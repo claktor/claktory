@@ -1,0 +1,43 @@
+# The secret check publishing runs (scripts/check-secrets.sh) before Factory's
+# source goes public: gitleaks' own rules (API keys, tokens and private keys of
+# every kind), plus Factory's below. Every exception is listed here, with why,
+# so a reviewer sees each one in the diff that adds it. Keep them narrow: a
+# value or a kind of line, never a whole file or folder.
+
+title = "Factory"
+
+[extend]
+useDefault = true
+
+# Files that hold credentials or someone's data, whatever is in them.
+[[rules]]
+id = "private-file"
+description = "A file that holds credentials or personal data (.env, a private key, a sign-in or credentials file, a database)"
+path = '''(?i)(?:^|/)(?:\.env(?:\.[^/]*)?|\.envrc|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|[^/]*\.(?:pem|key|p8|p12|pfx|jks|keystore|ppk|mobileprovision|provisionprofile|kdbx|asc|gpg)|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.htpasswd|auth\.json|credentials(?:\.json)?|service-account[^/]*\.json|factory\.db|[^/]*\.sqlite3?|[^/]*\.db)$'''
+
+# A path in a real home folder says whose machine it came from, and often what
+# is on it. Tests and docs use /Users/me and /Users/x.
+[[rules]]
+id = "home-path"
+description = "A path in someone's home folder"
+regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
+keywords = ["/users/", "/home/"]
+
+[[rules.allowlists]]
+description = "Placeholder home folders in tests and docs"
+regexTarget = "match"
+regexes = ['''^/(?:Users|home)/(?:me|x|you|user|runner|linuxbrew|Shared)$''']
+
+# Exceptions.
+
+[[allowlists]]
+description = "Sec-WebSocket-Key: a random nonce each WebSocket handshake sends, never a credential (RFC 6455's sample in crates/factoryd/tests/origin.rs, recorded handshakes in the Codex WebSocket fixtures)"
+regexTarget = "line"
+regexes = ['''(?i)sec-websocket-key''']
+
+[[allowlists]]
+description = "The Codex test fixtures' fake ChatGPT token: an unsigned JWT (alg none, signature 'sig') for the made-up account acct_123"
+condition = "AND"
+paths = ['''^crates/factory-agent/tests/fixtures/openai_codex(?:_ws)?\.json$''']
+regexTarget = "secret"
+regexes = ['''^eyJhbGciOiJub25lIn0\.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0\.sig$''']

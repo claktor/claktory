@@ -1,0 +1,379 @@
+//! One task per client: handshake, then requests in and events out.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use factory_protocol::PROTOCOL_VERSION;
+use factory_protocol::v1::{self, ClientMessage, ErrorCode, ServerMessage, Welcome, client_message, server_message::Body};
+use futures_util::{SinkExt, StreamExt};
+use prost::Message as _;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http;
+use tokio_tungstenite::tungstenite::{self, Message};
+
+use crate::factory::{AgentChange, Event, Factory};
+
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Pause after a failed accept (e.g. out of file descriptors) so the loop doesn't spin.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// A connection's bytes: plain TCP from this machine, TLS from a remote device.
+pub(crate) trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stream for T {}
+
+type Socket<S> = WebSocketStream<S>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectionError {
+    #[error("WebSocket error: {0}")]
+    WebSocket(#[from] tungstenite::Error),
+    #[error("socket error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Accepts clients forever, serving each connection on its own task.
+pub async fn serve(listener: TcpListener, factory: Arc<Factory>) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                let factory = factory.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = serve_connection(stream, factory).await {
+                        tracing::warn!(%peer, %error, "connection failed");
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "accept failed");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+            }
+        }
+    }
+}
+
+/// Refuses a handshake from a web page, with 403: otherwise any page open in
+/// the person's browser could drive the agents. Browsers always send `Origin`;
+/// the app (dart:io) and Factory's own clients never do.
+#[allow(clippy::result_large_err)] // The shape tungstenite's callback takes.
+fn refuse_web_pages(request: &Request, response: Response) -> Result<Response, ErrorResponse> {
+    let Some(origin) = request.headers().get(http::header::ORIGIN) else { return Ok(response) };
+    tracing::warn!(?origin, "refused a WebSocket connection from a web page");
+    let mut refusal = ErrorResponse::new(Some("Factory doesn't accept connections from web pages.".into()));
+    *refusal.status_mut() = http::StatusCode::FORBIDDEN;
+    Err(refusal)
+}
+
+enum Frame {
+    Message(Box<ClientMessage>),
+    Closed,
+    /// Nothing for the protocol (control frame, or garbage already answered).
+    Skip,
+}
+
+async fn serve_connection(stream: TcpStream, factory: Arc<Factory>) -> Result<(), ConnectionError> {
+    // Protocol messages are small and latency-sensitive; don't let Nagle batch them.
+    stream.set_nodelay(true)?;
+    serve_stream(stream, factory, None).await
+}
+
+/// Serves one client: this machine's app, or a device at `remote` (on the
+/// remote listener), which must give a paired device's token.
+pub(crate) async fn serve_stream<S: Stream>(stream: S, factory: Arc<Factory>, remote: Option<SocketAddr>) -> Result<(), ConnectionError> {
+    let mut socket = match tokio_tungstenite::accept_hdr_async(stream, refuse_web_pages).await {
+        Ok(socket) => socket,
+        // Port checks and stray connections that never speak WebSocket.
+        Err(error) => {
+            tracing::debug!(%error, "not a WebSocket client");
+            return Ok(());
+        }
+    };
+
+    factory.health.connecting();
+    let mut device = None;
+    let hello_id = loop {
+        let frame = socket.next().await;
+        let message = match read(&mut socket, frame).await? {
+            Frame::Message(message) => message,
+            Frame::Skip => continue,
+            Frame::Closed => return Ok(()),
+        };
+        let Some(client_message::Body::Hello(hello)) = message.body else {
+            return reject(socket, message.id, ErrorCode::HandshakeRequired, "first message must be hello").await;
+        };
+        if hello.protocol_version != PROTOCOL_VERSION {
+            let reason = format!("server speaks protocol {PROTOCOL_VERSION}, client sent {}", hello.protocol_version);
+            return reject(socket, message.id, ErrorCode::UnsupportedProtocolVersion, reason).await;
+        }
+        if let Some(peer) = remote {
+            let Some(connected) = factory.authorize(&hello.token, peer).await else {
+                let reason = "This device isn't paired with this Factory, or was unpaired. Pair it again with a new pairing code from Settings → Devices on the Factory's machine.";
+                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+            };
+            tracing::info!(client_version = %hello.client_version, device = %connected.device.id, %peer, "device connected");
+            device = Some(connected);
+        } else {
+            tracing::info!(client_version = %hello.client_version, "client connected");
+        }
+        break message.id;
+    };
+    let device_id = device.as_ref().map(|connected| connected.device.id.clone()).unwrap_or_default();
+    let welcome = Welcome { protocol_version: PROTOCOL_VERSION, server_version: SERVER_VERSION.to_owned(), device_id };
+    send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
+    session(&mut socket, &factory, device.as_ref().map(|connected| connected.closed.clone())).await?;
+    tracing::info!("client disconnected");
+    Ok(())
+}
+
+/// Requests in, events out, until the client leaves.
+/// `unpaired` is a remote device's: notified, the connection closes.
+async fn session<S: Stream>(
+    socket: &mut Socket<S>,
+    factory: &Arc<Factory>,
+    unpaired: Option<Arc<tokio::sync::Notify>>,
+) -> Result<(), ConnectionError> {
+    let remote = unpaired.is_some();
+    let mut events = sync(socket, factory).await?;
+    factory.health.served();
+
+    loop {
+        tokio::select! {
+            () = async { match &unpaired { Some(unpaired) => unpaired.notified().await, None => std::future::pending().await } } => {
+                tracing::info!("closing an unpaired device's connection");
+                socket.close(None).await?;
+                return Ok(());
+            }
+            frame = socket.next() => {
+                let message = match read(socket, frame).await? {
+                    Frame::Message(message) => message,
+                    Frame::Skip => continue,
+                    Frame::Closed => return Ok(()),
+                };
+                let reply = handle(factory, message.body, remote).await;
+                // Deliver what the request changed before answering it, so a
+                // client that sees the ack also sees the new state.
+                flush(socket, &mut events, factory).await?;
+                send(socket, message.id, reply).await?;
+            }
+            event = events.recv() => match event {
+                Ok(event) => forward(socket, event).await?,
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "client fell behind; resending state");
+                    events = sync(socket, factory).await?;
+                }
+                Err(RecvError::Closed) => return Ok(()),
+            },
+        }
+    }
+}
+
+/// Sends the full current state and returns the events that follow it.
+async fn sync<S: Stream>(socket: &mut Socket<S>, factory: &Factory) -> Result<Receiver<Event>, ConnectionError> {
+    let snapshot = factory.connect().await;
+    send(socket, 0, Body::Workspace(snapshot.workspace)).await?;
+    if let Some(transcript) = snapshot.transcript {
+        send(socket, 0, Body::Transcript(transcript)).await?;
+    }
+    if let Some(explorer) = snapshot.explorer {
+        send(socket, 0, Body::Explorer(explorer)).await?;
+    }
+    if let Some(view) = snapshot.view {
+        send(socket, 0, Body::ExtensionView(view)).await?;
+    }
+    if let Some(queued) = snapshot.queued {
+        send(socket, 0, Body::QueuedMessages(queued)).await?;
+    }
+    Ok(snapshot.events)
+}
+
+async fn flush<S: Stream>(socket: &mut Socket<S>, events: &mut Receiver<Event>, factory: &Factory) -> Result<(), ConnectionError> {
+    loop {
+        match events.try_recv() {
+            Ok(event) => forward(socket, event).await?,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(()),
+            Err(TryRecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client fell behind; resending state");
+                *events = sync(socket, factory).await?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Answers a request. A `remote` device's requests are the same, except that
+/// it can't have an app bundle on this machine replaced.
+async fn handle(factory: &Arc<Factory>, body: Option<client_message::Body>, remote: bool) -> Body {
+    use client_message::Body as Request;
+    let result = match body {
+        Some(Request::Hello(_)) => return error(ErrorCode::InvalidRequest, "already connected"),
+        Some(Request::CreateProject(request)) => factory.create_project(&request.name, &request.path).await,
+        Some(Request::CreateAgent(request)) => factory.create_agent(&request).await,
+        Some(Request::UpdateAgent(request)) => {
+            // `folder` (an absolute path) is deprecated and ignored.
+            let v1::UpdateAgent {
+                agent_id,
+                name,
+                prompt,
+                model,
+                effort,
+                project_id,
+                color,
+                extension,
+                placeholder,
+                folder: _,
+                folder_id,
+                avatar_shape,
+                // Faces are gone: ignored.
+                avatar_face: _,
+                role,
+            } = request;
+            let change = AgentChange {
+                name: name.as_deref(),
+                prompt: prompt.as_deref(),
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                project: project_id.as_deref(),
+                color: color.as_deref(),
+                extension: extension.as_ref(),
+                placeholder: placeholder.as_deref(),
+                folder: folder_id.as_deref(),
+                avatar_shape: avatar_shape.as_deref(),
+                role: role.as_deref(),
+            };
+            factory.update_agent(&agent_id, change).await
+        }
+        Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
+        Some(Request::SendMessage(request)) => factory.send_message(&request.agent_id, &request.text),
+        Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
+        Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
+        Some(Request::UpdateProject(request)) => factory.update_project(&request.project_id, request.name.as_deref()).await,
+        Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
+        Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
+        Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
+        // A remote device's app is on another machine: its path means nothing here.
+        Some(Request::InstallUpdate(request)) => factory.install_update(if remote { "" } else { &request.app_path }).await,
+        Some(Request::FocusProject(request)) => factory.focus_project(&request.project_id).await,
+        Some(Request::ExpandFolder(request)) => {
+            factory.expand_folder(&request.project_id, &request.folder_id, &request.agent_id, &request.path, request.expanded).await
+        }
+        Some(Request::ShowAllFiles(request)) => factory.show_all_files(&request.project_id, request.show_all).await,
+        Some(Request::OpenPanel(request)) => factory.open_panel(&request.agent_id, &request.extension_id).await,
+        Some(Request::ArrangeAgent(request)) => {
+            let v1::ArrangeAgent { agent_id, parent_id, before_id, project_id, folder_id } = request;
+            factory.arrange_agent(&agent_id, &parent_id, &before_id, project_id.as_deref(), folder_id.as_deref()).await
+        }
+        Some(Request::SetAgentCollapsed(request)) => factory.set_agent_collapsed(&request.agent_id, request.collapsed),
+        Some(Request::CreateFolder(request)) => factory.create_folder(&request.project_id, &request.name, &request.path).await,
+        Some(Request::UpdateFolder(request)) => {
+            let v1::UpdateFolder { project_id, folder_id, name, path } = request;
+            factory.update_folder(&project_id, &folder_id, name.as_deref(), path.as_deref()).await
+        }
+        Some(Request::DeleteFolder(request)) => factory.delete_folder(&request.project_id, &request.folder_id).await,
+        Some(Request::SetHighlights(request)) => factory.set_highlights(request.on).await,
+        Some(Request::StopTask(request)) => factory.stop_task(&request.agent_id, &request.task_id),
+        Some(Request::ChangeMonitor(request)) => factory.change_monitor(&request.agent_id, request.monitor_id, request.action()),
+        Some(Request::SetFolderCollapsed(request)) => {
+            factory.set_folder_collapsed(&request.project_id, &request.folder_id, request.collapsed)
+        }
+        Some(Request::RunCommand(request)) => factory.run_command(&request.agent_id, &request.name, &request.args).await,
+        Some(Request::StartLogin(request)) => factory.start_login(&request.provider_id, &request.method_id).await,
+        Some(Request::AnswerLogin(request)) => factory.answer_login(&request.text),
+        Some(Request::CancelLogin(_)) => {
+            factory.cancel_login();
+            Ok(())
+        }
+        Some(Request::SignOut(request)) => factory.sign_out(&request.provider_id).await,
+        Some(Request::CreatePairing(request)) => {
+            return match factory.create_pairing(&request.name, &request.host).await {
+                Ok(code) => Body::PairingCode(code),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::FetchApp(request)) => {
+            return match factory.fetch_app(&request.version, request.offset).await {
+                Ok(chunk) => Body::AppChunk(chunk),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::ListFolders(request)) => {
+            return match factory.list_folders(&request.path).await {
+                Ok(list) => Body::FolderList(list),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::DecideProposal(request)) => {
+            crate::proposals::decide(factory, &request.agent_id, &request.proposal_id, request.approve, &request.comment)
+        }
+        Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
+        Some(Request::SetRemoteAccess(request)) => factory.set_remote_access(request.on, request.port, request.listen.as_deref()).await,
+        // Empty, or from a newer client that this server doesn't know.
+        None => return error(ErrorCode::UnknownMessage, "unknown message"),
+    };
+    match result {
+        Ok(()) => Body::Ack(v1::Ack {}),
+        Err(problem) => error(problem.code(), problem.to_string()),
+    }
+}
+
+async fn read<S: Stream>(socket: &mut Socket<S>, frame: Option<Result<Message, tungstenite::Error>>) -> Result<Frame, ConnectionError> {
+    let frame = match frame {
+        Some(Ok(frame)) => frame,
+        None => return Ok(Frame::Closed),
+        // The client vanished without a close frame (app quit, laptop slept, network
+        // dropped). That's a normal way for a client to leave.
+        Some(Err(tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => return Ok(Frame::Closed),
+        Some(Err(problem)) => return Err(problem.into()),
+    };
+    let payload = match frame {
+        Message::Binary(payload) => payload,
+        Message::Close(_) => return Ok(Frame::Closed),
+        Message::Text(_) => {
+            send(socket, 0, error(ErrorCode::MalformedMessage, "text frames are not part of the protocol")).await?;
+            return Ok(Frame::Skip);
+        }
+        // tungstenite answers pings on its own.
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Ok(Frame::Skip),
+    };
+    match ClientMessage::decode(payload) {
+        Ok(message) => Ok(Frame::Message(Box::new(message))),
+        Err(decode_error) => {
+            tracing::debug!(%decode_error, "undecodable frame");
+            send(socket, 0, error(ErrorCode::MalformedMessage, "frame is not a ClientMessage")).await?;
+            Ok(Frame::Skip)
+        }
+    }
+}
+
+async fn forward<S: Stream>(socket: &mut Socket<S>, event: Event) -> Result<(), ConnectionError> {
+    socket.send(Message::Binary(event)).await?;
+    Ok(())
+}
+
+async fn send<S: Stream>(socket: &mut Socket<S>, reply_to: u64, body: Body) -> Result<(), ConnectionError> {
+    let message = ServerMessage { reply_to, body: Some(body) };
+    socket.send(Message::Binary(message.encode_to_vec().into())).await?;
+    Ok(())
+}
+
+/// Sends a final error and closes the connection.
+async fn reject<S: Stream>(
+    mut socket: Socket<S>,
+    reply_to: u64,
+    code: ErrorCode,
+    reason: impl Into<String>,
+) -> Result<(), ConnectionError> {
+    send(&mut socket, reply_to, error(code, reason)).await?;
+    socket.close(None).await?;
+    Ok(())
+}
+
+fn error(code: ErrorCode, message: impl Into<String>) -> Body {
+    Body::Error(v1::Error { code: code.into(), message: message.into() })
+}

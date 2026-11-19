@@ -1,0 +1,39 @@
+[package]
+name = "factoryd"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "1.12.2"
+dom_smoothie = "0.19"
+factory-agent = { version = "0.1.0", path = "../factory-agent" }
+factory-protocol = { version = "0.1.0", path = "../factory-protocol" }
+futures-util = "0.3.34"
+getrandom = "0.4"
+globset = "0.4"
+htmd = "0.6"
+ignore = "0.4.34"
+jiff = "1"
+libc = "0.2"
+pdf-extract = "0.12"
+primp = "2"
+prost = "0.14.6"
+rcgen = "0.14"
+regex = "1"
+rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
+# ring is the process default (main.rs); remote access names aws-lc-rs itself.
+rustls = { version = "0.23", features = ["ring"] }
+scraper = "0.29"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync", "process", "signal"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = "0.30.0"
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

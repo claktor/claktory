@@ -1,0 +1,17 @@
+# Hidden in Factory's file explorer unless "Show everything" is on.
+# Same syntax as .gitignore.
+.git/
+.DS_Store
+node_modules/
+target/
+build/
+dist/
+.dart_tool/
+.next/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.gradle/
+.idea/
+coverage/

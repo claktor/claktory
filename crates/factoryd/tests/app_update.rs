@@ -1,0 +1,149 @@
+//! Apps on other machines fetch their release's app from Factory (FetchApp),
+//! chunk by chunk, to update themselves.
+
+mod common;
+
+use std::io::Write as _;
+
+use common::{Client, View, apply_request, start, temp_dir};
+use factory_protocol::v1::{self, ErrorCode, client_message, server_message::Body};
+use sha2::{Digest, Sha256};
+
+fn fetch(version: &str, offset: u64) -> client_message::Body {
+    client_message::Body::FetchApp(v1::FetchApp { version: version.into(), offset })
+}
+
+/// An app bundle with a file that doesn't compress, so it takes chunks.
+fn release(dir: &std::path::Path, version: &str) -> Vec<u8> {
+    let app = dir.join("home").join("releases").join(version).join("Factory.app").join("Contents");
+    std::fs::create_dir_all(app.join("MacOS")).expect("mkdir");
+    std::fs::write(app.join("Info.plist"), "<plist/>").expect("write");
+    let mut noise = Vec::with_capacity(2_500_000);
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    while noise.len() < 2_500_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        noise.extend_from_slice(&state.to_le_bytes());
+    }
+    std::fs::File::create(app.join("MacOS").join("Factory")).and_then(|mut file| file.write_all(&noise)).expect("write");
+    std::fs::write(dir.join("home").join("releases").join(version).join("factoryd"), "backend").expect("write");
+    noise
+}
+
+/// Fetches the whole archive, waiting while it's prepared; Err with the
+/// refusal's message.
+async fn fetch_all(client: &mut Client, view: &mut View, version: &str) -> Result<(Vec<u8>, v1::AppChunk), String> {
+    let mut archive = Vec::new();
+    for _ in 0..400 {
+        match apply_request(client, view, fetch(version, archive.len() as u64)).await {
+            Body::AppChunk(chunk) if chunk.preparing => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            Body::AppChunk(chunk) => {
+                assert_eq!(chunk.offset, archive.len() as u64);
+                archive.extend_from_slice(&chunk.data);
+                if archive.len() as u64 == chunk.size {
+                    return Ok((archive, chunk));
+                }
+            }
+            Body::Error(error) => return Err(error.message),
+            other => panic!("{other:?}"),
+        }
+    }
+    panic!("never ready")
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A Linux release has no app: it's the published Mac release's, downloaded
+/// when an app first asks and served as it is.
+#[tokio::test]
+async fn a_release_without_an_app_serves_the_mac_releases() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    // The published Mac release: the app, factoryd and the rest.
+    let published = dir.join("published");
+    std::fs::create_dir_all(published.join("Factory.app/Contents")).expect("mkdir");
+    std::fs::write(published.join("Factory.app/Contents/Info.plist"), "<plist/>").expect("write");
+    std::fs::write(published.join("factoryd"), "mac backend").expect("write");
+    let tarball = dir.join("factory-mac.tar.gz");
+    let status = std::process::Command::new("tar")
+        .args(["-czf"])
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&published)
+        .args(["factoryd", "Factory.app"])
+        .status()
+        .expect("tar");
+    assert!(status.success());
+    let bytes = std::fs::read(&tarball).expect("read");
+    let note = |release: &str, sha256: &str| {
+        let folder = dir.join("home/releases").join(release);
+        std::fs::create_dir_all(&folder).expect("mkdir");
+        std::fs::write(folder.join("factoryd"), "linux backend").expect("write");
+        let source = serde_json::json!({"url": format!("file://{}", tarball.display()), "sha256": sha256, "size": bytes.len()});
+        std::fs::write(folder.join("app-source.json"), source.to_string()).expect("write");
+    };
+    note("2026.11.20-1012", &sha256(&bytes));
+    let (archive, last) = fetch_all(&mut client, &mut view, "2026.11.20-1012").await.expect("the app");
+    assert_eq!(archive, bytes);
+    assert_eq!((last.sha256, last.app_name.as_str()), (sha256(&bytes), "Factory.app"));
+
+    // A Mac release that isn't what the manifest said is refused, once.
+    note("2026.11.21-0900", &"0".repeat(64));
+    let refused = fetch_all(&mut client, &mut view, "2026.11.21-0900").await.expect_err("refused");
+    assert!(refused.contains("the Mac release isn't what its manifest says: its SHA-256 is"), "{refused}");
+    assert!(!dir.join("home/releases/2026.11.21-0900/app.tar.gz").exists());
+}
+
+#[tokio::test]
+async fn an_app_on_another_machine_fetches_its_release_in_chunks() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let noise = release(&dir, "2026.11.20-1012");
+
+    // The archive is made the first time it's asked for.
+    let first = apply_request(&mut client, &mut view, fetch("2026.11.20-1012", 0)).await;
+    assert!(matches!(&first, Body::AppChunk(chunk) if chunk.preparing && chunk.data.is_empty()), "{first:?}");
+    let (archive, last) = fetch_all(&mut client, &mut view, "2026.11.20-1012").await.expect("the app");
+    assert!(archive.len() > 2 << 20, "several chunks: {}", archive.len());
+    assert_eq!((last.sha256, last.app_name.as_str()), (sha256(&archive), "Factory.app"));
+
+    // It unpacks to the app, and only the app.
+    let unpacked = dir.join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("mkdir");
+    std::fs::write(dir.join("app.tar.gz"), &archive).expect("write");
+    let status = std::process::Command::new("tar").arg("-xzf").arg(dir.join("app.tar.gz")).arg("-C").arg(&unpacked).status().expect("tar");
+    assert!(status.success());
+    assert_eq!(std::fs::read(unpacked.join("Factory.app/Contents/MacOS/Factory")).expect("read"), noise);
+    let top: Vec<String> =
+        std::fs::read_dir(&unpacked).expect("ls").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(top, ["Factory.app"]);
+
+    // The end, and past it.
+    let end = apply_request(&mut client, &mut view, fetch("2026.11.20-1012", archive.len() as u64)).await;
+    assert!(matches!(&end, Body::AppChunk(chunk) if chunk.data.is_empty() && !chunk.preparing), "{end:?}");
+    let past = apply_request(&mut client, &mut view, fetch("2026.11.20-1012", archive.len() as u64 + 1)).await;
+    assert!(matches!(&past, Body::Error(error) if error.message.contains("past the archive's end")), "{past:?}");
+
+    // Releases it doesn't have, or that have no app, are refused with why.
+    std::fs::create_dir_all(dir.join("home/releases/2026.11.21-0900")).expect("mkdir");
+    for (version, why) in [
+        ("2026.11.19-0000", "this Factory has no such release"),
+        ("../releases/2026.11.20-1012", "this Factory has no such release"),
+        ("2026.11.21-0900", "the release has no app in it"),
+    ] {
+        match apply_request(&mut client, &mut view, fetch(version, 0)).await {
+            Body::Error(error) => {
+                assert_eq!(error.code(), ErrorCode::NotFound);
+                assert!(error.message.ends_with(why), "{version}: {}", error.message);
+            }
+            other => panic!("{version}: {other:?}"),
+        }
+    }
+}

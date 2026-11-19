@@ -1,0 +1,1984 @@
+{
+ "token": "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+ "systemPrompt": "You are a coding agent. Work in /w.",
+ "scenarios": [
+  {
+   "name": "two requests reuse the socket and the second sends a delta",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s1",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s1",
+      "sec-websocket-key": "hfHh/K9NoLBugRfF36vTeg==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s1",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      },
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Continue"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s1",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true,
+       "previous_response_id": "resp_1"
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "debug_close"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_1\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_1",
+      "rawStopReason": "completed"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Again."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Again."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Again.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_2\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_2",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a different session opens its own socket",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s2",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s2",
+      "sec-websocket-key": "iM4PJS54AV50EM2yMjTLzw==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s2",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "debug_close"
+     }
+    },
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s3",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s3",
+      "sec-websocket-key": "508frOXYueiGdASUT4U6Jw==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s3",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "debug_close"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hi."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hi."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hi.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_0\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_0",
+      "rawStopReason": "completed"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hi."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hi."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hi.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_1\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_1",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "previous_response_not_found retries once with the full body",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s4",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s4",
+      "sec-websocket-key": "40MK6Ev/mWAZKzRkJ7JMqQ==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s4",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      },
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Continue"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s4",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true,
+       "previous_response_id": "resp_0"
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "done"
+     }
+    },
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s4",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s4",
+      "sec-websocket-key": "vOUP0a72sbZp6u66TsXZEw==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        },
+        {
+         "type": "message",
+         "role": "assistant",
+         "content": [
+          {
+           "type": "output_text",
+           "text": "Hello.",
+           "annotations": []
+          }
+         ],
+         "status": "completed",
+         "id": "msg_resp_0"
+        },
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Continue"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s4",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "debug_close"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_0\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_0",
+      "rawStopReason": "completed"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_0\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_0",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a connection-limit error before the first event retries once",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s5",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s5",
+      "sec-websocket-key": "XlXIOWIXtTSGtNAjfdLEWw==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s5",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "done"
+     }
+    },
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s5",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s5",
+      "sec-websocket-key": "/f89LzDnnUCL7DzupVjeqA==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s5",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "debug_close"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_1\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_1",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a close before the first event falls back to SSE for the session",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s6",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s6",
+      "sec-websocket-key": "tNKP2bNLYwUB4ZX3waY/3g==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s6",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1011,
+      "reason": ""
+     }
+    }
+   ],
+   "sseRequests": [
+    {
+     "url": "http://127.0.0.1:40385/backend-api/codex/responses",
+     "headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "pi",
+      "session-id": "s6",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s6"
+     },
+     "body": {
+      "model": "gpt-5.6-luna",
+      "store": false,
+      "stream": true,
+      "instructions": "You are a coding agent. Work in /w.",
+      "input": [
+       {
+        "role": "user",
+        "content": [
+         {
+          "type": "input_text",
+          "text": "Fix"
+         }
+        ]
+       }
+      ],
+      "text": {
+       "verbosity": "low"
+      },
+      "include": [
+       "reasoning.encrypted_content"
+      ],
+      "prompt_cache_key": "s6",
+      "tool_choice": "auto",
+      "parallel_tool_calls": true
+     }
+    },
+    {
+     "url": "http://127.0.0.1:40385/backend-api/codex/responses",
+     "headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "pi",
+      "session-id": "s6",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s6"
+     },
+     "body": {
+      "model": "gpt-5.6-luna",
+      "store": false,
+      "stream": true,
+      "instructions": "You are a coding agent. Work in /w.",
+      "input": [
+       {
+        "role": "user",
+        "content": [
+         {
+          "type": "input_text",
+          "text": "Fix"
+         }
+        ]
+       },
+       {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+         {
+          "type": "output_text",
+          "text": "From SSE.",
+          "annotations": []
+         }
+        ],
+        "status": "completed",
+        "id": "msg_resp_sse_1"
+       },
+       {
+        "role": "user",
+        "content": [
+         {
+          "type": "input_text",
+          "text": "Continue"
+         }
+        ]
+       }
+      ],
+      "text": {
+       "verbosity": "low"
+      },
+      "include": [
+       "reasoning.encrypted_content"
+      ],
+      "prompt_cache_key": "s6",
+      "tool_choice": "auto",
+      "parallel_tool_calls": true
+     }
+    }
+   ],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "From SSE."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "From SSE."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "From SSE.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_sse_1\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "diagnostics": [
+       {
+        "type": "provider_transport_failure",
+        "error": {
+         "name": "WebSocketCloseError",
+         "message": "WebSocket closed 1011 server going away",
+         "code": 1011
+        },
+        "details": {
+         "configuredTransport": "auto",
+         "fallbackTransport": "sse",
+         "eventsEmitted": false,
+         "phase": "before_message_stream_start",
+         "requestBytes": 319
+        }
+       }
+      ],
+      "responseId": "resp_sse_1",
+      "rawStopReason": "completed"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Still SSE."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Still SSE."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Still SSE.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_sse_2\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_sse_2",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a message-too-big close before the first event falls back to SSE",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s7",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s7",
+      "sec-websocket-key": "4NxXwIw0az/K9ySU0ubXiA==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s7",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1009,
+      "reason": ""
+     }
+    }
+   ],
+   "sseRequests": [
+    {
+     "url": "http://127.0.0.1:40385/backend-api/codex/responses",
+     "headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "pi",
+      "session-id": "s7",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s7"
+     },
+     "body": {
+      "model": "gpt-5.6-luna",
+      "store": false,
+      "stream": true,
+      "instructions": "You are a coding agent. Work in /w.",
+      "input": [
+       {
+        "role": "user",
+        "content": [
+         {
+          "type": "input_text",
+          "text": "Fix"
+         }
+        ]
+       }
+      ],
+      "text": {
+       "verbosity": "low"
+      },
+      "include": [
+       "reasoning.encrypted_content"
+      ],
+      "prompt_cache_key": "s7",
+      "tool_choice": "auto",
+      "parallel_tool_calls": true
+     }
+    }
+   ],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "From SSE."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "From SSE."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "From SSE.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_sse\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "diagnostics": [
+       {
+        "type": "provider_transport_failure",
+        "error": {
+         "name": "WebSocketCloseError",
+         "message": "WebSocket closed 1009 message too big",
+         "code": 1009
+        },
+        "details": {
+         "configuredTransport": "auto",
+         "fallbackTransport": "sse",
+         "eventsEmitted": false,
+         "phase": "before_message_stream_start",
+         "requestBytes": 319
+        }
+       }
+      ],
+      "responseId": "resp_sse",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a close after events started is an error and marks the session",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s8",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s8",
+      "sec-websocket-key": "PuHGQGZ7+nKaeoDTQPyJFA==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s8",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1011,
+      "reason": ""
+     }
+    }
+   ],
+   "sseRequests": [
+    {
+     "url": "http://127.0.0.1:40385/backend-api/codex/responses",
+     "headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "content-encoding": "zstd",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "pi",
+      "session-id": "s8",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s8"
+     },
+     "body": {
+      "model": "gpt-5.6-luna",
+      "store": false,
+      "stream": true,
+      "instructions": "You are a coding agent. Work in /w.",
+      "input": [
+       {
+        "role": "user",
+        "content": [
+         {
+          "type": "input_text",
+          "text": "Fix"
+         }
+        ]
+       }
+      ],
+      "text": {
+       "verbosity": "low"
+      },
+      "include": [
+       "reasoning.encrypted_content"
+      ],
+      "prompt_cache_key": "s8",
+      "tool_choice": "auto",
+      "parallel_tool_calls": true
+     }
+    }
+   ],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello."
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "responseId": "resp_1",
+      "diagnostics": [
+       {
+        "type": "provider_transport_failure",
+        "error": {
+         "name": "WebSocketCloseError",
+         "message": "WebSocket closed 1011 mid-stream",
+         "code": 1011
+        },
+        "details": {
+         "configuredTransport": "auto",
+         "eventsEmitted": true,
+         "phase": "after_message_stream_start",
+         "requestBytes": 319
+        }
+       }
+      ],
+      "errorMessage": "WebSocket closed 1011 mid-stream"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "From SSE."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "From SSE."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "From SSE.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_sse\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_sse",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a protocol error is not retried on the socket",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s9",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s9",
+      "sec-websocket-key": "KmcBWZzGkiacLexRhvhDQQ==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s9",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "done"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [],
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "errorMessage": "Invalid Codex WebSocket JSON: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+     }
+    }
+   ]
+  },
+  {
+   "name": "response.failed on the socket is a final error",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s10",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s10",
+      "sec-websocket-key": "JkNE68jZAxm3kJnh951tZA==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s10",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": "done"
+     }
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "totalTokens": 0,
+       "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+       }
+      },
+      "stopReason": "error",
+      "responseId": "resp_1",
+      "errorMessage": "boom"
+     }
+    }
+   ]
+  },
+  {
+   "name": "a socket closed by the server between requests is replaced",
+   "connections": [
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s11",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s11",
+      "sec-websocket-key": "ueT/LEmwCIiJpHEHTLW0zQ==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s11",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": {
+      "code": 1000,
+      "reason": ""
+     }
+    },
+    {
+     "headers": {
+      "host": "127.0.0.1:40385",
+      "connection": "upgrade",
+      "upgrade": "websocket",
+      "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.sig",
+      "chatgpt-account-id": "acct_123",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "originator": "pi",
+      "session-id": "s11",
+      "user-agent": "pi (linux 6.18.13; x64)",
+      "x-client-request-id": "s11",
+      "sec-websocket-key": "G5RenQocN4ks5HeJwoMxYg==",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+      "accept": "*/*",
+      "accept-language": "*",
+      "sec-fetch-mode": "websocket",
+      "pragma": "no-cache",
+      "cache-control": "no-cache",
+      "accept-encoding": "gzip, deflate"
+     },
+     "frames": [
+      {
+       "type": "response.create",
+       "model": "gpt-5.6-luna",
+       "store": false,
+       "stream": true,
+       "instructions": "You are a coding agent. Work in /w.",
+       "input": [
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Fix"
+          }
+         ]
+        },
+        {
+         "type": "message",
+         "role": "assistant",
+         "content": [
+          {
+           "type": "output_text",
+           "text": "Hello.",
+           "annotations": []
+          }
+         ],
+         "status": "completed",
+         "id": "msg_resp_0"
+        },
+        {
+         "role": "user",
+         "content": [
+          {
+           "type": "input_text",
+           "text": "Continue"
+          }
+         ]
+        }
+       ],
+       "text": {
+        "verbosity": "low"
+       },
+       "include": [
+        "reasoning.encrypted_content"
+       ],
+       "prompt_cache_key": "s11",
+       "tool_choice": "auto",
+       "parallel_tool_calls": true
+      }
+     ],
+     "closed": null
+    }
+   ],
+   "sseRequests": [],
+   "requests": [
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_0\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_0",
+      "rawStopReason": "completed"
+     }
+    },
+    {
+     "events": [
+      {
+       "type": "start"
+      },
+      {
+       "type": "text_start",
+       "contentIndex": 0
+      },
+      {
+       "type": "text_delta",
+       "contentIndex": 0,
+       "delta": "Hello."
+      },
+      {
+       "type": "text_end",
+       "contentIndex": 0,
+       "content": "Hello."
+      }
+     ],
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "text",
+        "text": "Hello.",
+        "textSignature": "{\"v\":1,\"id\":\"msg_resp_1\"}"
+       }
+      ],
+      "api": "openai-codex-responses",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "usage": {
+       "input": 1000,
+       "output": 80,
+       "cacheRead": 200,
+       "cacheWrite": 0,
+       "reasoning": 30,
+       "totalTokens": 1280,
+       "cost": {
+        "input": 0.0002,
+        "output": 0.000096,
+        "cacheRead": 0.000004,
+        "cacheWrite": 0,
+        "total": 0.00030000000000000003
+       }
+      },
+      "stopReason": "stop",
+      "responseId": "resp_1",
+      "rawStopReason": "completed"
+     }
+    }
+   ]
+  }
+ ]
+}

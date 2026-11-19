@@ -1,0 +1,23 @@
+[package]
+name = "claktory_tunnel"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: it builds with the app (hook/build.dart), not with crates/.
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+[lib]
+# cdylib for the app (a native asset), rlib for its tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+# Pinned: the backend uses the same iroh (docs: private-tunnel.md).
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+anyhow = "1"
+hex = "0.4"

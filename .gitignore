@@ -1,0 +1,11 @@
+/target
+.DS_Store
+# Never committed: the whole history is public (scripts/check-secrets.sh).
+.env
+.env.*
+*.pem
+*.key
+*.p12
+auth.json
+*.sqlite
+*.db

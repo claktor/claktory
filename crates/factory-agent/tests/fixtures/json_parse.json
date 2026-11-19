@@ -1,0 +1,300 @@
+[
+ {
+  "input": "",
+  "repaired": "",
+  "parsed": {}
+ },
+ {
+  "input": "   ",
+  "repaired": "   ",
+  "parsed": {}
+ },
+ {
+  "input": "{",
+  "repaired": "{",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\"",
+  "repaired": "{\"a\"",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":",
+  "repaired": "{\"a\":",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":1",
+  "repaired": "{\"a\":1",
+  "parsed": {
+   "a": 1
+  }
+ },
+ {
+  "input": "{\"a\":1,",
+  "repaired": "{\"a\":1,",
+  "parsed": {
+   "a": 1
+  }
+ },
+ {
+  "input": "{\"a\":1,\"b\"",
+  "repaired": "{\"a\":1,\"b\"",
+  "parsed": {
+   "a": 1
+  }
+ },
+ {
+  "input": "{\"a\":1,\"b\":\"x",
+  "repaired": "{\"a\":1,\"b\":\"x",
+  "parsed": {
+   "a": 1,
+   "b": "x"
+  }
+ },
+ {
+  "input": "{\"a\":1,\"b\":\"x\\",
+  "repaired": "{\"a\":1,\"b\":\"x\\\\",
+  "parsed": {
+   "a": 1,
+   "b": "x"
+  }
+ },
+ {
+  "input": "{\"a\":1,\"b\":\"x\\n",
+  "repaired": "{\"a\":1,\"b\":\"x\\n",
+  "parsed": {
+   "a": 1,
+   "b": "x\n"
+  }
+ },
+ {
+  "input": "{\"a\":[1,2",
+  "repaired": "{\"a\":[1,2",
+  "parsed": {
+   "a": [
+    1,
+    2
+   ]
+  }
+ },
+ {
+  "input": "{\"a\":[1,2]",
+  "repaired": "{\"a\":[1,2]",
+  "parsed": {
+   "a": [
+    1,
+    2
+   ]
+  }
+ },
+ {
+  "input": "{\"a\":[",
+  "repaired": "{\"a\":[",
+  "parsed": {
+   "a": []
+  }
+ },
+ {
+  "input": "{\"a\":{\"b\":tr",
+  "repaired": "{\"a\":{\"b\":tr",
+  "parsed": {
+   "a": {
+    "b": true
+   }
+  }
+ },
+ {
+  "input": "{\"a\":nul",
+  "repaired": "{\"a\":nul",
+  "parsed": {
+   "a": null
+  }
+ },
+ {
+  "input": "{\"a\":-",
+  "repaired": "{\"a\":-",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":-1",
+  "repaired": "{\"a\":-1",
+  "parsed": {
+   "a": -1
+  }
+ },
+ {
+  "input": "{\"a\":1e",
+  "repaired": "{\"a\":1e",
+  "parsed": {
+   "a": 1
+  }
+ },
+ {
+  "input": "{\"a\":1.5e3}",
+  "repaired": "{\"a\":1.5e3}",
+  "parsed": {
+   "a": 1500
+  }
+ },
+ {
+  "input": "{\"a\":1.}",
+  "repaired": "{\"a\":1.}",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":fals}",
+  "repaired": "{\"a\":fals}",
+  "parsed": {}
+ },
+ {
+  "input": "{\"command\":\"printf 'a\tb'\"}",
+  "repaired": "{\"command\":\"printf 'a\\tb'\"}",
+  "parsed": {
+   "command": "printf 'a\tb'"
+  }
+ },
+ {
+  "input": "{\"command\":\"line1\nline2\"}",
+  "repaired": "{\"command\":\"line1\\nline2\"}",
+  "parsed": {
+   "command": "line1\nline2"
+  }
+ },
+ {
+  "input": "{\"path\":\"C:\\\\dir\\q\"}",
+  "repaired": "{\"path\":\"C:\\\\dir\\\\q\"}",
+  "parsed": {
+   "path": "C:\\dir\\q"
+  }
+ },
+ {
+  "input": "{\"a\":\"\\u00e9\"}",
+  "repaired": "{\"a\":\"\\u00e9\"}",
+  "parsed": {
+   "a": "é"
+  }
+ },
+ {
+  "input": "{\"a\":\"\\u00\"}",
+  "repaired": "{\"a\":\"\\u00\"}",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":\"\\uZZZZ\"}",
+  "repaired": "{\"a\":\"\\uZZZZ\"}",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":\"x\"}trailing",
+  "repaired": "{\"a\":\"x\"}trailing",
+  "parsed": {
+   "a": "x"
+  }
+ },
+ {
+  "input": "[1,2",
+  "repaired": "[1,2",
+  "parsed": [
+   1,
+   2
+  ]
+ },
+ {
+  "input": "\"str",
+  "repaired": "\"str",
+  "parsed": "str"
+ },
+ {
+  "input": "123",
+  "repaired": "123",
+  "parsed": 123
+ },
+ {
+  "input": "-",
+  "repaired": "-",
+  "parsed": {}
+ },
+ {
+  "input": "tru",
+  "repaired": "tru",
+  "parsed": true
+ },
+ {
+  "input": "{\"a\":1}  ",
+  "repaired": "{\"a\":1}  ",
+  "parsed": {
+   "a": 1
+  }
+ },
+ {
+  "input": "{\"a\" 1}",
+  "repaired": "{\"a\" 1}",
+  "parsed": {}
+ },
+ {
+  "input": "{\"a\":\"\\\"q\\\"\"}",
+  "repaired": "{\"a\":\"\\\"q\\\"\"}",
+  "parsed": {
+   "a": "\"q\""
+  }
+ },
+ {
+  "input": "{\"a\":\"x\\\\\"",
+  "repaired": "{\"a\":\"x\\\\\"",
+  "parsed": {
+   "a": "x\\"
+  }
+ },
+ {
+  "input": "{\"a\":\"\\",
+  "repaired": "{\"a\":\"\\\\",
+  "parsed": {
+   "a": ""
+  }
+ },
+ {
+  "input": "{\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"},{\"oldText\":\"c",
+  "repaired": "{\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"},{\"oldText\":\"c",
+  "parsed": {
+   "edits": [
+    {
+     "oldText": "a",
+     "newText": "b"
+    },
+    {
+     "oldText": "c"
+    }
+   ]
+  }
+ },
+ {
+  "input": "{\"a\":\"é\u0001\"}",
+  "repaired": "{\"a\":\"é\\u0001\"}",
+  "parsed": {
+   "a": "é\u0001"
+  }
+ },
+ {
+  "input": "{\"a\":Infinity}",
+  "repaired": "{\"a\":Infinity}",
+  "parsed": {
+   "a": null
+  }
+ },
+ {
+  "input": "{\"a\":NaN}",
+  "repaired": "{\"a\":NaN}",
+  "parsed": {
+   "a": null
+  }
+ },
+ {
+  "input": "{\"a\":Inf",
+  "repaired": "{\"a\":Inf",
+  "parsed": {
+   "a": null
+  }
+ }
+]

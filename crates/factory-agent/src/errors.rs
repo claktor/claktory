@@ -1,0 +1,179 @@
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentFailure {
+    CorruptCredentials { file: String },
+    WorkspaceEscape { path: String },
+    ReadOnly { path: String },
+    InvalidEdit { path: String, reason: String },
+    BashWrappedInvocation { command: String },
+}
+
+impl AgentFailure {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AgentFailure::CorruptCredentials { .. } => "corrupt-credentials",
+            AgentFailure::WorkspaceEscape { .. } => "workspace-escape",
+            AgentFailure::ReadOnly { .. } => "read-only",
+            AgentFailure::InvalidEdit { .. } => "invalid-edit",
+            AgentFailure::BashWrappedInvocation { .. } => "bash-wrapped-invocation",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            AgentFailure::CorruptCredentials { file } => format!("Corrupt credential file at {file}. Delete it and sign in again."),
+            AgentFailure::WorkspaceEscape { path } => format!("Path escapes the workspace: {path}"),
+            AgentFailure::ReadOnly { path } => format!("Path is read only: {path}. Change files only in your own folder."),
+            AgentFailure::InvalidEdit { path, reason } => format!("Cannot edit {path}: {reason}"),
+            AgentFailure::BashWrappedInvocation { command } => {
+                format!("command is \"{command}\", not a script. Put the script text itself in command.")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AgentError {
+    pub failure: AgentFailure,
+    pub cause: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl AgentError {
+    pub fn new(failure: AgentFailure) -> AgentError {
+        AgentError { failure, cause: None }
+    }
+
+    pub fn with_cause(failure: AgentFailure, cause: impl std::error::Error + Send + Sync + 'static) -> AgentError {
+        AgentError { failure, cause: Some(Box::new(cause)) }
+    }
+}
+
+impl fmt::Display for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.failure.message())
+    }
+}
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause.as_deref().map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
+
+const NODE_ERRORS: &[(i32, &str, &str)] = &[
+    (libc::ENOENT, "ENOENT", "no such file or directory"),
+    (libc::EISDIR, "EISDIR", "illegal operation on a directory"),
+    (libc::ENOTDIR, "ENOTDIR", "not a directory"),
+    (libc::EACCES, "EACCES", "permission denied"),
+    (libc::EEXIST, "EEXIST", "file already exists"),
+    (libc::EPERM, "EPERM", "operation not permitted"),
+    (libc::ENOTEMPTY, "ENOTEMPTY", "directory not empty"),
+    (libc::ELOOP, "ELOOP", "too many symbolic links encountered"),
+    (libc::EINVAL, "EINVAL", "invalid argument"),
+    (libc::ENAMETOOLONG, "ENAMETOOLONG", "name too long"),
+    (libc::EMFILE, "EMFILE", "too many open files"),
+    (libc::EBUSY, "EBUSY", "resource busy or locked"),
+    (libc::EXDEV, "EXDEV", "cross-device link not permitted"),
+    (libc::EROFS, "EROFS", "read-only file system"),
+    (libc::ENOSPC, "ENOSPC", "no space left on device"),
+    (libc::EIO, "EIO", "i/o error"),
+    (libc::EFBIG, "EFBIG", "file too large"),
+];
+
+/// An I/O failure printed the way Node prints it, because the model reads the text.
+#[derive(Debug)]
+pub struct FsError {
+    pub code: &'static str,
+    pub syscall: &'static str,
+    pub path: Option<PathBuf>,
+    pub dest: Option<PathBuf>,
+    pub source: std::io::Error,
+}
+
+impl FsError {
+    pub fn new(source: std::io::Error, syscall: &'static str, path: Option<&Path>, dest: Option<&Path>) -> FsError {
+        let code =
+            source.raw_os_error().and_then(|errno| NODE_ERRORS.iter().find(|entry| entry.0 == errno)).map_or("UNKNOWN", |entry| entry.1);
+        FsError { code, syscall, path: path.map(Path::to_path_buf), dest: dest.map(Path::to_path_buf), source }
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        self.source.kind() == std::io::ErrorKind::NotFound
+    }
+}
+
+impl fmt::Display for FsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let description =
+            NODE_ERRORS.iter().find(|entry| entry.1 == self.code).map_or_else(|| self.source.to_string(), |entry| entry.2.to_owned());
+        write!(f, "{}: {description}, {}", self.code, self.syscall)?;
+        if let Some(path) = &self.path {
+            write!(f, " '{}'", path.display())?;
+        }
+        if let Some(dest) = &self.dest {
+            write!(f, " -> '{}'", dest.display())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for FsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Agent(#[from] AgentError),
+    #[error("{0}")]
+    Fs(#[from] FsError),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Json(#[from] serde_json::Error),
+    #[error("This operation was aborted")]
+    Aborted,
+    #[error("{message}")]
+    Models { code: &'static str, message: String },
+    #[error("Compaction failed: {0}")]
+    Compaction(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl Error {
+    pub fn failure(&self) -> Option<&AgentFailure> {
+        match self {
+            Error::Agent(error) => Some(&error.failure),
+            Error::Fs(_)
+            | Error::Io(_)
+            | Error::Json(_)
+            | Error::Aborted
+            | Error::Models { .. }
+            | Error::Compaction(_)
+            | Error::Other(_) => None,
+        }
+    }
+
+    pub fn fs(source: std::io::Error, syscall: &'static str, path: &Path) -> Error {
+        FsError::new(source, syscall, Some(path), None).into()
+    }
+
+    pub fn fs_rename(source: std::io::Error, from: &Path, to: &Path) -> Error {
+        FsError::new(source, "rename", Some(from), Some(to)).into()
+    }
+}
+
+/// Pi's `ModelsError`: the cause's text joins the message because callers show `message` alone.
+pub fn models_error(code: &'static str, message: impl Into<String>, cause: Option<&Error>) -> Error {
+    let message = message.into();
+    let message = match cause.map(ToString::to_string) {
+        Some(detail) if !detail.trim().is_empty() && !message.contains(detail.trim()) => format!("{message}: {}", detail.trim()),
+        _ => message,
+    };
+    Error::Models { code, message }
+}

@@ -1,0 +1,1610 @@
+// Factory wire protocol.
+//
+// Transport: one WebSocket connection per client. Every binary frame carries
+// exactly one message: ClientMessage from client to server, ServerMessage from
+// server to client. Text frames are not part of the protocol.
+//
+// Handshake: the client's first message must be `hello`. The server answers
+// with `welcome`, then sends `workspace` and, if an agent is selected, its
+// `transcript`. On failure it sends `error` and closes the connection.
+//
+// Correlation: a client message that expects an answer carries a non-zero
+// `id`, and the server echoes it in `reply_to` on `ack` or `error`. Messages
+// the server sends on its own (events) have `reply_to = 0`.
+//
+// State lives in the backend (TENETS.md, tenet 7). Every client sees the same
+// workspace, including which agent is selected. The server pushes a full
+// `workspace` snapshot whenever any of it changes, and streams the selected
+// agent's transcript.
+//
+// Compatibility: the backend and frontend update independently, so new
+// versions must keep talking to old ones. Only add fields and messages; never
+// renumber, retype or reuse a field number. A change that breaks this rule
+// needs a new protocol version.
+syntax = "proto3";
+
+package factory.v1;
+
+message ClientMessage {
+  uint64 id = 1;
+  oneof body {
+    Hello hello = 2;
+    CreateProject create_project = 3;
+    CreateAgent create_agent = 4;
+    UpdateAgent update_agent = 5;
+    SelectAgent select_agent = 6;
+    SendMessage send_message = 7;
+    StopAgent stop_agent = 8;
+    StartLogin start_login = 9;
+    AnswerLogin answer_login = 10;
+    CancelLogin cancel_login = 11;
+    SignOut sign_out = 12;
+    DeleteAgent delete_agent = 13;
+    DeleteProject delete_project = 14;
+    UpdateProject update_project = 15;
+    UpdateSettings update_settings = 16;
+    RestoreSettings restore_settings = 17;
+    InstallUpdate install_update = 18;
+    FocusProject focus_project = 19;
+    ExpandFolder expand_folder = 20;
+    ShowAllFiles show_all_files = 21;
+    OpenPanel open_panel = 22;
+    ArrangeAgent arrange_agent = 23;
+    SetAgentCollapsed set_agent_collapsed = 24;
+    RunCommand run_command = 25;
+    CreateFolder create_folder = 26;
+    UpdateFolder update_folder = 27;
+    DeleteFolder delete_folder = 28;
+    SetFolderCollapsed set_folder_collapsed = 29;
+    SetHighlights set_highlights = 30;
+    StopTask stop_task = 31;
+    ChangeMonitor change_monitor = 32;
+    CreatePairing create_pairing = 33;
+    UnpairDevice unpair_device = 34;
+    SetRemoteAccess set_remote_access = 35;
+    FetchApp fetch_app = 36;
+    ListFolders list_folders = 37;
+    DecideProposal decide_proposal = 38;
+  }
+}
+
+message ServerMessage {
+  uint64 reply_to = 1;
+  oneof body {
+    Welcome welcome = 2;
+    Error error = 3;
+    Ack ack = 4;
+    Workspace workspace = 5;
+    Transcript transcript = 6;
+    EntryUpdate entry = 7;
+    EntryDelta delta = 8;
+    Explorer explorer = 9;
+    ExtensionView extension_view = 10;
+    QueuedMessages queued_messages = 11;
+    Highlight highlight = 12;
+    // The answer to CreatePairing, to the asker only.
+    PairingCode pairing_code = 13;
+    // The answer to FetchApp, to the asker only.
+    AppChunk app_chunk = 14;
+    // The answer to ListFolders, to the asker only.
+    FolderList folder_list = 15;
+  }
+}
+
+// ---- Handshake ----
+
+message Hello {
+  uint32 protocol_version = 1;
+  string client_version = 2;
+  // The device's token from its pairing code (`factory://…?t=<token>`), on
+  // Factory's remote listener; on the local one it isn't needed.
+  string token = 3;
+}
+
+message Welcome {
+  uint32 protocol_version = 1;
+  string server_version = 2;
+  // On the remote listener, the paired device this connection is (see
+  // RemoteAccess.devices), so the app can mark it "This device"; empty on
+  // the local listener.
+  string device_id = 3;
+}
+
+// Pairs a new device with this Factory. Answered with PairingCode. Refused
+// while remote access is off (RemoteAccess.on).
+message CreatePairing {
+  // What the device is called, e.g. "Laptop".
+  string name = 1;
+  // The address the device will reach this machine by: one of
+  // RemoteAccess.addresses, or any host name; empty for the first of them.
+  string host = 2;
+}
+
+// A new device's pairing code. Sent only to the client that asked, once:
+// Factory keeps only a hash of the key in it.
+message PairingCode {
+  // factory://<host>:<port>?t=<token>&fp=<certificate SHA-256>&name=<this
+  // machine>: what the device pastes or scans to connect.
+  string code = 1;
+  // The new device's id in RemoteAccess.devices.
+  string device_id = 2;
+}
+
+// Unpairs a device: it can't connect any more, and its open connections
+// close. Answered with Ack.
+message UnpairDevice {
+  string device_id = 1;
+}
+
+// Turns remote access (Factory's listener for devices on other machines) on
+// or off, in config.json's `remote`. Answered with Ack.
+message SetRemoteAccess {
+  bool on = 1;
+  // The port; 0 keeps it, or 7443 when it was never set.
+  uint32 port = 2;
+  // An IP address to listen on only, such as the Tailscale one; empty for
+  // every address; unset keeps it.
+  optional string listen = 3;
+}
+
+// Remote access: devices on other machines connecting to this Factory.
+message RemoteAccess {
+  // config.json has `remote`.
+  bool on = 1;
+  uint32 port = 2;
+  // The IP address it listens on only; empty for every address.
+  string listen = 3;
+  // It's on but not listening, and why (e.g. the port is taken).
+  string error = 4;
+  // The SHA-256 of Factory's certificate, in hex, which pairing codes pin;
+  // empty until remote access is first turned on.
+  string fingerprint = 5;
+  // How other machines may reach this one, best first: Tailscale addresses
+  // (100.64.0.0/10), then its .local name, then its other addresses (on
+  // Linux: its other addresses, then its name). Only the listen address when
+  // remote access listens on one.
+  repeated string addresses = 6;
+  repeated PairedDevice devices = 7;
+  // This machine's name, as pairing codes give it ("mac-mini").
+  string machine = 8;
+}
+
+message PairedDevice {
+  string id = 1;
+  string name = 2;
+  // When it was paired, in ms since 1970.
+  int64 paired_ms = 3;
+  // When it last connected; 0 if it never has.
+  int64 last_seen_ms = 4;
+  // It's connected now.
+  bool connected = 5;
+  // The IP address it last connected from; empty if it never has.
+  string last_address = 6;
+}
+
+// ---- Requests (client → server). Each is answered with `ack` or `error`. ----
+
+// Creates a project. Its folder is named after it, inside Factory's
+// workspace folder, and is created if it doesn't exist. Clients send only the
+// name; `path` is for callers that need a specific folder.
+message CreateProject {
+  string name = 1;
+  string path = 2;
+}
+
+// Creates an agent and selects it. An empty `project_id` puts it in the
+// workspace, outside any project. Empty `model` or `effort` means the Factory
+// default.
+message CreateAgent {
+  string project_id = 1;
+  string name = 2;
+  // The agent's prompt: instructions added to its system prompt.
+  string prompt = 3;
+  string model = 4;
+  string effort = 5;
+  // One of the agent colors (see Agent.color); empty lets Factory pick.
+  string color = 6;
+  // One of its project's folders (Project.folders) to work in; empty for the
+  // project's own folder.
+  string folder_id = 7;
+  // What it does, shown with its name (see Agent.role); empty for none.
+  string role = 8;
+}
+
+// Changes an agent's settings. Unset fields stay as they are. Takes effect
+// from the agent's next step (its next model call), mid-run too; what's
+// display only (color, placeholder, avatar) at once.
+message UpdateAgent {
+  string agent_id = 1;
+  optional string name = 2;
+  optional string prompt = 3;
+  optional string model = 4;
+  optional string effort = 5;
+  // Moves the agent to another project; empty moves it to the workspace. Its
+  // conversation goes with it, and it works in the new folder from its next
+  // step.
+  optional string project_id = 6;
+  // One of the agent colors (see Agent.color).
+  optional string color = 7;
+  // Changes one of the agent's extensions.
+  ExtensionChange extension = 8;
+  // What its message box says when empty (see Agent.placeholder); empty
+  // goes back to "Message <name>".
+  optional string placeholder = 9;
+  // Deprecated and ignored: agents work in their project's folders
+  // (folder_id) instead.
+  optional string folder = 10;
+  // The project folder it works in (see Agent.folder_id): one of its
+  // project's folders, or empty for the project's own folder. Moving the agent
+  // to another project without this puts it in that project's own folder.
+  optional string folder_id = 11;
+  // Its character's body shape (see Agent.avatar_shape); empty goes back to
+  // automatic. Display only, like color.
+  optional string avatar_shape = 12;
+  // Unused: characters no longer have faces, and this is ignored.
+  optional string avatar_face = 13;
+  // What it does (see Agent.role); empty clears it.
+  optional string role = 14;
+}
+
+// Turns an extension on or off for an agent, and/or sets one of its options.
+message ExtensionChange {
+  // The extension's id, e.g. "agents".
+  string id = 1;
+  // Turns it on or off; unset leaves it as it is.
+  optional bool enabled = 2;
+  // The option to set to `value`; empty sets none.
+  string option_id = 3;
+  OptionValue value = 4;
+}
+
+// Selects the agent every client shows. The server answers with that agent's
+// `transcript`.
+message SelectAgent {
+  string agent_id = 1;
+}
+
+// Gives an agent a message. If it's busy, the message waits for the current
+// run to finish.
+message SendMessage {
+  string agent_id = 1;
+  string text = 2;
+}
+
+// Stops the agent's current run.
+message StopAgent {
+  string agent_id = 1;
+}
+
+// Deletes an agent and its conversation. A running agent is stopped first.
+message DeleteAgent {
+  string agent_id = 1;
+}
+
+// Removes a project and deletes its agents. The project's folder and its files
+// are left alone.
+message DeleteProject {
+  string project_id = 1;
+}
+
+// Adds a folder to a project (see Project.folders). An empty `path` puts it
+// in the project's folder, named after it. The folder is created if missing.
+message CreateFolder {
+  string project_id = 1;
+  string name = 2;
+  // Absolute; anywhere on the machine (a repository elsewhere, say).
+  string path = 3;
+}
+
+// Renames a project's folder, or points it at another folder on disk (files
+// aren't moved). Unset fields stay as they are.
+message UpdateFolder {
+  string project_id = 1;
+  string folder_id = 2;
+  optional string name = 3;
+  optional string path = 4;
+}
+
+// Removes a folder from its project. Its agents go to the project's own
+// folder; no files are deleted.
+message DeleteFolder {
+  string project_id = 1;
+  string folder_id = 2;
+}
+
+// Renames a project. Its folder keeps its name.
+message UpdateProject {
+  string project_id = 1;
+  optional string name = 2;
+}
+
+// Changes Factory-wide settings. Unset fields stay as they are. An empty
+// `default_effort` picks one the default model accepts.
+message UpdateSettings {
+  optional string default_model = 1;
+  optional string default_effort = 2;
+  optional uint64 compact_at_tokens = 3;
+  // The Resources alerts' thresholds (see Settings); cpu_percent 0 turns its
+  // alert off. Percentages run 1 to 100.
+  optional uint32 ram_percent = 4;
+  optional uint32 disk_free_gb = 5;
+  optional uint32 disk_free_percent = 6;
+  optional uint32 cpu_percent = 7;
+  // The sidebar's and the right panel's widths (see Settings); 0 for the
+  // app's default. Negative or not finite is refused.
+  optional double sidebar_width = 8;
+  optional double panel_width = 9;
+}
+
+// Replaces a settings file that has an error (`Workspace.config_error`) with
+// the settings Factory is still using. The broken file is kept next to it as
+// config.broken.json.
+message RestoreSettings {}
+
+// Installs `Workspace.latest_release`: Factory swaps in its new backend and
+// restarts (the connection drops and comes back). With `app_path`, the app
+// bundle at that path on Factory's computer is replaced too and reopened once
+// the app quits, so the app quits after the ack. From a device on another
+// machine `app_path` is ignored: its app updates itself (see FetchApp).
+message InstallUpdate {
+  string app_path = 1;
+}
+
+// Asks for a chunk of the app of release `version` (Workspace.latest_release),
+// for an app on another machine to update itself: it fetches the archive
+// chunk by chunk, checks its size and SHA-256, unpacks it, sends
+// InstallUpdate (with no app_path) and swaps itself. Answered with AppChunk,
+// or an Error (NOT_FOUND) saying why this Factory can't send that app (no
+// such release, no app in it, packing or downloading it failed).
+message FetchApp {
+  string version = 1;
+  // Where the chunk starts, in bytes: 0 first, then the end of the last.
+  uint64 offset = 2;
+}
+
+// A chunk of a release's app archive: a gzipped tar with the app bundle at
+// its top level. The archive is made the first time any app asks for it;
+// until it's ready, the answer is only `version` and `preparing`.
+message AppChunk {
+  string version = 1;
+  uint64 offset = 2;
+  // min(1 MiB, size - offset) bytes of the archive from `offset`.
+  bytes data = 3;
+  // The whole archive's size in bytes, and its SHA-256 (hex).
+  uint64 size = 4;
+  string sha256 = 5;
+  // The bundle at the archive's top level: "Factory.app", or "Factory
+  // Dev.app" for the dev Factory.
+  string app_name = 6;
+  // The archive is still being made (on a Linux machine, downloaded): ask
+  // again in a second or two.
+  bool preparing = 7;
+}
+
+// Lists the folders in a folder of the machine Factory runs on, so an app on
+// another machine can pick a project's folder there by browsing. Answered
+// with FolderList, or an Error (INVALID_REQUEST) saying why it can't be
+// listed: not a full path, doesn't exist, isn't a folder, permission denied.
+message ListFolders {
+  // An absolute path, or one starting at the home folder: "" or "~" for the
+  // home folder itself, "~/code" below it. ".." and links are resolved.
+  string path = 1;
+}
+
+message FolderList {
+  // The folder listed, as a full path with links and ".." resolved.
+  string path = 1;
+  // Its parent folder; empty at "/".
+  string parent = 2;
+  // The folders in it (links to folders too; files are left out), sorted by
+  // name, case aside.
+  repeated FolderEntry folders = 3;
+  // The home folder of the user Factory runs as, for a Home button.
+  string home = 4;
+  // There were more than 5,000 folders; only the first 5,000 are listed.
+  bool truncated = 5;
+}
+
+message FolderEntry {
+  string name = 1;
+  // Its name starts with ".": a hidden folder, which pickers usually hide.
+  bool hidden = 2;
+}
+
+// Focuses a project: clients show only it, with its folder in the explorer.
+// If the selected agent isn't in it, its first agent is selected (or none).
+// An empty `project_id` leaves focus.
+message FocusProject {
+  string project_id = 1;
+}
+
+// Opens or closes a folder in a project's explorer. `path` is relative to the
+// root it's in, with "/" between names.
+message ExpandFolder {
+  string project_id = 1;
+  string path = 2;
+  bool expanded = 3;
+  // The root: empty for the project's own folder, else one of its folders
+  // (Project.folders, Explorer.folders).
+  string folder_id = 4;
+  // Or an agent's own checkout (ExplorerRoot.agent_id); folder_id is empty then.
+  string agent_id = 5;
+}
+
+// Shows the files the project's .factoryignore hides, or hides them again.
+message ShowAllFiles {
+  string project_id = 1;
+  bool show_all = 2;
+}
+
+// Moves an agent in the sidebar: to a place among its siblings, under another
+// agent, or into another project. Its children (and theirs) come with it.
+// Refused, with nothing changed, if an id is unknown or it would be placed
+// under itself or one of its own children.
+message ArrangeAgent {
+  string agent_id = 1;
+  // The agent to nest it under; empty for the top level. In another project,
+  // that moves it to that project.
+  string parent_id = 2;
+  // The sibling to place it before; empty to place it last.
+  string before_id = 3;
+  // Moves it to this project ("" for the workspace) at the top level or under
+  // `parent_id`, which must then be in that project. Unset keeps its project,
+  // or takes `parent_id`'s.
+  optional string project_id = 4;
+  // Puts it in this folder of its (new) project (see Agent.folder_id; "" for
+  // the project's own folder), in the same step. Unset keeps its folder, or
+  // the project's own folder when it moves to another project.
+  optional string folder_id = 5;
+}
+
+// Folds an agent's children away in the sidebar, or shows them.
+message SetAgentCollapsed {
+  string agent_id = 1;
+  bool collapsed = 2;
+}
+
+// Turns highlights (Workspace.highlights) on or off for this Factory.
+message SetHighlights {
+  bool on = 1;
+}
+
+// Stops an agent's background task (its whole process group). The agent gets
+// the usual event that it finished, "stopped by the person".
+message StopTask {
+  string agent_id = 1;
+  // Its id, such as "task-3".
+  string task_id = 2;
+}
+
+// Pauses, resumes or cancels one of an agent's monitors (the Monitors
+// panel's buttons), as the person. Pause and cancel stop a watch's command;
+// resume picks up from now: a time monitor that came due meanwhile fires
+// once. Refused (INVALID_REQUEST) when the monitor's state doesn't allow it,
+// such as resuming an active one or changing an ended one.
+message ChangeMonitor {
+  string agent_id = 1;
+  // Its number: 3 for m3.
+  uint32 monitor_id = 2;
+  MonitorAction action = 3;
+}
+
+// The person approves or dismisses an agent's proposal to Rivet (a
+// `Proposal` entry in `agent_id`'s transcript), answered with Ack. Approved,
+// Rivet gets it as the person's own message: `comment` (if any), a blank
+// line, "<Agent> (<role>) proposes:" and the proposal. Either way the agent
+// is told. An error when it's no longer pending, or when approving and
+// there's no Rivet or Rivet has no model (it stays pending).
+message DecideProposal {
+  string agent_id = 1;
+  string proposal_id = 2;
+  bool approve = 3;
+  // What the person adds for Rivet; may be empty.
+  string comment = 4;
+}
+
+enum MonitorAction {
+  MONITOR_ACTION_UNSPECIFIED = 0;
+  MONITOR_ACTION_PAUSE = 1;
+  MONITOR_ACTION_RESUME = 2;
+  MONITOR_ACTION_CANCEL = 3;
+}
+
+// Folds a project folder's agents away in the sidebar, or shows them.
+message SetFolderCollapsed {
+  string project_id = 1;
+  string folder_id = 2;
+  bool collapsed = 3;
+}
+
+// Runs one of the agent's slash commands (`Agent.commands`), as the person
+// typing "/<name> <args>" in its message box. A command that can't run now
+// is an INVALID_REQUEST error whose message can be shown as it is.
+message RunCommand {
+  string agent_id = 1;
+  // "clear", without the slash.
+  string name = 2;
+  // What follows the name, trimmed; empty if nothing.
+  string args = 3;
+}
+
+// Opens an extension's panel beside an agent (`Agent.open_panel`); an empty id
+// closes it. Each agent keeps its own.
+message OpenPanel {
+  string extension_id = 1;
+  // The agent; empty for the selected one.
+  string agent_id = 2;
+}
+
+// ---- Sign-in ----
+//
+// One sign-in runs at a time, shown to every client as `Workspace.login`.
+// Starting one cancels any other. The flow is driven by the provider: it may
+// publish a URL to open, a device code to enter, or ask a question
+// (`LoginFlow.prompt`) that the client answers with `AnswerLogin`.
+//
+// Browser sign-in: the client that started it opens `LoginFlow.url`. If the
+// browser runs on the backend's machine, the provider's redirect reaches the
+// backend and sign-in finishes by itself. Otherwise the user pastes the code
+// or the address the browser landed on, as the answer to the `CODE` prompt
+// that waits alongside.
+
+// Starts signing in to a provider with one of its `Provider.methods`.
+message StartLogin {
+  string provider_id = 1;
+  string method_id = 2;
+}
+
+// Answers `LoginFlow.prompt`: the pasted code or redirect address, the secret,
+// the text, or the chosen option's id.
+message AnswerLogin {
+  string text = 1;
+}
+
+// Cancels the sign-in in progress, or dismisses one that failed.
+message CancelLogin {}
+
+// Removes the credential Factory stored for a provider.
+message SignOut {
+  string provider_id = 1;
+}
+// ---- Server → client ----
+
+message Ack {}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // The client speaks a protocol version the server doesn't. Connection closes.
+  ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION = 1;
+  // The first message wasn't `hello`. Connection closes.
+  ERROR_CODE_HANDSHAKE_REQUIRED = 2;
+  // A frame couldn't be decoded as a ClientMessage.
+  ERROR_CODE_MALFORMED_MESSAGE = 3;
+  // A valid message of a kind this server doesn't know (sent by a newer client).
+  ERROR_CODE_UNKNOWN_MESSAGE = 4;
+  // The request named a project, agent or provider that doesn't exist.
+  ERROR_CODE_NOT_FOUND = 5;
+  // The request's fields are invalid (empty name, unknown model, ...).
+  ERROR_CODE_INVALID_REQUEST = 6;
+  // The server failed to carry out a valid request (e.g. couldn't write a file).
+  ERROR_CODE_INTERNAL = 7;
+  // On the remote listener: the device's token isn't one of a paired device
+  // (never paired, or unpaired since). Connection closes.
+  ERROR_CODE_UNAUTHORIZED = 8;
+}
+
+// Everything the sidebar and headers need. Sent in full after `welcome` and
+// whenever any part changes.
+//
+// The workspace is Factory's own folder. Each project is a folder inside it,
+// and agents work in their project's folder, or in the workspace folder when
+// they aren't in a project.
+message Workspace {
+  repeated Project projects = 1;
+  repeated Agent agents = 2;
+  // Models from providers Factory has credentials for.
+  repeated Model models = 3;
+  // Empty when no agent is selected.
+  string selected_agent_id = 4;
+  // Set when the config file on disk has an error; the last valid config stays
+  // in effect until it's fixed.
+  string config_error = 5;
+  // Every provider Factory can use, signed in or not.
+  repeated Provider providers = 6;
+  // The sign-in in progress; unset when there is none.
+  LoginFlow login = 7;
+  Settings settings = 8;
+  // This backend's build, e.g. "2026.11.18-1652"; "dev" for an unstamped build.
+  // Versions of stamped builds sort in release order.
+  string version = 9;
+  // The newest release published for this Factory (scripts/release.sh); empty
+  // when there is none. An app or backend older than it should update.
+  string latest_release = 10;
+  // The focused project; empty when none is. Its explorer follows as Explorer.
+  string focused_project_id = 11;
+  // Set when the last update's backend didn't start and Factory went back to
+  // the one before; says which versions and why.
+  string update_error = 12;
+  // The backend in `latest_release`. Older than `latest_release` when the
+  // release only changed the app: installing it doesn't restart the backend.
+  string latest_backend = 13;
+  // The color a new agent gets unless the person picks one: the one least
+  // like any agent's color, so agents stay easy to tell apart.
+  string next_agent_color = 14;
+  // Every extension Factory has, whether or not any agent uses it.
+  repeated Extension extensions = 15;
+  // The selected agent's `Agent.open_panel`, for older apps; empty when no
+  // agent is selected or its panel is closed.
+  string open_panel = 16;
+  // The person wants highlights shown (see Highlight). Factory sends them
+  // either way; when this is off, the app doesn't show them.
+  bool highlights = 17;
+  // What changed in each version, newest first, from the changelog of the
+  // newest release (`latest_release`): every version up to it, so the app can
+  // show what an update brings (the versions newer than `version`) and what
+  // the running one brought. Empty when there's no release or it has no
+  // changelog. Only a dev release has an unreleased entry, first.
+  repeated ChangelogVersion changelog = 18;
+  // Devices on other machines: whether they can connect, and which are paired.
+  RemoteAccess remote = 19;
+}
+
+message ChangelogVersion {
+  // e.g. "2026.11.18-2123"; empty for the unreleased entry.
+  string version = 1;
+  // When it was released (the time in its version), in ms since 1970; 0 for
+  // the unreleased entry.
+  int64 released = 2;
+  // In the changelog's order.
+  repeated ChangelogItem items = 3;
+  // Changes not in a release yet (dev releases only).
+  bool unreleased = 4;
+}
+
+message ChangelogItem {
+  ChangelogKind kind = 1;
+  // The change without its "Added"/"Changed:"/"Fixed:" prefix, starting with
+  // a capital, e.g. "The Tasks panel lists background tasks".
+  string text = 2;
+  // The line as written, e.g. "Added the Tasks panel…".
+  string raw = 3;
+}
+
+enum ChangelogKind {
+  // A line with none of the prefixes.
+  CHANGELOG_KIND_OTHER = 0;
+  CHANGELOG_KIND_ADDED = 1;
+  CHANGELOG_KIND_CHANGED = 2;
+  CHANGELOG_KIND_FIXED = 3;
+}
+
+// Parts of the app to make glow briefly, so the person sees what happened or
+// what an agent is pointing at. Transient: never stored or sent again, and
+// only to the clients connected now.
+message Highlight {
+  repeated HighlightTarget targets = 1;
+  // A short caption an agent gave (AGENT kind); may be empty.
+  string text = 2;
+  // The agent it came from: the sender of a message, or the agent that
+  // called the highlight tool.
+  string from_agent_id = 3;
+  HighlightKind kind = 4;
+}
+
+// What to highlight. Kinds the app doesn't know are skipped. `kind` and `id`:
+//
+// - "agent": an agent's id (its sidebar row)
+// - "project": a project's id
+// - "checklist_item": "<agent id>#<item number>", e.g. "backend#4"
+// - "extension": "<agent id>/<extension id>", that extension's icon for the agent, e.g. "backend/checklist"
+// - "settings", "marketplace": the sidebar's buttons; `id` is empty
+message HighlightTarget {
+  string kind = 1;
+  string id = 2;
+}
+
+enum HighlightKind {
+  HIGHLIGHT_KIND_UNSPECIFIED = 0;
+  // An agent messaged another (agents_send): targets[0] is the sender's
+  // "agent" target, targets[1] the recipient's.
+  HIGHLIGHT_KIND_MESSAGE = 1;
+  // An agent asked for it with its highlight tool.
+  HIGHLIGHT_KIND_AGENT = 2;
+}
+
+// A capability agents can have, such as messaging other agents. Each agent
+// has it on or off (`Agent.extensions`), with its own option values.
+message Extension {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  // Agents have it unless it's turned off for them.
+  bool default_enabled = 4;
+  repeated ExtensionOption options = 5;
+  // A Lucide icon name, e.g. "users".
+  string icon = 6;
+  // For an instance of an extension (a named second use of it, on or off on
+  // its own, such as "memory:factory", Factory's manual as a read-only
+  // memory): the extension it belongs to, e.g. "memory". Its `id` is
+  // "<base>:<name>" and works wherever an extension id does: AgentExtension,
+  // ExtensionChange, OpenPanel, Agent.open_panel and ExtensionView. Empty for
+  // an extension itself. Instances have no options and come right after
+  // their extension.
+  string base = 7;
+  // Admin agents (Messaging's `admin` option, such as Rivet) have it unless
+  // it's turned off for them; other agents only once it's turned on. Set for
+  // instances and for extensions alike (Resources is one).
+  bool admin_default = 8;
+}
+
+message ExtensionOption {
+  string id = 1;
+  // e.g. "Other agents can message it".
+  string label = 2;
+  string description = 3;
+  // A SWITCH's default.
+  bool default_value = 4;
+  ExtensionOptionKind kind = 5;
+  // AGENTS: the agent's own project's agents always count, whether listed or
+  // not; show them checked and greyed, as "in its project".
+  bool includes_project = 6;
+}
+
+enum ExtensionOptionKind {
+  EXTENSION_OPTION_KIND_UNSPECIFIED = 0;
+  // On or off: `OptionValue.on`.
+  EXTENSION_OPTION_KIND_SWITCH = 1;
+  // A list of agents: `OptionValue.agent_ids`.
+  EXTENSION_OPTION_KIND_AGENTS = 2;
+}
+
+message OptionValue {
+  // For a SWITCH.
+  bool on = 1;
+  // For an AGENTS list: agent ids.
+  repeated string agent_ids = 2;
+}
+
+// An extension as one agent has it, with its options' effective values.
+message AgentExtension {
+  string id = 1;
+  bool enabled = 2;
+  // Every option of the extension, by option id.
+  map<string, OptionValue> options = 3;
+}
+
+// What an extension's panel shows for an agent. Sent when the selected agent
+// has the extension in `Workspace.open_panel` enabled, and again whenever it
+// changes; a client shows it only while it matches the open panel and the
+// selected agent.
+message ExtensionView {
+  string extension_id = 1;
+  string agent_id = 2;
+  string title = 3;
+  oneof body {
+    Checklist checklist = 10;
+    Memory memory = 11;
+    Messaging messaging = 12;
+    Tasks tasks = 13;
+    Monitors monitors = 14;
+    Database database = 15;
+    Resources resources = 16;
+  }
+}
+
+// A database's tables, read only: the agent's own (extension "database"),
+// or Factory's records (instance "database:factory").
+message Database {
+  // By name; empty when it has none yet.
+  repeated DatabaseTable tables = 1;
+  // Where the file is, for the person who wants to open it elsewhere.
+  string path = 2;
+}
+
+message DatabaseTable {
+  string name = 1;
+  // A view rather than a table.
+  bool view = 2;
+  uint64 rows = 3;
+  repeated DatabaseColumn columns = 4;
+}
+
+// How the machine and Factory use its resources (the Resources extension),
+// sampled every minute; disk use is measured every 20 minutes.
+message Resources {
+  Machine machine = 1;
+  // Factory's processes, biggest first: its backend, supervisor and app, and
+  // agents' background tasks, monitors' watches and commands running now.
+  repeated ResourceProcess factory = 2;
+  // The machine's other processes using the most memory.
+  repeated ResourceProcess others = 3;
+  // What Factory's data takes (its home folder, then by part), then each
+  // project's folders.
+  repeated DiskUsage disk = 4;
+  // The last hour's samples, oldest first.
+  repeated ResourceSample history = 5;
+  // When `machine` and the processes were sampled, and when the disk was
+  // last measured (0 until it has been), in ms since 1970.
+  int64 sampled = 6;
+  int64 measured = 7;
+  // The alerts in effect now, as the agents were told them.
+  repeated string alerts = 8;
+}
+
+message Machine {
+  // How busy all its processors are, 0 to 100.
+  double cpu_percent = 1;
+  uint32 cores = 2;
+  // In bytes.
+  uint64 memory_total = 3;
+  uint64 memory_used = 4;
+  uint64 swap_total = 5;
+  uint64 swap_used = 6;
+  // The volumes Factory uses.
+  repeated Volume volumes = 7;
+}
+
+message Volume {
+  // Where it's mounted, e.g. "/" or "/Volumes/Work".
+  string mount = 1;
+  // In bytes.
+  uint64 total = 2;
+  uint64 available = 3;
+  // What of Factory's is on it: "Factory's data", then project names.
+  repeated string uses = 4;
+}
+
+// A process of Factory's (with what it started) or another one.
+message ResourceProcess {
+  // "Factory's backend", "Supervisor", "App", "task-3 npm run dev",
+  // "Monitor m2 tail -f app.log", "Commands running now", or another
+  // process's name, such as "Docker".
+  string label = 1;
+  // backend, supervisor, app, task, monitor, command or other.
+  string kind = 2;
+  // The agent a task, monitor or command is of; empty otherwise.
+  string agent_id = 3;
+  // Its main process (a task's or monitor's process group).
+  uint32 pid = 4;
+  // How many processes it counts.
+  uint32 processes = 5;
+  // Over the last minute; 100 is one processor busy.
+  double cpu_percent = 6;
+  // Resident memory, in bytes.
+  uint64 memory = 7;
+}
+
+message DiskUsage {
+  // "Factory's data", "Releases", an agent's or project's name, a folder's.
+  string label = 1;
+  // home, releases, agent, project or folder.
+  string kind = 2;
+  // The agent's or project's id.
+  string id = 3;
+  string path = 4;
+  // In bytes. Checkouts are copy-on-write clones: their bytes are counted
+  // in full though they share most of them.
+  uint64 bytes = 5;
+  // An agent's: its conversations, task logs, database and checkout.
+  repeated DiskUsage parts = 6;
+  // The walk took too long and stopped: `bytes` is at least this.
+  bool partial = 7;
+}
+
+message ResourceSample {
+  int64 time = 1;
+  double cpu_percent = 2;
+  uint64 memory_used = 3;
+  uint64 swap_used = 4;
+  // All of Factory's processes together.
+  uint64 factory_memory = 5;
+}
+
+message DatabaseColumn {
+  string name = 1;
+  // As declared, e.g. "INTEGER"; may be empty.
+  string type = 2;
+}
+
+// Whom an agent can message and who can message it, by the same rule as its
+// tools. Names, colors and status come from the workspace's agents.
+message Messaging {
+  // Agent ids it can message, in sidebar order.
+  repeated string reaches = 1;
+  // Agent ids that can message it, in sidebar order.
+  repeated string reached_by = 2;
+}
+
+// An agent's checklist: everything the person asked for, oldest first.
+message Checklist {
+  repeated ChecklistItem items = 1;
+}
+
+message ChecklistItem {
+  // Small and per agent: #1, #2…
+  uint32 id = 1;
+  string text = 2;
+  ChecklistStatus status = 3;
+  // The agent id of who's on it; empty when unassigned.
+  string owner = 4;
+  // When it was added and last changed, in ms since 1970.
+  int64 created = 5;
+  int64 updated = 6;
+  // What happened to it, oldest first.
+  repeated ChecklistUpdate log = 7;
+  // While it's blocked: the latest note made since it last became blocked
+  // (what it waits on), the note's own text. Empty otherwise.
+  string note = 8;
+}
+
+message ChecklistUpdate {
+  // ms since 1970.
+  int64 time = 1;
+  // e.g. "Added", "Done: shipped", "Owner: frontend", or a note.
+  string text = 2;
+  // The agent id of who made it; empty for the person.
+  string author = 3;
+}
+
+enum ChecklistStatus {
+  CHECKLIST_STATUS_UNSPECIFIED = 0;
+  CHECKLIST_STATUS_OPEN = 1;
+  CHECKLIST_STATUS_IN_PROGRESS = 2;
+  CHECKLIST_STATUS_DONE = 3;
+  CHECKLIST_STATUS_DROPPED = 4;
+  // Waiting on the person or something outside; still outstanding.
+  CHECKLIST_STATUS_BLOCKED = 5;
+}
+
+// An agent's own memory: the person's preferences it learned and its
+// knowledge notes. Only that agent reads and writes it.
+message Memory {
+  // By id.
+  repeated MemoryPreference preferences = 1;
+  // By slug.
+  repeated MemoryNote notes = 2;
+  // Newest first, the last 50.
+  repeated MemoryChange changes = 3;
+  // Factory's manual (instance "memory:factory"): notes only, which are
+  // Factory's own docs; nothing is learned or changed, so there are no
+  // preferences or changes.
+  bool read_only = 4;
+}
+
+message MemoryPreference {
+  // Small and per agent: #1, #2…; never reused.
+  uint32 id = 1;
+  // What the person wants or doesn't, e.g. "Don't propose paid CI".
+  string rule = 2;
+  // Why, e.g. "everything runs locally in Factory".
+  string why = 3;
+  // When it was added and last changed, in ms since 1970.
+  int64 learned = 4;
+  int64 updated = 5;
+}
+
+message MemoryNote {
+  // a-z, 0-9 and -, e.g. "deploy-quirks".
+  string slug = 1;
+  // One line, up to 150 characters.
+  string summary = 2;
+  // Markdown.
+  string body = 3;
+  // ms since 1970.
+  int64 created = 4;
+  int64 updated = 5;
+}
+
+message MemoryChange {
+  // ms since 1970.
+  int64 time = 1;
+  // The agent id of who made it; empty for the person.
+  string actor = 2;
+  MemoryChangeKind kind = 3;
+  // Set for preference changes.
+  uint32 preference_id = 4;
+  // Set for note changes.
+  string note_slug = 5;
+  // A preference's rule (the old one when removed); a note's summary.
+  string text = 6;
+}
+
+enum MemoryChangeKind {
+  MEMORY_CHANGE_KIND_UNSPECIFIED = 0;
+  MEMORY_CHANGE_KIND_PREFERENCE_ADDED = 1;
+  MEMORY_CHANGE_KIND_PREFERENCE_CHANGED = 2;
+  MEMORY_CHANGE_KIND_PREFERENCE_REMOVED = 3;
+  MEMORY_CHANGE_KIND_NOTE_WRITTEN = 4;
+  MEMORY_CHANGE_KIND_NOTE_EDITED = 5;
+  MEMORY_CHANGE_KIND_NOTE_REMOVED = 6;
+}
+
+// The background tasks an agent can see (its own, or every agent's with
+// see_all or admin): running ones first, newest first, then the 20 that
+// ended most recently.
+message Tasks {
+  repeated BackgroundTask tasks = 1;
+}
+
+message BackgroundTask {
+  // Per agent: "task-3".
+  string id = 1;
+  // The agent that started it.
+  string agent_id = 2;
+  string command = 3;
+  // When it started and ended, in ms since 1970; ended is 0 while it runs.
+  int64 started = 4;
+  int64 ended = 5;
+  bool running = 6;
+  // How it ended: "exit 0", "exit 1", "signal SIGKILL", "timed out",
+  // "stopped by Rivet", "stopped by the person"…; empty while it runs.
+  string status = 7;
+  // The absolute path of its output log.
+  string log_path = 8;
+  // The last lines of its output (about 20).
+  string log_tail = 9;
+}
+
+// An agent's monitors: what will prompt it later, and what else will.
+message Monitors {
+  // Its monitors, oldest first: active, paused and failed ones, and ones that
+  // ended in the last week.
+  repeated Monitor monitors = 1;
+  // What else will wake it, one line each, e.g. "task-3 (background task) —
+  // wakes you when it exits", "checklist reminder — on: …".
+  repeated string builtins = 2;
+}
+
+message Monitor {
+  // Small and per agent: 3 for m3; never reused.
+  uint32 id = 1;
+  string name = 2;
+  // What the agent is told when it fires.
+  string prompt = 3;
+  // What it waits for, in words, e.g. "every 1h", "check `make test` every
+  // 5m, fires on failure", "files src/**/*.rs".
+  string when = 4;
+  // "at", "every", "cron", "check", "files" or "watch".
+  string kind = 5;
+  MonitorState state = 6;
+  // Why it's paused or ended, e.g. "by the person", "by coordinator", "its
+  // until passed"; may be empty.
+  string reason = 7;
+  // When it next fires or checks, in ms since 1970; 0 when it has no time
+  // (files, watch, or not active).
+  int64 next_due = 8;
+  // When it last fired, in ms since 1970; 0 if it never has.
+  int64 last_fired = 9;
+  uint32 fires = 10;
+  // When it ends on its own, in ms since 1970; 0 for never.
+  int64 until = 11;
+  // It ends after this many fires; 0 for no limit.
+  uint32 max_fires = 12;
+  // It fires only while the agent is idle.
+  bool idle_only = 13;
+  // The agent id of who set it; empty for the person.
+  string created_by = 14;
+  // ms since 1970.
+  int64 created = 15;
+}
+
+enum MonitorState {
+  MONITOR_STATE_UNSPECIFIED = 0;
+  MONITOR_STATE_ACTIVE = 1;
+  MONITOR_STATE_PAUSED = 2;
+  // It ended on its own: once, until or max fires.
+  MONITOR_STATE_DONE = 3;
+  MONITOR_STATE_CANCELLED = 4;
+  // It stopped working (its command kept failing or couldn't start, its
+  // watch kept exiting or its log grew too big); `reason` says why. It can
+  // be resumed.
+  MONITOR_STATE_ERROR = 5;
+}
+
+message Settings {
+  // Model for new agents that don't choose one: "<provider>/<model id>".
+  string default_model = 1;
+  string default_effort = 2;
+  // Agents' contexts are compacted when they reach this many tokens.
+  uint64 compact_at_tokens = 3;
+  // When agents with the Resources extension are told the machine runs low
+  // (config.json's `resources`), as in effect: memory used above this
+  // percentage for a few minutes; a volume Factory uses with less free than
+  // disk_free_gb GB or disk_free_percent of it, whichever is smaller; the
+  // processors busier than cpu_percent for several minutes, 0 when that
+  // alert is off.
+  uint32 ram_percent = 4;
+  uint32 disk_free_gb = 5;
+  uint32 disk_free_percent = 6;
+  uint32 cpu_percent = 7;
+  // How wide the person dragged the sidebar and the right panel (the
+  // extension panel), in logical pixels, the same on every device
+  // (config.json's `display`); 0 for the app's default. The app keeps them
+  // in its own range.
+  double sidebar_width = 8;
+  double panel_width = 9;
+}
+
+message Provider {
+  string id = 1;
+  string name = 2;
+  // How Factory is signed in, e.g. "Anthropic (Claude Pro/Max)" or
+  // "ANTHROPIC_API_KEY". Empty when it isn't.
+  string signed_in_with = 3;
+  // Factory stored this credential and `SignOut` removes it. False for
+  // credentials from the environment.
+  bool can_sign_out = 4;
+  // Ways to sign in, in the provider's order of preference.
+  repeated LoginMethod methods = 5;
+  // How much of its usage limits the signed-in subscription has used. Unset
+  // when the provider isn't signed in or has no usage limits (API keys). Set
+  // as soon as a subscription signs in, with no windows and `updated` 0 until
+  // the first read lands.
+  ProviderUsage usage = 6;
+  // The signed-in subscription's plan as the provider names it, such as
+  // "Claude Max 20x" or "ChatGPT Pro". Empty when it isn't signed in with a
+  // subscription, or the plan hasn't been read or the provider doesn't say.
+  string plan = 7;
+}
+
+message ProviderUsage {
+  // The provider's limits; the one with id "weekly" (all models, per week) is
+  // the headline.
+  repeated UsageWindow windows = 1;
+  // When usage was last read, in ms since 1970; 0 if it never was.
+  int64 updated = 2;
+  // Why the latest read failed; empty when it worked. `windows` and `updated`
+  // then still hold the last good read, if there was one.
+  string error = 3;
+}
+
+// One usage limit, such as the weekly or the 5-hour one.
+message UsageWindow {
+  // "weekly", "five_hour", "weekly_opus", "weekly_sonnet", ...
+  string id = 1;
+  // Shown as is, e.g. "Weekly", "5-hour", "Weekly (Opus)".
+  string label = 2;
+  // 0-100.
+  double used_percent = 3;
+  // When the window resets, in ms since 1970; 0 if unknown.
+  int64 resets_at = 4;
+}
+
+message LoginMethod {
+  // "oauth" or "api_key".
+  string id = 1;
+  // e.g. "Anthropic (Claude Pro/Max)", "Anthropic API key".
+  string label = 2;
+}
+
+message LoginFlow {
+  string provider_id = 1;
+  string method_id = 2;
+  // Open this to sign in.
+  string url = 3;
+  // What to do with `url`.
+  string instructions = 4;
+  // Device-code sign-in: enter `user_code` at `verification_url`.
+  string user_code = 5;
+  string verification_url = 6;
+  // Latest status message from the provider.
+  string progress = 7;
+  // A question waiting for `AnswerLogin`; unset when none.
+  LoginPrompt prompt = 8;
+  // Sign-in failed. The flow stays until `CancelLogin` dismisses it.
+  string error = 9;
+}
+
+message LoginPrompt {
+  LoginPromptKind kind = 1;
+  string message = 2;
+  string placeholder = 3;
+  // For `SELECT`.
+  repeated LoginOption options = 4;
+}
+
+enum LoginPromptKind {
+  LOGIN_PROMPT_KIND_UNSPECIFIED = 0;
+  LOGIN_PROMPT_KIND_TEXT = 1;
+  // Hide what's typed (API keys).
+  LOGIN_PROMPT_KIND_SECRET = 2;
+  // Pick one of `options`; answer with its id.
+  LOGIN_PROMPT_KIND_SELECT = 3;
+  // Paste the authorization code or the full address the browser was
+  // redirected to. Waits next to `LoginFlow.url`: only needed when the
+  // redirect can't reach the backend.
+  LOGIN_PROMPT_KIND_CODE = 4;
+}
+
+message LoginOption {
+  string id = 1;
+  string label = 2;
+}
+
+message Project {
+  string id = 1;
+  string name = 2;
+  // Absolute path of the project's folder.
+  string path = 3;
+  // Folders inside the project, each where some of its agents work (see
+  // Agent.folder_id). In the person's order.
+  repeated ProjectFolder folders = 4;
+}
+
+// A folder that some of a project's agents work in. It only scopes where they
+// work: messaging and everything else stay project-wide.
+message ProjectFolder {
+  // Unique within the project.
+  string id = 1;
+  string name = 2;
+  // Absolute; may be outside the project's folder.
+  string path = 3;
+  // Its agents are folded away in the sidebar.
+  bool collapsed = 4;
+}
+
+message Agent {
+  string id = 1;
+  // Empty for an agent in the workspace, outside any project.
+  string project_id = 2;
+  string name = 3;
+  // The agent's prompt: instructions added to its system prompt.
+  string prompt = 4;
+  // "<provider>/<model id>", e.g. "anthropic/claude-opus-5-5".
+  string model = 5;
+  // Reasoning effort: one of the model's `efforts`.
+  string effort = 6;
+  AgentStatus status = 7;
+  // Tokens the agent's context held after its last model call.
+  uint64 context_tokens = 8;
+  // The context is compacted when it reaches this many tokens.
+  uint64 compact_at_tokens = 9;
+  // Messages waiting for the current run to finish.
+  uint32 queued_messages = 10;
+  // `model` can run now: its provider is signed in. When false the agent has
+  // no model, and the app says so instead of showing `model`.
+  bool model_available = 11;
+  // The agent's color, which marks its messages and its bar: "blue",
+  // "violet", "green", "pink", "teal", "amber", "red" or "slate".
+  string color = 12;
+  // A run of the agent finished (or failed) since the person last opened it:
+  // there's something to look at. Selecting the agent clears it; a run that
+  // ends while the agent is selected, or that was stopped, doesn't set it.
+  bool unseen = 13;
+  // One per extension in `Workspace.extensions`, in that order.
+  repeated AgentExtension extensions = 14;
+  // The agent it's nested under in the sidebar, in the same project or
+  // workspace; empty at the top level. Purely visual. Agents come in sidebar
+  // order: within a project (or the workspace), siblings in list order.
+  string parent_id = 15;
+  // Its children are folded away in the sidebar.
+  bool collapsed = 16;
+  // The slash commands the person can run for this agent, in the order to
+  // offer them.
+  repeated SlashCommand commands = 17;
+  // What its message box says when empty, e.g. what the agent is for. Empty
+  // means the app shows "Message <name>". Display only.
+  string placeholder = 18;
+  // Deprecated, always empty: see folder_id.
+  string folder = 19;
+  // The project folder it works in (one of Project.folders); empty when it
+  // works in the project's own folder (or the workspace). Its file tools write
+  // only there; it reads the whole project.
+  string folder_id = 20;
+  // The extension whose panel is open beside this agent, as the person left
+  // it; empty when none is (or that extension is off for it). The selected
+  // agent's panel content arrives as `ExtensionView`, sent again whenever the
+  // selection changes.
+  string open_panel = 21;
+  // Its character, drawn in `color` with the same eyes as every agent: its
+  // shape, one of "circle", "square", "triangle", "diamond", "pentagon" or
+  // "hexagon" (catalog order; an automatic one is character_seed % 6). The
+  // one chosen in its settings, or else one picked from its id, so renaming,
+  // moving or reordering it never changes it.
+  string avatar_shape = 22;
+  // Unused: characters no longer have faces, so it's always empty.
+  string avatar_face = 23;
+  // A number from its id (32-bit FNV-1a of the id), the same on every device
+  // and for good: offsets its animation so agents don't blink together.
+  uint32 character_seed = 24;
+  // What its character shows now. Factory decides it; the app only draws it.
+  CharacterMood character_mood = 25;
+  // When `character_mood` became what it is, in ms since 1970; unchanged
+  // while the mood stays. A mood that changes while the app shows the agent
+  // may play its one-time entry; one already in place when the app connects
+  // doesn't.
+  int64 character_mood_since_ms = 26;
+  // The shape chosen in its settings; absent when it's automatic. It may be
+  // one this Factory doesn't know (such as an organic shape of before), in
+  // which case `avatar_shape` is automatic.
+  optional string avatar_shape_override = 27;
+  // Unused: characters no longer have faces, so it's always absent.
+  optional string avatar_face_override = 28;
+  // What the agent does, such as "Coordinator" or "Copywriter", shown
+  // fainter beside or under its name, which is its identity (often a human
+  // first name, "Mike"). Other agents see it with the name too
+  // ("Mike (Coordinator)"). Empty when it has none.
+  string role = 29;
+}
+
+// What an agent's character shows. The first that applies wins: working or
+// thinking (it's running), no model, failed, news, asleep, idle.
+enum CharacterMood {
+  CHARACTER_MOOD_UNSPECIFIED = 0;
+  // Nothing going on; none of the below.
+  CHARACTER_MOOD_IDLE = 1;
+  // A run is active and no tool is running: a model reply, compaction,
+  // retries, setup.
+  CHARACTER_MOOD_THINKING = 2;
+  // A run is active and a tool (not a background task) is running.
+  CHARACTER_MOOD_WORKING = 3;
+  // Not running, and something new since the person last opened it
+  // (Agent.unseen).
+  CHARACTER_MOOD_NEWS = 4;
+  // Not running, and its last run failed (an error it didn't recover from;
+  // not a stop). Shows even while selected or unseen, until it next runs or
+  // is cleared.
+  CHARACTER_MOOD_FAILED = 5;
+  // Not running, and its model can't run (Agent.model_available is false).
+  CHARACTER_MOOD_NO_MODEL = 6;
+  // Idle for 15 minutes or more. Only a look: it wakes at once for anything.
+  CHARACTER_MOOD_ASLEEP = 7;
+}
+
+message SlashCommand {
+  // "clear", without the slash.
+  string name = 1;
+  // One line, e.g. "Start a new conversation".
+  string description = 2;
+  // What it takes after its name, e.g. "<instructions>"; empty if nothing.
+  string args_hint = 3;
+}
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_IDLE = 1;
+  AGENT_STATUS_WORKING = 2;
+}
+
+message Model {
+  // "<provider>/<model id>".
+  string id = 1;
+  string name = 2;
+  uint64 context_window = 3;
+  // Reasoning efforts the model accepts, weakest first.
+  repeated string efforts = 4;
+}
+
+// The selected agent's whole transcript, oldest entry first.
+message Transcript {
+  string agent_id = 1;
+  repeated Entry entries = 2;
+}
+
+// What waits for the selected agent, not yet taken by it. Sent on connect,
+// when an agent is selected, and whenever its queue changes; empty when
+// nothing waits. A message the agent takes leaves the list and arrives in
+// the transcript as usual.
+message QueuedMessages {
+  string agent_id = 1;
+  // Oldest first.
+  repeated QueuedMessage messages = 2;
+}
+
+message QueuedMessage {
+  // Its id in factory.db's messages.
+  int64 id = 1;
+  // "person", "agent", "task" or "factory".
+  string source = 2;
+  // Who it's from, for events: the agent's name (with its project when it's
+  // in another one), a task's id, "Factory". Empty for the person.
+  string sender = 3;
+  // The sending agent's id, or the task's. Empty for the person.
+  string sender_id = 4;
+  // The whole text, as the agent will read it.
+  string text = 5;
+  // ms since 1970.
+  int64 created = 6;
+  // One line for people, for events that have one (a task that finished,
+  // Factory restarted); empty otherwise, then show `text`.
+  string summary = 7;
+}
+
+// Adds an entry or replaces the one with the same `seq`.
+message EntryUpdate {
+  string agent_id = 1;
+  Entry entry = 2;
+}
+
+// Appends streamed text to an entry: `text` for assistant text and thinking.
+message EntryDelta {
+  string agent_id = 1;
+  uint64 seq = 2;
+  string text = 3;
+}
+
+message Entry {
+  // Position in the transcript; unique per agent and never reused.
+  uint64 seq = 1;
+  int64 timestamp_ms = 2;
+  oneof kind {
+    UserText user = 3;
+    AssistantText assistant = 4;
+    Thinking thinking = 5;
+    ToolCall tool_call = 6;
+    Compaction compaction = 7;
+    Notice notice = 8;
+    Event event = 9;
+    Proposal proposal = 11;
+  }
+  // The model response it came from: the same for every entry one response
+  // produced (its thinking, text and tool calls), the seq of the first of
+  // them. 0 for entries that don't come from a response (the person's
+  // messages, events, notices, compaction dividers).
+  uint64 reply = 10;
+}
+
+// Something other than the person prompting the agent: Factory itself,
+// another agent, a background task that finished, or a monitor. The model
+// reads it as a message tagged with where it's from; the app shows it as an
+// event, never as the person's.
+message Event {
+  EventSource source = 1;
+  // Who it's from: "Factory", the sending agent's name, the task's id, or the
+  // monitor's name.
+  string from = 2;
+  // The sending agent's id, for AGENT; the task's id, for TASK; the
+  // monitor's id ("m3"), for MONITOR.
+  string from_id = 3;
+  // One line for people; empty when `text` is meant to be shown as it is.
+  string summary = 4;
+  string text = 5;
+}
+
+// A message the agent proposed for Rivet, the admin agent, which only the
+// person can message: shown in the proposing agent's conversation, after the
+// propose_to_rivet call, for the person to approve (with a comment) or
+// dismiss with DecideProposal. The entry is sent again when it's decided.
+message Proposal {
+  // Unique in this Factory; what DecideProposal names.
+  string id = 1;
+  // What the agent proposes, written to stand alone for Rivet.
+  string text = 2;
+  ProposalState state = 3;
+  // The person's comment on approving; empty otherwise.
+  string comment = 4;
+  // When it was approved or dismissed, in ms since 1970; 0 while pending.
+  int64 decided_at_ms = 5;
+}
+
+enum ProposalState {
+  PROPOSAL_STATE_UNSPECIFIED = 0;
+  PROPOSAL_STATE_PENDING = 1;
+  PROPOSAL_STATE_APPROVED = 2;
+  PROPOSAL_STATE_DISMISSED = 3;
+}
+
+enum EventSource {
+  EVENT_SOURCE_UNSPECIFIED = 0;
+  EVENT_SOURCE_FACTORY = 1;
+  EVENT_SOURCE_AGENT = 2;
+  EVENT_SOURCE_TASK = 3;
+  // One of the agent's monitors fired: `from` is its name, `from_id` its id
+  // ("m3").
+  EVENT_SOURCE_MONITOR = 4;
+}
+
+message UserText {
+  string text = 1;
+}
+
+message AssistantText {
+  string text = 1;
+}
+
+message Thinking {
+  string text = 1;
+}
+
+message ToolCall {
+  string call_id = 1;
+  string name = 2;
+  // The call's arguments as pretty-printed JSON. While the model is still
+  // writing them (PENDING), the raw JSON written so far, which may be cut off
+  // anywhere; empty until it starts.
+  string input = 3;
+  // What the tool returned, or its output so far while it runs.
+  string output = 4;
+  ToolCallState state = 5;
+  // When the tool began running and when it ended, in ms since 1970; 0 until
+  // it starts, and ended is 0 while it runs. Show a running call's elapsed
+  // time from `started`: no updates are sent just for the clock.
+  int64 started = 6;
+  int64 ended = 7;
+  // bash only: when it will be stopped, in ms after `started` (its timeout).
+  // 0 for no timeout (run_in_background) and for other tools.
+  uint64 timeout_ms = 8;
+}
+
+enum ToolCallState {
+  TOOL_CALL_STATE_UNSPECIFIED = 0;
+  // The model is still writing the call.
+  TOOL_CALL_STATE_PENDING = 1;
+  TOOL_CALL_STATE_RUNNING = 2;
+  TOOL_CALL_STATE_DONE = 3;
+  TOOL_CALL_STATE_FAILED = 4;
+}
+
+// The context was summarized to make room; everything above this entry is
+// history the model now sees only through `summary`.
+message Compaction {
+  string summary = 1;
+  uint64 tokens_before = 2;
+}
+
+// Something the harness reports rather than the model: errors, stops.
+message Notice {
+  string text = 1;
+  NoticeLevel level = 2;
+}
+
+enum NoticeLevel {
+  NOTICE_LEVEL_UNSPECIFIED = 0;
+  NOTICE_LEVEL_INFO = 1;
+  NOTICE_LEVEL_ERROR = 2;
+}
+
+// The focused project's folder as a tree, flattened into the rows to show: a
+// folder's children follow it when it's expanded. Folders come before files,
+// each sorted by name. Sent after the Workspace on connect and whenever the
+// tree changes, including when agents change files.
+message Explorer {
+  string project_id = 1;
+  // Whether files .factoryignore hides are shown (as `hidden` rows).
+  bool show_all = 2;
+  repeated FileEntry entries = 3;
+  // Set when the folder can't be read; `entries` is empty then.
+  string error = 4;
+  // One per folder of the project (Project.folders), in that order, each
+  // listed like the project's own folder above. The app shows the project's
+  // own folder as a root too when it has entries or there are no folders.
+  // Then one per agent in the project with its own checkout, in sidebar
+  // order (ExplorerRoot.agent_id set).
+  repeated ExplorerRoot folders = 5;
+}
+
+// One of the project's folders in the explorer, or an agent's own checkout
+// (the Own checkout extension). The app labels a folder with its name from
+// Project.folders, and a checkout as the agent's ("Backend's checkout").
+message ExplorerRoot {
+  // Empty for an agent's checkout.
+  string folder_id = 1;
+  // Absolute.
+  string path = 2;
+  // Relative to `path`; listed as Explorer.entries are, with the folder's
+  // own .factoryignore.
+  repeated FileEntry entries = 3;
+  // Set when the folder can't be read; `entries` is empty then.
+  string error = 4;
+  // An agent's own checkout: the agent's id, and its branch
+  // ("factory/backend"). The path is where in the checkout the agent works.
+  string agent_id = 5;
+  string branch = 6;
+}
+
+message FileEntry {
+  // Relative to the project folder, with "/" between names.
+  string path = 1;
+  string name = 2;
+  // 0 for the project folder's own entries.
+  uint32 depth = 3;
+  bool is_dir = 4;
+  bool expanded = 5;
+  // Matched by .factoryignore; only sent when `show_all` is on.
+  bool hidden = 6;
+}

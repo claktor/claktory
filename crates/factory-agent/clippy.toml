@@ -1,0 +1,7 @@
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "Use hashbrown::HashMap." },
+  { path = "std::collections::HashSet", reason = "Use hashbrown::HashSet." },
+  { path = "std::sync::Mutex", reason = "Use parking_lot::Mutex; locks must not poison." },
+  { path = "std::sync::RwLock", reason = "Use parking_lot::RwLock; locks must not poison." },
+]
+allow-unwrap-in-tests = true

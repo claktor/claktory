@@ -1,0 +1,6 @@
+# The Rust the app's tunnel builds with (hook/build.dart, through
+# native_toolchain_rust, which needs a pinned version). iOS targets join when
+# the iPhone app does.
+[toolchain]
+channel = "1.97.1"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

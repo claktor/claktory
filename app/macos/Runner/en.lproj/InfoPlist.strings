@@ -1,0 +1,6 @@
+/* The name the person sees: menu bar, About, Finder and the Dock. The bundle
+   stays Factory.app (CFBundleDisplayName in Info.plist matches its file
+   name, as macOS needs to show this one instead), so installs and updates
+   find it where they always have. */
+CFBundleName = "Claktory";
+CFBundleDisplayName = "Claktory";

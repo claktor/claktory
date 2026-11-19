@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Builds Factory's backend for Linux: one static binary (musl), which runs on
+# any distribution, x86_64 or aarch64. It builds in a container, with podman or
+# docker, so this Mac needs no Linux toolchain; on Apple Silicon, x86_64 builds
+# under emulation (enable Rosetta in the podman machine or Docker Desktop to
+# make that fast). FACTORY_VERSION and FACTORY_UPDATE_URL are stamped in as for
+# the Mac build. scripts/publish.sh runs it for each release.
+#
+#   scripts/build-linux.sh ARCH OUT    ARCH: x86_64 or aarch64; OUT: the binary to write
+#
+#   FACTORY_CONTAINER=docker   the container engine (podman unless it's missing)
+#   FACTORY_LINUX_JOBS=N       parallel jobs (2: more can run a small VM out of memory)
+#
+# Each arch keeps its build in a volume, factory-linux-target-ARCH, and the
+# crates it downloads in factory-linux-cargo, so later builds are quick.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ARCH="${1:-}" OUT="${2:-}"
+case "$ARCH" in
+  x86_64) PLATFORM=linux/amd64 ;;
+  aarch64) PLATFORM=linux/arm64 ;;
+  *) echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2 ;;
+esac
+[[ -n "$OUT" ]] || { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2; }
+
+ENGINE="${FACTORY_CONTAINER:-}"
+if [[ -z "$ENGINE" ]]; then
+  if command -v podman >/dev/null; then ENGINE=podman
+  elif command -v docker >/dev/null; then ENGINE=docker
+  else
+    echo "building for Linux needs podman (brew install podman; podman machine init --rosetta; podman machine start) or docker" >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$(dirname "$OUT")"
+OUT_DIR="$(cd "$(dirname "$OUT")" && pwd)"
+IMAGE="docker.io/library/rust:1-alpine"
+
+# The checkout goes in read-only and is copied, so nothing in it changes; the
+# copy leaves out the Mac's build output and the app.
+"$ENGINE" run --rm --platform "$PLATFORM" \
+  -v "$ROOT:/src:ro" -v "$OUT_DIR:/out" \
+  -v "factory-linux-target-$ARCH:/target" -v "factory-linux-cargo:/usr/local/cargo/registry" \
+  -e FACTORY_VERSION -e FACTORY_UPDATE_URL -e CARGO_TARGET_DIR=/target \
+  "$IMAGE" sh -euc '
+    apk add --no-cache musl-dev >/dev/null
+    mkdir /work
+    cd /src
+    tar --exclude=./target --exclude=./app --exclude=./.git -cf - . | tar -xf - -C /work
+    cd /work
+    cargo build --release --locked -p factoryd -j "$1"
+    file=/target/release/factoryd
+    # Static, or it would need the libraries of the distribution it was built on.
+    if ldd "$file" 2>&1 | grep -q "=>"; then echo "factoryd isn'"'"'t static" >&2; exit 1; fi
+    # And it runs: an unknown command answers with the usage.
+    "$file" not-a-command 2>&1 | grep -q usage
+    cp "$file" "/out/.$2.partial"
+  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")"
+mv -f "$OUT_DIR/.$(basename "$OUT").partial" "$OUT"
+echo "built $OUT ($ARCH)"

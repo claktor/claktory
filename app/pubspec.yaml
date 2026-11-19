@@ -1,0 +1,42 @@
+name: factory_app
+description: "Factory desktop app."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.14.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.6
+  fixnum: ^1.1.1
+  protobuf: ^6.1.0
+  markdown: ^7.3.1
+  url_launcher: ^6.3.3
+  flutter_rust_bridge: 2.13.0
+  flutter_rust_bridge_hooks: 2.13.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: false
+  # Geist and Geist Mono, SIL OFL 1.1 (fonts/OFL.txt).
+  fonts:
+    - family: Geist
+      fonts:
+        - asset: fonts/Geist-Regular.ttf
+        - asset: fonts/Geist-Italic.ttf
+          style: italic
+        - asset: fonts/Geist-Medium.ttf
+          weight: 500
+        - asset: fonts/Geist-SemiBold.ttf
+          weight: 600
+    - family: GeistMono
+      fonts:
+        - asset: fonts/GeistMono-Regular.ttf
+        - asset: fonts/GeistMono-Medium.ttf
+          weight: 500
