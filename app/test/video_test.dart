@@ -102,7 +102,7 @@ Future<Harness> _showVideo(
     },
   );
   harness.backend.rangedReads = ranged;
-  tester.view.physicalSize = const Size(1600, 900);
+  tester.view.physicalSize = const Size(2000, 900);
   harness.backend.threads.apply(
     ThreadList(path: _path, versionSha256: 'v1', threads: threads),
   );
@@ -308,7 +308,13 @@ void main() {
   testWidgets('Comment, then a drag along the timeline, makes a comment on '
       'that stretch', (tester) async {
     final harness = await _showVideo(tester);
-    await tester.tap(find.text('Comment'));
+    // The Comment button over the frame.
+    await tester.tap(
+      find.descendant(
+        of: find.byType(CommentPick),
+        matching: find.text('Comment'),
+      ),
+    );
     await settle(tester);
     // To begin with, the moment it's at.
     expect(_controller(tester).selection.value, Moment(0));

@@ -6,6 +6,11 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.11
+Released 2026-11-20 18:23 UTC.
+- Added: Download Claktory for Mac from claktory.com and open it: it sets itself up, and offers to move itself to Applications.
+- Changed: Comment on files as in a shared document: select text, click Comment right there, and press Return to send it to the agent at once. Comments show beside the text only when there are some, as small dots on a narrow pane. On an image or a video, click Comment, then click a spot or drag across an area; numbered pins mark each comment.
+
 ## v0.1.10
 Released 2026-11-20 16:55 UTC.
 - Added: When an agent is waiting for your answer, such as a secret it asked for, its row in the sidebar shows an orange badge with how many. Click the agent to go straight to the oldest one.

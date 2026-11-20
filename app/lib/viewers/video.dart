@@ -215,6 +215,7 @@ class _VideoViewerState extends State<VideoViewer>
       _wired?.removeListener(_commentsChanged);
       _wired = comments?..addListener(_commentsChanged);
       comments?.revealMoment = _play;
+      comments?.rectOfMoment = _rectOfMoment;
     }
   }
 
@@ -231,6 +232,34 @@ class _VideoViewerState extends State<VideoViewer>
     final copy = _copy;
     _copy = null;
     if (copy != null) unawaited(copy.delete().catchError((_) => copy));
+  }
+
+  /// The pointer is over the frame (for its Comment button).
+  var _hovered = false;
+
+  /// No pointer to hover with: the Comment button always shows.
+  bool get _touch =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.android;
+
+  /// The timeline's box, for where a moment is on screen.
+  final _timeline = GlobalKey();
+
+  /// [moment] on the timeline (global): its stretch, or a point.
+  Rect? _rectOfMoment(Moment moment) {
+    final box = _timeline.currentContext?.findRenderObject();
+    final duration = _state.duration;
+    if (box is! RenderBox || !box.attached || duration <= 0) return null;
+    double x(double seconds) =>
+        (seconds / duration).clamp(0.0, 1.0) * box.size.width;
+    final end = moment.end;
+    final local = Rect.fromLTRB(
+      x(moment.start),
+      0,
+      end == null || end <= moment.start ? x(moment.start) : x(end),
+      box.size.height,
+    );
+    return local.shift(box.localToGlobal(Offset.zero));
   }
 
   /// Writing the comment ends marking.
@@ -440,6 +469,7 @@ class _VideoViewerState extends State<VideoViewer>
         children: [
           Expanded(child: _frame(palette, state, comments)),
           _Controls(
+            timelineKey: _timeline,
             state: state,
             comments: comments,
             marking: _marking,
@@ -500,7 +530,12 @@ class _VideoViewerState extends State<VideoViewer>
                 fit: StackFit.expand,
                 children: [
                   GestureDetector(
-                    onTap: _marking ? null : _togglePlaying,
+                    onTap: _marking
+                        ? null
+                        : () {
+                            comments?.letGo();
+                            _togglePlaying();
+                          },
                     child: _playback?.view() ?? const SizedBox.shrink(),
                   ),
                   if (comments != null)
@@ -513,6 +548,7 @@ class _VideoViewerState extends State<VideoViewer>
                               ? null
                               : Rect.fromPoints(_dragFrom!, _dragTo!),
                           signal: palette.signal,
+                          ring: palette.canvas,
                           colorOf: (agentId) =>
                               _agentColor(comments.backend, agentId),
                         ),
@@ -524,6 +560,10 @@ class _VideoViewerState extends State<VideoViewer>
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         dragStartBehavior: DragStartBehavior.down,
+                        onTapUp: (details) {
+                          final at = fraction(details.localPosition);
+                          _markRegion(Rect.fromLTWH(at.dx, at.dy, 0, 0));
+                        },
                         onPanStart: (details) => setState(() {
                           _dragFrom = fraction(details.localPosition);
                           _dragTo = _dragFrom;
@@ -535,10 +575,44 @@ class _VideoViewerState extends State<VideoViewer>
                           final from = _dragFrom;
                           final to = _dragTo;
                           setState(() => _dragFrom = _dragTo = null);
-                          if (from != null && to != null) {
-                            _markRegion(Rect.fromPoints(from, to));
-                          }
+                          if (from == null || to == null) return;
+                          final area = Region(Rect.fromPoints(from, to));
+                          // Too small to be an area: the spot it began on.
+                          _markRegion(
+                            area.isEmpty
+                                ? Rect.fromLTWH(from.dx, from.dy, 0, 0)
+                                : area.rect,
+                          );
                         },
+                      ),
+                    ),
+                  if (comments != null)
+                    Positioned(
+                      top: Space.s,
+                      right: Space.s,
+                      left: Space.s,
+                      child: Align(
+                        alignment: Alignment.topRight,
+                        child: CommentPick(
+                          picking: _marking,
+                          visible: _hovered || _touch,
+                          hint:
+                              '${_touch ? 'Tap' : 'Click'} the timeline for a '
+                              'moment, drag along it for a stretch, or '
+                              '${_touch ? 'tap' : 'click'} the frame for a spot.',
+                          onToggle: _toggleMarking,
+                        ),
+                      ),
+                    ),
+                  // Whether the pointer is over the frame, for the Comment
+                  // button; it takes no clicks.
+                  if (comments != null)
+                    Positioned.fill(
+                      child: MouseRegion(
+                        opaque: false,
+                        hitTestBehavior: HitTestBehavior.translucent,
+                        onEnter: (_) => setState(() => _hovered = true),
+                        onExit: (_) => setState(() => _hovered = false),
                       ),
                     ),
                 ],
@@ -608,6 +682,7 @@ class _Fetching extends StatelessWidget {
 /// timeline.
 class _Controls extends StatelessWidget {
   const _Controls({
+    required this.timelineKey,
     required this.state,
     required this.comments,
     required this.marking,
@@ -616,6 +691,7 @@ class _Controls extends StatelessWidget {
     required this.onMark,
   });
 
+  final GlobalKey timelineKey;
   final PlaybackState state;
   final CommentsController? comments;
   final bool marking;
@@ -660,6 +736,7 @@ class _Controls extends StatelessWidget {
             const SizedBox(width: Space.m),
             Expanded(
               child: Timeline(
+                key: timelineKey,
                 state: state,
                 comments: comments,
                 marking: marking,
@@ -948,6 +1025,7 @@ class _FrameRegions extends CustomPainter {
     required this.at,
     required this.drag,
     required this.signal,
+    required this.ring,
     required this.colorOf,
   }) : super(repaint: Listenable.merge([comments, comments.selection]));
 
@@ -955,6 +1033,9 @@ class _FrameRegions extends CustomPainter {
   final double at;
   final Rect? drag;
   final Color signal;
+
+  /// Around each pin, so it shows on any frame: the canvas.
+  final Color ring;
   final Color Function(String agentId) colorOf;
 
   @override
@@ -966,6 +1047,13 @@ class _FrameRegions extends CustomPainter {
         region.width * size.width,
         region.height * size.height,
       );
+      if (rect.isEmpty) {
+        // A spot: only its pin.
+        if (rect.width == 0 && rect.height == 0) {
+          paintPin(canvas, rect.topLeft, color: color, ring: ring);
+        }
+        return;
+      }
       canvas
         ..drawRect(
           rect,
@@ -980,15 +1068,36 @@ class _FrameRegions extends CustomPainter {
         );
     }
 
+    final pins = comments.pins;
+    final placed = <(Offset, Color, int, bool)>[];
     for (final thread in comments.shown) {
       final moment = comments.moments[thread.id];
       final region = moment?.region;
       if (moment == null || region == null) continue;
       final strong = comments.focused == thread.id;
       if (!strong && !moment.covers(at)) continue;
-      box(region, colorOf(thread.agentId), strong: strong);
+      final color = colorOf(thread.agentId);
+      if (region.width > 0 || region.height > 0) {
+        box(region, color, strong: strong);
+      }
+      final number = pins[thread.id];
+      if (number != null) {
+        final pin = Offset(region.left * size.width, region.top * size.height);
+        placed.add((pin, color, number, strong));
+      }
     }
-    final selected = comments.selection.value;
+    placed.sort((a, b) => (a.$4 ? 1 : 0) - (b.$4 ? 1 : 0));
+    for (final (pin, color, number, strong) in placed) {
+      paintPin(
+        canvas,
+        pin,
+        color: color,
+        ring: ring,
+        number: number,
+        strong: strong,
+      );
+    }
+    final selected = comments.composing ?? comments.selection.value;
     if (selected is Moment && selected.region != null) {
       box(selected.region!, signal, strong: false);
     }
@@ -998,5 +1107,8 @@ class _FrameRegions extends CustomPainter {
 
   @override
   bool shouldRepaint(_FrameRegions old) =>
-      old.at != at || old.drag != drag || old.signal != signal;
+      old.at != at ||
+      old.drag != drag ||
+      old.signal != signal ||
+      old.ring != ring;
 }

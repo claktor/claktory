@@ -6,10 +6,20 @@
 
 use serde_json::Value;
 
-/// The region in `selectors` (a JSON array) in words, with pixels when the
-/// image's `size` is known: "30% wide and 20% tall, its top left 12.5%
-/// across and 8% down (that's 384 × 216 px at 160, 86 of 1280 × 1080)".
-pub(super) fn describe(selectors: &str, size: Option<(u32, u32)>) -> Option<String> {
+/// Where in an image or a frame a comment is.
+#[derive(Debug, PartialEq)]
+pub(super) struct Place {
+    /// A spot (a region of no size, `xywh=percent:62,30,0,0`) rather than a region.
+    pub spot: bool,
+    /// In words, with pixels when the image's size is known: a region "30%
+    /// wide and 20% tall, its top left 12.5% across and 8% down (that's 384 ×
+    /// 216 px at 160, 86 of 1280 × 1080)"; a spot "62% across and 30% down
+    /// (that's pixel 794, 324 of 1280 × 1080)".
+    pub words: String,
+}
+
+/// The region or spot in `selectors` (a JSON array), as a `Place`.
+pub(super) fn describe(selectors: &str, size: Option<(u32, u32)>) -> Option<Place> {
     let fragment = part(selectors, "xywh")?;
     let (unit, numbers) = match fragment.split_once(':') {
         Some((unit, numbers)) => (unit, numbers),
@@ -21,7 +31,16 @@ pub(super) fn describe(selectors: &str, size: Option<(u32, u32)>) -> Option<Stri
         return None;
     }
     let of = |(width, height): (u32, u32)| format!(" of {width} × {height}");
-    match unit {
+    let spot = *w == 0.0 && *h == 0.0;
+    let words = match unit {
+        "percent" if spot => {
+            let mut words = format!("{}% across and {}% down", number(*x), number(*y));
+            if let Some((width, height)) = size {
+                let px = |percent: f64, whole: u32| (percent / 100.0 * f64::from(whole)).round();
+                words.push_str(&format!(" (that's pixel {}, {}{})", px(*x, width), px(*y, height), of((width, height))));
+            }
+            words
+        }
         "percent" => {
             let mut words =
                 format!("{}% wide and {}% tall, its top left {}% across and {}% down", number(*w), number(*h), number(*x), number(*y));
@@ -31,13 +50,13 @@ pub(super) fn describe(selectors: &str, size: Option<(u32, u32)>) -> Option<Stri
                 let (wide, tall) = (px(*w, width), px(*h, height));
                 words.push_str(&format!(" (that's {wide} × {tall} px at {left}, {top}{})", of((width, height))));
             }
-            Some(words)
+            words
         }
-        "pixel" => {
-            Some(format!("{} × {} px at {}, {}{}", number(*w), number(*h), number(*x), number(*y), size.map(of).unwrap_or_default()))
-        }
-        _ => None,
-    }
+        "pixel" if spot => format!("pixel {}, {}{}", number(*x), number(*y), size.map(of).unwrap_or_default()),
+        "pixel" => format!("{} × {} px at {}, {}{}", number(*w), number(*h), number(*x), number(*y), size.map(of).unwrap_or_default()),
+        _ => return None,
+    };
+    Some(Place { spot, words })
 }
 
 /// A media fragment's `name=` part, from the first fragment selector.
@@ -144,17 +163,37 @@ pub(super) fn size(bytes: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    /// A region's words; None for a spot or nothing.
+    fn words(place: Option<Place>) -> Option<String> {
+        place.filter(|place| !place.spot).map(|place| place.words)
+    }
+
+    #[test]
+    fn a_spot_is_said_as_one() {
+        let spot = r#"[{"type":"FragmentSelector","value":"xywh=percent:62,30,0,0"}]"#;
+        let place = |size| describe(spot, size).filter(|place| place.spot).map(|place| place.words);
+        assert_eq!(place(None).as_deref(), Some("62% across and 30% down"));
+        assert_eq!(place(Some((1280, 1080))).as_deref(), Some("62% across and 30% down (that's pixel 794, 324 of 1280 × 1080)"));
+        let video = r#"[{"type":"FragmentSelector","value":"t=31.2&xywh=percent:62,30,0,0"}]"#;
+        assert!(describe(video, None).is_some_and(|place| place.spot));
+        let pixels = r#"[{"type":"FragmentSelector","value":"xywh=pixel:794,324,0,0"}]"#;
+        assert_eq!(describe(pixels, Some((1280, 1080))).map(|place| place.words).as_deref(), Some("pixel 794, 324 of 1280 × 1080"));
+        // Only no size at all is a spot.
+        let thin = r#"[{"type":"FragmentSelector","value":"xywh=percent:62,30,0,5"}]"#;
+        assert!(describe(thin, None).is_some_and(|place| !place.spot));
+    }
+
     #[test]
     fn regions_are_said_in_percent_and_pixels() {
         let percent =
             r#"[{"type":"FragmentSelector","conformsTo":"http://www.w3.org/TR/media-frags/","value":"xywh=percent:12.5,8,30,20"}]"#;
-        assert_eq!(describe(percent, None).as_deref(), Some("30% wide and 20% tall, its top left 12.5% across and 8% down"));
+        assert_eq!(words(describe(percent, None)).as_deref(), Some("30% wide and 20% tall, its top left 12.5% across and 8% down"));
         assert_eq!(
-            describe(percent, Some((1280, 1080))).as_deref(),
+            words(describe(percent, Some((1280, 1080)))).as_deref(),
             Some("30% wide and 20% tall, its top left 12.5% across and 8% down (that's 384 × 216 px at 160, 86 of 1280 × 1080)")
         );
         let pixels = r#"[{"type":"FragmentSelector","value":"xywh=pixel:154,82,384,216"}]"#;
-        assert_eq!(describe(pixels, Some((1280, 1080))).as_deref(), Some("384 × 216 px at 154, 82 of 1280 × 1080"));
+        assert_eq!(words(describe(pixels, Some((1280, 1080)))).as_deref(), Some("384 × 216 px at 154, 82 of 1280 × 1080"));
         for bad in
             ["[]", "nonsense", r#"[{"type":"FragmentSelector","value":"t=10"}]"#, r#"[{"type":"FragmentSelector","value":"xywh=1,2,3"}]"#]
         {
@@ -163,7 +202,7 @@ mod tests {
         assert_eq!(number(12.345), "12.35");
         let video = r#"[{"type":"FragmentSelector","value":"t=31.2,45&xywh=percent:10,20,30,25"}]"#;
         assert_eq!(when(video).as_deref(), Some("at 0:31–0:45"));
-        assert_eq!(describe(video, None).as_deref(), Some("30% wide and 25% tall, its top left 10% across and 20% down"));
+        assert_eq!(words(describe(video, None)).as_deref(), Some("30% wide and 25% tall, its top left 10% across and 20% down"));
         assert_eq!(when(r#"[{"type":"FragmentSelector","value":"t=3725"}]"#).as_deref(), Some("at 1:02:05"));
         assert_eq!(when(r#"[{"type":"FragmentSelector","value":"t=npt:,1:05.5"}]"#).as_deref(), Some("at 0:00–1:05"));
         assert_eq!(when(r#"[{"type":"FragmentSelector","value":"t=31.2,31.8"}]"#).as_deref(), Some("at 0:31"));

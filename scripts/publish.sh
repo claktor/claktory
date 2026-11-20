@@ -10,6 +10,9 @@
 # into tarballs, the Mac's and one per Linux architecture, and uploads them with:
 #   latest.json   the manifest naming it, which installed backends read every
 #                 half hour (crates/factoryd/src/channel.rs)
+#   Claktory-<version>.dmg and Claktory.dmg  the Mac app to download and drag
+#                 to Applications (scripts/make-dmg.sh); it sets Claktory up
+#                 on first launch. latest.json names it as "dmg".
 #   install.sh    the online installer (scripts/install-online.sh), for
 #                 curl -fsSL https://github.com/claktor/claktory/releases/latest/download/install.sh | bash
 #
@@ -194,6 +197,21 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   LINUX_JSON+="    \"$arch\": {\"url\": \"$(url_of "$linux_name")\", \"sha256\": \"$(shasum -a 256 "$STAGE/$linux_name" | cut -d' ' -f1)\", \"size\": $(stat -f %z "$STAGE/$linux_name")}"
 done
 
+# The disk image people download to install on a Mac (scripts/make-dmg.sh):
+# Claktory-<version>.dmg, and the same as Claktory.dmg, so
+# releases/latest/download/Claktory.dmg (claktory.com/download/mac) is always
+# the newest. Signed and notarized for GitHub; unsigned for a --local channel
+# or with --adhoc.
+DMG_JSON=""
+if [[ ${#DEV[@]} -eq 0 ]]; then
+  DMG_ARGS=()
+  if [[ -z "$REPO" ]] || $ADHOC; then DMG_ARGS=(--unsigned); fi
+  DMG="$("$ROOT/scripts/make-dmg.sh" "$RELEASE" "$STAGE" ${DMG_ARGS[@]+"${DMG_ARGS[@]}"})"
+  cp "$DMG" "$STAGE/Claktory.dmg"
+  FILES+=("$DMG" "$STAGE/Claktory.dmg")
+  DMG_JSON="  \"dmg\": {\"url\": \"$(url_of "$(basename "$DMG")")\", \"sha256\": \"$(shasum -a 256 "$DMG" | cut -d' ' -f1)\", \"size\": $(stat -f %z "$DMG")},"
+fi
+
 # The top-level url is the Mac's, as every backend so far reads it; Linux
 # backends read theirs under "linux".
 cat >"$STAGE/latest.json" <<JSON
@@ -205,7 +223,8 @@ cat >"$STAGE/latest.json" <<JSON
   "size": $(stat -f %z "$STAGE/$NAME"),
   "min_macos": "$MIN_MACOS",
   "archs": [$ARCHS],
-  "linux": {
+${DMG_JSON:+$DMG_JSON
+}  "linux": {
 $LINUX_JSON
   }
 }

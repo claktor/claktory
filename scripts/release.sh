@@ -136,6 +136,8 @@ else
   # The supervisor as an app (Developer Tools needs one); installers put it
   # in place, updates never do.
   make_supervisor_app "$partial"
+  # And the helpers in the app, so it can set Claktory up from a .dmg.
+  add_helpers "$partial" "$APP_NAME"
   # Developer ID and notarized when this Mac has what that takes; ad hoc
   # otherwise, as dev releases always are.
   "$ROOT/scripts/sign-release.sh" "$partial"

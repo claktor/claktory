@@ -83,8 +83,8 @@ Future<Harness> _showEssay(
     beside('text', '/w/essay.md'),
     files: {'/w/essay.md': _file('/w/essay.md', _essay)},
   );
-  // Wide enough for the margin beside the conversation.
-  tester.view.physicalSize = const Size(1600, 900);
+  // Wide enough for the cards beside the text, beside the conversation.
+  tester.view.physicalSize = const Size(2000, 900);
   harness.backend.threads.apply(
     ThreadList(path: '/w/essay.md', versionSha256: 'v1', threads: threads),
   );
@@ -230,12 +230,26 @@ void main() {
       expect(find.text('Lead with this.'), findsOneWidget);
       expect(find.text('Draft'), findsOneWidget);
       expect(_marksOn(tester, 'makes the claim'), hasLength(1));
-      // The card is level with its passage.
-      final card = tester.getTopLeft(find.text('Lead with this.')).dy;
-      final passage = tester.getTopLeft(
+      // The card is level with its passage, in the margin at the right,
+      // which the text leaves room for.
+      final card = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Lead with this.'),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      final passage = tester.getRect(
         find.textContaining('The second paragraph', findRichText: true).first,
       );
-      expect((card - passage.dy).abs(), lessThan(80));
+      expect(card.top, closeTo(passage.top, 6));
+      final pane = tester.getRect(find.byType(Commented));
+      expect(card.right, pane.right - Commented.edge);
+      expect(card.width, Commented.cardWidth);
+      // It reaches over the text's own padding, not over the text.
+      expect(passage.right, pane.right - Commented.marginInset - 16);
+      expect(card.left, greaterThanOrEqualTo(passage.right));
     });
 
     testWidgets('sends the drafts to the agent in one go', (tester) async {
@@ -272,11 +286,26 @@ void main() {
       await tester.pump();
       await mouse.up();
       await settle(tester);
+      // A popover just above the selection, and nothing set aside for
+      // comments while there are none.
+      expect(tester.getRect(find.byType(Commented)).right - box.right, 16);
+      final actions = tester.getRect(
+        find
+            .ancestor(of: find.text('Comment'), matching: find.byType(Row))
+            .first,
+      );
+      expect(actions.bottom, lessThanOrEqualTo(box.top + 2));
+      expect(actions.bottom, greaterThan(box.top - 40));
+      expect((actions.left - box.left).abs(), lessThan(24));
       await tester.tap(find.text('Comment'));
       await settle(tester);
+      // Written in a popover just under it.
+      final popover = tester.getRect(_field.first);
+      expect(popover.top, greaterThan(box.top));
+      expect(popover.top, lessThan(box.top + 120));
       await tester.enterText(_field, 'Too long.');
       await tester.pump();
-      // The composer's Comment, which keeps it as a draft.
+      // Its Comment sends it at once.
       await tester.tap(find.text('Comment').last);
       await settle(tester);
       final made = harness.backend.sent.lastWhere((m) => m.hasCreateThread());
@@ -286,7 +315,7 @@ void main() {
       expect(create.kind, 'markdown');
       expect(create.versionSha256, 'v1');
       expect(create.body, 'Too long.');
-      expect(create.sendNow, isFalse);
+      expect(create.sendNow, isTrue);
       final quote = jsonDecode(create.selectors.first.json) as Map;
       expect(quote['type'], 'TextQuoteSelector');
       expect('The second paragraph makes', startsWith(quote['exact']));
@@ -334,7 +363,9 @@ void main() {
       );
     });
 
-    testWidgets('⌘Enter sends a new comment at once', (tester) async {
+    testWidgets('Return sends a new comment at once; Shift-Return doesn\'t', (
+      tester,
+    ) async {
       final harness = await _showEssay(tester);
       final controller = _controller(tester);
       controller.selection.value = Passage(
@@ -345,14 +376,21 @@ void main() {
       );
       controller.comment();
       await settle(tester);
+      // The passage it's on stays lit while it's written.
+      expect(_marksOn(tester, 'The first'), hasLength(1));
       await tester.enterText(_field, 'Cut this.');
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shift);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shift);
+      await settle(tester);
+      expect(harness.backend.sent.where((m) => m.hasCreateThread()), isEmpty);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await settle(tester);
       final made = harness.backend.sent.lastWhere((m) => m.hasCreateThread());
       expect(made.createThread.sendNow, isTrue);
       expect(made.createThread.body, 'Cut this.');
+      // Gone once sent.
+      expect(_field, findsNothing);
     });
 
     testWidgets('a picked thread offers Reply and Resolve', (tester) async {
@@ -373,11 +411,12 @@ void main() {
       await settle(tester);
       await tester.enterText(_field, 'Done?');
       await settle(tester);
-      await tester.tap(find.text('Comment').last);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await settle(tester);
       final reply = harness.backend.sent.lastWhere((m) => m.hasReplyThread());
       expect(reply.replyThread.threadId, 't1');
       expect(reply.replyThread.body, 'Done?');
+      expect(reply.replyThread.sendNow, isTrue);
     });
 
     testWidgets('a thread whose passage is gone says so', (tester) async {
@@ -458,7 +497,7 @@ void main() {
       await tester.pump(const Duration(seconds: 7));
     });
 
-    testWidgets('a narrow pane has a Comments button and a sheet', (
+    testWidgets('a narrow pane has markers, a Comments button and a sheet', (
       tester,
     ) async {
       final harness = await showPanes(
@@ -481,6 +520,44 @@ void main() {
       );
       expect(button, findsOneWidget);
       expect(find.text('Lead with this.'), findsNothing);
+      // A marker level with its text, at the pane's right edge.
+      final marker = find.bySemanticsLabel('Comment for Builder');
+      expect(marker, findsOneWidget);
+      final passage = tester.getRect(
+        find.textContaining('The second paragraph', findRichText: true).first,
+      );
+      final pane = tester.getRect(find.byType(Commented));
+      final dot = tester.getRect(marker);
+      expect(dot.right, pane.right);
+      // Level with the line the passage starts on.
+      expect(dot.top, greaterThanOrEqualTo(passage.top));
+      expect(dot.bottom, lessThanOrEqualTo(passage.bottom + 4));
+      expect(passage.right, lessThan(dot.left));
+      // A click opens its card at its text, a click elsewhere closes it.
+      await tester.tap(marker);
+      await settle(tester);
+      expect(find.text('Lead with this.'), findsOneWidget);
+      final card = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Lead with this.'),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      expect(card.top, greaterThan(passage.top));
+      expect(card.top, lessThan(passage.bottom + 40));
+      await tester.tapAt(
+        tester
+            .getRect(
+              find.textContaining('The third one', findRichText: true).first,
+            )
+            .centerLeft
+            .translate(4, 0),
+      );
+      await settle(tester);
+      expect(find.text('Lead with this.'), findsNothing);
+      // The sheet lists them all.
       await tester.tap(button);
       await settle(tester);
       expect(find.text('Lead with this.'), findsOneWidget);
@@ -622,7 +699,7 @@ void main() {
       final made = harness.backend.sent.lastWhere((m) => m.hasCreateThread());
       expect(made.createThread.suggestion, 'part');
       expect(made.createThread.body, '');
-      expect(made.createThread.sendNow, isFalse);
+      expect(made.createThread.sendNow, isTrue);
     });
   });
 
@@ -666,7 +743,7 @@ void _imageTests() {
           ),
         },
       );
-      tester.view.physicalSize = const Size(1600, 900);
+      tester.view.physicalSize = const Size(2000, 900);
       harness.backend.threads.apply(
         ThreadList(path: path, versionSha256: 'v1', threads: threads),
       );
@@ -694,10 +771,12 @@ void _imageTests() {
       // Level with the region's top.
       final box = picture(tester);
       final card = tester.getRect(
-        find.ancestor(
-          of: find.text('Label this axis.'),
-          matching: find.byType(AnimatedContainer),
-        ).first,
+        find
+            .ancestor(
+              of: find.text('Label this axis.'),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
       );
       expect(card.top, closeTo(box.top + box.height * 0.25, 2));
       expect(
@@ -719,19 +798,23 @@ void _imageTests() {
       tester,
     ) async {
       final harness = await showChart(tester);
-      await tester.tap(find.text('Comment'));
+      // The Comment button over the image.
+      await tester.tap(_pick('Comment'));
       await settle(tester);
+      expect(_pick('Cancel'), findsOneWidget);
       final box = picture(tester);
       await tester.dragFrom(
         box.topLeft + Offset(box.width * 0.1, box.height * 0.2),
         Offset(box.width * 0.4, box.height * 0.5),
       );
       await settle(tester);
-      // The margin offers Comment (and no Suggest: an image can't be).
+      // Comment was asked for: straight to writing it, under the region.
       expect(find.text('Suggest'), findsNothing);
-      await tester.tap(find.text('Comment').last);
-      await settle(tester);
       expect(find.byType(RegionThumbnail), findsOneWidget);
+      expect(
+        tester.getRect(_field.first).top,
+        greaterThan(box.top + box.height * 0.7),
+      );
       await tester.enterText(_field, 'Brighter here.');
       await tester.pump();
       await tester.tap(find.text('Comment').last);
@@ -744,6 +827,71 @@ void _imageTests() {
       expect(region.top, closeTo(0.2, 0.02));
       expect(region.width, closeTo(0.4, 0.02));
       expect(region.height, closeTo(0.5, 0.02));
+    });
+
+    testWidgets('a click while picking comments on a spot, shown as a pin', (
+      tester,
+    ) async {
+      final harness = await showChart(tester);
+      // Nothing set aside while there are no comments.
+      final pane = tester.getRect(find.byType(Commented));
+      expect(
+        tester.getRect(find.byType(CommentPick)).right,
+        closeTo(pane.right - 12, 1),
+      );
+      await tester.tap(_pick('Comment'));
+      await settle(tester);
+      final box = picture(tester);
+      await tester.tapAt(
+        box.topLeft + Offset(box.width * 0.5, box.height * 0.4),
+      );
+      await settle(tester);
+      // Straight to writing it, and Return sends it.
+      expect(find.byType(RegionThumbnail), findsOneWidget);
+      await tester.enterText(_field, 'What is this?');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      final made = harness.backend.sent.lastWhere((m) => m.hasCreateThread());
+      expect(made.createThread.sendNow, isTrue);
+      expect(
+        (jsonDecode(made.createThread.selectors.single.json) as Map)['value'],
+        'xywh=percent:50,40,0,0',
+      );
+      // Back from the backend: a numbered pin, and the same number on its
+      // card.
+      harness.backend.threads.apply(
+        ThreadList(
+          path: path,
+          versionSha256: 'v1',
+          threads: [
+            regionThread(),
+            Thread(
+              id: 'r2',
+              agentId: 'a1',
+              path: path,
+              kind: 'image',
+              versionSha256: 'v1',
+              status: ThreadStatus.THREAD_STATUS_OPEN,
+              anchor: AnchorState.ANCHOR_STATE_ANCHORED,
+              selectors: made.createThread.selectors,
+              comments: [ThreadComment(id: 'c2', body: 'What is this?')],
+            ),
+          ],
+        ),
+      );
+      await settle(tester);
+      expect(_controller(tester).pins, {'r1': 1, 'r2': 2});
+      final badges = tester.widgetList<PinBadge>(find.byType(PinBadge));
+      expect(badges.map((badge) => badge.number), unorderedEquals([1, 2]));
+      // A click on the spot's pin picks it (the image now fitted beside
+      // the cards).
+      final fitted = picture(tester);
+      expect(fitted.width, lessThan(box.width + 0.01));
+      await tester.tapAt(
+        fitted.topLeft + Offset(fitted.width * 0.5, fitted.height * 0.4),
+      );
+      await settle(tester);
+      expect(_controller(tester).focused, 'r2');
     });
 
     testWidgets('a comment made on an earlier version says so', (tester) async {
@@ -779,6 +927,10 @@ void _imageTests() {
     });
   });
 }
+
+/// The Comment button over an image or a frame, or Cancel while picking.
+Finder _pick(String label) =>
+    find.descendant(of: find.byType(CommentPick), matching: find.text(label));
 
 /// The comment being written's field (not the conversation's).
 Finder get _field => find.descendant(

@@ -1025,11 +1025,16 @@ fn location(thread: &Thread, doc: Option<&Doc>) -> String {
 }
 
 /// Where an image's or a video's thread is, in words: "a region of the
-/// image, 30% wide and 20% tall, …", with pixels while the image is the one
-/// it was made on; "at 0:31–0:45, in a region of the frame, …" in a video.
+/// image, 30% wide and 20% tall, …" or "a spot on the image, 62% across and
+/// 30% down", with pixels while the image is the one it was made on; "at
+/// 0:31–0:45, in a region of the frame, …" (or "on a spot in the frame") in
+/// a video.
 fn media_place(thread: &Thread) -> String {
     if thread.kind == Kind::Video {
-        let region = region::describe(&thread.selectors, None).map(|words| format!(", in a region of the frame, {words}"));
+        let region = region::describe(&thread.selectors, None).map(|place| match place.spot {
+            true => format!(", on a spot in the frame, {}", place.words),
+            false => format!(", in a region of the frame, {}", place.words),
+        });
         return match region::when(&thread.selectors) {
             Some(when) => format!("{when}{}", region.unwrap_or_default()),
             None => format!("a part of the video: {}", thread.selectors),
@@ -1040,7 +1045,8 @@ fn media_place(thread: &Thread) -> String {
         _ => std::fs::read(&thread.path).ok().and_then(|bytes| region::size(&bytes)),
     };
     match region::describe(&thread.selectors, size) {
-        Some(words) => format!("a region of the image, {words}"),
+        Some(place) if place.spot => format!("a spot on the image, {}", place.words),
+        Some(place) => format!("a region of the image, {}", place.words),
         None => format!("a region of the image: {}", thread.selectors),
     }
 }

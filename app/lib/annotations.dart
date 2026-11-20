@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -13,12 +14,15 @@ import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'selection.dart';
 import 'usage.dart' show formatAge;
+import 'viewers/registry.dart' show HeaderTextButton;
 
 // Comments on files (factory-research/annotations.md): the person selects a
 // passage a viewer shows, comments on it, and sends the comments to an agent,
 // which revises the file and replies. Threads live in the backend, by file;
-// the app shows them beside the viewer (a margin on a wide pane, a sheet on a
-// narrow one) and highlights their passages.
+// the app highlights their passages and shows them over the viewer: cards
+// in its right margin on a wide pane, small markers on a narrow one. A
+// selection gets a popover at it to comment from; a comment goes to its
+// agent as soon as it's written.
 
 /// Every thread on each file the backend has told this device about.
 class ThreadStore extends ChangeNotifier {
@@ -80,9 +84,12 @@ class Region extends Mark {
   @override
   String get kind => 'image';
 
-  /// Too small to mean anything: a click, not a drag.
+  /// A spot rather than an area: a click, not a drag.
+  bool get isPoint => rect.width == 0 && rect.height == 0;
+
+  /// Too thin to mean anything: a sliver, not a spot or an area.
   @override
-  bool get isEmpty => rect.width < 0.005 || rect.height < 0.005;
+  bool get isEmpty => !isPoint && (rect.width < 0.005 || rect.height < 0.005);
 
   /// A media fragment, `xywh=percent:x,y,w,h`.
   @override
@@ -426,8 +433,9 @@ class CommentsController extends ChangeNotifier {
   /// On a narrow pane, the sheet listing them is up.
   var sheetOpen = false;
 
-  /// The pane is too narrow for a margin: the header's Comments button
-  /// opens the sheet instead.
+  /// The pane is too narrow for cards beside the text: they're markers,
+  /// each opening its card at its text, and the header's Comments button
+  /// opens the sheet listing them all.
   final narrow = ValueNotifier<bool>(false);
 
   /// Why the last request failed, till the next one.
@@ -444,6 +452,34 @@ class CommentsController extends ChangeNotifier {
   /// box, and how to bring it into view.
   double? Function(Rect region)? yOfRegion;
   void Function(Rect region)? revealRegion;
+
+  /// Where a passage ([start] to [end] of the text shown), a region of the
+  /// image or a moment of the video is on screen, in global coordinates,
+  /// for a popover to sit by; null when it isn't laid out.
+  Rect? Function(int start, int end)? rectOfRange;
+  Rect? Function(Rect region)? rectOfRegion;
+  Rect? Function(Moment moment)? rectOfMoment;
+
+  /// Scrolls the viewer by [dy], for a wheel over the cards.
+  void Function(double dy)? scrollBy;
+
+  /// Where [mark] is on screen (global), if the viewer can say.
+  Rect? rectOf(Mark mark) => switch (mark) {
+    Passage(:final start, :final end) => rectOfRange?.call(start, end),
+    Region(:final rect) => rectOfRegion?.call(rect),
+    Moment() => rectOfMoment?.call(mark),
+  };
+
+  /// Where [threadId]'s passage, region or moment is on screen (global).
+  Rect? rectOfThread(String threadId) {
+    final range = located[threadId];
+    if (range != null) return rectOfRange?.call(range.start, range.end);
+    final region = regions[threadId];
+    if (region != null) return rectOfRegion?.call(region);
+    final moment = moments[threadId];
+    if (moment != null) return rectOfMoment?.call(moment);
+    return null;
+  }
 
   /// Whether [threadId]'s passage or region is in what's shown.
   bool isPlaced(String threadId) =>
@@ -467,6 +503,19 @@ class CommentsController extends ChangeNotifier {
     // A video's cards go down the margin in time order.
     Moment() => null,
   };
+
+  /// The number on each pin, by thread id: the comments on a spot or an
+  /// area of an image or a video's frame, from 1 in reading order.
+  Map<String, int> get pins {
+    final numbers = <String, int>{};
+    for (final thread in inOrder(shown)) {
+      if (regions.containsKey(thread.id) ||
+          moments[thread.id]?.region != null) {
+        numbers[thread.id] = numbers.length + 1;
+      }
+    }
+    return numbers;
+  }
 
   /// [threads] in reading order, those not placed first.
   List<Thread> inOrder(List<Thread> threads) =>
@@ -628,6 +677,13 @@ class CommentsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// A click away from the picked thread lets it go, unless something's
+  /// being written in it.
+  void letGo() {
+    if (replyingTo != null || editing != null) return;
+    focus(null);
+  }
+
   /// Starts a comment on the selection, or a suggested change to it.
   void comment({bool suggest = false}) {
     final mark = selection.value;
@@ -638,7 +694,6 @@ class CommentsController extends ChangeNotifier {
     replyingTo = null;
     editing = null;
     focused = null;
-    sheetOpen = true;
     notifyListeners();
   }
 
@@ -691,7 +746,8 @@ class CommentsController extends ChangeNotifier {
     }
   }
 
-  /// Saves the comment being written as a draft, or sends it at once.
+  /// Sends the comment being written to its agent, or with [sendNow] false
+  /// keeps it as a draft.
   Future<void> submit(
     String body, {
     required bool sendNow,
@@ -721,7 +777,9 @@ class CommentsController extends ChangeNotifier {
             suggestion: suggestion,
           ),
         );
-        focused = thread.id;
+        // Its card stands out in the margin; a narrow pane's marker
+        // doesn't open it.
+        if (!narrow.value) focused = thread.id;
       }
     });
     if (ok) {
@@ -854,26 +912,61 @@ TextSpan markSpan(
   return mark(span) as TextSpan;
 }
 
-/// The comments beside a viewer: on a wide pane a margin at its right with
-/// each thread's card level with its passage; on a narrow one (and the
-/// phone) a sheet from the bottom, opened from the pane's header. [child]
-/// is the viewer's body.
-class Commented extends StatelessWidget {
-  const Commented({super.key, required this.controller, required this.child});
+/// The comments over a viewer. Nothing is set aside for them until there
+/// are some: then on a wide pane their cards sit in a margin at its right,
+/// each level with its text and reaching a little over the document's own
+/// edge; on a narrow one (and the phone) a small marker per comment, which
+/// opens its card at its text. A selection gets a popover at it to comment
+/// from, and the comment is written there. [child] is the viewer's body.
+class Commented extends StatefulWidget {
+  const Commented({
+    super.key,
+    required this.controller,
+    required this.child,
+    this.insetInside = false,
+  });
 
   final CommentsController controller;
   final Widget child;
 
-  /// The margin's width, and how wide a pane must be to have one.
-  static const marginWidth = 260.0;
-  static const wideFrom = 560.0;
+  /// The child makes the room for the cards itself, inside what it
+  /// scrolls ([CommentsInset]), so the text under them still scrolls and
+  /// selects; else it's padded.
+  final bool insetInside;
+
+  /// A card's width, how far in from the pane's right edge it sits, and how
+  /// far over the document's edge (its own padding) it may reach.
+  static const cardWidth = 240.0;
+  static const edge = Space.s;
+  static const overlap = Space.l;
+
+  /// The room the cards take from the document.
+  static const marginInset = cardWidth + edge - overlap;
+
+  /// The narrowest the document gets beside the cards: narrower panes
+  /// have markers instead.
+  static const minReading = 480.0;
+  static const wideFrom = minReading + marginInset;
+
+  /// The markers' strip on a narrow pane.
+  static const markerWidth = 20.0;
+
+  /// A popover's width: writing a comment, and a comment's card.
+  static const popoverWidth = 320.0;
+
+  @override
+  State<Commented> createState() => _CommentedState();
+}
+
+class _CommentedState extends State<Commented> {
+  final _stack = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
+    final controller = widget.controller;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= wideFrom;
+        final wide = constraints.maxWidth >= Commented.wideFrom;
         if (controller.narrow.value == wide) {
           // Told after the frame: the header is built already.
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -881,41 +974,87 @@ class Commented extends StatelessWidget {
             if (wide) controller.openSheet(false);
           });
         }
-        if (wide) {
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: child),
-              Container(
-                width: marginWidth,
-                decoration: BoxDecoration(
-                  color: palette.canvas,
-                  border: Border(left: BorderSide(color: palette.hairline)),
+        return ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) {
+            final shown = controller.shown;
+            // A video's comments are on its timeline already.
+            final markers = !wide && controller.kind != 'video';
+            final inset = shown.isEmpty
+                ? 0.0
+                : wide
+                ? Commented.marginInset
+                : markers
+                ? Commented.markerWidth
+                : 0.0;
+            return Stack(
+              key: _stack,
+              children: [
+                Positioned.fill(
+                  child: widget.insetInside
+                      ? CommentsInset(right: inset, child: widget.child)
+                      : Padding(
+                          padding: EdgeInsets.only(right: inset),
+                          child: widget.child,
+                        ),
                 ),
-                child: _Margin(controller: controller),
-              ),
-            ],
-          );
-        }
-        return Stack(
-          children: [
-            Positioned.fill(child: child),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: Space.l,
-              child: _CommentPill(controller: controller),
-            ),
-            Positioned.fill(child: _Sheet(controller: controller)),
-          ],
+                if (shown.isNotEmpty && wide)
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: Commented.edge,
+                    width: Commented.cardWidth,
+                    child: _Margin(controller: controller),
+                  )
+                else if (shown.isNotEmpty && markers)
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 0,
+                    width: Commented.markerWidth,
+                    child: _Markers(controller: controller),
+                  ),
+                Positioned.fill(
+                  child: _Popovers(
+                    controller: controller,
+                    stack: _stack,
+                    wide: wide,
+                    right: inset,
+                  ),
+                ),
+                Positioned(
+                  right: Space.m,
+                  bottom: Space.m,
+                  child: _Footer(controller: controller),
+                ),
+                if (!wide)
+                  Positioned.fill(child: _Sheet(controller: controller)),
+              ],
+            );
+          },
         );
       },
     );
   }
 }
 
-/// The header's control for the comments on a narrow pane: how many there
-/// are; it opens the sheet.
+/// How much room at its right a viewer inside [Commented] leaves for the
+/// comments, when it makes the room itself ([Commented.insetInside]).
+class CommentsInset extends InheritedWidget {
+  const CommentsInset({super.key, required this.right, required super.child});
+
+  final double right;
+
+  static double of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<CommentsInset>()?.right ?? 0;
+
+  @override
+  bool updateShouldNotify(CommentsInset old) => old.right != right;
+}
+
+/// The header's control for the comments. On a wide pane, while some are
+/// resolved: "Show 2 resolved" or "Hide resolved". On a narrow one: how
+/// many there are; it opens the sheet listing them.
 class CommentsButton extends StatelessWidget {
   const CommentsButton({super.key, required this.controller});
 
@@ -925,7 +1064,14 @@ class CommentsButton extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([controller, controller.narrow]),
     builder: (context, _) {
-      if (!controller.narrow.value) return const SizedBox.shrink();
+      if (!controller.narrow.value) {
+        final resolved = controller.resolvedCount;
+        if (resolved == 0) return const SizedBox.shrink();
+        return HeaderTextButton(
+          controller.showResolved ? 'Hide resolved' : 'Show $resolved resolved',
+          controller.toggleResolved,
+        );
+      }
       final count = controller.shown.length;
       return GlyphButton(
         label: count == 0 ? 'Comments' : '$count comments',
@@ -941,41 +1087,220 @@ class CommentsButton extends StatelessWidget {
   );
 }
 
-/// On a narrow pane, while something's selected: a pill to comment on it.
-class _CommentPill extends StatelessWidget {
-  const _CommentPill({required this.controller});
+/// What floats over the viewer at a place in it: the popover at the
+/// selection (Comment, Suggest), the comment being written there, and on a
+/// narrow pane the picked comment's card at its text.
+class _Popovers extends StatelessWidget {
+  const _Popovers({
+    required this.controller,
+    required this.stack,
+    required this.wide,
+    required this.right,
+  });
 
   final CommentsController controller;
+  final GlobalKey stack;
+  final bool wide;
+
+  /// What the cards or markers take at the right.
+  final double right;
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: controller.selection,
-    builder: (context, mark, _) {
-      if (mark == null || mark.isEmpty || controller.sheetOpen) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([
+      controller,
+      controller.layout,
+      controller.selection,
+    ]),
+    builder: (context, _) {
+      if (controller.sheetOpen) return const SizedBox.shrink();
+      final box = stack.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) {
+        // Laid out after this frame: placed then.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (stack.currentContext != null) controller.relayout();
+        });
         return const SizedBox.shrink();
       }
-      return Center(
-        child: _Floating(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Button(
-                label: 'Comment',
-                primary: true,
-                onPressed: controller.comment,
-              ),
-              if (mark is Passage) ...[
-                const SizedBox(width: Space.xs),
-                Button(
-                  label: 'Suggest',
-                  onPressed: () => controller.comment(suggest: true),
-                ),
-              ],
-            ],
+      Rect? local(Rect? global) => global == null
+          ? null
+          : Rect.fromPoints(
+              box.globalToLocal(global.topLeft),
+              box.globalToLocal(global.bottomRight),
+            );
+      final size = box.size;
+      // Nothing to sit by: low in the middle.
+      final fallback = Rect.fromLTWH(
+        size.width / 2 - Commented.popoverWidth / 2,
+        size.height - Space.l,
+        0,
+        0,
+      );
+      final reduced = MediaQuery.disableAnimationsOf(context);
+      final composing = controller.composing;
+      if (composing != null) {
+        return _Popover(
+          anchor: local(controller.rectOf(composing)) ?? fallback,
+          // Over a video's timeline, which is at the bottom.
+          above: composing is Moment,
+          child: Arrival(
+            key: ValueKey(('composing', composing, controller.suggesting)),
+            animate: !reduced,
+            child: SizedBox(
+              width: Commented.popoverWidth,
+              child: _ComposerCard(controller: controller, mark: composing),
+            ),
           ),
+        );
+      }
+      final mark = controller.selection.value;
+      if (mark != null && !mark.isEmpty) {
+        return _Popover(
+          anchor: local(controller.rectOf(mark)) ?? fallback,
+          above: true,
+          child: Arrival(
+            key: const ValueKey('selection'),
+            animate: !reduced,
+            child: _SelectionActions(controller: controller, mark: mark),
+          ),
+        );
+      }
+      final focused = controller.focused;
+      if (!wide && focused != null) {
+        final thread = controller.shown
+            .where((thread) => thread.id == focused)
+            .firstOrNull;
+        if (thread == null) return const SizedBox.shrink();
+        return _Popover(
+          anchor:
+              local(controller.rectOfThread(focused)) ??
+              Rect.fromLTWH(size.width, Space.s, 0, 0),
+          alignRight: right + Space.xs,
+          child: Arrival(
+            key: ValueKey(('thread', focused)),
+            animate: !reduced,
+            child: SizedBox(
+              width: Commented.popoverWidth,
+              child: _ThreadCard(controller: controller, thread: thread),
+            ),
+          ),
+        );
+      }
+      return const SizedBox.shrink();
+    },
+  );
+}
+
+/// Places [child] by [anchor] (in the box's coordinates): below it, or
+/// above it with [above] or when there's no room below; at its left, or
+/// [alignRight] in from the box's right. Always kept inside the box, and
+/// scrolling when it's taller.
+class _Popover extends StatelessWidget {
+  const _Popover({
+    required this.anchor,
+    required this.child,
+    this.above = false,
+    this.alignRight,
+  });
+
+  final Rect anchor;
+  final Widget child;
+  final bool above;
+  final double? alignRight;
+
+  @override
+  Widget build(BuildContext context) => CustomSingleChildLayout(
+    delegate: _PopoverLayout(
+      anchor: anchor,
+      above: above,
+      alignRight: alignRight,
+    ),
+    child: SingleChildScrollView(child: child),
+  );
+}
+
+class _PopoverLayout extends SingleChildLayoutDelegate {
+  _PopoverLayout({
+    required this.anchor,
+    required this.above,
+    required this.alignRight,
+  });
+
+  final Rect anchor;
+  final bool above;
+  final double? alignRight;
+
+  /// Between the popover and what it's at, and the box's edges.
+  static const gap = Space.xs + 2;
+  static const margin = Space.s;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(
+        maxWidth: (constraints.maxWidth - 2 * margin).clamp(0, double.infinity),
+        maxHeight: (constraints.maxHeight - 2 * margin).clamp(
+          0,
+          double.infinity,
         ),
       );
-    },
+
+  @override
+  Offset getPositionForChild(Size size, Size child) {
+    final right = alignRight;
+    final x = right != null ? size.width - right - child.width : anchor.left;
+    final below = anchor.bottom + gap;
+    final over = anchor.top - gap - child.height;
+    final fitsBelow = below + child.height <= size.height - margin;
+    final fitsOver = over >= margin;
+    final y = above
+        ? (fitsOver || !fitsBelow ? over : below)
+        : (fitsBelow || !fitsOver ? below : over);
+    double keep(double value, double extent, double room) {
+      final most = room - extent - margin;
+      return most < margin ? margin : value.clamp(margin, most);
+    }
+
+    return Offset(
+      keep(x, child.width, size.width),
+      keep(y, child.height, size.height),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_PopoverLayout old) =>
+      old.anchor != anchor ||
+      old.above != above ||
+      old.alignRight != alignRight;
+}
+
+/// At the selection: a primary Comment, and Suggest for text.
+class _SelectionActions extends StatelessWidget {
+  const _SelectionActions({required this.controller, required this.mark});
+
+  final CommentsController controller;
+  final Mark mark;
+
+  @override
+  Widget build(BuildContext context) => Unselectable(
+    child: _Floating(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Button(
+            label: 'Comment',
+            primary: true,
+            onPressed: controller.comment,
+          ),
+          if (mark is Passage) ...[
+            const SizedBox(width: Space.xs),
+            Button(
+              label: 'Suggest',
+              onPressed: () => controller.comment(suggest: true),
+            ),
+          ],
+        ],
+      ),
+    ),
   );
 }
 
@@ -1000,8 +1325,8 @@ class _Floating extends StatelessWidget {
   }
 }
 
-/// The wide pane's margin: what's above the cards (detached threads, the
-/// resolved ones), the cards level with their passages, and the Send bar.
+/// The wide pane's margin: each card level with its text, the rest from
+/// the top. A wheel over a card scrolls the document.
 class _Margin extends StatelessWidget {
   const _Margin({required this.controller});
 
@@ -1010,95 +1335,237 @@ class _Margin extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([
-        controller,
-        controller.layout,
-        controller.selection,
-      ]),
+      listenable: Listenable.merge([controller, controller.layout]),
       builder: (context, _) {
-        final cards = <Widget>[];
-        final wanted = <double>[];
-        // The person's selection: a button to comment on it, level with it.
-        final mark = controller.selection.value;
-        final composing = controller.composing;
-        if (composing != null) {
-          cards.add(_ComposerCard(controller: controller, mark: composing));
-          wanted.add(controller.yOfMark(composing) ?? 0);
-        } else if (mark != null && !mark.isEmpty) {
-          cards.add(
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Unselectable(
-                child: Wrap(
-                  spacing: Space.xs,
-                  children: [
-                    Button(label: 'Comment', onPressed: controller.comment),
-                    if (mark is Passage)
-                      Button(
-                        label: 'Suggest',
-                        onPressed: () => controller.comment(suggest: true),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          );
-          wanted.add(controller.yOfMark(mark) ?? 0);
-        }
         final threads = controller.inOrder(controller.shown);
-        for (final thread in threads) {
-          cards.add(_ThreadCard(controller: controller, thread: thread));
-          // Detached ones at the top, the rest level with their passages.
-          wanted.add(controller.yOfThread(thread.id) ?? 0);
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _MarginHeader(controller: controller),
-            Expanded(
-              child: ClipRect(
-                child: CustomMultiChildLayout(
-                  delegate: _Cards(wanted),
-                  children: [
-                    for (var i = 0; i < cards.length; i++)
-                      LayoutId(id: i, child: cards[i]),
-                  ],
-                ),
-              ),
+        final focused = threads.indexWhere((t) => t.id == controller.focused);
+        return Listener(
+          onPointerSignal: (event) {
+            if (event is PointerScrollEvent) {
+              controller.scrollBy?.call(event.scrollDelta.dy);
+            }
+          },
+          child: ClipRect(
+            child: CustomMultiChildLayout(
+              delegate: _Stacked([
+                for (final t in threads) controller.yOfThread(t.id),
+              ], focused: focused == -1 ? null : focused),
+              children: [
+                for (var i = 0; i < threads.length; i++)
+                  LayoutId(
+                    id: i,
+                    child: _ThreadCard(
+                      controller: controller,
+                      thread: threads[i],
+                    ),
+                  ),
+              ],
             ),
-            _SendBar(controller: controller),
-          ],
+          ),
         );
       },
     );
   }
 }
 
-/// Cards top to bottom, each level with what it's about if there's room,
-/// else just below the one before.
-class _Cards extends MultiChildLayoutDelegate {
-  _Cards(this.wanted);
+/// Things down a strip, each level with what it's about ([wanted], a y)
+/// unless it would overlap the one before; those with nowhere to be
+/// (null) first, from the top. The [focused] one keeps its place exactly,
+/// and those above it move up to make room.
+class _Stacked extends MultiChildLayoutDelegate {
+  _Stacked(this.wanted, {this.focused, this.gap = Space.s});
 
-  final List<double> wanted;
+  final List<double?> wanted;
+  final int? focused;
+  final double gap;
 
   @override
   void performLayout(Size size) {
-    final order = [for (var i = 0; i < wanted.length; i++) i]
-      ..sort((a, b) => wanted[a].compareTo(wanted[b]));
-    var next = Space.s;
-    for (final i in order) {
-      final card = layoutChild(
-        i,
-        BoxConstraints(maxWidth: size.width - Space.m * 2),
-      );
-      final y = wanted[i] > next ? wanted[i] : next;
-      positionChild(i, Offset(Space.m, y));
-      next = y + card.height + Space.s;
+    final heights = [
+      for (var i = 0; i < wanted.length; i++)
+        layoutChild(i, BoxConstraints(maxWidth: size.width)).height,
+    ];
+    var top = Space.s;
+    final placed = <int>[];
+    for (var i = 0; i < wanted.length; i++) {
+      if (wanted[i] == null) {
+        positionChild(i, Offset(0, top));
+        top += heights[i] + gap;
+      } else {
+        placed.add(i);
+      }
+    }
+    final unplaced = placed.length < wanted.length;
+    placed.sort((a, b) => wanted[a]!.compareTo(wanted[b]!));
+    final pivot = focused == null ? -1 : placed.indexOf(focused!);
+    // Those scrolled above stay above: only the unplaced hold the top.
+    var next = unplaced ? top : double.negativeInfinity;
+    var from = 0;
+    if (pivot != -1) {
+      final i = placed[pivot];
+      final y = wanted[i]! > next ? wanted[i]! : next;
+      positionChild(i, Offset(0, y));
+      var limit = y - gap;
+      for (var j = pivot - 1; j >= 0; j--) {
+        final k = placed[j];
+        final at = wanted[k]! + heights[k] < limit
+            ? wanted[k]!
+            : limit - heights[k];
+        positionChild(k, Offset(0, at));
+        limit = at - gap;
+      }
+      next = y + heights[i] + gap;
+      from = pivot + 1;
+    }
+    for (var j = from; j < placed.length; j++) {
+      final i = placed[j];
+      final y = wanted[i]! > next ? wanted[i]! : next;
+      positionChild(i, Offset(0, y));
+      next = y + heights[i] + gap;
     }
   }
 
   @override
-  bool shouldRelayout(_Cards old) => !listEquals(old.wanted, wanted);
+  bool shouldRelayout(_Stacked old) =>
+      !listEquals(old.wanted, wanted) || old.focused != focused;
+}
+
+/// A narrow pane's markers: a dot in the agent's color level with each
+/// comment's text; a click opens its card there.
+class _Markers extends StatelessWidget {
+  const _Markers({required this.controller});
+
+  final CommentsController controller;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([controller, controller.layout]),
+    builder: (context, _) {
+      final threads = controller.inOrder(controller.shown);
+      final focused = threads.indexWhere((t) => t.id == controller.focused);
+      return Listener(
+        onPointerSignal: (event) {
+          if (event is PointerScrollEvent) {
+            controller.scrollBy?.call(event.scrollDelta.dy);
+          }
+        },
+        child: ClipRect(
+          child: CustomMultiChildLayout(
+            delegate: _Stacked(
+              [for (final t in threads) controller.yOfThread(t.id)],
+              focused: focused == -1 ? null : focused,
+              gap: 0,
+            ),
+            children: [
+              for (var i = 0; i < threads.length; i++)
+                LayoutId(
+                  id: i,
+                  child: _Marker(controller: controller, thread: threads[i]),
+                ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _Marker extends StatelessWidget {
+  const _Marker({required this.controller, required this.thread});
+
+  final CommentsController controller;
+  final Thread thread;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final focused = controller.focused == thread.id;
+    final agent = _agent(controller.backend, thread.agentId);
+    final resolved = thread.status == ThreadStatus.THREAD_STATUS_RESOLVED;
+    return Semantics(
+      button: true,
+      label: 'Comment for ${agent?.name ?? thread.agentId}',
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: () => controller.focus(focused ? null : thread.id),
+        builder: (context, hovered) => Container(
+          width: Commented.markerWidth,
+          height: Commented.markerWidth,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: focused
+                ? palette.selected
+                : hovered
+                ? palette.hover
+                : const Color(0x00000000),
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Opacity(
+            opacity: resolved ? 0.6 : 1,
+            child: Dot(
+              color: agentColor(agent?.color ?? ''),
+              size: focused ? 10 : 8,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// At the pane's bottom right, floating, only while there's something:
+/// why the last request failed, and comments kept from before they were
+/// sent as soon as written, to send now ("Send 3 comments to June").
+class _Footer extends StatelessWidget {
+  const _Footer({required this.controller});
+
+  final CommentsController controller;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: controller,
+    builder: (context, _) {
+      final palette = Palette.of(context);
+      final error = controller.error;
+      final drafts = controller.drafts;
+      if (controller.sheetOpen || (error == null && drafts.isEmpty)) {
+        return const SizedBox.shrink();
+      }
+      return Unselectable(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: Commented.cardWidth),
+          child: _Floating(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (error != null)
+                  Padding(
+                    padding: const EdgeInsets.all(Space.xs),
+                    child: Text(
+                      error,
+                      style: TextStyles.caption.copyWith(color: palette.danger),
+                    ),
+                  ),
+                for (final MapEntry(key: agentId, value: count)
+                    in drafts.entries)
+                  Padding(
+                    padding: const EdgeInsets.all(Space.xs / 2),
+                    child: Button(
+                      label:
+                          'Send $count ${count == 1 ? 'comment' : 'comments'} '
+                          'to ${_agentName(controller.backend, agentId)}',
+                      primary: true,
+                      onPressed: () => controller.send(agentId),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
 }
 
 /// Above the cards, when there's something: how many are resolved, to show
@@ -1252,7 +1719,13 @@ class _ThreadCard extends StatelessWidget {
               Unselectable(
                 child: Row(
                   children: [
-                    Dot(color: agentColor(agent?.color ?? ''), size: 6),
+                    if (controller.pins[thread.id] case final number?)
+                      PinBadge(
+                        number: number,
+                        color: agentColor(agent?.color ?? ''),
+                      )
+                    else
+                      Dot(color: agentColor(agent?.color ?? ''), size: 6),
                     const SizedBox(width: Space.xs + 2),
                     Expanded(
                       child: Text(
@@ -1597,7 +2070,7 @@ class _TextAction extends StatelessWidget {
   }
 }
 
-/// A new comment's card, level with its passage.
+/// The popover a new comment is written in, at what it's on.
 class _ComposerCard extends StatelessWidget {
   const _ComposerCard({required this.controller, required this.mark});
 
@@ -1612,9 +2085,9 @@ class _ComposerCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(Space.m),
       decoration: BoxDecoration(
-        color: palette.canvas,
+        color: palette.sidebar,
         borderRadius: BorderRadius.circular(Radii.panel),
-        border: Border.all(color: palette.textMuted),
+        border: Border.all(color: palette.hairline),
         boxShadow: floatingShadow,
       ),
       child: Column(
@@ -1687,15 +2160,25 @@ class RegionThumbnail extends StatelessWidget {
     final image = this.image;
     if (image == null) return const SizedBox.shrink();
     final palette = Palette.of(context);
-    final source =
-        Rect.fromLTWH(
-          region.left * image.width,
-          region.top * image.height,
-          region.width * image.width,
-          region.height * image.height,
-        ).intersect(
-          Offset.zero & Size(image.width.toDouble(), image.height.toDouble()),
-        );
+    final whole =
+        Offset.zero & Size(image.width.toDouble(), image.height.toDouble());
+    final point = region.width == 0 && region.height == 0;
+    final spot = Offset(region.left * image.width, region.top * image.height);
+    // A spot shows with what's around it, a fifth of the image's shorter
+    // side across, and a dot on it.
+    final side = (image.width < image.height ? image.width : image.height) / 5;
+    final source = point
+        ? Rect.fromCenter(
+            center: spot,
+            width: side,
+            height: side,
+          ).intersect(whole)
+        : Rect.fromLTWH(
+            region.left * image.width,
+            region.top * image.height,
+            region.width * image.width,
+            region.height * image.height,
+          ).intersect(whole);
     if (source.isEmpty) return const SizedBox.shrink();
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1714,7 +2197,14 @@ class RegionThumbnail extends StatelessWidget {
               borderRadius: BorderRadius.circular(Radii.control),
             ),
             clipBehavior: Clip.antiAlias,
-            child: CustomPaint(painter: _Crop(image, source)),
+            child: CustomPaint(
+              painter: _Crop(
+                image,
+                source,
+                spot: point ? spot : null,
+                color: palette.signal,
+              ),
+            ),
           ),
         );
       },
@@ -1723,27 +2213,163 @@ class RegionThumbnail extends StatelessWidget {
 }
 
 class _Crop extends CustomPainter {
-  _Crop(this.image, this.source);
+  _Crop(this.image, this.source, {this.spot, required this.color});
 
   final ui.Image image;
   final Rect source;
 
-  @override
-  void paint(Canvas canvas, Size size) => canvas.drawImageRect(
-    image,
-    source,
-    Offset.zero & size,
-    Paint()..filterQuality = FilterQuality.medium,
-  );
+  /// A spot in the image to mark with a dot.
+  final Offset? spot;
+  final Color color;
 
   @override
-  bool shouldRepaint(_Crop old) => old.image != image || old.source != source;
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      source,
+      Offset.zero & size,
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+    final spot = this.spot;
+    if (spot == null) return;
+    final at = Offset(
+      (spot.dx - source.left) / source.width * size.width,
+      (spot.dy - source.top) / source.height * size.height,
+    );
+    canvas
+      ..drawCircle(at, 4.5, Paint()..color = const Color(0xFFFFFFFF))
+      ..drawCircle(at, 3, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_Crop old) =>
+      old.image != image ||
+      old.source != source ||
+      old.spot != spot ||
+      old.color != color;
 }
 
-/// Where a comment is written: Enter makes a new line, ⌘Enter sends it to
-/// the agent at once, Comment keeps it as a draft to send with the rest,
-/// Esc gives up. Suggesting a change, the new text comes first, and the
-/// comment is optional.
+/// A comment's pin on an image or a video's frame, painted at [at]: a
+/// circle of its agent's [color], 18px (22px while [strong], picked)
+/// ringed in [ring] (the canvas), with its [number] in white; without one,
+/// a small dot (the person's own mark).
+void paintPin(
+  Canvas canvas,
+  Offset at, {
+  required Color color,
+  required Color ring,
+  int? number,
+  bool strong = false,
+}) {
+  final radius = number == null ? 4.0 : (strong ? 11.0 : 9.0);
+  canvas
+    ..drawCircle(at, radius + 1.5, Paint()..color = ring)
+    ..drawCircle(at, radius, Paint()..color = color);
+  if (number == null) return;
+  final label = TextPainter(
+    text: TextSpan(
+      text: '$number',
+      style: const TextStyle(
+        fontFamily: TextStyles.sans,
+        fontSize: 11,
+        height: 1,
+        fontWeight: FontWeight.w600,
+        color: Color(0xFFFFFFFF),
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+  label.paint(canvas, at - Offset(label.width / 2, label.height / 2));
+  label.dispose();
+}
+
+/// A pin's number in a card's header, matching the pin on the image: a
+/// 16px circle of the agent's color with the number in white.
+class PinBadge extends StatelessWidget {
+  const PinBadge({super.key, required this.number, required this.color});
+
+  final int number;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 16,
+    height: 16,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    child: Text(
+      '$number',
+      style: const TextStyle(
+        fontFamily: TextStyles.sans,
+        fontSize: 10,
+        height: 1,
+        fontWeight: FontWeight.w600,
+        color: Color(0xFFFFFFFF),
+      ),
+    ),
+  );
+}
+
+/// Over an image or a video's frame: a floating Comment button, shown
+/// while the pointer is over it (always on a phone), that starts picking
+/// where the comment goes; while picking, what to do and Cancel.
+class CommentPick extends StatelessWidget {
+  const CommentPick({
+    super.key,
+    required this.picking,
+    required this.visible,
+    required this.hint,
+    required this.onToggle,
+  });
+
+  final bool picking;
+  final bool visible;
+  final String hint;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final shown = picking || visible;
+    return IgnorePointer(
+      ignoring: !shown,
+      child: AnimatedOpacity(
+        opacity: shown ? 1 : 0,
+        duration: shown ? Motion.fast : Motion.fast * 0.75,
+        curve: Curves.easeOut,
+        child: Unselectable(
+          child: _Floating(
+            child: picking
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Space.s,
+                          ),
+                          child: Text(
+                            hint,
+                            style: TextStyles.caption.copyWith(
+                              color: palette.textMuted,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Button(label: 'Cancel', onPressed: onToggle),
+                    ],
+                  )
+                : Button(label: 'Comment', primary: true, onPressed: onToggle),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Where a comment is written: Return sends it to the agent at once (an
+/// edit is saved), Shift-Return makes a new line, Esc gives up. Suggesting
+/// a change, the new text comes first, and the comment is optional.
 class _Composer extends StatefulWidget {
   const _Composer({
     super.key,
@@ -1791,28 +2417,48 @@ class _ComposerState extends State<_Composer> {
     return replacement.text != widget.replacement;
   }
 
-  Future<void> _submit({required bool sendNow}) async {
+  Future<void> _submit() async {
     if (_busy || !_ready) return;
     setState(() => _busy = true);
     await widget.controller.submit(
       _text.text,
-      sendNow: sendNow,
+      sendNow: widget.canSendNow,
       replacement: _replacement?.text,
     );
     if (mounted) setState(() => _busy = false);
+  }
+
+  /// Return sends; Shift-Return is left to the field, a new line, and so
+  /// is a Return that ends an input method's composing.
+  KeyEventResult _key(FocusNode node, KeyEvent event) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      widget.controller.cancel();
+      return KeyEventResult.handled;
+    }
+    if (key != LogicalKeyboardKey.enter &&
+        key != LogicalKeyboardKey.numpadEnter) {
+      return KeyEventResult.ignored;
+    }
+    if (HardwareKeyboard.instance.isShiftPressed ||
+        _text.value.composing.isValid ||
+        (_replacement?.value.composing.isValid ?? false)) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent) unawaited(_submit());
+    return KeyEventResult.handled;
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final replacement = _replacement;
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): () =>
-            _submit(sendNow: widget.canSendNow),
-        const SingleActivator(LogicalKeyboardKey.escape):
-            widget.controller.cancel,
-      },
+    final replying = widget.placeholder == 'Reply';
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _key,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1848,13 +2494,13 @@ class _ComposerState extends State<_Composer> {
                   builder: (context, _) => Button(
                     label: replacement != null
                         ? 'Suggest'
-                        : widget.initial.isEmpty
-                        ? 'Comment'
-                        : 'Save',
+                        : widget.initial.isNotEmpty
+                        ? 'Save'
+                        : replying
+                        ? 'Reply'
+                        : 'Comment',
                     primary: true,
-                    onPressed: _busy || !_ready
-                        ? null
-                        : () => _submit(sendNow: false),
+                    onPressed: _busy || !_ready ? null : _submit,
                   ),
                 ),
               ],
@@ -1863,7 +2509,7 @@ class _ComposerState extends State<_Composer> {
           if (widget.canSendNow && widget.agentName.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
             Text(
-              '⌘↩ sends it to ${widget.agentName} now',
+              '↩ sends to ${widget.agentName} · ⇧↩ starts a new line',
               textAlign: TextAlign.right,
               style: TextStyles.caption.copyWith(color: palette.textFaint),
             ),
@@ -1874,9 +2520,8 @@ class _ComposerState extends State<_Composer> {
   }
 }
 
-/// The narrow pane's comments, from the bottom: the new comment being
-/// written, then every thread in the order of its passage, then the Send
-/// bar. A tap above it closes it.
+/// The narrow pane's comments, from the bottom: every thread in the order
+/// of its passage, then the Send bar. A tap above it closes it.
 class _Sheet extends StatelessWidget {
   const _Sheet({required this.controller});
 
@@ -1889,7 +2534,6 @@ class _Sheet extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         if (!controller.sheetOpen) return const SizedBox.shrink();
-        final composing = controller.composing;
         final threads = controller.inOrder(controller.shown);
         return LayoutBuilder(
           builder: (context, constraints) => Stack(
@@ -1925,14 +2569,7 @@ class _Sheet extends StatelessWidget {
                           shrinkWrap: true,
                           padding: const EdgeInsets.all(Space.m),
                           children: [
-                            if (composing != null) ...[
-                              _ComposerCard(
-                                controller: controller,
-                                mark: composing,
-                              ),
-                              const SizedBox(height: Space.s),
-                            ],
-                            if (composing == null && threads.isEmpty)
+                            if (threads.isEmpty)
                               Padding(
                                 padding: const EdgeInsets.all(Space.m),
                                 child: Text(

@@ -46,7 +46,7 @@ pub(crate) struct Job {
 }
 
 impl Job {
-    fn for_this_user() -> Option<Job> {
+    pub(crate) fn for_this_user() -> Option<Job> {
         let user_home = std::env::var_os("HOME")?;
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
@@ -77,7 +77,7 @@ fn plutil(args: &[&std::ffi::OsStr]) -> Result<Vec<u8>, String> {
 }
 
 /// The plist as JSON.
-fn read(plist: &Path) -> Result<Value, String> {
+pub(crate) fn read(plist: &Path) -> Result<Value, String> {
     let json = plutil(&["-convert".as_ref(), "json".as_ref(), "-o".as_ref(), "-".as_ref(), plist.as_os_str()])?;
     serde_json::from_slice(&json).map_err(|error| error.to_string())
 }

@@ -8,6 +8,7 @@ import 'drafts.dart';
 import 'identity.dart';
 import 'rail.dart';
 import 'scope.dart';
+import 'setup.dart';
 import 'shell.dart';
 import 'state.dart';
 import 'update.dart';
@@ -27,6 +28,7 @@ class FactoryApp extends StatefulWidget {
     required this.connections,
     this.open,
     this.localBackend,
+    this.setupChannel,
   });
 
   /// The drafts this device keeps, for every Claktory.
@@ -43,6 +45,10 @@ class FactoryApp extends StatefulWidget {
   /// it's a Mac ([hasLocalBackend]).
   final bool? localBackend;
 
+  /// Sets this Mac up from the app ([setsUpThisMac]); tests give one to
+  /// set up with anywhere.
+  final SetupChannel? setupChannel;
+
   @override
   State<FactoryApp> createState() => _FactoryAppState();
 }
@@ -55,6 +61,29 @@ class _FactoryAppState extends State<FactoryApp> {
     drafts: widget.drafts,
   );
   final _appBuild = AppBuild.current();
+
+  /// Setting this Mac up, on the first launch of the app downloaded for it.
+  late final MacSetup? _setup = _startSetup();
+
+  MacSetup? _startSetup() {
+    final channel =
+        widget.setupChannel ?? (setsUpThisMac ? const SetupChannel() : null);
+    if (channel == null || !_claktories.localBackend) return null;
+    final local = _claktories.all.firstWhere((each) => each.target == null);
+    final setup = MacSetup(
+      channel: channel,
+      connected: local.backend.connected,
+      reconnect: local.backend.reconnectNow,
+    );
+    unawaited(setup.start());
+    return setup;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _setup;
+  }
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -80,6 +109,7 @@ class _FactoryAppState extends State<FactoryApp> {
   void dispose() {
     _window.remove();
     _window.dispose();
+    _setup?.dispose();
     _claktories.dispose();
     super.dispose();
   }
@@ -107,7 +137,7 @@ class _FactoryAppState extends State<FactoryApp> {
         child: Builder(
           builder: (context) {
             final shown = ClaktoriesScope.of(context)!.selected;
-            return AppScope(
+            final scope = AppScope(
               backend: shown.backend,
               login: shown.login,
               page: shown.page,
@@ -122,6 +152,10 @@ class _FactoryAppState extends State<FactoryApp> {
                 ),
               ),
             );
+            final setup = _setup;
+            return setup == null
+                ? scope
+                : SetupScope(setup: setup, child: scope);
           },
         ),
       ),

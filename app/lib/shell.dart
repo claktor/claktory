@@ -22,6 +22,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show railWidth;
 import 'scope.dart';
 import 'settings_view.dart';
+import 'setup.dart';
 import 'sidebar.dart';
 import 'state.dart';
 import 'update.dart';
@@ -116,14 +117,31 @@ class _ShellState extends State<Shell> {
     listenable: Listenable.merge([
       AppScope.of(context).workspace,
       signInPutOff(AppScope.of(context)),
+      AppScope.scope(context).page,
     ]),
     builder: (context, _) {
-      final window = _layout(context);
-      final step = asksSignIn(context)
+      // Setting this Mac up comes first, over its own Claktory only.
+      final setup = SetupScope.of(context);
+      final setupStep =
+          setup != null && setup.showing && AppScope.of(context).target == null
+          ? SetupStep(setup: setup)
+          : null;
+      // What's new, opened from the update banner, shows instead of the
+      // first launch's questions until it's closed.
+      final question = AppScope.pageShown(context, AppPage.changelog)
+          ? null
+          : asksSignIn(context)
           ? const SignInStep()
           : asksName(context)
           ? const NameStep()
           : null;
+      final step = setupStep ?? question;
+      // Over the questions the update banner stays in reach: they don't
+      // block updating.
+      final window = _layout(
+        context,
+        bannerOnTop: setupStep == null && question != null,
+      );
       if (step == null) return window;
       // The first launch asks the person to sign in, then their name, over
       // everything.
@@ -137,7 +155,9 @@ class _ShellState extends State<Shell> {
     },
   );
 
-  Widget _layout(BuildContext context) {
+  /// The window. With [bannerOnTop], the update banner is drawn above
+  /// what's laid over the window, so it's clickable over a step.
+  Widget _layout(BuildContext context, {bool bannerOnTop = false}) {
     final palette = Palette.of(context);
     if (isPhoneLayout(context)) {
       return DefaultTextStyle(
@@ -234,11 +254,13 @@ class _ShellState extends State<Shell> {
                     Expanded(
                       child: part(
                         updateOffered(workspace, scope.appBuild.version)
-                            ? const Column(
+                            ? Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  UpdateBanner(),
-                                  Expanded(child: _Content()),
+                                  bannerOnTop
+                                      ? const _LiftedBanner()
+                                      : const UpdateBanner(),
+                                  const Expanded(child: _Content()),
                                 ],
                               )
                             : const _Content(),
@@ -519,3 +541,55 @@ class _EmptyState extends StatelessWidget {
 /// (never set) is [fallback], the default.
 double keptWidth(double kept, double fallback, double min, double max) =>
     kept > 0 && kept.isFinite ? kept.clamp(min, max) : fallback;
+
+/// The update banner in its place, drawn above the window's overlay (over
+/// a first-launch step and its scrim) so it can still be clicked. Its
+/// place keeps a hidden copy, for its height.
+class _LiftedBanner extends StatefulWidget {
+  const _LiftedBanner();
+
+  @override
+  State<_LiftedBanner> createState() => _LiftedBannerState();
+}
+
+class _LiftedBannerState extends State<_LiftedBanner> {
+  final _portal = OverlayPortalController();
+  final _link = LayerLink();
+
+  @override
+  void initState() {
+    super.initState();
+    _portal.show();
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => OverlayPortal(
+      controller: _portal,
+      overlayChildBuilder: (context) => Align(
+        alignment: Alignment.topLeft,
+        child: CompositedTransformFollower(
+          link: _link,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            child: const UpdateBanner(),
+          ),
+        ),
+      ),
+      child: CompositedTransformTarget(
+        link: _link,
+        child: const IgnorePointer(
+          child: ExcludeSemantics(
+            child: Visibility(
+              visible: false,
+              maintainSize: true,
+              maintainAnimation: true,
+              maintainState: true,
+              child: UpdateBanner(),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}

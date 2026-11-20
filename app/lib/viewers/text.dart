@@ -128,7 +128,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
       );
       body = commenting == null
           ? text
-          : Commented(controller: commenting, child: text);
+          : Commented(controller: commenting, insetInside: true, child: text);
     }
     return PaneScaffold(
       details: details,
@@ -154,15 +154,21 @@ class _CutNote extends StatelessWidget {
 }
 
 /// The thread highlights in [range] of a viewer's text, for [markSpan]:
-/// each passage in its agent's color.
+/// each passage in its agent's color, and the one a comment is being
+/// written on in [writing] (the selection's color, as it was selected).
 List<(int, int, Color)> _marksIn(
   CommentsController? comments,
   Backend? backend,
   int start,
-  int end,
-) {
-  if (comments == null || comments.located.isEmpty) return const [];
+  int end, {
+  required Color writing,
+}) {
+  if (comments == null) return const [];
   final marks = <(int, int, Color)>[];
+  final composing = comments.composing;
+  if (composing is Passage && composing.end > start && composing.start < end) {
+    marks.add((composing.start, composing.end, writing));
+  }
   for (final thread in comments.shown) {
     final range = comments.located[thread.id];
     if (range == null || range.end <= start || range.start >= end) continue;
@@ -187,6 +193,20 @@ String? _threadAt(CommentsController comments, int offset) {
   return null;
 }
 
+/// Whether [paragraph]'s layout can be read: it's in the tree and laid
+/// out, and (checked only while debugging) not waiting to be laid out
+/// again. Read while building, it's the last frame's; the viewer asks
+/// for its comments to be placed again once it's laid out.
+bool _laidOut(RenderParagraph paragraph) {
+  if (!paragraph.attached || !paragraph.hasSize) return false;
+  var current = true;
+  assert(() {
+    current = !paragraph.debugNeedsLayout;
+    return true;
+  }());
+  return current;
+}
+
 /// One block of text the person can select and comment on: where it is
 /// in the viewer's text ([base]), and what it is.
 class _Block {
@@ -195,9 +215,22 @@ class _Block {
   int base = 0;
   int length = 0;
 
+  /// The block's text as laid out: its render object, or the first
+  /// paragraph under it (a link's hover region may wrap it).
   RenderParagraph? get paragraph {
+    RenderParagraph? found;
+    void look(RenderObject object) {
+      if (found != null) return;
+      if (object is RenderParagraph) {
+        found = object;
+      } else {
+        object.visitChildren(look);
+      }
+    }
+
     final object = key.currentContext?.findRenderObject();
-    return object is RenderParagraph ? object : null;
+    if (object != null) look(object);
+    return found;
   }
 
   void dispose() => selection.dispose();
@@ -315,7 +348,7 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
     final box = viewer.currentContext?.findRenderObject();
     if (block == null ||
         paragraph == null ||
-        !paragraph.attached ||
+        !_laidOut(paragraph) ||
         box is! RenderBox) {
       return null;
     }
@@ -327,10 +360,54 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
     return paragraph.localToGlobal(Offset(0, top), ancestor: box).dy;
   }
 
-  /// A click on a passage picks its thread.
+  /// Where [start] to [end] is on screen, global: from its first line's
+  /// top to its last line's bottom, from where it starts to the furthest
+  /// right its first and last lines reach.
+  Rect? rectOf(int start, int end) {
+    final first = boxAt(start);
+    if (first == null) return null;
+    final last = end - 1 > start ? (boxAt(end - 1) ?? first) : first;
+    return Rect.fromLTRB(
+      first.left,
+      first.top,
+      last.right > first.right ? last.right : first.right,
+      last.bottom > first.bottom ? last.bottom : first.bottom,
+    );
+  }
+
+  /// The box of the character at [offset], global; null when its block
+  /// isn't laid out.
+  Rect? boxAt(int offset) {
+    final block = blockOf(offset);
+    final paragraph = block?.paragraph;
+    if (block == null || paragraph == null || !_laidOut(paragraph)) {
+      return null;
+    }
+    final local = (offset - block.base).clamp(0, block.length);
+    final boxes = paragraph.getBoxesForSelection(
+      TextSelection(baseOffset: local, extentOffset: local + 1),
+    );
+    final Rect box;
+    if (boxes.isEmpty) {
+      // An empty block, or its end: where the caret would be.
+      final at = paragraph.getOffsetForCaret(
+        TextPosition(offset: local),
+        Rect.zero,
+      );
+      final height = paragraph.getFullHeightForCaret(
+        TextPosition(offset: local),
+      );
+      box = Rect.fromLTWH(at.dx, at.dy, 0, height);
+    } else {
+      box = boxes.first.toRect();
+    }
+    return box.shift(paragraph.localToGlobal(Offset.zero));
+  }
+
+  /// A click on a passage picks its thread; anywhere else lets go.
   void tapped(Offset global) {
     final comments = this.comments;
-    if (comments == null || comments.located.isEmpty) return;
+    if (comments == null) return;
     for (var i = 0; i < inUse && i < blocks.length; i++) {
       final block = blocks[i];
       final paragraph = block.paragraph;
@@ -339,9 +416,13 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
       if (!(Offset.zero & paragraph.size).contains(local)) continue;
       final position = paragraph.getPositionForOffset(local);
       final id = _threadAt(comments, block.base + position.offset);
-      if (id != null) comments.focus(id);
-      return;
+      if (id != null) {
+        comments.focus(id);
+        return;
+      }
+      break;
     }
+    comments.letGo();
   }
 }
 
@@ -401,17 +482,32 @@ class _FormattedTextState extends State<_FormattedText>
     if (comments == null) return;
     comments.yOf = yOf;
     comments.reveal = _reveal;
+    comments.rectOfRange = rectOf;
+    comments.scrollBy = _scrollBy;
   }
 
   @override
   void dispose() {
     final comments = widget.comments;
     if (comments?.yOf == yOf) comments?.yOf = null;
+    if (comments?.rectOfRange == rectOf) comments?.rectOfRange = null;
+    if (comments?.scrollBy == _scrollBy) comments?.scrollBy = null;
     _scroll.dispose();
     super.dispose();
   }
 
   void _moved() => widget.comments?.relayout();
+
+  void _scrollBy(double dy) {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    _scroll.jumpTo(
+      (position.pixels + dy).clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      ),
+    );
+  }
 
   void _reveal(int offset) {
     final context = blockOf(offset)?.key.currentContext;
@@ -444,6 +540,7 @@ class _FormattedTextState extends State<_FormattedText>
       widget.comments?.backend,
       block.base,
       block.base + block.length,
+      writing: _writing,
     );
     return SelectionListener(
       selectionNotifier: block.selection,
@@ -463,13 +560,19 @@ class _FormattedTextState extends State<_FormattedText>
     widget.comments?.relayout();
   }
 
+  /// The highlight of the passage a comment is being written on.
+  Color _writing = const Color(0x00000000);
+
   @override
   Widget build(BuildContext context) {
     final note = widget.note;
     final comments = widget.comments;
+    _writing = Palette.of(context).signal.withValues(alpha: 0.28);
+    // Room at the right for the comments' cards, inside what scrolls.
+    final inset = CommentsInset.of(context);
     Widget content() => SingleChildScrollView(
       controller: _scroll,
-      padding: const EdgeInsets.all(Space.l),
+      padding: EdgeInsets.fromLTRB(Space.l, Space.l, Space.l + inset, Space.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -582,7 +685,37 @@ class _NumberedTextState extends State<_NumberedText>
     if (comments == null) return;
     comments.yOf = _yOf;
     comments.reveal = _reveal;
+    comments.rectOfRange = _rectOf;
+    comments.scrollBy = _scrollBy;
   }
+
+  /// A line not laid out (scrolled away) is still where its number says:
+  /// the start of its text column.
+  Rect? _rectOf(int start, int end) {
+    final laidOut = rectOf(start, end);
+    if (laidOut != null) return laidOut;
+    final y = _yOf(start);
+    final box = viewer.currentContext?.findRenderObject();
+    if (y == null || box is! RenderBox || !box.attached) return null;
+    final across = _across.hasClients ? _across.offset : 0.0;
+    final lines = _lineOf(end) - _lineOf(start) + 1;
+    final topLeft = box.localToGlobal(Offset(_gutter + Space.m - across, y));
+    return Rect.fromLTWH(topLeft.dx, topLeft.dy, 0, lines * _lineHeight);
+  }
+
+  void _scrollBy(double dy) {
+    if (!_down.hasClients) return;
+    final position = _down.position;
+    _down.jumpTo(
+      (position.pixels + dy).clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      ),
+    );
+  }
+
+  /// The line numbers' width, as the last build made it.
+  double _gutter = 0;
 
   void _show() {
     final comments = widget.comments;
@@ -597,6 +730,8 @@ class _NumberedTextState extends State<_NumberedText>
   void dispose() {
     final comments = widget.comments;
     if (comments?.yOf == _yOf) comments?.yOf = null;
+    if (comments?.rectOfRange == _rectOf) comments?.rectOfRange = null;
+    if (comments?.scrollBy == _scrollBy) comments?.scrollBy = null;
     _across.dispose();
     _down.dispose();
     super.dispose();
@@ -647,6 +782,10 @@ class _NumberedTextState extends State<_NumberedText>
     );
     final digits = '${_lines.length}'.length;
     final gutter = digits * 7.5 + Space.m;
+    _gutter = gutter;
+    // Room at the right for the comments' cards, inside what scrolls.
+    final inset = CommentsInset.of(context);
+    final writing = palette.signal.withValues(alpha: 0.28);
     final note = widget.note;
     final comments = widget.comments;
     inUse = comments == null ? 0 : _lines.length;
@@ -673,6 +812,7 @@ class _NumberedTextState extends State<_NumberedText>
         comments.backend,
         block.base,
         block.base + block.length,
+        writing: writing,
       );
       return SelectionListener(
         selectionNotifier: block.selection,
@@ -697,9 +837,8 @@ class _NumberedTextState extends State<_NumberedText>
 
     Widget view() => LayoutBuilder(
       builder: (context, constraints) {
-        final textWidth = width > constraints.maxWidth - gutter - Space.m
-            ? width
-            : constraints.maxWidth - gutter - Space.m;
+        final room = constraints.maxWidth - gutter - Space.m - inset;
+        final textWidth = (width > room ? width : room) + inset;
         return RawScrollbar(
           controller: _across,
           child: SingleChildScrollView(

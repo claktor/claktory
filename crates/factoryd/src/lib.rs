@@ -20,6 +20,7 @@ pub mod factory;
 mod forward;
 pub mod home;
 mod idle;
+pub mod install;
 pub mod launch_agent;
 mod login;
 mod manual;

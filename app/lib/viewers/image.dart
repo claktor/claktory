@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -56,7 +57,8 @@ class _ImageViewerState extends State<ImageViewer>
       _wired = comments;
       comments
         ?..yOfRegion = _yOfRegion
-        ..revealRegion = _revealRegion;
+        ..revealRegion = _revealRegion
+        ..rectOfRegion = _rectOfRegion;
     }
   }
 
@@ -91,6 +93,15 @@ class _ImageViewerState extends State<ImageViewer>
         region.height * image.height,
       ),
     );
+  }
+
+  /// The pane's box, for where a region is on screen.
+  final _paneKey = GlobalKey();
+
+  Rect? _rectOfRegion(Rect region) {
+    final box = _paneKey.currentContext?.findRenderObject();
+    if (_image == null || box is! RenderBox || !box.attached) return null;
+    return _onScreen(region).shift(box.localToGlobal(Offset.zero));
   }
 
   double? _yOfRegion(Rect region) {
@@ -136,6 +147,23 @@ class _ImageViewerState extends State<ImageViewer>
     setState(() => _dragTo = _fraction(details.localPosition));
   }
 
+  /// The pointer is over the image (for its Comment button).
+  var _hovered = false;
+
+  /// No pointer to hover with: the Comment button always shows.
+  bool get _touch =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.android;
+
+  /// A click while picking: a comment on that spot.
+  void _markSpot(Offset at) {
+    setState(() {
+      _dragFrom = _dragTo = null;
+      _marking = false;
+    });
+    _commentOn(Region(Rect.fromLTWH(at.dx, at.dy, 0, 0)));
+  }
+
   void _markEnd(DragEndDetails details) {
     final from = _dragFrom;
     final to = _dragTo;
@@ -144,14 +172,19 @@ class _ImageViewerState extends State<ImageViewer>
       _marking = false;
     });
     if (from == null || to == null) return;
-    final region = Region(Rect.fromPoints(from, to));
-    if (region.isEmpty) return;
+    final area = Region(Rect.fromPoints(from, to));
+    // Too small to be an area: the spot it started on.
+    _commentOn(
+      area.isEmpty ? Region(Rect.fromLTWH(from.dx, from.dy, 0, 0)) : area,
+    );
+  }
+
+  void _commentOn(Region region) {
     final comments = this.comments;
     if (comments == null) return;
     comments.selection.value = region;
-    // On a narrow pane, straight to writing it: there's no margin to
-    // offer Comment in.
-    if (comments.narrow.value) comments.comment();
+    // Comment was asked for already: straight to writing it.
+    comments.comment();
   }
 
   /// A click on a comment's region picks it; anywhere else lets go.
@@ -160,7 +193,18 @@ class _ImageViewerState extends State<ImageViewer>
     if (comments == null || _image == null) return;
     final at = _fraction(details.localPosition);
     String? hit;
-    var smallest = double.infinity;
+    // A pin first: a spot has nothing else to click.
+    var nearest = 12.0;
+    for (final thread in comments.shown) {
+      final region = comments.regions[thread.id];
+      if (region == null) continue;
+      final away = (_onScreen(region).topLeft - details.localPosition).distance;
+      if (away <= nearest) {
+        nearest = away;
+        hit = thread.id;
+      }
+    }
+    var smallest = hit == null ? double.infinity : -1.0;
     for (final thread in comments.shown) {
       final region = comments.regions[thread.id];
       if (region == null || !region.contains(at)) continue;
@@ -170,7 +214,11 @@ class _ImageViewerState extends State<ImageViewer>
         hit = thread.id;
       }
     }
-    comments.focus(hit);
+    if (hit != null) {
+      comments.focus(hit);
+    } else {
+      comments.letGo();
+    }
     if (comments.selection.value is Region && comments.composing == null) {
       comments.selection.value = null;
     }
@@ -364,6 +412,7 @@ class _ImageViewerState extends State<ImageViewer>
       body = problem ?? const SizedBox.shrink();
     } else {
       body = LayoutBuilder(
+        key: _paneKey,
         builder: (context, constraints) {
           _pane = constraints.biggest;
           final fit = [
@@ -386,117 +435,172 @@ class _ImageViewerState extends State<ImageViewer>
               )
               ..scaleByDouble(fit, fit, fit, 1);
           }
-          return CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.equal, meta: true):
-                  _zoomIn,
-              const SingleActivator(
-                LogicalKeyboardKey.equal,
-                meta: true,
-                shift: true,
-              ): _zoomIn,
-              const SingleActivator(LogicalKeyboardKey.add, meta: true):
-                  _zoomIn,
-              const SingleActivator(LogicalKeyboardKey.minus, meta: true):
-                  _zoomOut,
-              const SingleActivator(LogicalKeyboardKey.digit0, meta: true):
-                  _fitNow,
-              const SingleActivator(LogicalKeyboardKey.escape): () {
-                if (_marking) _toggleMarking();
-              },
-            },
-            child: Focus(
-              focusNode: _focus,
-              child: GestureDetector(
-                onTapUp: comments == null ? null : _tapped,
-                onDoubleTapDown: (details) =>
-                    _doubleTapAt = details.localPosition,
-                onDoubleTap: _toggleActualSize,
-                child: Listener(
-                  // A click takes the keys for zooming.
-                  onPointerDown: (_) => _focus.requestFocus(),
-                  // ⌘-scroll zooms about the pointer; a plain scroll pans,
-                  // and a pinch zooms, as InteractiveViewer does.
-                  onPointerSignal: (event) {
-                    if (event is PointerScrollEvent &&
-                        HardwareKeyboard.instance.isMetaPressed) {
-                      _zoomTo(
-                        _scale * (event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1),
-                        at: event.localPosition,
-                      );
-                    }
+          // The Comment button over the image takes its own clicks at
+          // once, outside the image's double click.
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(LogicalKeyboardKey.equal, meta: true):
+                        _zoomIn,
+                    const SingleActivator(
+                      LogicalKeyboardKey.equal,
+                      meta: true,
+                      shift: true,
+                    ): _zoomIn,
+                    const SingleActivator(LogicalKeyboardKey.add, meta: true):
+                        _zoomIn,
+                    const SingleActivator(LogicalKeyboardKey.minus, meta: true):
+                        _zoomOut,
+                    const SingleActivator(
+                      LogicalKeyboardKey.digit0,
+                      meta: true,
+                    ): _fitNow,
+                    const SingleActivator(LogicalKeyboardKey.escape): () {
+                      if (_marking) _toggleMarking();
+                    },
                   },
-                  child: Stack(
-                    children: [
-                      InteractiveViewer(
-                        transformationController: _zoom,
-                        constrained: false,
-                        minScale: _minScale,
-                        maxScale: 8,
-                        boundaryMargin: const EdgeInsets.all(double.infinity),
-                        onInteractionStart: (_) => _fitted = false,
-                        child: SizedBox(
-                          width: image.width.toDouble(),
-                          height: image.height.toDouble(),
-                          child: CustomPaint(
-                            painter: _Checkerboard(
-                              palette.hairline,
-                              zoom: _zoom,
-                            ),
-                            child: RawImage(
-                              image: image,
-                              filterQuality: _scale > 2
-                                  ? FilterQuality.none
-                                  : FilterQuality.medium,
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (comments != null)
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: CustomPaint(
-                              painter: _Regions(
-                                comments: comments,
-                                zoom: _zoom,
-                                onScreen: _onScreen,
-                                drag: _dragFrom == null || _dragTo == null
-                                    ? null
-                                    : Rect.fromPoints(_dragFrom!, _dragTo!),
-                                signal: palette.signal,
-                                colorOf: (agentId) => agentColor(
-                                  comments.backend.workspace.workspace.agents
-                                          .where((a) => a.id == agentId)
-                                          .firstOrNull
-                                          ?.color ??
-                                      '',
+                  child: Focus(
+                    focusNode: _focus,
+                    child: GestureDetector(
+                      // While picking, a click is the spot at once: no
+                      // waiting to see if it's a double click.
+                      onTapUp: comments == null || _marking ? null : _tapped,
+                      onDoubleTapDown: _marking
+                          ? null
+                          : (details) => _doubleTapAt = details.localPosition,
+                      onDoubleTap: _marking ? null : _toggleActualSize,
+                      child: Listener(
+                        // A click takes the keys for zooming.
+                        onPointerDown: (_) => _focus.requestFocus(),
+                        // ⌘-scroll zooms about the pointer; a plain scroll pans,
+                        // and a pinch zooms, as InteractiveViewer does.
+                        onPointerSignal: (event) {
+                          if (event is PointerScrollEvent &&
+                              HardwareKeyboard.instance.isMetaPressed) {
+                            _zoomTo(
+                              _scale *
+                                  (event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1),
+                              at: event.localPosition,
+                            );
+                          }
+                        },
+                        child: Stack(
+                          children: [
+                            InteractiveViewer(
+                              transformationController: _zoom,
+                              constrained: false,
+                              minScale: _minScale,
+                              maxScale: 8,
+                              boundaryMargin: const EdgeInsets.all(
+                                double.infinity,
+                              ),
+                              onInteractionStart: (_) => _fitted = false,
+                              child: SizedBox(
+                                width: image.width.toDouble(),
+                                height: image.height.toDouble(),
+                                child: CustomPaint(
+                                  painter: _Checkerboard(
+                                    palette.hairline,
+                                    zoom: _zoom,
+                                  ),
+                                  child: RawImage(
+                                    image: image,
+                                    filterQuality: _scale > 2
+                                        ? FilterQuality.none
+                                        : FilterQuality.medium,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
+                            if (comments != null)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _Regions(
+                                      comments: comments,
+                                      zoom: _zoom,
+                                      onScreen: _onScreen,
+                                      drag: _dragFrom == null || _dragTo == null
+                                          ? null
+                                          : Rect.fromPoints(
+                                              _dragFrom!,
+                                              _dragTo!,
+                                            ),
+                                      signal: palette.signal,
+                                      ring: palette.canvas,
+                                      colorOf: (agentId) => agentColor(
+                                        comments
+                                                .backend
+                                                .workspace
+                                                .workspace
+                                                .agents
+                                                .where((a) => a.id == agentId)
+                                                .firstOrNull
+                                                ?.color ??
+                                            '',
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            // While marking, a drag draws a region instead of
+                            // moving the image.
+                            if (_marking)
+                              Positioned.fill(
+                                child: MouseRegion(
+                                  cursor: SystemMouseCursors.precise,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    // From where the pointer went down, not
+                                    // where the drag was recognised.
+                                    dragStartBehavior: DragStartBehavior.down,
+                                    onTapUp: (details) => _markSpot(
+                                      _fraction(details.localPosition),
+                                    ),
+                                    onPanStart: _markStart,
+                                    onPanUpdate: _markUpdate,
+                                    onPanEnd: _markEnd,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                      // While marking, a drag draws a region instead of
-                      // moving the image.
-                      if (_marking)
-                        Positioned.fill(
-                          child: MouseRegion(
-                            cursor: SystemMouseCursors.precise,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              // From where the pointer went down, not
-                              // where the drag was recognised.
-                              dragStartBehavior: DragStartBehavior.down,
-                              onPanStart: _markStart,
-                              onPanUpdate: _markUpdate,
-                              onPanEnd: _markEnd,
-                            ),
-                          ),
-                        ),
-                    ],
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+              if (comments != null)
+                Positioned(
+                  top: Space.m,
+                  right: Space.m,
+                  left: Space.m,
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    child: CommentPick(
+                      picking: _marking,
+                      visible: _hovered || _touch,
+                      hint:
+                          '${_touch ? 'Tap' : 'Click'} a spot or drag '
+                          'across an area to comment on it.',
+                      onToggle: _toggleMarking,
+                    ),
+                  ),
+                ),
+              // Whether the pointer is over the image, for the
+              // Comment button; it takes no clicks.
+              if (comments != null)
+                Positioned.fill(
+                  child: MouseRegion(
+                    opaque: false,
+                    hitTestBehavior: HitTestBehavior.translucent,
+                    onEnter: (_) => setState(() => _hovered = true),
+                    onExit: (_) => setState(() => _hovered = false),
+                  ),
+                ),
+            ],
           );
         },
       );
@@ -526,6 +630,7 @@ class _Regions extends CustomPainter {
     required this.onScreen,
     required this.drag,
     required this.signal,
+    required this.ring,
     required this.colorOf,
   }) : super(repaint: Listenable.merge([comments, comments.selection, zoom]));
 
@@ -534,12 +639,22 @@ class _Regions extends CustomPainter {
   final Rect Function(Rect region) onScreen;
   final Rect? drag;
   final Color signal;
+
+  /// Around each pin, so it shows on any picture: the canvas.
+  final Color ring;
   final Color Function(String agentId) colorOf;
 
   @override
   void paint(Canvas canvas, Size size) {
     void box(Rect region, Color color, {required bool strong}) {
       final rect = onScreen(region);
+      if (rect.isEmpty) {
+        // A spot: only its pin.
+        if (rect.width == 0 && rect.height == 0) {
+          paintPin(canvas, rect.topLeft, color: color, ring: ring);
+        }
+        return;
+      }
       canvas
         ..drawRect(
           rect,
@@ -554,24 +669,50 @@ class _Regions extends CustomPainter {
         );
     }
 
+    final pins = comments.pins;
+    final placed = <(Offset, Color, int, bool)>[];
     for (final thread in comments.shown) {
       final region = comments.regions[thread.id];
       if (region == null) continue;
-      box(
-        region,
-        colorOf(thread.agentId),
-        strong: comments.focused == thread.id,
+      final color = colorOf(thread.agentId);
+      final strong = comments.focused == thread.id;
+      if (region.width > 0 || region.height > 0) {
+        box(region, color, strong: strong);
+      }
+      final number = pins[thread.id];
+      if (number != null) {
+        placed.add((onScreen(region).topLeft, color, number, strong));
+      }
+    }
+    // Pins over every outline, the picked one on top.
+    placed.sort((a, b) => (a.$4 ? 1 : 0) - (b.$4 ? 1 : 0));
+    for (final (at, color, number, strong) in placed) {
+      paintPin(
+        canvas,
+        at,
+        color: color,
+        ring: ring,
+        number: number,
+        strong: strong,
       );
     }
     final selected = comments.selection.value;
-    if (selected is Region) box(selected.rect, signal, strong: false);
+    final writing = comments.composing;
+    if (writing is Region) {
+      box(writing.rect, signal, strong: false);
+    } else if (selected is Region) {
+      box(selected.rect, signal, strong: false);
+    }
     final drag = this.drag;
     if (drag != null) box(drag, signal, strong: false);
   }
 
   @override
   bool shouldRepaint(_Regions old) =>
-      old.drag != drag || old.signal != signal || old.comments != comments;
+      old.drag != drag ||
+      old.signal != signal ||
+      old.ring != ring ||
+      old.comments != comments;
 }
 
 /// Faint squares under an image, so where it's transparent shows: 8

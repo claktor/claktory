@@ -199,6 +199,23 @@ PLIST
   codesign --force --sign - "$app"
 }
 
+# Puts the helpers in the app (Contents/Helpers): the backend (factoryd),
+# the apps host (claktory-apps) and the supervisor's app, as the release has
+# them, so the app can install Claktory on a Mac by itself (`factoryd
+# install`, from a .dmg) or repair it. scripts/sign-release.sh signs them in
+# the app.
+add_helpers() {
+  local release="$1" app="$1/$2"
+  local helpers="$app/Contents/Helpers"
+  rm -rf "$helpers"
+  mkdir -p "$helpers"
+  cp "$release/factoryd" "$helpers/factoryd"
+  if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
+  if [[ -d "$release/supervisor/Claktory Agents.app" ]]; then
+    ditto "$release/supervisor/Claktory Agents.app" "$helpers/Claktory Agents.app"
+  fi
+}
+
 # The public repository holds one commit per release: its files are exactly
 # that release's source, its parent is the previous release's public commit,
 # and its message is what the release brings, from the changelog. The

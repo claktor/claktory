@@ -39,6 +39,8 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
     // The video viewer's player (VideoPlayers.swift).
     VideoPlayers.register(with: flutterViewController.registrar(forPlugin: "VideoPlayers"))
+    // Setting Claktory up from the app downloaded as a disk image (Setup.swift).
+    Setup.register(with: flutterViewController.engine.binaryMessenger)
 
     windowChannel = FlutterMethodChannel(
       name: "factory/window", binaryMessenger: flutterViewController.engine.binaryMessenger)

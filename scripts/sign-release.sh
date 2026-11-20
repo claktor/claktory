@@ -5,7 +5,8 @@
 # with the Developer ID, the hardened runtime and a secure timestamp. Then it
 # notarizes both with Apple and staples the ticket to the app.
 # scripts/release.sh runs it on each release it builds; --dev releases stay
-# signed ad hoc.
+# signed ad hoc. The app's helpers (Contents/Helpers) are the signed backend,
+# apps host and supervisor's app, copied in before the app is signed.
 #
 #   scripts/sign-release.sh RELEASE_DIR [--dry-run]
 #
@@ -69,7 +70,6 @@ find "$APP/Contents" -name '*.dylib' -type f -print0 | while IFS= read -r -d '' 
 for framework in "$APP"/Contents/Frameworks/*.framework; do
   if [[ -d "$framework" ]]; then sign "$framework"; fi
 done
-sign --entitlements "$ROOT/app/macos/Runner/Release.entitlements" "$APP"
 # The backend: a stable identifier (the linker's changes with every build),
 # so its designated requirement, which keychain items trust, survives updates.
 sign --identifier dev.factory.factoryd "$DIR/factoryd"
@@ -85,6 +85,18 @@ if [[ -n "$SUPERVISOR" ]]; then
   sign "$SUPERVISOR"
   codesign --verify --strict --deep "$SUPERVISOR"
 fi
+# The helpers in the app (scripts/lib.sh add_helpers) are the release's own,
+# just signed: the same bytes as the ones beside the app.
+HELPERS="$APP/Contents/Helpers"
+if [[ -d "$HELPERS" ]]; then
+  cp "$DIR/factoryd" "$HELPERS/factoryd"
+  if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$HELPERS/claktory-apps"; fi
+  if [[ -n "$SUPERVISOR" ]]; then
+    rm -rf "$HELPERS/Claktory Agents.app"
+    ditto "$SUPERVISOR" "$HELPERS/Claktory Agents.app"
+  fi
+fi
+sign --entitlements "$ROOT/app/macos/Runner/Release.entitlements" "$APP"
 
 codesign --verify --strict --deep "$APP"
 codesign --verify --strict "$DIR/factoryd"
