@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use factory_agent::compaction::Reason;
 use factory_agent::{
     Agent, AgentEvent, AgentOptions, Arrived, Background, Event, EventSource, Finished, Inbox, Message, StopReason, Task, ThinkingLevel,
     Tool, ToolSpec, UserMessage,
@@ -37,8 +38,10 @@ struct Job {
     places: Places,
     /// The conversation it belongs to (see `Runtime::epoch`).
     epoch: u64,
-    /// Compact before anything else (/compact).
-    compact: bool,
+    /// Compact before anything else: /compact, or idle (`crate::idle`).
+    compact: Option<Reason>,
+    /// How long its model's prompt cache is asked to last.
+    cache_ttl: factory_agent::CacheTtl,
 }
 
 /// What a system prompt is written from.
@@ -503,7 +506,8 @@ impl Factory {
             if checkout.exists() || crate::trees::failure(&checkout).is_some() {
                 return;
             }
-            let Some(runtime) = inner.agents.get(id) else { return };
+            // Compacting while idle works on the conversation, not in a folder.
+            let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.compact != Some(Reason::Idle)) else { return };
             (checkout, runtime.epoch, agent.name.clone())
         };
         let text = format!(
@@ -538,13 +542,21 @@ impl Factory {
         let compact_at = inner.config.compact_at_tokens;
         let models = inner.models.clone();
         let places = agent.as_ref().map(|agent| places(&self.home, &inner.config, agent));
+        let cache_ttl = agent.as_ref().and_then(|agent| inner.config.cache_ttl(&agent.model)).unwrap_or_default();
         let runtime = inner.agents.get_mut(id)?;
         let Some(agent) = agent else {
             runtime.running = false;
+            runtime.idle = false;
             return None;
         };
-        if runtime.queue.is_empty() && !runtime.compact {
+        // New work came before compacting while idle began: it goes first,
+        // on the conversation as it is.
+        if runtime.compact == Some(Reason::Idle) && !runtime.queue.is_empty() {
+            runtime.compact = None;
+        }
+        if runtime.queue.is_empty() && runtime.compact.is_none() {
             runtime.running = false;
+            runtime.idle = false;
             let outcome = if runtime.failed { "failed" } else { "finished" };
             if self.end_run(runtime, outcome) {
                 self.mark_unseen(&mut inner, id);
@@ -558,27 +570,31 @@ impl Factory {
         // agent should know comes first in this run. A compaction writes a
         // new frame anyway.
         let compact = runtime.compact;
-        let note = if compact { None } else { self.take_changes(&mut inner, id, current) };
-        let cleared = crate::extensions::tree::caches::take_note(self, id);
+        // Compacting while idle is no run of the agent's: nothing is taken
+        // for it, and it ends with no news.
+        let idle = compact == Some(Reason::Idle);
+        runtime.idle = idle;
+        let note = if compact.is_some() { None } else { self.take_changes(&mut inner, id, current) };
+        let cleared = if idle { None } else { crate::extensions::tree::caches::take_note(self, id) };
         let runtime = inner.agents.get_mut(id)?;
         // A new run: a stop before now was of the one that ended.
         runtime.stopped = false;
         let mut prompts = std::mem::take(&mut runtime.queue);
         prompts.splice(0..0, note.into_iter().chain(cleared));
-        let (epoch, compact) = (runtime.epoch, std::mem::take(&mut runtime.compact));
+        let (epoch, compact) = (runtime.epoch, runtime.compact.take());
         let frame = runtime
             .transcript
             .as_ref()
             .and_then(|transcript| transcript.frame())
             .filter(|frame| frame_model(frame) == agent.model)
             .cloned();
-        let run = self.begin_run(id, runtime);
+        let run = if idle { None } else { self.begin_run(id, runtime) };
         runtime.taken.extend(prompts.iter().map(|queued| (queued.clone(), run)));
         let messages = runtime.transcript.as_ref().map(|transcript| transcript.messages().to_vec()).unwrap_or_default();
         let extensions = enabled_extensions(&agent);
         self.broadcast_workspace(&inner);
         let places = places?;
-        Some(Job { prompts, agent, compact_at, messages, models, extensions, frame, places, epoch, compact })
+        Some(Job { prompts, agent, compact_at, messages, models, extensions, frame, places, epoch, compact, cache_ttl })
     }
 
     /// What changed that the agent should hear of since it was last told
@@ -802,6 +818,7 @@ impl Factory {
             after_compaction: Some(after_compaction),
             secrets: Some(self.secrets(id)),
         });
+        agent.state.cache_ttl = job.cache_ttl;
         let factory = self.clone();
         let agent_id = id.to_owned();
         let epoch = job.epoch;
@@ -821,10 +838,15 @@ impl Factory {
         for queued in job.prompts {
             prompts.push(user_message(queued));
         }
-        if job.compact {
-            match agent.compact().await {
+        if let Some(reason) = job.compact {
+            let idle = reason == Reason::Idle;
+            // Work that came meanwhile wins over compacting while idle.
+            let skip = idle && self.lock().agents.get(id).is_none_or(|runtime| !runtime.queue.is_empty() || runtime.stopped);
+            match if skip { Err(factory_agent::Error::Aborted) } else { agent.compact_for(reason).await } {
                 Ok(()) => {}
                 Err(factory_agent::Error::Aborted) => prompts.clear(),
+                // Nobody asked for it: the conversation stays as it was, with no news.
+                Err(error) if idle => tracing::warn!(agent = %id, %error, "compacting while idle failed"),
                 Err(error) => {
                     tracing::warn!(agent = %id, %error, "compaction failed");
                     self.notice(id, job.epoch, format!("Couldn't compact: {error}"), NoticeLevel::Error);
@@ -990,6 +1012,13 @@ impl Factory {
     async fn apply(&self, id: &str, epoch: u64, event: AgentEvent) {
         let persist = {
             let mut inner = self.lock();
+            // A model call's tokens, for the account's check-ins.
+            if matches!(event, AgentEvent::MessageEnd { .. } | AgentEvent::Compacted { .. })
+                && let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.epoch == epoch)
+            {
+                let model = inner.config.agent(id).map(|agent| agent.model.as_str()).unwrap_or_default();
+                crate::account::analytics::record(&self.store.db(), runtime.run, model, &event);
+            }
             let Some(runtime) = inner.agents.get_mut(id) else { return };
             // A run of a conversation the person cleared.
             if runtime.epoch != epoch {
@@ -1148,6 +1177,8 @@ impl Factory {
                 let Some(factory) = factory.upgrade() else {
                     return Err("Claktory is stopping.".to_owned());
                 };
+                // Locked after a restart: the account service may open it now.
+                crate::account::unlock_now(&factory).await;
                 factory.vault.resolve(&agent, &names)
             })
         });

@@ -72,7 +72,7 @@ impl Factory {
             self.end_run(runtime, "stopped");
             // What the stopped run still reports belongs to the old conversation.
             runtime.epoch += 1;
-            runtime.compact = false;
+            runtime.compact = None;
             runtime.doing = None;
             // A fresh start: idle from now, whatever its last run did.
             self.reset_presence(id);
@@ -106,7 +106,7 @@ impl Factory {
         if runtime.transcript.as_ref().is_none_or(|transcript| transcript.messages().is_empty()) {
             return Err(RequestError::Command("Nothing to compact yet.".to_owned()));
         }
-        runtime.compact = true;
+        runtime.compact = Some(factory_agent::compaction::Reason::Requested);
         runtime.stopped = false;
         runtime.running = true;
         tokio::spawn(self.clone().run(id.to_owned()));

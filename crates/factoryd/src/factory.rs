@@ -122,6 +122,9 @@ pub enum RequestError {
     Layout(String),
     #[error(transparent)]
     Vault(#[from] crate::vault::VaultError),
+    /// The account service's answer, or why it can't be asked (`crate::account`).
+    #[error("{1}")]
+    Account(v1::ErrorCode, String),
 }
 
 impl RequestError {
@@ -155,6 +158,7 @@ impl RequestError {
             | RequestError::Proposal(_)
             | RequestError::BuildCache(_)
             | RequestError::Layout(_) => v1::ErrorCode::InvalidRequest,
+            RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
                 v1::ErrorCode::Internal
             }
@@ -165,7 +169,7 @@ impl RequestError {
                     VaultError::ProofRequired => v1::ErrorCode::ProofRequired,
                     VaultError::WrongProof => v1::ErrorCode::WrongProof,
                     VaultError::NotGranted { .. } => v1::ErrorCode::NotGranted,
-                    VaultError::NoSecret(_) => v1::ErrorCode::NotFound,
+                    VaultError::NoSecret(_) | VaultError::NoRequest(_) => v1::ErrorCode::NotFound,
                     VaultError::NoVault | VaultError::Exists | VaultError::Invalid(_) => v1::ErrorCode::InvalidRequest,
                     VaultError::Db(_) | VaultError::Io(_) => v1::ErrorCode::Internal,
                 }
@@ -237,12 +241,16 @@ pub struct Factory {
     /// Build caches found, and cleared ones agents are to hear of
     /// (`extensions::tree::caches`).
     pub(crate) build_caches: crate::extensions::tree::caches::State,
+    /// When idle agents compact (`crate::idle`).
+    pub(crate) idle: crate::idle::State,
     /// Agents' layouts (`extensions::viewer`).
     pub(crate) viewer: crate::extensions::viewer::State,
     /// The secrets agents use (`crate::vault`).
     pub(crate) vault: crate::vault::Vault,
     /// Hides the vault's values in what agents and the app are shown.
     pub(crate) redaction: factory_agent::Redaction,
+    /// This Claktory's account at claktory.com (`crate::account`).
+    pub(crate) account: crate::account::State,
 }
 
 pub(crate) struct Inner {
@@ -343,8 +351,15 @@ pub(crate) struct Runtime {
     /// Held while the conversation's files are written, so none is written
     /// after /clear moved them away.
     pub(crate) writes: Arc<tokio::sync::Mutex<()>>,
-    /// The person asked for /compact; the next run does it first.
-    pub(crate) compact: bool,
+    /// The next run compacts first: the person asked for /compact, or it's
+    /// idle with its prompt cache about to expire (`crate::idle`).
+    pub(crate) compact: Option<factory_agent::compaction::Reason>,
+    /// The run in progress only compacts an idle agent's conversation: new
+    /// work for it cancels that, and it ends with no news of a run.
+    pub(crate) idle: bool,
+    /// The model response an idle compaction was last tried after (its
+    /// timestamp), so it's tried once until the agent works again.
+    pub(crate) idle_tried: u64,
     /// The run hit an error it didn't recover from (its model call or
     /// compaction failed for good, or its folder was unusable); it ends as
     /// "failed" unless a later prompt in it succeeds. Cleared when it ends.
@@ -447,6 +462,7 @@ impl Factory {
         let viewer = crate::extensions::viewer::State::load(&store);
         let remote = crate::remote::State::new(&home);
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
+        let account = crate::account::State::new(&home);
         let factory = Arc::new(Factory {
             home,
             models,
@@ -466,9 +482,11 @@ impl Factory {
             remote,
             resources: crate::extensions::resources::State::default(),
             build_caches: crate::extensions::tree::caches::State::default(),
+            idle: crate::idle::State::default(),
             viewer,
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
+            account,
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
@@ -490,6 +508,8 @@ impl Factory {
         tokio::spawn(crate::remote::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::resources::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         Ok(factory)
     }
 
@@ -724,6 +744,9 @@ impl Factory {
             panel_width,
             user_name,
             vault_unlock_minutes,
+            idle_compaction,
+            idle_compaction_short_cache,
+            cache_ttl,
         } = request;
         let (model, effort) = (model.as_deref(), effort.as_deref());
         let models = self.lock().models.clone();
@@ -761,6 +784,28 @@ impl Factory {
             }
             if let Some(minutes) = vault_unlock_minutes {
                 config.vault.unlock_minutes = minutes;
+            }
+            if let Some(on) = idle_compaction {
+                config.compaction.idle = on;
+            }
+            if let Some(on) = idle_compaction_short_cache {
+                config.compaction.idle_short_cache = on;
+            }
+            if let Some(v1::CacheTtl { key, ttl }) = cache_ttl {
+                let key = key.trim().to_owned();
+                match ttl.trim() {
+                    "" => {
+                        config.prompt_cache.remove(&key);
+                    }
+                    ttl => {
+                        let Some(ttl) = factory_agent::CacheTtl::parse(ttl) else {
+                            return Err(RequestError::Invalid(crate::config::Invalid::BadPromptCache(format!(
+                                "{key}: ttl \"{ttl}\" isn't 5m or 1h"
+                            ))));
+                        };
+                        config.prompt_cache.insert(key, ttl);
+                    }
+                }
             }
             for (value, setting) in [(sidebar_width, &mut config.display.sidebar_width), (panel_width, &mut config.display.panel_width)] {
                 if let Some(value) = value {
@@ -908,6 +953,13 @@ impl Factory {
         let runtime = inner.agents.entry(id.to_owned()).or_default();
         runtime.queue.push(queued);
         runtime.stopped = false;
+        // New work wins over compacting while idle: the conversation stays
+        // as it was, and the run goes on with the message.
+        if runtime.idle
+            && let Some(abort) = &runtime.abort
+        {
+            abort.abort();
+        }
         if !runtime.running {
             runtime.running = true;
             tokio::spawn(self.clone().run(id.to_owned()));
@@ -943,6 +995,14 @@ impl Factory {
         let mut transcript = Transcript::load(self.home.agent_dir(id)).await?;
         if let Err(error) = crate::proposals::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read proposals; decided ones show as pending");
+        }
+        match self.vault.requests_of(id) {
+            Ok(requests) => {
+                for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
+                    transcript.set_secret_request(request);
+                }
+            }
+            Err(error) => tracing::error!(agent = %id, %error, "could not read secret requests; decided ones show as pending"),
         }
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
@@ -1457,6 +1517,7 @@ impl Factory {
             changelog: inner.latest_release.changelog.iter().map(crate::update::ChangelogVersion::to_proto).collect(),
             remote: Some(self.remote_view(inner)),
             vault: Some(self.vault.state(|agent, task| self.store.task_running(agent, task))),
+            account: self.account.view(&config.account),
             update_error: inner.update_error.clone(),
             next_agent_color: inner.config.next_color().to_owned(),
             extensions: crate::extensions::catalog(),
@@ -1485,6 +1546,7 @@ impl Factory {
                         usage: if signed_in { inner.usage.get(&first).cloned().or_else(|| provider.usage.clone()) } else { None },
                         plan: if signed_in { inner.plans.get(&first).cloned().unwrap_or_default() } else { String::new() },
                         accounts,
+                        cache_ttl: config.cache_ttl(&provider.id).map(|ttl| ttl.as_str().to_owned()).unwrap_or_default(),
                         ..provider.clone()
                     }
                 })
@@ -1503,6 +1565,13 @@ impl Factory {
                 panel_width: config.display.panel_width,
                 user_name: config.user.name.clone(),
                 vault_unlock_minutes: config.vault.unlock_minutes,
+                idle_compaction: config.compaction.idle,
+                idle_compaction_short_cache: config.compaction.idle_short_cache,
+                cache_ttls: config
+                    .prompt_cache
+                    .iter()
+                    .map(|(key, ttl)| v1::CacheTtl { key: key.clone(), ttl: ttl.as_str().to_owned() })
+                    .collect(),
             }),
         }
     }
@@ -1635,6 +1704,17 @@ pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
 impl Factory {
     /// The vault changed: what's hidden follows its values, and clients see
     /// it as it is now.
+    /// Opens the vault with the key the backend before this one handed over
+    /// at an update (see `vault::handoff`).
+    pub fn take_vault_key(&self, handed: crate::vault::handoff::Handed) {
+        if self.vault.take(handed) {
+            tracing::info!("the vault stays open across the update");
+            self.vault_changed();
+        } else {
+            tracing::warn!("a key handed over at the update doesn't open the vault; it opens as after a restart");
+        }
+    }
+
     pub(crate) fn vault_changed(&self) {
         self.redaction.set(factory_agent::Redactor::new(&self.vault.every_variable()));
         self.broadcast_workspace(&self.lock());

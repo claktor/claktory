@@ -1775,8 +1775,9 @@ class _CompactionView extends StatelessWidget {
               Expanded(child: Container(height: 1, color: palette.hairline)),
               const SizedBox(width: Space.m),
               Text(
-                'Context compacted at '
-                '${formatTokens(compaction.tokensBefore)} tokens',
+                compaction.idle
+                    ? 'Earlier messages summarized while idle'
+                    : 'Earlier messages summarized',
                 style: TextStyles.caption.copyWith(color: color),
               ),
               const SizedBox(width: Space.xs + 2),
@@ -1787,7 +1788,21 @@ class _CompactionView extends StatelessWidget {
           ),
         );
       },
-      body: (context) => Markdown(compaction.summary, color: palette.textMuted),
+      body: (context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // How big the conversation was, for whoever opens it to see.
+          if (compaction.tokensBefore > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: Text(
+                'Summarized at ${formatTokens(compaction.tokensBefore)} tokens.',
+                style: TextStyles.caption.copyWith(color: palette.textFaint),
+              ),
+            ),
+          Markdown(compaction.summary, color: palette.textMuted),
+        ],
+      ),
     );
   }
 }

@@ -382,6 +382,11 @@ pub enum AgentEvent {
         summary: String,
         tokens_before: u64,
         messages: Vec<Message>,
+        /// What writing the summary took: a model request like any other.
+        #[serde(default)]
+        usage: Usage,
+        #[serde(default)]
+        reason: crate::compaction::Reason,
     },
 }
 

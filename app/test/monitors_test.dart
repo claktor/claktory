@@ -93,6 +93,7 @@ void main() {
   testWidgets('active, paused and ended monitors, then what else wakes it', (
     tester,
   ) async {
+    final made = DateTime.now();
     await show(
       tester,
       [
@@ -139,11 +140,15 @@ void main() {
     expect(top('Deploy'), lessThan(top('Also wakes it')));
 
     expect(inPanel(find.text('every 1h')), findsWidgets);
-    // The real clock moves while the test runs, so allow a second.
-    expect(
-      inPanel(find.textContaining(RegExp(r'^next in 4m 1[12]s$'))),
-      findsOneWidget,
+    // The real clock moves while the test runs (seconds, on a busy
+    // machine), so any count from 4m 12s down to what it's been since.
+    final next = inPanel(find.textContaining(RegExp(r'^next in 4m \d+s$')));
+    expect(next, findsOneWidget);
+    final left = int.parse(
+      RegExp(r'(\d+)s$').firstMatch(tester.widget<Text>(next).data!)!.group(1)!,
     );
+    final since = DateTime.now().difference(made).inSeconds;
+    expect(left, inInclusiveRange(12 - since - 1, 12));
     expect(inPanel(find.text('3 fires')), findsOneWidget);
     expect(inPanel(find.text('2 of 5 fires')), findsOneWidget);
     expect(inPanel(find.text('never fired')), findsWidgets);

@@ -569,14 +569,16 @@ async fn an_agents_system_prompt_and_tools_hold_still_and_changes_are_appended()
     assert_eq!(sent(), first);
     ack(apply_request(&mut client, &mut view, turn("lead", "agents", true)).await);
 
-    // A compaction starts the next context, with its settings as they are now;
-    // what it was told of them isn't summarized.
+    // A compaction starts the next context, with its settings as they are now.
+    // The summary is asked for after the context as it was sent, notes and all,
+    // so the prompt cache holds; the model is told to leave the notes out.
     let compact = v1::RunCommand { agent_id: "lead".into(), name: "compact".into(), args: String::new() };
     ack(apply_request(&mut client, &mut view, client_message::Body::RunCommand(compact)).await);
     view.follow(&mut client, |view| view.entries.iter().any(|entry| matches!(entry.kind, Some(Kind::Compaction(_)))) && idle(view, "lead"))
         .await;
     let summarized = compacted.lock().expect("lock").clone();
-    assert!(summarized.contains("now?") && !summarized.contains("Your settings changed"), "{summarized}");
+    assert!(summarized.contains("now?") && summarized.contains("Your settings changed"), "{summarized}");
+    assert!(summarized.contains("Leave out the notes from the program running you"), "{summarized}");
     talk(&mut client, &mut view, "after").await;
     let (prompt, tools) = sent();
     assert!(prompt.contains("Lead the site.") && tools.contains("checklist_add"), "{prompt}");

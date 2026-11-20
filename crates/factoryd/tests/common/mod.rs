@@ -27,6 +27,11 @@ use tokio_tungstenite::{WebSocketStream, client_async};
 pub const MODEL: &str = "scripted/echo";
 /// Another model, which works like `MODEL`.
 pub const OTHER_MODEL: &str = "scripted/parrot";
+/// A model of a provider whose prompt cache lifetime Claktory chooses
+/// ("anthropic"), with a 200,000-token window, whose responses report
+/// 160,000 tokens of context and are stamped with when they were asked for,
+/// as real ones are. Listed only by `Scripted::with_long_model`.
+pub const LONG_MODEL: &str = "anthropic/long";
 /// How long a test waits for the server before calling it a hang. Never a
 /// measure of speed: a test process starved of the processor (agents' builds
 /// and tests run beside it) can stall for many seconds, and only a real hang
@@ -98,6 +103,8 @@ pub struct Scripted {
     pub compacted: Arc<Mutex<String>>,
     /// Every request, oldest first.
     pub requests: Arc<Mutex<Vec<Request>>>,
+    /// Lists `LONG_MODEL` too.
+    long: bool,
 }
 
 /// What a model request was sent with.
@@ -109,6 +116,8 @@ pub struct Request {
     pub system_prompt: String,
     /// The tools' names, in order.
     pub tools: Vec<String>,
+    /// How long the prompt cache was asked to last: "5m" or "1h".
+    pub cache_ttl: String,
 }
 
 const ACCOUNT: &str = "Scripted account";
@@ -122,6 +131,7 @@ impl Scripted {
             tools: Arc::default(),
             compacted: Arc::default(),
             requests: Arc::default(),
+            long: false,
         }
     }
 
@@ -133,6 +143,7 @@ impl Scripted {
             tools: Arc::default(),
             compacted: Arc::default(),
             requests: Arc::default(),
+            long: false,
         }
     }
 
@@ -143,7 +154,14 @@ impl Scripted {
             tools: Arc::default(),
             compacted: Arc::default(),
             requests: Arc::default(),
+            long: false,
         }
+    }
+
+    /// Lists `LONG_MODEL` too.
+    pub fn with_long_model(mut self) -> Scripted {
+        self.long = true;
+        self
     }
 
     fn current(&self) -> Option<&'static str> {
@@ -153,13 +171,16 @@ impl Scripted {
 
 impl Models for Scripted {
     fn list(&self) -> BoxFuture<'_, Vec<v1::Model>> {
-        let models = match self.current() {
+        let mut models = match self.current() {
             Some(_) => vec![
                 v1::Model { id: MODEL.into(), name: "Echo".into(), context_window: 10_000, efforts: vec!["off".into()] },
                 v1::Model { id: OTHER_MODEL.into(), name: "Parrot".into(), context_window: 10_000, efforts: vec!["off".into()] },
             ],
             None => Vec::new(),
         };
+        if self.long && self.current().is_some() {
+            models.push(v1::Model { id: LONG_MODEL.into(), name: "Long".into(), context_window: 200_000, efforts: vec!["off".into()] });
+        }
         Box::pin(async move { models })
     }
 
@@ -178,6 +199,7 @@ impl Models for Scripted {
                 usage: None,
                 plan: String::new(),
                 accounts: Vec::new(),
+                cache_ttl: String::new(),
             }]
         })
     }
@@ -228,16 +250,31 @@ impl Models for Scripted {
     }
 
     fn resolve(&self, id: &str) -> Option<Model> {
-        (id == MODEL || id == OTHER_MODEL).then(|| Model {
-            id: if id == OTHER_MODEL { "parrot" } else { "echo" }.into(),
-            name: if id == OTHER_MODEL { "Parrot" } else { "Echo" }.into(),
+        let long = self.long && id == LONG_MODEL;
+        (id == MODEL || id == OTHER_MODEL || long).then(|| Model {
+            id: if long {
+                "long"
+            } else if id == OTHER_MODEL {
+                "parrot"
+            } else {
+                "echo"
+            }
+            .into(),
+            name: if long {
+                "Long"
+            } else if id == OTHER_MODEL {
+                "Parrot"
+            } else {
+                "Echo"
+            }
+            .into(),
             api: "scripted".into(),
-            provider: "scripted".into(),
+            provider: if long { "anthropic" } else { "scripted" }.into(),
             base_url: String::new(),
             reasoning: false,
             input: vec!["text".into()],
             cost: ModelCost::default(),
-            context_window: 10_000,
+            context_window: if long { 200_000 } else { 10_000 },
             max_tokens: 1_000,
             thinking_level_map: None,
             compat: None,
@@ -257,6 +294,7 @@ impl Models for Scripted {
                 effort: options.reasoning.map_or("off".to_owned(), |level| format!("{level:?}").to_lowercase()),
                 system_prompt: context.system_prompt.clone().unwrap_or_default(),
                 tools: context.tools.iter().map(|tool| tool.name.to_string()).collect(),
+                cache_ttl: options.cache_ttl.as_str().to_owned(),
             });
             *system_prompt.lock().expect("lock") = context.system_prompt.clone().unwrap_or_default();
             *tools.lock().expect("lock") = serde_json::to_string(&context.tools).expect("tools");
@@ -296,10 +334,10 @@ impl Models for Scripted {
                 api: model.api.clone(),
                 provider: model.provider.clone(),
                 model: model.id.clone(),
-                usage: Usage { input: 1_000, output: 200, ..Usage::default() },
+                usage: Usage { input: if model.provider == "anthropic" { 160_000 } else { 1_000 }, output: 200, ..Usage::default() },
                 stop_reason: StopReason::Stop,
                 error_message: None,
-                timestamp: 1,
+                timestamp: if model.provider == "anthropic" { factoryd::transcript::now_ms() as u64 } else { 1 },
                 extra: Default::default(),
             };
             let (sink, stream) = event_stream();
@@ -353,8 +391,10 @@ impl Models for Scripted {
                 sink.push(StreamEvent::Error { reason: StopReason::Error, error: partial });
                 return Ok(stream);
             }
-            // "hang" never finishes, like a run a restart cuts off.
-            if prompt.ends_with("hang") {
+            // "hang" never finishes, like a run a restart cuts off; so does
+            // the summary of a conversation that mentions "slow summary".
+            let slow_summary = prompt.contains("<summary>") && compacted.lock().expect("lock").contains("slow summary");
+            if prompt.ends_with("hang") || slow_summary {
                 tokio::spawn(async move {
                     let _open = sink;
                     std::future::pending::<()>().await

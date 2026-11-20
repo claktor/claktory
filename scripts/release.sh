@@ -19,17 +19,45 @@
 #
 #   scripts/release.sh         for the real Factory (~/.factory, Factory.app)
 #   scripts/release.sh --dev   for the dev Factory (~/.factory-dev, Factory Dev)
+#   scripts/release.sh --out DIR
+#                              a release for the real Factory, built and
+#                              signed exactly the same, into DIR instead of
+#                              ~/.factory/releases: a rehearsal (of signing
+#                              and notarizing, say) that no running Claktory
+#                              sees, so it shows no Update banner.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
+usage() { echo "usage: scripts/release.sh [--dev | --out DIR]" >&2; exit 2; }
 case "${1:-}" in
-  "") HOME_DIR="$HOME/.factory"; APP_NAME="Factory.app"; DEFINES=() ;;
-  --dev) HOME_DIR="$HOME/.factory-dev"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true) ;;
-  *) echo "usage: scripts/release.sh [--dev]" >&2; exit 2 ;;
+  "") RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=() ;;
+  --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true) ;;
+  --out)
+    [[ -n "${2:-}" ]] || usage
+    RELEASES="$(mkdir -p "$2" && cd "$2" && pwd)"
+    case "$RELEASES/" in
+      "$HOME/.factory/"* | "$HOME/.factory-dev/"*) echo "--out is for a folder outside ~/.factory and ~/.factory-dev" >&2; exit 2 ;;
+    esac
+    APP_NAME="Factory.app"; DEFINES=()
+    ;;
+  *) usage ;;
 esac
-RELEASES="$HOME_DIR/releases"
+if [[ "$APP_NAME" == "Factory.app" ]]; then
+  # Built only from what's committed: a release is never someone's work in
+  # progress. The real one only from main's commit (on main, or a checkout
+  # whose branch is exactly main).
+  [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || {
+    echo "the checkout has uncommitted or untracked changes; a release is built from a clean tree only:" >&2
+    git -C "$ROOT" status --short >&2
+    exit 1
+  }
+  if [[ "$RELEASES" == "$HOME/.factory/releases" && "$(git -C "$ROOT" rev-parse HEAD)" != "$(git -C "$ROOT" rev-parse main)" ]]; then
+    echo "a release is built from main's commit only; this checkout is at $(git -C "$ROOT" rev-parse --short HEAD), main at $(git -C "$ROOT" rev-parse --short main)" >&2
+    exit 1
+  fi
+fi
 mkdir -p "$RELEASES"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
   # The version the changelog's newest entries are stamped with.
@@ -69,6 +97,10 @@ mkdir -p "$partial"
 cp "$BACKEND" "$partial/factoryd"
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
+# What it was built from, for scripts/publish.sh --built: the commit, and the
+# channel stamped into its backend (none unless FACTORY_UPDATE_URL was set).
+git -C "$ROOT" rev-parse HEAD >"$partial/source"
+echo "${FACTORY_UPDATE_URL:-}" >"$partial/update-url"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
   # What's unreleased stays out of a real release.
   awk '/^## /{skip = ($0 == "## Unreleased")} !skip' "$ROOT/docs/CHANGELOG.md" >"$partial/CHANGELOG.md"

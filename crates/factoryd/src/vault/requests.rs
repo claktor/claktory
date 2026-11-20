@@ -174,6 +174,10 @@ impl Session {
         Session { device }
     }
 
+    pub(crate) fn device(&self) -> &str {
+        &self.device
+    }
+
     /// Unused since requests need no proof: always 0.
     pub(crate) fn answer(&self) -> v1::VaultSession {
         v1::VaultSession { unlocked_until_ms: 0 }
@@ -266,6 +270,14 @@ pub(crate) async fn new_recovery_key(
     Ok(v1::RecoveryKey { key, unlocked_until_ms: 0 })
 }
 
+/// The recovery key to note down (one is made if there's none), logged as
+/// shown on the session's device.
+pub(crate) fn show_recovery_key(factory: &Factory, session: &Session) -> Result<v1::RecoveryKey, RequestError> {
+    let key = factory.vault.recovery_key(session.device())?;
+    factory.vault_changed();
+    Ok(v1::RecoveryKey { key, unlocked_until_ms: 0 })
+}
+
 pub(crate) async fn set_locked_mode(
     factory: &Arc<Factory>,
     session: &mut Session,
@@ -275,4 +287,64 @@ pub(crate) async fn set_locked_mode(
     factory.vault.set_locked_mode(request.locked_mode)?;
     factory.vault_changed();
     Ok(session.answer())
+}
+
+/// The person gives an agent what it asked for (a new secret made from
+/// `entries`, or an existing one), or dismisses the request; its entry
+/// shows the decision, and the agent is told.
+pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
+    let agent = request.agent_id.as_str();
+    if factory.lock().config.agent(agent).is_none() {
+        return Err(RequestError::UnknownAgent(agent.to_owned()));
+    }
+    let asked = factory.vault.pending_request(agent, &request.request_id)?;
+    let mut name = asked.secret_name.clone();
+    if request.approve {
+        let secret = match &asked.new_secret {
+            Some(wanted) => {
+                let entries = values(&request.entries);
+                if entries.is_empty() {
+                    return Err(VaultError::Invalid("Enter the values of the secret it asked for.".to_owned()).into());
+                }
+                factory.vault.create_secret(&wanted.name, &wanted.description, &entries, "")?
+            }
+            None => asked.secret_id.clone(),
+        };
+        name = give(factory, &secret, agent, "")?;
+    }
+    let decided = factory.vault.decide_request(agent, &asked.id, request.approve, &request.comment)?;
+    factory.vault_changed();
+    // Its entry shows the decision.
+    {
+        let mut inner = factory.lock();
+        let entry = inner
+            .agents
+            .get_mut(agent)
+            .and_then(|runtime| runtime.transcript.as_mut())
+            .and_then(|transcript| transcript.set_secret_request(decided));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+    }
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let comment = request.comment.trim();
+    let mut summary = if request.approve {
+        format!("{person} gave you {name}: pass it in bash's `secrets`")
+    } else {
+        format!("{person} dismissed your request for {name}")
+    };
+    if !comment.is_empty() {
+        summary.push_str(&format!(" (comment: {comment})"));
+    }
+    summary.push('.');
+    let text = format!("{summary}\n\nYou asked because: {}", asked.reason);
+    let event = factory_agent::Event {
+        source: factory_agent::EventSource::Host,
+        from: "Claktory".to_owned(),
+        id: String::new(),
+        summary,
+        transient: false,
+    };
+    factory.deliver_event(agent, text, event);
+    Ok(())
 }

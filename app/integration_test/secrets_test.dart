@@ -1,6 +1,8 @@
 // Drives Settings → Secrets on an iPhone (the Simulator) end to end against a
-// real Claktory: adds a secret, pastes a .env, gives the secret to an agent, has the agent use it in bash, checks
-// the value never reaches the conversation, and takes it back.
+// real Claktory: adds a secret, pastes a .env, gives the secret to an agent,
+// has the agent use it in bash, checks the value never reaches the
+// conversation, takes it back, then has the agent ask for a new secret and
+// gives it from the request waiting in Settings → Secrets.
 //
 //   cd app && flutter test integration_test/secrets_test.dart -d <simulator> \
 //     --dart-define=FACTORY_DEV=true --dart-define=PAIRING_CODE='factory://…' \
@@ -48,7 +50,9 @@ Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('secrets: add, paste, give, use, take back', (tester) async {
+  testWidgets('secrets: add, paste, give, use, take back, a request given', (
+    tester,
+  ) async {
     await app.main();
     await tester.pump(const Duration(seconds: 1));
     if (find.text('Connect to your Claktory').evaluate().isNotEmpty) {
@@ -224,6 +228,49 @@ void main() {
     // ignore: avoid_print
     print('uses: ${[for (final use in uses) '${use.kind} ${use.detail}']}');
     expect(uses.map((u) => u.kind), containsAll(['grant', 'use', 'revoke']));
+    await hold(tester, seconds: 3);
+
+    // The agent asks for a new secret; its request waits at the top of
+    // Settings → Secrets, and is given there.
+    final asked = 'Req$stamp';
+    scope.page.value = AppPage.agent;
+    await tester.pump(const Duration(milliseconds: 300));
+    await waitFor(tester, find.text('Send'));
+    await tester.enterText(
+      find.byType(EditableText).last,
+      'This is a test of secret requests from the iPhone app. Ask me for a '
+      'new secret with secrets_request: name $asked, description "Token '
+      'for the request test", one variable REQ_TOKEN, reason "To test '
+      'requests." Then stop; no need to reply.',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Send'));
+    final requested = DateTime.now().add(const Duration(minutes: 3));
+    while (!vault().requests.any((r) => r.newSecret.name == asked)) {
+      if (DateTime.now().isAfter(requested)) fail('No request for $asked');
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    scope.page.value = AppPage.settings;
+    await tester.pump(const Duration(milliseconds: 300));
+    final card = find.text('$_agent asks for a new secret: $asked');
+    await _scrollTo(tester, card);
+    final settings = find.descendant(
+      of: find.byType(SettingsView),
+      matching: find.byType(SecretRequestCard),
+    );
+    expect(settings, findsOneWidget);
+    await tester.enterText(
+      find.descendant(of: settings, matching: find.byType(EditableText)).first,
+      'req-value-$stamp',
+    );
+    await tester.pump();
+    await hold(tester, seconds: 3);
+    await tester.tap(
+      find.descendant(of: settings, matching: find.text('Add and give')),
+    );
+    await waitFor(tester, card, gone: true);
+    final made = vault().secrets.firstWhere((s) => s.name == asked);
+    expect(made.grants.map((g) => g.agentId), contains(agent.id));
     await hold(tester, seconds: 5);
   });
 }

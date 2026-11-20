@@ -12,7 +12,7 @@ import 'extensions.dart';
 import 'identity.dart';
 import 'layout.dart';
 import 'marketplace.dart';
-import 'panes.dart' show paneGlyph, paneTitle;
+import 'panes.dart' show pageOfKind, paneGlyph, paneTitle;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show ClaktoriesBackRow;
 import 'scanner.dart';
@@ -305,7 +305,10 @@ class _ExtensionList extends StatelessWidget {
     final extensions = enabledExtensions(backend.workspace.workspace, agent);
     final viewers = [
       for (final pane in leaves(layoutOf(agent)))
-        if (pane.leaf.kind != chatKind) pane,
+        // Settings and other pages a Mac shows beside the conversation are
+        // the phone's own screens here.
+        if (pane.leaf.kind != chatKind && pageOfKind(pane.leaf.kind) == null)
+          pane,
     ];
     Widget row({
       required Widget glyph,

@@ -1,4 +1,5 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/selection.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
@@ -211,8 +212,9 @@ void main() {
       final copied = watchClipboard(tester);
       final harness = Harness(workspace(agents: [builder(working: false)]));
       await harness.show(tester);
-      // Opened as the person opens it, with a click on the cog.
-      await tester.tap(find.bySemanticsLabel('Settings'));
+      // As a page of its own (a phone, or no agent to show it beside),
+      // with its Done button; beside a conversation it's the same view.
+      harness.page.value = AppPage.settings;
       await settle(tester);
       // Text joins the selection after the frame that builds it.
       await tester.pump();

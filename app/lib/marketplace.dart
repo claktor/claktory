@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
@@ -50,10 +51,13 @@ class _MarketplaceViewState extends State<MarketplaceView> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     void close() => AppScope.closePage(context);
+    // Beside a conversation, the pane's header names and closes it: the
+    // bar keeps only the tabs.
+    final inPane = InPane.of(context);
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
-        autofocus: true,
+        autofocus: !inPane,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -67,7 +71,7 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                 child: Row(
                   children: [
                     // A phone has room for the tabs alone.
-                    if (!isPhoneLayout(context)) ...[
+                    if (!isPhoneLayout(context) && !inPane) ...[
                       Text(
                         'Marketplace',
                         style: TextStyles.label.copyWith(
@@ -92,7 +96,7 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                         ),
                       ),
                     ),
-                    Button(label: 'Done', onPressed: close),
+                    if (!inPane) Button(label: 'Done', onPressed: close),
                   ],
                 ),
               ),

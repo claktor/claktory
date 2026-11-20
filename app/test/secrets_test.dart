@@ -379,6 +379,42 @@ void main() {
     expect(decided.entries, isEmpty);
   });
 
+  testWidgets('requests waiting show at the top of Settings → Secrets', (
+    tester,
+  ) async {
+    final workspace = _workspace();
+    workspace.vault.requests.add(
+      SecretRequest(
+        id: 'r3',
+        agentId: 'june',
+        secretId: 's1',
+        secretName: 'AWS',
+        reason: 'To deploy the site.',
+        state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+      ),
+    );
+    final harness = Harness(workspace);
+    await _show(tester, harness, const SecretsSettings());
+    expect(find.text('June asks for AWS'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('June asks for AWS')).dy,
+      lessThan(tester.getTopLeft(find.text('Add a secret…')).dy),
+    );
+    await tester.tap(find.text('Give AWS to June'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.requestId, 'r3');
+    expect(decided.approve, isTrue);
+
+    // Decided, the backend no longer lists it.
+    harness.backend.workspace.apply(_workspace());
+    await pumpFrames(tester);
+    expect(find.text('June asks for AWS'), findsNothing);
+  });
+
   testWidgets('Delete… deletes once confirmed', (tester) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, const SecretsSettings());

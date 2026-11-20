@@ -12,8 +12,11 @@
 //! secret; values are only ever decrypted to be revealed to the person or
 //! given to a command.
 
+mod account;
+pub(crate) mod asks;
 mod crypto;
 pub(crate) mod env;
+pub mod handoff;
 pub mod memory;
 pub(crate) mod requests;
 
@@ -100,7 +103,7 @@ CREATE TABLE uses (
     detail TEXT NOT NULL
 );
 CREATE INDEX uses_by_secret ON uses (secret, time);
--- Agents' requests (secret_request).
+-- Agents' requests (secrets_request).
 CREATE TABLE requests (
     id TEXT PRIMARY KEY,
     agent TEXT NOT NULL,
@@ -118,7 +121,14 @@ CREATE TABLE requests (
 ";
 
 /// Changes to the schema after the first, in order.
-const MIGRATIONS: &[&str] = &[];
+const MIGRATIONS: &[&str] = &["
+-- What the vault keeps for the person, sealed with the vault's key: the
+-- recovery key ('recovery'), to show it again.
+CREATE TABLE kept (
+    name TEXT PRIMARY KEY,
+    sealed BLOB NOT NULL
+);
+"];
 
 /// A value is too short to hide in output below this many bytes.
 const SHORT: usize = 8;
@@ -132,11 +142,11 @@ const RECENT_MS: i64 = 24 * 3600 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
-    #[error("There's no vault yet. Create it first.")]
+    #[error("There's no vault: Claktory couldn't make it (its log says why).")]
     NoVault,
     #[error("There's a vault already.")]
     Exists,
-    #[error("The vault is locked. Unlock it with its passphrase.")]
+    #[error("The vault is locked: it opens with its passphrase or recovery key.")]
     Locked,
     #[error("That passphrase isn't right.")]
     WrongProof,
@@ -144,6 +154,8 @@ pub enum VaultError {
     ProofRequired,
     #[error("There's no secret \"{0}\".")]
     NoSecret(String),
+    #[error("There's no request \"{0}\" from that agent.")]
+    NoRequest(String),
     #[error("{secret} isn't granted to {agent}.")]
     NotGranted { secret: String, agent: String },
     #[error("{0}")]
@@ -346,10 +358,12 @@ impl Vault {
         inner.db = Some(db);
         if !locked_mode {
             let vmk = self.auto_vmk(&inner);
-            if vmk.is_none() {
+            if vmk.is_none() && account::protector(&inner).is_none() {
                 tracing::warn!("the vault's key on disk is missing or doesn't open it; it stays locked until unlocked");
             }
-            inner.vmk = vmk.as_ref().and_then(|vmk| memory::Locked::new(vmk));
+            if let Some(vmk) = &vmk {
+                Self::set_open(&mut inner, vmk);
+            }
         }
         Ok(())
     }
@@ -442,7 +456,6 @@ impl Vault {
         }
         let vault_id = crypto::hex(&crypto::random::<16>());
         let vmk = crypto::new_key();
-        let locked = memory::Locked::new(&vmk).ok_or_else(|| std::io::Error::other("no memory for the vault's key"))?;
         let passphrase = passphrase.map(|passphrase| Self::passphrase_protector(&inner, &vault_id, &vmk, passphrase)).transpose()?;
         let (recovery_text, recovery) = match passphrase {
             Some(_) => {
@@ -476,8 +489,7 @@ impl Vault {
         inner.db = Some(open_db(&self.db_path())?);
         inner.vault_id = vault_id;
         inner.locked_mode = locked_mode;
-        inner.vmk = Some(locked);
-        inner.state = None;
+        Self::set_open(&mut inner, &vmk);
         Ok(recovery_text)
     }
 
@@ -518,9 +530,58 @@ impl Vault {
     pub(crate) fn unlock(&self, vmk: Key) {
         let mut inner = self.lock();
         if inner.vmk.is_none() {
-            inner.vmk = memory::Locked::new(&vmk);
+            Self::set_open(&mut inner, &vmk);
+        }
+    }
+
+    /// Opens the vault with `vmk`, known to be its key, keeping a check of it
+    /// the first time (to know a key handed over at an update).
+    fn set_open(inner: &mut Inner, vmk: &[u8; 32]) {
+        inner.vmk = memory::Locked::new(vmk);
+        inner.state = None;
+        let Some(db) = &inner.db else { return };
+        let checked: bool = db.query_row("SELECT COUNT(*) > 0 FROM kept WHERE name = 'check'", [], |row| row.get(0)).unwrap_or(true);
+        if !checked && let Err(error) = Self::keep(db, &inner.vault_id, vmk, "check", b"claktory") {
+            tracing::warn!(%error, "could not keep a check of the vault's key");
+        }
+    }
+
+    /// Opens the vault with a key the backend before this one handed over,
+    /// if it's this vault's. Whether it's open now.
+    pub(crate) fn take(&self, handed: handoff::Handed) -> bool {
+        let mut inner = self.lock();
+        if inner.vmk.is_some() {
+            return true;
+        }
+        let Some(db) = &inner.db else { return false };
+        if handed.vault_id != inner.vault_id {
+            return false;
+        }
+        let sealed: Option<Vec<u8>> =
+            db.query_row("SELECT sealed FROM kept WHERE name = 'check'", [], |row| row.get(0)).optional().ok().flatten();
+        let good = sealed.is_some_and(|sealed| crypto::open(&handed.vmk, &sealed, &aad(&["kept", &inner.vault_id, "check"])).is_some());
+        if good {
+            inner.vmk = Some(handed.vmk);
             inner.state = None;
         }
+        good
+    }
+
+    /// Hands the open vault's key to the next backend, before this one exits
+    /// for an update: through the supervisor, or `exec` (Some: the fd to
+    /// leave open, for `handoff::FD_ENV`). Without a key, nothing.
+    pub(crate) fn hand_over(&self, exec: bool) -> Option<std::os::fd::OwnedFd> {
+        let inner = self.lock();
+        let vmk = inner.vmk.as_deref()?;
+        if exec {
+            return handoff::for_exec(&inner.vault_id, vmk)
+                .inspect_err(|error| tracing::warn!(%error, "could not hand the vault's key over"))
+                .ok();
+        }
+        if !handoff::keep(&inner.vault_id, vmk) {
+            tracing::info!("no supervisor to hand the vault's key to; it opens again by itself, or asks");
+        }
+        None
     }
 
     fn open_vmk(inner: &Inner) -> Result<&[u8; 32], VaultError> {
@@ -546,7 +607,9 @@ impl Vault {
         let inner = self.lock();
         let vmk = Self::open_vmk(&inner)?;
         let (text, protector) = Self::recovery_protector(&inner.vault_id, vmk);
-        Self::save_protector(Self::db(&inner)?, &protector)?;
+        let db = Self::db(&inner)?;
+        Self::save_protector(db, &protector)?;
+        Self::keep(db, &inner.vault_id, vmk, "recovery", text.as_bytes())?;
         Ok(text)
     }
 
@@ -736,6 +799,7 @@ impl Vault {
             .query_map([agent], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
         db.execute("DELETE FROM grants WHERE agent = ?1", [agent])?;
+        db.execute("DELETE FROM requests WHERE agent = ?1", [agent])?;
         inner.state = None;
         Ok(names)
     }
@@ -900,8 +964,13 @@ impl Vault {
             }
             secrets.push(secret);
         }
-        let state =
-            v1::VaultState { exists: true, unlocked: inner.vmk.is_some(), locked_mode: inner.locked_mode, secrets, requests: Vec::new() };
+        let state = v1::VaultState {
+            exists: true,
+            unlocked: inner.vmk.is_some(),
+            locked_mode: inner.locked_mode,
+            secrets,
+            requests: asks::pending(db)?,
+        };
         Ok((state, recent))
     }
 
@@ -975,6 +1044,13 @@ impl Vault {
             ));
         };
         let (Ok(key), Ok(vmk)) = (Self::grant_key(&inner), Self::open_vmk(&inner)) else {
+            if account::protector(&inner).is_some() {
+                return Err(Refusal::Said(
+                    "The vault is locked: Claktory restarted and can't reach claktory.com yet to open it. It opens by itself once it \
+                     can, or the person can open it with the recovery key in Settings → Secrets. Try again later."
+                        .to_owned(),
+                ));
+            }
             return Err(Refusal::Said(
                 "The vault is locked: Claktory restarted, and it opens only with its passphrase. Ask the person to unlock it in Settings → Secrets.".to_owned(),
             ));

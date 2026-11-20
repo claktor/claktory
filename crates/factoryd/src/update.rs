@@ -337,6 +337,12 @@ pub fn trial_failed(home: &Home, reason: &dyn std::fmt::Display) {
     }
 }
 
+/// An update is on trial: the backend started now is new, or the one
+/// before it coming back.
+pub fn on_trial(home: &Home) -> bool {
+    read_trial(home).is_some()
+}
+
 /// For the supervisor, after the backend stopped or couldn't be started:
 /// whether that was an update failing. A trial that hasn't started yet means
 /// the backend stopped to hand over to the update.
@@ -422,6 +428,8 @@ impl Factory {
             }
         }
         tracing::info!(version = VERSION, "update passed its trial");
+        // No rollback now: the supervisor forgets the vault's key.
+        crate::vault::handoff::release();
         let mut inner = self.lock();
         inner.update_error.clear();
         self.broadcast_workspace(&inner);
@@ -488,14 +496,25 @@ impl Factory {
         write_atomic(&backend, &new_backend).await?;
         set_executable(&backend).await?;
         tracing::info!(from = VERSION, to = %latest.backend, supervised, "updating");
+        let factory = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RESTART_DELAY).await;
             if supervised {
-                // The supervisor starts the new backend and watches it.
+                // The supervisor starts the new backend and watches it,
+                // handing it the open vault's key.
+                factory.vault.hand_over(false);
                 std::process::exit(0);
             }
-            // Nobody to watch over it: become the new backend in place.
-            let error = std::process::Command::new(&backend).args(std::env::args_os().skip(1)).exec();
+            // Nobody to watch over it: become the new backend in place, the
+            // open vault's key handed over through an fd it keeps.
+            let mut command = std::process::Command::new(&backend);
+            command.args(std::env::args_os().skip(1));
+            let handed = factory.vault.hand_over(true);
+            if let Some(fd) = &handed {
+                command.env(crate::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(fd).to_string());
+            }
+            let error = command.exec();
+            drop(handed);
             tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
         });
         Ok(())

@@ -68,6 +68,43 @@ pub enum Transport {
     Sse,
 }
 
+/// How long the provider keeps a request's prompt cache, where a request can
+/// choose (Anthropic's `cache_control.ttl`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CacheTtl {
+    /// The provider's default: 5 minutes on Anthropic. Nothing is sent.
+    #[default]
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// An hour, at a higher price for writing the cache.
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl CacheTtl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<CacheTtl> {
+        match text.trim() {
+            "5m" => Some(CacheTtl::FiveMinutes),
+            "1h" => Some(CacheTtl::OneHour),
+            _ => None,
+        }
+    }
+
+    pub fn millis(self) -> u64 {
+        match self {
+            CacheTtl::FiveMinutes => 5 * 60_000,
+            CacheTtl::OneHour => 60 * 60_000,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct StreamOptions {
     pub cancel: CancellationToken,
@@ -79,6 +116,8 @@ pub struct StreamOptions {
     pub base_url: Option<String>,
     pub headers: Vec<(String, String)>,
     pub transport: Transport,
+    /// How long the prompt cache is kept, where the provider lets a request ask.
+    pub cache_ttl: CacheTtl,
 }
 
 #[derive(Clone, Debug)]

@@ -19,6 +19,7 @@ use factoryd::factory::OpenError;
 use factoryd::home::{self, Home, Instance};
 use factoryd::models::Registry;
 use factoryd::update;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -94,11 +95,14 @@ async fn run() -> Result<(), MainError> {
             // It holds the vault's key: no core dumps, and on Linux no other
             // process of this user reads its memory.
             factoryd::vault::memory::harden();
+            // Before anything starts: the open vault's key from the backend
+            // before this one, at an update.
+            let handed = factoryd::vault::handoff::receive();
             if let Ok(factoryd) = std::env::current_exe() {
                 factoryd::set_filter_executable(factoryd);
             }
             let home = instance.home.clone();
-            let served = serve(instance).await;
+            let served = serve(instance, handed).await;
             if let Err(error) = &served {
                 update::trial_failed(&home, error);
             }
@@ -174,6 +178,9 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
     let mut interrupt = signal(SignalKind::interrupt()).map_err(MainError::Signal)?;
     let mut pause = Duration::from_millis(500);
     tracing::info!(backend = %home.backend().display(), version = update::VERSION, "supervising");
+    // It may hold the vault's key between two backends.
+    factoryd::vault::memory::harden();
+    let mut holder = factoryd::vault::handoff::Holder::default();
     loop {
         if let Err(error) = update::start_trial(&home) {
             tracing::error!(%error, "could not start the update's trial");
@@ -184,13 +191,47 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
             command.arg("--dev");
         }
         command.env(update::SUPERVISED, "1").kill_on_drop(true);
-        let ended = match command.spawn() {
+        // The vault's key goes from one backend to the next through a pair.
+        let channel = match holder.channel(update::on_trial(&home)) {
+            Ok((ours, theirs)) => {
+                command.env(factoryd::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(&theirs).to_string());
+                Some((ours, theirs))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not make the vault's handover; an update locks it");
+                None
+            }
+        };
+        let spawned = command.spawn();
+        // Only the backend holds its end now, so the pair ends with it.
+        let mut ours = channel.and_then(|(ours, theirs)| {
+            drop(theirs);
+            ours.set_nonblocking(true).ok()?;
+            tokio::net::UnixStream::from_std(ours).ok()
+        });
+        let ended = match spawned {
             Ok(mut child) => {
-                let status = tokio::select! {
-                    status = child.wait() => status,
-                    _ = terminate.recv() => return stop(child).await,
-                    _ = interrupt.recv() => return stop(child).await,
+                let mut buffer = zeroize::Zeroizing::new([0u8; 256]);
+                let status = loop {
+                    tokio::select! {
+                        status = child.wait() => break status,
+                        _ = terminate.recv() => return stop(child).await,
+                        _ = interrupt.recv() => return stop(child).await,
+                        read = async { match ours.as_mut() { Some(ours) => ours.read(buffer.as_mut_slice()).await, None => std::future::pending().await } } => match read {
+                            Ok(0) | Err(_) => ours = None,
+                            Ok(read) => holder.read(&buffer[..read]),
+                        },
+                    }
                 };
+                // What it wrote just before it exited.
+                if let Some(ours) = ours.as_mut() {
+                    while let Ok(Ok(read)) = tokio::time::timeout(Duration::from_millis(200), ours.read(buffer.as_mut_slice())).await {
+                        if read == 0 {
+                            break;
+                        }
+                        holder.read(&buffer[..read]);
+                    }
+                }
                 match status {
                     Ok(status) if status.success() => None,
                     Ok(status) => Some(format!("It stopped ({status}).")),
@@ -229,11 +270,14 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
     Ok(())
 }
 
-async fn serve(instance: Instance) -> Result<(), MainError> {
+async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
     let Instance { home, addr } = instance;
     let listener = TcpListener::bind(addr).await.map_err(|source| MainError::Bind { addr, source })?;
     let models = Arc::new(Registry::new(home.auth_path()));
     let factory = Factory::open(home.clone(), models).await?;
+    if let Some(handed) = handed {
+        factory.take_vault_key(handed);
+    }
     // Factories installed from published releases download newer ones.
     if let Some(url) = factoryd::channel::url() {
         tokio::spawn(factoryd::channel::poll(home.clone(), url));

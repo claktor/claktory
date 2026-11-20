@@ -26,15 +26,25 @@
 #       Factory. Point a backend at it with FACTORY_UPDATE_URL=file://DIR/latest.json.
 #   --no-linux  without the Linux builds (Linux backends then keep the release
 #               they have)
+#   --built     publishes the release already built (the newest in
+#               ~/.factory/releases, or ~/.factory-dev's with --dev) instead
+#               of building one: so a release can be built and signed first,
+#               tried on this Mac, and then published exactly as tried. Build
+#               it from this commit with the channel's address stamped in:
+#                 FACTORY_UPDATE_URL=https://github.com/claktor/claktory/releases/latest/download/latest.json scripts/release.sh
+#               It refuses a release built from another commit or for
+#               another channel.
+#   --adhoc     allows publishing a Mac app to GitHub that isn't notarized
+#               (signed ad hoc); without it, that's refused.
 #
 # Agents: leave publishing to GitHub to Coordinator and the person.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="" LOCAL="" DEV=() NOTES="" LINUX=(x86_64 aarch64)
+REPO="" LOCAL="" DEV=() NOTES="" LINUX=(x86_64 aarch64) BUILT=false ADHOC=false
 DEFAULT_REPO="claktor/claktory"
 usage() {
-  echo "usage: scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux] | --local DIR [--dev] [--no-linux]" >&2
+  echo "usage: scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux] [--built] [--adhoc] | --local DIR [--dev] [--no-linux] [--built]" >&2
   exit 2
 }
 while (($#)); do
@@ -44,6 +54,8 @@ while (($#)); do
     --notes) NOTES="${2:-}"; shift 2 || usage ;;
     --dev) DEV=(--dev); shift ;;
     --no-linux) LINUX=(); shift ;;
+    --built) BUILT=true; shift ;;
+    --adhoc) ADHOC=true; shift ;;
     *) usage ;;
   esac
 done
@@ -76,15 +88,54 @@ if [[ ${#LINUX[@]} -gt 0 ]]; then
   }
 fi
 
-FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/release.sh" ${DEV[@]+"${DEV[@]}"}
-
 if [[ ${#DEV[@]} -eq 0 ]]; then
   HOME_DIR="$HOME/.factory" APP_NAME="Factory.app"
 else
   HOME_DIR="$HOME/.factory-dev" APP_NAME="Factory Dev.app"
 fi
-VERSION="$(cat "$HOME_DIR/releases/latest")"
-RELEASE="$HOME_DIR/releases/$VERSION"
+
+# A Mac app on GitHub is notarized, unless --adhoc says otherwise.
+require_notarized() {
+  [[ -n "$REPO" ]] && ! $ADHOC || return 0
+  spctl --assess --type execute "$1" 2>/dev/null && xcrun stapler validate -q "$1" 2>/dev/null || {
+    echo "$1 isn't notarized (scripts/sign-release.sh signs releases built with the App Store Connect key); publish it anyway with --adhoc" >&2
+    exit 1
+  }
+}
+
+if $BUILT; then
+  VERSION="$(cat "$HOME_DIR/releases/latest" 2>/dev/null)" || { echo "no release in $HOME_DIR/releases to publish" >&2; exit 1; }
+  RELEASE="$HOME_DIR/releases/$VERSION"
+  HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+  [[ "$(cat "$RELEASE/source" 2>/dev/null)" == "$HEAD" ]] || {
+    echo "$VERSION was built from $(cat "$RELEASE/source" 2>/dev/null || echo "an unrecorded commit"), not this checkout's $HEAD; build it again from here" >&2
+    exit 1
+  }
+  [[ "$(cat "$RELEASE/update-url" 2>/dev/null)" == "$MANIFEST_URL" ]] || {
+    echo "$VERSION's backend checks \"$(cat "$RELEASE/update-url" 2>/dev/null || true)\" for updates, not this channel; build it with:" >&2
+    echo "  FACTORY_UPDATE_URL=$MANIFEST_URL scripts/release.sh ${DEV[*]-}" >&2
+    exit 1
+  }
+  if [[ -n "$REPO" ]] && gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
+    echo "$VERSION is already published to $REPO" >&2
+    exit 1
+  fi
+  require_notarized "$RELEASE/$APP_NAME"
+  echo "publishing $VERSION as built ($RELEASE)"
+else
+  # Before building: would it be notarized?
+  if [[ -n "$REPO" ]] && ! $ADHOC; then
+    source "$ROOT/scripts/lib.sh"
+    [[ "$(signing_mode)" != adhoc ]] || {
+      echo "this release would be signed ad hoc, not notarized: it needs the Developer ID identity and the App Store Connect key (see scripts/sign-release.sh); publish it anyway with --adhoc" >&2
+      exit 1
+    }
+  fi
+  FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/release.sh" ${DEV[@]+"${DEV[@]}"}
+  VERSION="$(cat "$HOME_DIR/releases/latest")"
+  RELEASE="$HOME_DIR/releases/$VERSION"
+  require_notarized "$RELEASE/$APP_NAME"
+fi
 NAME="factory-$VERSION-macos.tar.gz"
 
 STAGE="$(mktemp -d)"

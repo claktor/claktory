@@ -30,7 +30,7 @@ pub use errors::Error;
 pub use login::login_terminal;
 pub use providers::models::{ModelInfo, Registry};
 pub use secrets::{Redaction, Redactor, SecretUse, SecretVariable, Secrets};
-pub use stream::{StreamFn, ThinkingLevel};
+pub use stream::{CacheTtl, StreamFn, ThinkingLevel};
 pub use tools::bash::{Background, Finished, Task};
 pub use tools::{Handler, Tool, ToolSpec, coding_prompt, coding_tools};
 pub use types::{

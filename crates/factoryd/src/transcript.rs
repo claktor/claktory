@@ -24,6 +24,13 @@ const TOOL_OUTPUT_INTERVAL: Duration = Duration::from_millis(100);
 struct CompactionInfo {
     summary: String,
     tokens_before: u64,
+    /// Compacted while the agent was idle (`crate::idle`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    idle: bool,
+    /// What the request that wrote the summary took; None in segments
+    /// written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<factory_agent::Usage>,
 }
 
 #[derive(Deserialize)]
@@ -268,6 +275,18 @@ impl Transcript {
         Some(entry.clone())
     }
 
+    /// Shows an agent's request for a secret as it is now (decided, say); the
+    /// changed entry, or None if the conversation doesn't show it.
+    pub fn set_secret_request(&mut self, request: v1::SecretRequest) -> Option<Entry> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(&entry.kind, Some(Kind::SecretRequest(shown)) if shown.id == request.id))?;
+        entry.kind = Some(Kind::SecretRequest(request));
+        Some(entry.clone())
+    }
+
     /// Adds a harness notice. Notices are for display only and aren't saved.
     pub fn notice(&mut self, text: impl Into<String>, level: NoticeLevel) -> Entry {
         self.push(now_ms(), notice(text.into(), level))
@@ -337,13 +356,14 @@ impl Transcript {
                 let text = format!("The model request failed. Retrying in {seconds}s (attempt {attempt}).");
                 applied.changes.push(Change::Entry(self.push(now_ms(), notice(text, NoticeLevel::Info))));
             }
-            AgentEvent::Compacted { summary, tokens_before, messages } => {
+            AgentEvent::Compacted { summary, tokens_before, messages, usage, reason } => {
+                let idle = reason == factory_agent::compaction::Reason::Idle;
                 self.segment += 1;
                 // Stamped like the summary message, so a reload shows the same entry.
                 let timestamp = messages.first().map_or_else(now_ms, |message| message.timestamp() as i64);
-                let entry = self.push(timestamp, Kind::Compaction(v1::Compaction { summary: summary.clone(), tokens_before }));
+                let entry = self.push(timestamp, Kind::Compaction(v1::Compaction { summary: summary.clone(), tokens_before, idle }));
                 applied.changes.push(Change::Entry(entry));
-                self.compaction = Some(CompactionInfo { summary, tokens_before });
+                self.compaction = Some(CompactionInfo { summary, tokens_before, idle, usage: Some(usage) });
                 self.messages = messages;
                 self.pinned.clear();
                 self.cleared = None;
@@ -369,7 +389,8 @@ impl Transcript {
             // The summary message shows as the divider. Messages compaction kept
             // after it (the prompt that triggered it) were shown at the end of
             // the previous segment, which is where they appeared live.
-            let kind = Kind::Compaction(v1::Compaction { summary: info.summary.clone(), tokens_before: info.tokens_before });
+            let kind =
+                Kind::Compaction(v1::Compaction { summary: info.summary.clone(), tokens_before: info.tokens_before, idle: info.idle });
             self.push(summary.timestamp() as i64, kind);
             let mut carried = kept.len().min(self.messages.len());
             while carried > 0 && !self.messages.ends_with(&kept[..carried]) {
@@ -409,6 +430,10 @@ impl Transcript {
                 // A proposal to Rivet shows after the call that made it.
                 if let Some(proposal) = crate::proposals::proposed(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::Proposal(proposal)));
+                }
+                // So does a request for a secret.
+                if let Some(request) = crate::vault::asks::requested(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::SecretRequest(request)));
                 }
                 changed
             }

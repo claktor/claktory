@@ -6,6 +6,15 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.2
+Released 2026-11-20 02:08 UTC.
+- Changed: Settings, the Marketplace and What's new open beside the conversation instead of covering it, so you can read an agent's messages while you change a setting. Drag the line between them to resize, or click × to close.
+- Added: Run Claktory on a Linux machine, NixOS included, with the same install command. Then connect your iPhone or Mac with the code it shows.
+- Added: An agent that needs a key or password asks you for it in its conversation. Give it one of yours with one click, or add the new one it describes. Requests waiting for you also show at the top of Settings → Secrets.
+- Added: Your next message to an agent costs less after a long break. An idle agent with a long conversation summarizes it before picking it up would cost more, and its conversation says "Earlier messages summarized while idle". For Anthropic, set Keep conversations ready to 1 hour in Settings → Providers. Turn it off in Settings → Defaults.
+- Changed: Where an agent's earlier messages were summarized, the conversation says "Earlier messages summarized" instead of a token count. Click it to read the summary.
+- Changed: Long messages between agents, notes and monitor prompts in a conversation fold to their first line. Click Show more to read them in full.
+
 ## v0.1.1
 Released 2026-11-20 01:14 UTC.
 - Added: Use several Claktories at once, such as this Mac's and a server's. A thin rail at the left of the window shows each one, and when its agents are working or have something new; click one to switch. Click + to add one with its code, and right-click one to rename or remove it. On iPhone, they're a list.

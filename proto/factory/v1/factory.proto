@@ -88,6 +88,13 @@ message ClientMessage {
     ChangePassphrase change_passphrase = 57;
     NewRecoveryKey new_recovery_key = 58;
     SetVaultLockedMode set_vault_locked_mode = 59;
+    // This Claktory's sign-in at claktory.com (#116): see ClaktoryAccount.
+    AccountSignIn account_sign_in = 60;
+    AccountVerify account_verify = 61;
+    AccountResend account_resend = 62;
+    AccountSignOut account_sign_out = 63;
+    SetAccountService set_account_service = 64;
+    ShowRecoveryKey show_recovery_key = 65;
   }
 }
 
@@ -419,6 +426,12 @@ message UpdateSettings {
   optional string user_name = 10;
   // Unused: requests need no vault passphrase. Still kept in config.json.
   optional uint32 vault_unlock_minutes = 20;
+  // See Settings.
+  optional bool idle_compaction = 23;
+  optional bool idle_compaction_short_cache = 24;
+  // Sets one provider's or model's cache lifetime: ttl "5m" or "1h"; "" goes
+  // back to the default (its provider's, or the provider's own).
+  CacheTtl cache_ttl = 25;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -805,6 +818,12 @@ enum ErrorCode {
   ERROR_CODE_WRONG_PROOF = 11;
   // The secret isn't granted to that agent (RevokeSecret).
   ERROR_CODE_NOT_GRANTED = 12;
+  // The account service asks to wait (too many codes or tries); the
+  // message says how long.
+  ERROR_CODE_RATE_LIMITED = 13;
+  // The account service can't be reached (or answered something Claktory
+  // can't trust); the message says which. Claktory keeps working.
+  ERROR_CODE_UNREACHABLE = 14;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -863,6 +882,8 @@ message Workspace {
   RemoteAccess remote = 19;
   // The vault's state and its secrets' metadata, never values.
   VaultState vault = 20;
+  // This Claktory's sign-in at claktory.com: the same on every device.
+  ClaktoryAccount account = 21;
 }
 
 message ChangelogVersion {
@@ -1352,6 +1373,32 @@ message Settings {
   // Unused: requests need no vault passphrase (config.json's
   // `vault.unlock_minutes`, 5 unless changed).
   uint32 vault_unlock_minutes = 20;
+  // An idle agent compacts its conversation just before its prompt cache
+  // expires, so coming back to it later doesn't pay to cache the whole long
+  // conversation again (config.json's `compaction.idle`, on unless changed).
+  // Only for a cache Claktory knows the lifetime of (an hour: after 54
+  // minutes idle; 5 minutes: only with `idle_compaction_short_cache`), and a
+  // conversation of at least 150,000 tokens on a 200,000-token model (75% of
+  // a smaller window, at most 200,000 on a larger one).
+  bool idle_compaction = 23;
+  // Also compact after 4 minutes idle when the cache lasts 5 minutes
+  // (config.json's `compaction.idle_short_cache`, off unless changed). Far
+  // more often than with an hour's cache.
+  bool idle_compaction_short_cache = 24;
+  // How long each provider's or model's prompt cache is asked to last, as
+  // set (config.json's `prompt_cache`); what isn't listed asks for the
+  // provider's default. See Provider.cache_ttl for what applies.
+  repeated CacheTtl cache_ttls = 25;
+}
+
+// How long a provider's (or one model's) prompt cache is asked to last.
+message CacheTtl {
+  // A provider id ("anthropic") or a model id ("anthropic/claude-opus-4-8"),
+  // which wins over its provider's.
+  string key = 1;
+  // "5m" or "1h". An hour costs more to write the cache (2× input instead of
+  // 1.25× on Anthropic) and keeps it through longer breaks.
+  string ttl = 2;
 }
 
 message Provider {
@@ -1377,6 +1424,11 @@ message Provider {
   // Every account signed in to it, in the order requests try them. The fields
   // above describe the first, as before several accounts could be signed in.
   repeated Account accounts = 8;
+  // How long its prompt cache is asked to last now, "5m" or "1h" (models with
+  // their own setting may differ; see Settings.cache_ttls). Empty when
+  // Claktory can't choose it for this provider and doesn't know how long it
+  // lasts: its agents never compact while idle.
+  string cache_ttl = 9;
 }
 
 // One account signed in to a provider, such as one of two Claude
@@ -1704,7 +1756,7 @@ message Entry {
     Notice notice = 8;
     Event event = 9;
     Proposal proposal = 11;
-    // An agent asks for a secret (secret_request): see SecretRequest.
+    // An agent asks for a secret (its secrets_request tool): see SecretRequest.
     SecretRequest secret_request = 12;
   }
   // The model response it came from: the same for every entry one response
@@ -1816,6 +1868,10 @@ enum ToolCallState {
 message Compaction {
   string summary = 1;
   uint64 tokens_before = 2;
+  // Compacted while the agent was idle, just before its prompt cache
+  // expired (Settings.idle_compaction), not because the context was full or
+  // on request.
+  bool idle = 3;
 }
 
 // Something the harness reports rather than the model: errors, stops.
@@ -2128,7 +2184,7 @@ message SecretUse {
   string detail = 7;
 }
 
-// An agent's request (secret_request), shown in its conversation after the
+// An agent's request (secrets_request), shown in its conversation after the
 // call, for the person to grant or dismiss with DecideSecretRequest. The
 // entry is sent again when it's decided.
 message SecretRequest {
@@ -2163,3 +2219,76 @@ enum SecretRequestState {
   SECRET_REQUEST_STATE_GRANTED = 2;
   SECRET_REQUEST_STATE_DISMISSED = 3;
 }
+
+// This Claktory's account at claktory.com, or at the service in
+// config.json's `account.service`. Signing in is the backend's, not a
+// device's: one sign-in, and every device that connects shows it.
+message ClaktoryAccount {
+  ClaktoryAccountState state = 1;
+  // The email it's signed in with, or that the code went to.
+  string email = 2;
+  // The service's address, such as "https://account.claktory.com".
+  string service = 3;
+  // This Claktory's name there, as sent at sign-in (the computer's name).
+  string name = 4;
+  // When the service last answered, in ms since 1970; 0 if it never has.
+  int64 last_contact_ms = 5;
+  // What went wrong with the last call to the service, in words for the
+  // person ("claktory.com can't be reached; Claktory tries again by
+  // itself"); empty when it worked.
+  string problem = 6;
+  // AWAITING_CODE: when the code stops working, in ms since 1970.
+  int64 code_expires_ms = 7;
+  // Exactly what this Claktory last sent the service, as JSON, for "What
+  // claktory.com receives": its sign-in (the request that emails the code)
+  // and its check-in. The machine token, signatures and codes travel beside
+  // them and aren't shown; empty before the first.
+  string last_sign_in_json = 8;
+  string last_check_in_json = 9;
+  // When each was sent, in ms since 1970; 0 before the first.
+  int64 last_sign_in_ms = 10;
+  int64 last_check_in_ms = 11;
+}
+
+enum ClaktoryAccountState {
+  CLAKTORY_ACCOUNT_STATE_UNSPECIFIED = 0;
+  // Not signed in: AccountSignIn.
+  CLAKTORY_ACCOUNT_STATE_SIGNED_OUT = 1;
+  // A code was emailed: AccountVerify, or AccountResend.
+  CLAKTORY_ACCOUNT_STATE_AWAITING_CODE = 2;
+  CLAKTORY_ACCOUNT_STATE_SIGNED_IN = 3;
+  // Removed at claktory.com: it keeps running, but after a restart its
+  // secrets open only with the recovery key, until it signs in again.
+  CLAKTORY_ACCOUNT_STATE_REVOKED = 4;
+}
+
+// Emails a code to sign this Claktory in. Answered with Ack once it's sent;
+// ERROR_CODE_RATE_LIMITED or ERROR_CODE_UNREACHABLE when it can't be.
+message AccountSignIn {
+  string email = 1;
+}
+
+// The emailed code. Answered with Ack once signed in, when the vault is
+// protected by the account (and its recovery key made). A wrong code is
+// ERROR_CODE_WRONG_PROOF, its message saying how many tries are left; an
+// expired one ERROR_CODE_INVALID_REQUEST.
+message AccountVerify {
+  string code = 1;
+}
+
+// Emails a new code to the same address. Answered with Ack.
+message AccountResend {}
+
+// Signs out: no more check-ins, and back to SIGNED_OUT. The vault stays as
+// it is, unlocked while Claktory runs. Answered with Ack.
+message AccountSignOut {}
+
+// The account service to use; empty for claktory.com's. Only while signed
+// out. Answered with Ack.
+message SetAccountService {
+  string url = 1;
+}
+
+// The vault's recovery key, to note down. Answered with RecoveryKey, to the
+// asker only; logged in the vault's uses.
+message ShowRecoveryKey {}

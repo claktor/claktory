@@ -2,11 +2,13 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'account.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'devices.dart';
 import 'identity.dart';
 import 'login.dart';
+import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -15,7 +17,9 @@ import 'tell_rivet.dart';
 import 'selection.dart';
 
 /// Factory-wide settings: provider sign-in and the defaults for new agents.
-/// Replaces the agent view until closed with Done or Esc.
+/// On a Mac, a pane beside the conversation ([InPane]); on a phone, or with
+/// no agent to show it beside, it replaces the agent view until closed with
+/// Done or Esc.
 class SettingsView extends StatelessWidget {
   const SettingsView({super.key});
 
@@ -24,36 +28,42 @@ class SettingsView extends StatelessWidget {
     final palette = Palette.of(context);
     final scope = AppScope.scope(context);
     void close() => scope.page.value = AppPage.agent;
+    // Beside a conversation, the pane's header names and closes it.
+    final inPane = InPane.of(context);
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
-        autofocus: true,
+        autofocus: !inPane,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            WindowDrag(
-              child: Container(
-                height: titleBarHeight,
-                padding: const EdgeInsets.only(left: Space.xl, right: Space.m),
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: palette.hairline)),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Settings',
-                        style: TextStyles.label.copyWith(
-                          color: palette.text,
-                          fontWeight: FontWeight.w600,
+            if (!inPane)
+              WindowDrag(
+                child: Container(
+                  height: titleBarHeight,
+                  padding: const EdgeInsets.only(
+                    left: Space.xl,
+                    right: Space.m,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(color: palette.hairline)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Settings',
+                          style: TextStyles.label.copyWith(
+                            color: palette.text,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
-                    Button(label: 'Done', onPressed: close),
-                  ],
+                      Button(label: 'Done', onPressed: close),
+                    ],
+                  ),
                 ),
               ),
-            ),
             Expanded(
               child: ListenableBuilder(
                 listenable: scope.backend.workspace,
@@ -67,6 +77,19 @@ class SettingsView extends StatelessWidget {
                           title: 'General',
                           children: [_YourName(workspace: workspace)],
                         ),
+                        // Only while the backend has the account on.
+                        if (workspace.hasAccount() &&
+                            workspace.account.state !=
+                                ClaktoryAccountState
+                                    .CLAKTORY_ACCOUNT_STATE_UNSPECIFIED) ...[
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Account',
+                            children: [
+                              AccountSettings(account: workspace.account),
+                            ],
+                          ),
+                        ],
                         const SizedBox(height: Space.xxl),
                         _Section(
                           title: 'Providers',
@@ -340,6 +363,40 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
                 'When a conversation gets this long, older messages are '
                 'summarized so the agent can keep going.',
                 style: TextStyles.caption.copyWith(color: palette.textFaint),
+              ),
+            ],
+          ),
+        ),
+        SettingRow(
+          label: 'Idle conversations',
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _Switch(
+                label: 'Summarize idle conversations',
+                note:
+                    'When an agent with a long conversation is left idle, '
+                    'Claktory summarizes it shortly before picking it up '
+                    'again would cost more, so your next message costs less.',
+                value: settings.idleCompaction,
+                onChanged: (on) => _update(UpdateSettings(idleCompaction: on)),
+              ),
+              const SizedBox(height: Space.s),
+              Padding(
+                padding: const EdgeInsets.only(left: Space.xl),
+                child: _Switch(
+                  label: 'Also after 5 minutes idle',
+                  note:
+                      'For conversations kept ready only 5 minutes. This '
+                      'summarizes far more often.',
+                  value: settings.idleCompactionShortCache,
+                  onChanged: settings.idleCompaction
+                      ? (on) => _update(
+                          UpdateSettings(idleCompactionShortCache: on),
+                        )
+                      : null,
+                ),
               ),
             ],
           ),
@@ -679,6 +736,57 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
   }
 }
 
+/// A switch with its label and a note under it.
+class _Switch extends StatelessWidget {
+  const _Switch({
+    required this.label,
+    required this.note,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String note;
+  final bool value;
+
+  /// Null when it can't be changed now.
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final enabled = onChanged != null;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Toggle(value: value, label: label, onChanged: onChanged),
+        ),
+        const SizedBox(width: Space.m),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyles.body.copyWith(
+                  color: enabled ? palette.text : palette.textFaint,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                note,
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class SettingRow extends StatelessWidget {
   const SettingRow({super.key, required this.label, required this.child});
 
@@ -688,7 +796,18 @@ class SettingRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    if (isPhoneLayout(context)) {
+    return LayoutBuilder(
+      builder: (context, constraints) => _build(context, palette, constraints),
+    );
+  }
+
+  Widget _build(
+    BuildContext context,
+    Palette palette,
+    BoxConstraints constraints,
+  ) {
+    // On a phone, or in a narrow pane beside a conversation.
+    if (isPhoneLayout(context) || constraints.maxWidth < 440) {
       // No room beside it: the label over the control.
       return Padding(
         padding: const EdgeInsets.only(bottom: Space.m),

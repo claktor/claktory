@@ -46,6 +46,7 @@ The person you work with uses the real Claktory: that's where they talk to you a
 - `crates/factoryd`: the backend. It owns all state: settings (`config.json`), agents and their transcripts.
 - `crates/factory-agent`: the coding agent: model providers, sign-in, tools, compaction.
 - `crates/factory-protocol`: Rust types generated from the protocol schema.
+- `crates/claktory-account`: the account service (claktory.com's sign-in, the vault's service share, check-ins), a server of its own; its HTTP API, the contract with factoryd, is `crates/claktory-account/API.md`. `scripts/deploy-account.sh HOST` installs or updates it on a Linux server over ssh, with Caddy in front (steps in `crates/claktory-account/DEPLOY.md`); `scripts/test-deploy-account.sh` tries that in a podman container. Deploying it is DevOps's.
 - `proto/factory/v1/factory.proto`: the wire protocol, the contract between backend and app. Only add fields and messages; never renumber or reuse them.
 - `app/`: the Flutter app. It only displays the backend's state and sends requests.
 

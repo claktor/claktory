@@ -17,7 +17,7 @@ use crate::providers::{
     model_params, oauth, response_text, set_response_id, set_stop_reason, tool_text, user_agent, user_content,
 };
 use crate::sse::{SseDecoder, SseMessage};
-use crate::stream::{EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel, pending_message};
+use crate::stream::{CacheTtl, EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel, pending_message};
 use crate::tools::ToolSpec;
 use crate::types::{
     AssistantMessage, AssistantPart, Message, Model, ModelCost, StopReason, StreamEvent, ToolResultPart, UserContent, UserPart,
@@ -346,6 +346,26 @@ fn convert_tools(tools: &[ToolSpec], oauth: bool, model: &Model) -> Result<Vec<V
             Ok(Value::Object(item))
         })
         .collect()
+}
+
+/// Every cache marker in `params` asks for `ttl`; all alike, since a longer
+/// TTL may not follow a shorter one.
+fn set_cache_ttl(params: &mut Value, ttl: CacheTtl) {
+    match params {
+        Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                if key == "cache_control" {
+                    if let Value::Object(control) = value {
+                        control.insert("ttl".into(), json!(ttl.as_str()));
+                    }
+                } else {
+                    set_cache_ttl(value, ttl);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| set_cache_ttl(item, ttl)),
+        _ => {}
+    }
 }
 
 /// `buildParams` with the default short cache retention.
@@ -729,7 +749,10 @@ async fn request(
     sink: &EventSink,
 ) -> Result<(), String> {
     let oauth = options.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
-    let params = build_params(model, context, oauth, max_tokens, thinking)?;
+    let mut params = build_params(model, context, oauth, max_tokens, thinking)?;
+    if options.cache_ttl != CacheTtl::FiveMinutes {
+        set_cache_ttl(&mut params, options.cache_ttl);
+    }
     let mut builder = client().post(format!("{}/v1/messages", model.base_url.trim_end_matches('/')));
     for (name, value) in request_headers(model, context, options, oauth) {
         builder = builder.header(name, value);

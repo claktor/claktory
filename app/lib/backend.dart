@@ -624,6 +624,36 @@ class Backend {
     return reply.secretUses.uses;
   }
 
+  /// Emails a code to sign this Claktory in to [email].
+  Future<void> accountSignIn(String email) =>
+      _request(ClientMessage(accountSignIn: AccountSignIn(email: email)));
+
+  /// The emailed code: signs this Claktory in.
+  Future<void> accountVerify(String code) =>
+      _request(ClientMessage(accountVerify: AccountVerify(code: code)));
+
+  /// Emails a new code to the same address.
+  Future<void> accountResend() =>
+      _request(ClientMessage(accountResend: AccountResend()));
+
+  Future<void> accountSignOut() =>
+      _request(ClientMessage(accountSignOut: AccountSignOut()));
+
+  /// The account service to use; empty for claktory.com's.
+  Future<void> setAccountService(String url) =>
+      _request(ClientMessage(setAccountService: SetAccountService(url: url)));
+
+  /// The vault's recovery key, to this device only. Never keep it.
+  Future<String> showRecoveryKey() async {
+    final reply = await _call(
+      ClientMessage(showRecoveryKey: ShowRecoveryKey()),
+    );
+    if (!reply.hasRecoveryKey()) {
+      throw const RequestFailure('Claktory sent no recovery key.');
+    }
+    return reply.recoveryKey.key;
+  }
+
   /// Empties the build cache at [path].
   Future<void> clearBuildCache(String path) =>
       _request(ClientMessage(clearBuildCache: ClearBuildCache(path: path)));

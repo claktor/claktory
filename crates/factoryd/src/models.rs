@@ -167,6 +167,7 @@ impl Models for Registry {
                     usage,
                     plan: String::new(),
                     accounts,
+                    cache_ttl: String::new(),
                 });
             }
             providers

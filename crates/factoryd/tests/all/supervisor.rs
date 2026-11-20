@@ -97,8 +97,16 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     let port = std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let _supervisor = supervise(&home, port);
-    let (client, view) = reconnect(addr, |_| true).await;
+    let (mut client, mut view) = reconnect(addr, |_| true).await;
     assert_eq!(view.workspace.version, "dev");
+    // A vault with no key on disk: open only while a backend holds its key,
+    // which each hands to the next.
+    let recovery = client_message::Body::NewRecoveryKey(v1::NewRecoveryKey { proof: None });
+    assert!(matches!(apply_request(&mut client, &mut view, recovery).await, Body::RecoveryKey(_)));
+    let locked = client_message::Body::SetVaultLockedMode(v1::SetVaultLockedMode { locked_mode: true, proof: None });
+    apply_request(&mut client, &mut view, locked).await;
+    assert!(!home.join("vault/auto.key").exists());
+    let open = |view: &View| view.workspace.vault.as_ref().is_some_and(|vault| vault.unlocked);
 
     // A release whose backend can't even run.
     publish(&home, "2099.01.01-0000", b"#!/bin/sh\nexit 3\n");
@@ -116,6 +124,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     );
     assert_eq!(std::fs::read(home.join("bin/factoryd")).expect("read"), original, "the previous backend is back");
     assert!(!home.join("bin/trial.json").exists());
+    assert!(open(&view), "the vault's key came back with it");
 
     // A release with a working backend passes its trial once it serves the app.
     publish(&home, "2099.01.01-0001", &update);
@@ -134,6 +143,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     }
     let (_client, view) = reconnect(addr, |_| true).await;
     assert!(view.workspace.update_error.is_empty());
+    assert!(open(&view), "the vault stays open across the update");
     assert!(home.join("bin/factoryd.previous").exists(), "the one before is kept to go back to");
     // Byte for byte, so a signed build's signature stays whole.
     assert_eq!(std::fs::read(home.join("bin/factoryd")).expect("read"), update, "the update is in place");

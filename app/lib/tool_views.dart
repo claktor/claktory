@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'agent_name.dart';
@@ -52,7 +53,7 @@ class ToolView {
 
 /// The view for [call], or null for the generic row.
 ToolView? toolViewFor(ToolCallInfo call) {
-  final view = toolViews[call.call.name];
+  final view = toolViews[call.name];
   if (view == null) return null;
   final applies = view.applies;
   return applies == null || applies(call) ? view : null;
@@ -60,11 +61,43 @@ ToolView? toolViewFor(ToolCallInfo call) {
 
 /// A tool call as its view reads it.
 class ToolCallInfo {
-  ToolCallInfo(this.call, {this.seq = 0})
-    : input = _object(call.input),
-      details = _object(call.details) ?? const {};
+  factory ToolCallInfo(ToolCall call, {int seq = 0}) {
+    final input = _object(call.input);
+    final details = _object(call.details) ?? const <String, Object?>{};
+    // A tool of an extension turned on mid-context, called through
+    // extension_call {tool, args}: shown as that tool.
+    final inner = input?['tool'];
+    if (call.name == 'extension_call' && inner is String) {
+      final args = input?['args'];
+      return ToolCallInfo._(
+        call,
+        seq,
+        name: inner,
+        input: args is Map<String, Object?> ? args : const {},
+        details: details,
+      );
+    }
+    return ToolCallInfo._(
+      call,
+      seq,
+      name: call.name,
+      input: input,
+      details: details,
+    );
+  }
+
+  ToolCallInfo._(
+    this.call,
+    this.seq, {
+    required this.name,
+    required this.input,
+    required this.details,
+  });
 
   final ToolCall call;
+
+  /// The tool it calls: the one inside an extension_call.
+  final String name;
 
   /// Its entry's place in the transcript.
   final int seq;
@@ -672,9 +705,104 @@ class _SendLine extends StatelessWidget {
 Widget? _sendBody(BuildContext context, ToolCallInfo call) {
   final text = call.argument('text') ?? '';
   if (text.trim().isEmpty) return null;
-  return ShowMore(
-    child: Markdown(text.trim(), color: Palette.of(context).textMuted),
-  );
+  return FirstLine(text.trim());
+}
+
+/// A message folded to its first line, as plain text cut with an ellipsis,
+/// with "Show more" at its end when there's more; open, the whole message
+/// as Markdown with "Show less" under it.
+class FirstLine extends StatefulWidget {
+  const FirstLine(this.text, {super.key});
+
+  /// Markdown.
+  final String text;
+
+  @override
+  State<FirstLine> createState() => _FirstLineState();
+}
+
+class _FirstLineState extends State<FirstLine> {
+  var _open = false;
+
+  /// The first line with something on it, without its Markdown.
+  static String _first(String text) {
+    for (final line in text.split('\n')) {
+      final plain = md.Document(extensionSet: md.ExtensionSet.gitHubFlavored)
+          .parseInline(
+            line.trim().replaceFirst(RegExp(r'^(#+|[-*+>]|\d+\.)\s+'), ''),
+          )
+          .map((node) => node.textContent)
+          .join()
+          .trim();
+      if (plain.isNotEmpty) return plain;
+    }
+    return text.trim();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    Widget toggle(String label) => Pressable(
+      onTap: () => setState(() => _open = !_open),
+      builder: (context, hovered) => Text(
+        label,
+        style: TextStyles.caption.copyWith(
+          color: hovered ? palette.text : palette.textMuted,
+        ),
+      ),
+    );
+    if (_open) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Markdown(widget.text, color: palette.textMuted),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: toggle('Show less'),
+            ),
+          ),
+        ],
+      );
+    }
+    final first = _first(widget.text);
+    final style = TextStyles.body.copyWith(color: palette.textMuted);
+    final lines = widget.text
+        .trim()
+        .split('\n')
+        .where((l) => l.trim().isNotEmpty);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final painter = TextPainter(
+          text: TextSpan(text: first, style: style),
+          maxLines: 1,
+          textDirection: TextDirection.ltr,
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: constraints.maxWidth);
+        // Something left out: more lines, Markdown that reads differently
+        // whole, or a line too long for the width.
+        final more =
+            lines.length > 1 ||
+            first != widget.text.trim() ||
+            painter.didExceedMaxLines;
+        painter.dispose();
+        return Row(
+          children: [
+            Flexible(
+              child: Text(
+                first,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: style,
+              ),
+            ),
+            if (more) ...[const SizedBox(width: Space.s), toggle('Show more')],
+          ],
+        );
+      },
+    );
+  }
 }
 
 class _ProposeLine extends StatelessWidget {
@@ -929,7 +1057,7 @@ Widget? _memoryReadBody(BuildContext context, ToolCallInfo call) {
   final at = output.indexOf('\n\n');
   final text = at < 0 ? '' : output.substring(at + 2).trim();
   if (text.isEmpty) return null;
-  return ShowMore(child: Markdown(text, color: Palette.of(context).textMuted));
+  return FirstLine(text);
 }
 
 /// What one memory op did, for its line.
@@ -970,14 +1098,13 @@ Widget _memoryUpdateLine(BuildContext context, ToolCallInfo call) {
 }
 
 Widget? _memoryUpdateBody(BuildContext context, ToolCallInfo call) {
-  final palette = Palette.of(context);
   final ops = call.list('ops').map(_map).toList();
   final changes = _list(call.details['changes']).map(_map).toList();
   if (ops.length == 1) {
     final op = ops.single;
     return switch (_string(op['op'])) {
-      'note_write' when _string(op['body']).trim().isNotEmpty => ShowMore(
-        child: Markdown(_string(op['body']).trim(), color: palette.textMuted),
+      'note_write' when _string(op['body']).trim().isNotEmpty => FirstLine(
+        _string(op['body']).trim(),
       ),
       'pref_add' || 'pref_replace' when _string(op['why']).isNotEmpty => _Faint(
         _string(op['why']),
@@ -1054,7 +1181,7 @@ Widget? _monitorsAddBody(BuildContext context, ToolCallInfo call) {
   final asked = call.list('monitors');
   if (asked.length == 1) {
     final prompt = _string(_map(asked.single)['prompt']);
-    return prompt.isEmpty ? null : _Faint(prompt);
+    return prompt.isEmpty ? null : FirstLine(prompt);
   }
   if (asked.isEmpty) return null;
   return _rows([
@@ -1386,7 +1513,7 @@ Widget _dbLine(BuildContext context, ToolCallInfo call) {
       .ifEmpty(call.argument('instance'))
       .isNotEmpty;
   final what = records ? "Claktory's records" : 'the database';
-  switch (call.call.name) {
+  switch (call.name) {
     case 'db_query':
       final rows = _int(details['rows']);
       final more = _int(details['more']) ?? 0;

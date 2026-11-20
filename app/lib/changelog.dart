@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'extensions.dart' show dayLabel;
 import 'identity.dart';
+import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'update.dart';
@@ -38,35 +39,41 @@ class ChangelogView extends StatelessWidget {
     final palette = Palette.of(context);
     final scope = AppScope.scope(context);
     void close() => AppScope.closePage(context);
+    // Beside a conversation, the pane's header names and closes it.
+    final inPane = InPane.of(context);
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
-        autofocus: true,
+        autofocus: !inPane,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            WindowDrag(
-              child: Container(
-                height: titleBarHeight,
-                padding: const EdgeInsets.only(left: Space.xl, right: Space.m),
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: palette.hairline)),
-                ),
-                child: Row(
-                  children: [
-                    Text(
-                      "What's new",
-                      style: TextStyles.label.copyWith(
-                        color: palette.text,
-                        fontWeight: FontWeight.w600,
+            if (!inPane)
+              WindowDrag(
+                child: Container(
+                  height: titleBarHeight,
+                  padding: const EdgeInsets.only(
+                    left: Space.xl,
+                    right: Space.m,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(color: palette.hairline)),
+                  ),
+                  child: Row(
+                    children: [
+                      Text(
+                        "What's new",
+                        style: TextStyles.label.copyWith(
+                          color: palette.text,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    Button(label: 'Done', onPressed: close),
-                  ],
+                      const Spacer(),
+                      Button(label: 'Done', onPressed: close),
+                    ],
+                  ),
                 ),
               ),
-            ),
             Expanded(
               child: SelectableArea(
                 child: ListenableBuilder(

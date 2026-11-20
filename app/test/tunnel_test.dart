@@ -7,8 +7,10 @@ import 'package:factory_app/connections.dart';
 import 'package:factory_app/devices.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -405,7 +407,17 @@ void main() {
     await harness.apply(tester, snapshot);
     await pumpFrames(tester);
     final line = find.text('Connected to mac-mini');
-    await tester.ensureVisible(line);
+    // Settings builds its sections as they scroll into view.
+    await tester.scrollUntilVisible(
+      line,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     expect(line, findsOneWidget);
     expect(find.text('Private and encrypted.'), findsOneWidget);
     expect(find.textContaining('relay'), findsNothing);

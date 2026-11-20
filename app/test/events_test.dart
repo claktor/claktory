@@ -1,3 +1,4 @@
+import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/forms.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/transcript.dart';
@@ -249,6 +250,7 @@ void main() {
 
   testWidgets('the marketplace shows each kind and closes', (tester) async {
     final harness = Harness(workspace());
+    harness.backend.appliesLayouts = true;
     await harness.show(tester);
     await tester.tap(find.bySemanticsLabel('Marketplace'));
     await settle(tester);
@@ -259,9 +261,13 @@ void main() {
     await tester.tap(find.text('Extensions'));
     await settle(tester);
     expect(find.text('No extensions yet.'), findsOneWidget);
-    await tester.tap(find.text('Done'));
+    // Beside the conversation, its pane's × closes it.
+    expect(find.text('Conversation'), findsOneWidget);
+    await tester.tap(
+      find.byWidgetPredicate((w) => w is GlyphButton && w.label == 'Close'),
+    );
     await settle(tester);
-    expect(find.text('Marketplace'), findsNothing);
+    expect(find.text('No extensions yet.'), findsNothing);
 
     // The cog opens Settings, and closes it again.
     await tester.tap(find.bySemanticsLabel('Settings'));

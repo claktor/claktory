@@ -80,6 +80,12 @@ enum ClientMessage_Body {
   changePassphrase,
   newRecoveryKey,
   setVaultLockedMode,
+  accountSignIn,
+  accountVerify,
+  accountResend,
+  accountSignOut,
+  setAccountService,
+  showRecoveryKey,
   notSet
 }
 
@@ -144,6 +150,12 @@ class ClientMessage extends $pb.GeneratedMessage {
     ChangePassphrase? changePassphrase,
     NewRecoveryKey? newRecoveryKey,
     SetVaultLockedMode? setVaultLockedMode,
+    AccountSignIn? accountSignIn,
+    AccountVerify? accountVerify,
+    AccountResend? accountResend,
+    AccountSignOut? accountSignOut,
+    SetAccountService? setAccountService,
+    ShowRecoveryKey? showRecoveryKey,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -208,6 +220,12 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (newRecoveryKey != null) result.newRecoveryKey = newRecoveryKey;
     if (setVaultLockedMode != null)
       result.setVaultLockedMode = setVaultLockedMode;
+    if (accountSignIn != null) result.accountSignIn = accountSignIn;
+    if (accountVerify != null) result.accountVerify = accountVerify;
+    if (accountResend != null) result.accountResend = accountResend;
+    if (accountSignOut != null) result.accountSignOut = accountSignOut;
+    if (setAccountService != null) result.setAccountService = setAccountService;
+    if (showRecoveryKey != null) result.showRecoveryKey = showRecoveryKey;
     return result;
   }
 
@@ -280,6 +298,12 @@ class ClientMessage extends $pb.GeneratedMessage {
     57: ClientMessage_Body.changePassphrase,
     58: ClientMessage_Body.newRecoveryKey,
     59: ClientMessage_Body.setVaultLockedMode,
+    60: ClientMessage_Body.accountSignIn,
+    61: ClientMessage_Body.accountVerify,
+    62: ClientMessage_Body.accountResend,
+    63: ClientMessage_Body.accountSignOut,
+    64: ClientMessage_Body.setAccountService,
+    65: ClientMessage_Body.showRecoveryKey,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -344,7 +368,13 @@ class ClientMessage extends $pb.GeneratedMessage {
       56,
       57,
       58,
-      59
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -464,6 +494,18 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: NewRecoveryKey.$_createMessage)
     ..aOM<SetVaultLockedMode>(59, _omitFieldNames ? '' : 'setVaultLockedMode',
         subBuilder: SetVaultLockedMode.$_createMessage)
+    ..aOM<AccountSignIn>(60, _omitFieldNames ? '' : 'accountSignIn',
+        subBuilder: AccountSignIn.$_createMessage)
+    ..aOM<AccountVerify>(61, _omitFieldNames ? '' : 'accountVerify',
+        subBuilder: AccountVerify.$_createMessage)
+    ..aOM<AccountResend>(62, _omitFieldNames ? '' : 'accountResend',
+        subBuilder: AccountResend.$_createMessage)
+    ..aOM<AccountSignOut>(63, _omitFieldNames ? '' : 'accountSignOut',
+        subBuilder: AccountSignOut.$_createMessage)
+    ..aOM<SetAccountService>(64, _omitFieldNames ? '' : 'setAccountService',
+        subBuilder: SetAccountService.$_createMessage)
+    ..aOM<ShowRecoveryKey>(65, _omitFieldNames ? '' : 'showRecoveryKey',
+        subBuilder: ShowRecoveryKey.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -546,6 +588,12 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(57)
   @$pb.TagNumber(58)
   @$pb.TagNumber(59)
+  @$pb.TagNumber(60)
+  @$pb.TagNumber(61)
+  @$pb.TagNumber(62)
+  @$pb.TagNumber(63)
+  @$pb.TagNumber(64)
+  @$pb.TagNumber(65)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -605,6 +653,12 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(57)
   @$pb.TagNumber(58)
   @$pb.TagNumber(59)
+  @$pb.TagNumber(60)
+  @$pb.TagNumber(61)
+  @$pb.TagNumber(62)
+  @$pb.TagNumber(63)
+  @$pb.TagNumber(64)
+  @$pb.TagNumber(65)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1255,6 +1309,73 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearSetVaultLockedMode() => $_clearField(59);
   @$pb.TagNumber(59)
   SetVaultLockedMode ensureSetVaultLockedMode() => $_ensure(58);
+
+  /// This Claktory's sign-in at claktory.com (#116): see ClaktoryAccount.
+  @$pb.TagNumber(60)
+  AccountSignIn get accountSignIn => $_getN(59);
+  @$pb.TagNumber(60)
+  set accountSignIn(AccountSignIn value) => $_setField(60, value);
+  @$pb.TagNumber(60)
+  $core.bool hasAccountSignIn() => $_has(59);
+  @$pb.TagNumber(60)
+  void clearAccountSignIn() => $_clearField(60);
+  @$pb.TagNumber(60)
+  AccountSignIn ensureAccountSignIn() => $_ensure(59);
+
+  @$pb.TagNumber(61)
+  AccountVerify get accountVerify => $_getN(60);
+  @$pb.TagNumber(61)
+  set accountVerify(AccountVerify value) => $_setField(61, value);
+  @$pb.TagNumber(61)
+  $core.bool hasAccountVerify() => $_has(60);
+  @$pb.TagNumber(61)
+  void clearAccountVerify() => $_clearField(61);
+  @$pb.TagNumber(61)
+  AccountVerify ensureAccountVerify() => $_ensure(60);
+
+  @$pb.TagNumber(62)
+  AccountResend get accountResend => $_getN(61);
+  @$pb.TagNumber(62)
+  set accountResend(AccountResend value) => $_setField(62, value);
+  @$pb.TagNumber(62)
+  $core.bool hasAccountResend() => $_has(61);
+  @$pb.TagNumber(62)
+  void clearAccountResend() => $_clearField(62);
+  @$pb.TagNumber(62)
+  AccountResend ensureAccountResend() => $_ensure(61);
+
+  @$pb.TagNumber(63)
+  AccountSignOut get accountSignOut => $_getN(62);
+  @$pb.TagNumber(63)
+  set accountSignOut(AccountSignOut value) => $_setField(63, value);
+  @$pb.TagNumber(63)
+  $core.bool hasAccountSignOut() => $_has(62);
+  @$pb.TagNumber(63)
+  void clearAccountSignOut() => $_clearField(63);
+  @$pb.TagNumber(63)
+  AccountSignOut ensureAccountSignOut() => $_ensure(62);
+
+  @$pb.TagNumber(64)
+  SetAccountService get setAccountService => $_getN(63);
+  @$pb.TagNumber(64)
+  set setAccountService(SetAccountService value) => $_setField(64, value);
+  @$pb.TagNumber(64)
+  $core.bool hasSetAccountService() => $_has(63);
+  @$pb.TagNumber(64)
+  void clearSetAccountService() => $_clearField(64);
+  @$pb.TagNumber(64)
+  SetAccountService ensureSetAccountService() => $_ensure(63);
+
+  @$pb.TagNumber(65)
+  ShowRecoveryKey get showRecoveryKey => $_getN(64);
+  @$pb.TagNumber(65)
+  set showRecoveryKey(ShowRecoveryKey value) => $_setField(65, value);
+  @$pb.TagNumber(65)
+  $core.bool hasShowRecoveryKey() => $_has(64);
+  @$pb.TagNumber(65)
+  void clearShowRecoveryKey() => $_clearField(65);
+  @$pb.TagNumber(65)
+  ShowRecoveryKey ensureShowRecoveryKey() => $_ensure(64);
 }
 
 enum ServerMessage_Body {
@@ -3771,6 +3892,9 @@ class UpdateSettings extends $pb.GeneratedMessage {
     $core.String? userName,
     $core.double? buildCacheGb,
     $core.int? vaultUnlockMinutes,
+    $core.bool? idleCompaction,
+    $core.bool? idleCompactionShortCache,
+    CacheTtl? cacheTtl,
   }) {
     final result = UpdateSettings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -3786,6 +3910,10 @@ class UpdateSettings extends $pb.GeneratedMessage {
     if (buildCacheGb != null) result.buildCacheGb = buildCacheGb;
     if (vaultUnlockMinutes != null)
       result.vaultUnlockMinutes = vaultUnlockMinutes;
+    if (idleCompaction != null) result.idleCompaction = idleCompaction;
+    if (idleCompactionShortCache != null)
+      result.idleCompactionShortCache = idleCompactionShortCache;
+    if (cacheTtl != null) result.cacheTtl = cacheTtl;
     return result;
   }
 
@@ -3818,6 +3946,10 @@ class UpdateSettings extends $pb.GeneratedMessage {
     ..aD(11, _omitFieldNames ? '' : 'buildCacheGb')
     ..aI(20, _omitFieldNames ? '' : 'vaultUnlockMinutes',
         fieldType: $pb.PbFieldType.OU3)
+    ..aOB(23, _omitFieldNames ? '' : 'idleCompaction')
+    ..aOB(24, _omitFieldNames ? '' : 'idleCompactionShortCache')
+    ..aOM<CacheTtl>(25, _omitFieldNames ? '' : 'cacheTtl',
+        subBuilder: CacheTtl.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3957,6 +4089,38 @@ class UpdateSettings extends $pb.GeneratedMessage {
   $core.bool hasVaultUnlockMinutes() => $_has(11);
   @$pb.TagNumber(20)
   void clearVaultUnlockMinutes() => $_clearField(20);
+
+  /// See Settings.
+  @$pb.TagNumber(23)
+  $core.bool get idleCompaction => $_getBF(12);
+  @$pb.TagNumber(23)
+  set idleCompaction($core.bool value) => $_setBool(12, value);
+  @$pb.TagNumber(23)
+  $core.bool hasIdleCompaction() => $_has(12);
+  @$pb.TagNumber(23)
+  void clearIdleCompaction() => $_clearField(23);
+
+  @$pb.TagNumber(24)
+  $core.bool get idleCompactionShortCache => $_getBF(13);
+  @$pb.TagNumber(24)
+  set idleCompactionShortCache($core.bool value) => $_setBool(13, value);
+  @$pb.TagNumber(24)
+  $core.bool hasIdleCompactionShortCache() => $_has(13);
+  @$pb.TagNumber(24)
+  void clearIdleCompactionShortCache() => $_clearField(24);
+
+  /// Sets one provider's or model's cache lifetime: ttl "5m" or "1h"; "" goes
+  /// back to the default (its provider's, or the provider's own).
+  @$pb.TagNumber(25)
+  CacheTtl get cacheTtl => $_getN(14);
+  @$pb.TagNumber(25)
+  set cacheTtl(CacheTtl value) => $_setField(25, value);
+  @$pb.TagNumber(25)
+  $core.bool hasCacheTtl() => $_has(14);
+  @$pb.TagNumber(25)
+  void clearCacheTtl() => $_clearField(25);
+  @$pb.TagNumber(25)
+  CacheTtl ensureCacheTtl() => $_ensure(14);
 }
 
 /// Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -6677,6 +6841,7 @@ class Workspace extends $pb.GeneratedMessage {
     $core.Iterable<ChangelogVersion>? changelog,
     RemoteAccess? remote,
     VaultState? vault,
+    ClaktoryAccount? account,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -6699,6 +6864,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (changelog != null) result.changelog.addAll(changelog);
     if (remote != null) result.remote = remote;
     if (vault != null) result.vault = vault;
+    if (account != null) result.account = account;
     return result;
   }
 
@@ -6745,6 +6911,8 @@ class Workspace extends $pb.GeneratedMessage {
         subBuilder: RemoteAccess.$_createMessage)
     ..aOM<VaultState>(20, _omitFieldNames ? '' : 'vault',
         subBuilder: VaultState.$_createMessage)
+    ..aOM<ClaktoryAccount>(21, _omitFieldNames ? '' : 'account',
+        subBuilder: ClaktoryAccount.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -6947,6 +7115,18 @@ class Workspace extends $pb.GeneratedMessage {
   void clearVault() => $_clearField(20);
   @$pb.TagNumber(20)
   VaultState ensureVault() => $_ensure(19);
+
+  /// This Claktory's sign-in at claktory.com: the same on every device.
+  @$pb.TagNumber(21)
+  ClaktoryAccount get account => $_getN(20);
+  @$pb.TagNumber(21)
+  set account(ClaktoryAccount value) => $_setField(21, value);
+  @$pb.TagNumber(21)
+  $core.bool hasAccount() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearAccount() => $_clearField(21);
+  @$pb.TagNumber(21)
+  ClaktoryAccount ensureAccount() => $_ensure(20);
 }
 
 class ChangelogVersion extends $pb.GeneratedMessage {
@@ -10194,6 +10374,9 @@ class Settings extends $pb.GeneratedMessage {
     $core.String? userName,
     $core.double? buildCacheGb,
     $core.int? vaultUnlockMinutes,
+    $core.bool? idleCompaction,
+    $core.bool? idleCompactionShortCache,
+    $core.Iterable<CacheTtl>? cacheTtls,
   }) {
     final result = Settings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -10209,6 +10392,10 @@ class Settings extends $pb.GeneratedMessage {
     if (buildCacheGb != null) result.buildCacheGb = buildCacheGb;
     if (vaultUnlockMinutes != null)
       result.vaultUnlockMinutes = vaultUnlockMinutes;
+    if (idleCompaction != null) result.idleCompaction = idleCompaction;
+    if (idleCompactionShortCache != null)
+      result.idleCompactionShortCache = idleCompactionShortCache;
+    if (cacheTtls != null) result.cacheTtls.addAll(cacheTtls);
     return result;
   }
 
@@ -10241,6 +10428,10 @@ class Settings extends $pb.GeneratedMessage {
     ..aD(11, _omitFieldNames ? '' : 'buildCacheGb')
     ..aI(20, _omitFieldNames ? '' : 'vaultUnlockMinutes',
         fieldType: $pb.PbFieldType.OU3)
+    ..aOB(23, _omitFieldNames ? '' : 'idleCompaction')
+    ..aOB(24, _omitFieldNames ? '' : 'idleCompactionShortCache')
+    ..pPM<CacheTtl>(25, _omitFieldNames ? '' : 'cacheTtls',
+        subBuilder: CacheTtl.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10389,6 +10580,112 @@ class Settings extends $pb.GeneratedMessage {
   $core.bool hasVaultUnlockMinutes() => $_has(11);
   @$pb.TagNumber(20)
   void clearVaultUnlockMinutes() => $_clearField(20);
+
+  /// An idle agent compacts its conversation just before its prompt cache
+  /// expires, so coming back to it later doesn't pay to cache the whole long
+  /// conversation again (config.json's `compaction.idle`, on unless changed).
+  /// Only for a cache Claktory knows the lifetime of (an hour: after 54
+  /// minutes idle; 5 minutes: only with `idle_compaction_short_cache`), and a
+  /// conversation of at least 150,000 tokens on a 200,000-token model (75% of
+  /// a smaller window, at most 200,000 on a larger one).
+  @$pb.TagNumber(23)
+  $core.bool get idleCompaction => $_getBF(12);
+  @$pb.TagNumber(23)
+  set idleCompaction($core.bool value) => $_setBool(12, value);
+  @$pb.TagNumber(23)
+  $core.bool hasIdleCompaction() => $_has(12);
+  @$pb.TagNumber(23)
+  void clearIdleCompaction() => $_clearField(23);
+
+  /// Also compact after 4 minutes idle when the cache lasts 5 minutes
+  /// (config.json's `compaction.idle_short_cache`, off unless changed). Far
+  /// more often than with an hour's cache.
+  @$pb.TagNumber(24)
+  $core.bool get idleCompactionShortCache => $_getBF(13);
+  @$pb.TagNumber(24)
+  set idleCompactionShortCache($core.bool value) => $_setBool(13, value);
+  @$pb.TagNumber(24)
+  $core.bool hasIdleCompactionShortCache() => $_has(13);
+  @$pb.TagNumber(24)
+  void clearIdleCompactionShortCache() => $_clearField(24);
+
+  /// How long each provider's or model's prompt cache is asked to last, as
+  /// set (config.json's `prompt_cache`); what isn't listed asks for the
+  /// provider's default. See Provider.cache_ttl for what applies.
+  @$pb.TagNumber(25)
+  $pb.PbList<CacheTtl> get cacheTtls => $_getList(14);
+}
+
+/// How long a provider's (or one model's) prompt cache is asked to last.
+class CacheTtl extends $pb.GeneratedMessage {
+  factory CacheTtl({
+    $core.String? key,
+    $core.String? ttl,
+  }) {
+    final result = CacheTtl._();
+    if (key != null) result.key = key;
+    if (ttl != null) result.ttl = ttl;
+    return result;
+  }
+
+  CacheTtl._();
+
+  factory CacheTtl.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CacheTtl()..mergeFromBuffer(data, registry);
+  factory CacheTtl.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CacheTtl()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CacheTtl',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: CacheTtl.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'key')
+    ..aOS(2, _omitFieldNames ? '' : 'ttl')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CacheTtl clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CacheTtl copyWith(void Function(CacheTtl) updates) =>
+      super.copyWith((message) => updates(message as CacheTtl)) as CacheTtl;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use CacheTtl() / CacheTtl.new instead')
+  static CacheTtl create() => CacheTtl._();
+  static $pb.GeneratedMessage $_createMessage() => CacheTtl._();
+  @$core.override
+  CacheTtl createEmptyInstance() => CacheTtl._();
+  @$core.pragma('dart2js:noInline')
+  static CacheTtl getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CacheTtl>(CacheTtl.$_createMessage);
+  static CacheTtl? _defaultInstance;
+
+  /// A provider id ("anthropic") or a model id ("anthropic/claude-opus-4-8"),
+  /// which wins over its provider's.
+  @$pb.TagNumber(1)
+  $core.String get key => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set key($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKey() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKey() => $_clearField(1);
+
+  /// "5m" or "1h". An hour costs more to write the cache (2× input instead of
+  /// 1.25× on Anthropic) and keeps it through longer breaks.
+  @$pb.TagNumber(2)
+  $core.String get ttl => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set ttl($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasTtl() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTtl() => $_clearField(2);
 }
 
 class Provider extends $pb.GeneratedMessage {
@@ -10401,6 +10698,7 @@ class Provider extends $pb.GeneratedMessage {
     ProviderUsage? usage,
     $core.String? plan,
     $core.Iterable<Account>? accounts,
+    $core.String? cacheTtl,
   }) {
     final result = Provider._();
     if (id != null) result.id = id;
@@ -10411,6 +10709,7 @@ class Provider extends $pb.GeneratedMessage {
     if (usage != null) result.usage = usage;
     if (plan != null) result.plan = plan;
     if (accounts != null) result.accounts.addAll(accounts);
+    if (cacheTtl != null) result.cacheTtl = cacheTtl;
     return result;
   }
 
@@ -10438,6 +10737,7 @@ class Provider extends $pb.GeneratedMessage {
     ..aOS(7, _omitFieldNames ? '' : 'plan')
     ..pPM<Account>(8, _omitFieldNames ? '' : 'accounts',
         subBuilder: Account.$_createMessage)
+    ..aOS(9, _omitFieldNames ? '' : 'cacheTtl')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10535,6 +10835,19 @@ class Provider extends $pb.GeneratedMessage {
   /// above describe the first, as before several accounts could be signed in.
   @$pb.TagNumber(8)
   $pb.PbList<Account> get accounts => $_getList(7);
+
+  /// How long its prompt cache is asked to last now, "5m" or "1h" (models with
+  /// their own setting may differ; see Settings.cache_ttls). Empty when
+  /// Claktory can't choose it for this provider and doesn't know how long it
+  /// lasts: its agents never compact while idle.
+  @$pb.TagNumber(9)
+  $core.String get cacheTtl => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set cacheTtl($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasCacheTtl() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearCacheTtl() => $_clearField(9);
 }
 
 /// One account signed in to a provider, such as one of two Claude
@@ -12782,7 +13095,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(11)
   Proposal ensureProposal() => $_ensure(10);
 
-  /// An agent asks for a secret (secret_request): see SecretRequest.
+  /// An agent asks for a secret (its secrets_request tool): see SecretRequest.
   @$pb.TagNumber(12)
   SecretRequest get secretRequest => $_getN(11);
   @$pb.TagNumber(12)
@@ -13361,10 +13674,12 @@ class Compaction extends $pb.GeneratedMessage {
   factory Compaction({
     $core.String? summary,
     $fixnum.Int64? tokensBefore,
+    $core.bool? idle,
   }) {
     final result = Compaction._();
     if (summary != null) result.summary = summary;
     if (tokensBefore != null) result.tokensBefore = tokensBefore;
+    if (idle != null) result.idle = idle;
     return result;
   }
 
@@ -13385,6 +13700,7 @@ class Compaction extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(
         2, _omitFieldNames ? '' : 'tokensBefore', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'idle')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -13424,6 +13740,18 @@ class Compaction extends $pb.GeneratedMessage {
   $core.bool hasTokensBefore() => $_has(1);
   @$pb.TagNumber(2)
   void clearTokensBefore() => $_clearField(2);
+
+  /// Compacted while the agent was idle, just before its prompt cache
+  /// expired (Settings.idle_compaction), not because the context was full or
+  /// on request.
+  @$pb.TagNumber(3)
+  $core.bool get idle => $_getBF(2);
+  @$pb.TagNumber(3)
+  set idle($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasIdle() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearIdle() => $_clearField(3);
 }
 
 /// Something the harness reports rather than the model: errors, stops.
@@ -16087,7 +16415,7 @@ class SecretUse extends $pb.GeneratedMessage {
   void clearDetail() => $_clearField(7);
 }
 
-/// An agent's request (secret_request), shown in its conversation after the
+/// An agent's request (secrets_request), shown in its conversation after the
 /// call, for the person to grant or dismiss with DecideSecretRequest. The
 /// entry is sent again when it's decided.
 class SecretRequest extends $pb.GeneratedMessage {
@@ -16327,6 +16655,507 @@ class NewSecret extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(3)
   $pb.PbList<SecretVariable> get variables => $_getList(2);
+}
+
+/// This Claktory's account at claktory.com, or at the service in
+/// config.json's `account.service`. Signing in is the backend's, not a
+/// device's: one sign-in, and every device that connects shows it.
+class ClaktoryAccount extends $pb.GeneratedMessage {
+  factory ClaktoryAccount({
+    ClaktoryAccountState? state,
+    $core.String? email,
+    $core.String? service,
+    $core.String? name,
+    $fixnum.Int64? lastContactMs,
+    $core.String? problem,
+    $fixnum.Int64? codeExpiresMs,
+    $core.String? lastSignInJson,
+    $core.String? lastCheckInJson,
+    $fixnum.Int64? lastSignInMs,
+    $fixnum.Int64? lastCheckInMs,
+  }) {
+    final result = ClaktoryAccount._();
+    if (state != null) result.state = state;
+    if (email != null) result.email = email;
+    if (service != null) result.service = service;
+    if (name != null) result.name = name;
+    if (lastContactMs != null) result.lastContactMs = lastContactMs;
+    if (problem != null) result.problem = problem;
+    if (codeExpiresMs != null) result.codeExpiresMs = codeExpiresMs;
+    if (lastSignInJson != null) result.lastSignInJson = lastSignInJson;
+    if (lastCheckInJson != null) result.lastCheckInJson = lastCheckInJson;
+    if (lastSignInMs != null) result.lastSignInMs = lastSignInMs;
+    if (lastCheckInMs != null) result.lastCheckInMs = lastCheckInMs;
+    return result;
+  }
+
+  ClaktoryAccount._();
+
+  factory ClaktoryAccount.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClaktoryAccount()..mergeFromBuffer(data, registry);
+  factory ClaktoryAccount.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClaktoryAccount()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ClaktoryAccount',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ClaktoryAccount.$_createMessage)
+    ..aE<ClaktoryAccountState>(1, _omitFieldNames ? '' : 'state',
+        enumValues: ClaktoryAccountState.values)
+    ..aOS(2, _omitFieldNames ? '' : 'email')
+    ..aOS(3, _omitFieldNames ? '' : 'service')
+    ..aOS(4, _omitFieldNames ? '' : 'name')
+    ..aInt64(5, _omitFieldNames ? '' : 'lastContactMs')
+    ..aOS(6, _omitFieldNames ? '' : 'problem')
+    ..aInt64(7, _omitFieldNames ? '' : 'codeExpiresMs')
+    ..aOS(8, _omitFieldNames ? '' : 'lastSignInJson')
+    ..aOS(9, _omitFieldNames ? '' : 'lastCheckInJson')
+    ..aInt64(10, _omitFieldNames ? '' : 'lastSignInMs')
+    ..aInt64(11, _omitFieldNames ? '' : 'lastCheckInMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClaktoryAccount clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClaktoryAccount copyWith(void Function(ClaktoryAccount) updates) =>
+      super.copyWith((message) => updates(message as ClaktoryAccount))
+          as ClaktoryAccount;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ClaktoryAccount() / ClaktoryAccount.new instead')
+  static ClaktoryAccount create() => ClaktoryAccount._();
+  static $pb.GeneratedMessage $_createMessage() => ClaktoryAccount._();
+  @$core.override
+  ClaktoryAccount createEmptyInstance() => ClaktoryAccount._();
+  @$core.pragma('dart2js:noInline')
+  static ClaktoryAccount getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ClaktoryAccount>(
+          ClaktoryAccount.$_createMessage);
+  static ClaktoryAccount? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  ClaktoryAccountState get state => $_getN(0);
+  @$pb.TagNumber(1)
+  set state(ClaktoryAccountState value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasState() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearState() => $_clearField(1);
+
+  /// The email it's signed in with, or that the code went to.
+  @$pb.TagNumber(2)
+  $core.String get email => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set email($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasEmail() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearEmail() => $_clearField(2);
+
+  /// The service's address, such as "https://account.claktory.com".
+  @$pb.TagNumber(3)
+  $core.String get service => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set service($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasService() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearService() => $_clearField(3);
+
+  /// This Claktory's name there, as sent at sign-in (the computer's name).
+  @$pb.TagNumber(4)
+  $core.String get name => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set name($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasName() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearName() => $_clearField(4);
+
+  /// When the service last answered, in ms since 1970; 0 if it never has.
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get lastContactMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set lastContactMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasLastContactMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLastContactMs() => $_clearField(5);
+
+  /// What went wrong with the last call to the service, in words for the
+  /// person ("claktory.com can't be reached; Claktory tries again by
+  /// itself"); empty when it worked.
+  @$pb.TagNumber(6)
+  $core.String get problem => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set problem($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasProblem() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearProblem() => $_clearField(6);
+
+  /// AWAITING_CODE: when the code stops working, in ms since 1970.
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get codeExpiresMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set codeExpiresMs($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasCodeExpiresMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearCodeExpiresMs() => $_clearField(7);
+
+  /// Exactly what this Claktory last sent the service, as JSON, for "What
+  /// claktory.com receives": its sign-in (the request that emails the code)
+  /// and its check-in. The machine token, signatures and codes travel beside
+  /// them and aren't shown; empty before the first.
+  @$pb.TagNumber(8)
+  $core.String get lastSignInJson => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set lastSignInJson($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasLastSignInJson() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearLastSignInJson() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get lastCheckInJson => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set lastCheckInJson($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasLastCheckInJson() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearLastCheckInJson() => $_clearField(9);
+
+  /// When each was sent, in ms since 1970; 0 before the first.
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get lastSignInMs => $_getI64(9);
+  @$pb.TagNumber(10)
+  set lastSignInMs($fixnum.Int64 value) => $_setInt64(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasLastSignInMs() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearLastSignInMs() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $fixnum.Int64 get lastCheckInMs => $_getI64(10);
+  @$pb.TagNumber(11)
+  set lastCheckInMs($fixnum.Int64 value) => $_setInt64(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasLastCheckInMs() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearLastCheckInMs() => $_clearField(11);
+}
+
+/// Emails a code to sign this Claktory in. Answered with Ack once it's sent;
+/// ERROR_CODE_RATE_LIMITED or ERROR_CODE_UNREACHABLE when it can't be.
+class AccountSignIn extends $pb.GeneratedMessage {
+  factory AccountSignIn({
+    $core.String? email,
+  }) {
+    final result = AccountSignIn._();
+    if (email != null) result.email = email;
+    return result;
+  }
+
+  AccountSignIn._();
+
+  factory AccountSignIn.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountSignIn()..mergeFromBuffer(data, registry);
+  factory AccountSignIn.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountSignIn()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AccountSignIn',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AccountSignIn.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'email')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountSignIn clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountSignIn copyWith(void Function(AccountSignIn) updates) =>
+      super.copyWith((message) => updates(message as AccountSignIn))
+          as AccountSignIn;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AccountSignIn() / AccountSignIn.new instead')
+  static AccountSignIn create() => AccountSignIn._();
+  static $pb.GeneratedMessage $_createMessage() => AccountSignIn._();
+  @$core.override
+  AccountSignIn createEmptyInstance() => AccountSignIn._();
+  @$core.pragma('dart2js:noInline')
+  static AccountSignIn getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AccountSignIn>(
+          AccountSignIn.$_createMessage);
+  static AccountSignIn? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get email => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set email($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasEmail() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearEmail() => $_clearField(1);
+}
+
+/// The emailed code. Answered with Ack once signed in, when the vault is
+/// protected by the account (and its recovery key made). A wrong code is
+/// ERROR_CODE_WRONG_PROOF, its message saying how many tries are left; an
+/// expired one ERROR_CODE_INVALID_REQUEST.
+class AccountVerify extends $pb.GeneratedMessage {
+  factory AccountVerify({
+    $core.String? code,
+  }) {
+    final result = AccountVerify._();
+    if (code != null) result.code = code;
+    return result;
+  }
+
+  AccountVerify._();
+
+  factory AccountVerify.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountVerify()..mergeFromBuffer(data, registry);
+  factory AccountVerify.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountVerify()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AccountVerify',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AccountVerify.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'code')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountVerify clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountVerify copyWith(void Function(AccountVerify) updates) =>
+      super.copyWith((message) => updates(message as AccountVerify))
+          as AccountVerify;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AccountVerify() / AccountVerify.new instead')
+  static AccountVerify create() => AccountVerify._();
+  static $pb.GeneratedMessage $_createMessage() => AccountVerify._();
+  @$core.override
+  AccountVerify createEmptyInstance() => AccountVerify._();
+  @$core.pragma('dart2js:noInline')
+  static AccountVerify getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AccountVerify>(
+          AccountVerify.$_createMessage);
+  static AccountVerify? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get code => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set code($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCode() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCode() => $_clearField(1);
+}
+
+/// Emails a new code to the same address. Answered with Ack.
+class AccountResend extends $pb.GeneratedMessage {
+  factory AccountResend() => AccountResend._();
+
+  AccountResend._();
+
+  factory AccountResend.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountResend()..mergeFromBuffer(data, registry);
+  factory AccountResend.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountResend()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AccountResend',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AccountResend.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountResend clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountResend copyWith(void Function(AccountResend) updates) =>
+      super.copyWith((message) => updates(message as AccountResend))
+          as AccountResend;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AccountResend() / AccountResend.new instead')
+  static AccountResend create() => AccountResend._();
+  static $pb.GeneratedMessage $_createMessage() => AccountResend._();
+  @$core.override
+  AccountResend createEmptyInstance() => AccountResend._();
+  @$core.pragma('dart2js:noInline')
+  static AccountResend getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AccountResend>(
+          AccountResend.$_createMessage);
+  static AccountResend? _defaultInstance;
+}
+
+/// Signs out: no more check-ins, and back to SIGNED_OUT. The vault stays as
+/// it is, unlocked while Claktory runs. Answered with Ack.
+class AccountSignOut extends $pb.GeneratedMessage {
+  factory AccountSignOut() => AccountSignOut._();
+
+  AccountSignOut._();
+
+  factory AccountSignOut.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountSignOut()..mergeFromBuffer(data, registry);
+  factory AccountSignOut.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountSignOut()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AccountSignOut',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AccountSignOut.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountSignOut clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountSignOut copyWith(void Function(AccountSignOut) updates) =>
+      super.copyWith((message) => updates(message as AccountSignOut))
+          as AccountSignOut;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AccountSignOut() / AccountSignOut.new instead')
+  static AccountSignOut create() => AccountSignOut._();
+  static $pb.GeneratedMessage $_createMessage() => AccountSignOut._();
+  @$core.override
+  AccountSignOut createEmptyInstance() => AccountSignOut._();
+  @$core.pragma('dart2js:noInline')
+  static AccountSignOut getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AccountSignOut>(
+          AccountSignOut.$_createMessage);
+  static AccountSignOut? _defaultInstance;
+}
+
+/// The account service to use; empty for claktory.com's. Only while signed
+/// out. Answered with Ack.
+class SetAccountService extends $pb.GeneratedMessage {
+  factory SetAccountService({
+    $core.String? url,
+  }) {
+    final result = SetAccountService._();
+    if (url != null) result.url = url;
+    return result;
+  }
+
+  SetAccountService._();
+
+  factory SetAccountService.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAccountService()..mergeFromBuffer(data, registry);
+  factory SetAccountService.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAccountService()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetAccountService',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetAccountService.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'url')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAccountService clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAccountService copyWith(void Function(SetAccountService) updates) =>
+      super.copyWith((message) => updates(message as SetAccountService))
+          as SetAccountService;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetAccountService() / SetAccountService.new instead')
+  static SetAccountService create() => SetAccountService._();
+  static $pb.GeneratedMessage $_createMessage() => SetAccountService._();
+  @$core.override
+  SetAccountService createEmptyInstance() => SetAccountService._();
+  @$core.pragma('dart2js:noInline')
+  static SetAccountService getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetAccountService>(
+          SetAccountService.$_createMessage);
+  static SetAccountService? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get url => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set url($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasUrl() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUrl() => $_clearField(1);
+}
+
+/// The vault's recovery key, to note down. Answered with RecoveryKey, to the
+/// asker only; logged in the vault's uses.
+class ShowRecoveryKey extends $pb.GeneratedMessage {
+  factory ShowRecoveryKey() => ShowRecoveryKey._();
+
+  ShowRecoveryKey._();
+
+  factory ShowRecoveryKey.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ShowRecoveryKey()..mergeFromBuffer(data, registry);
+  factory ShowRecoveryKey.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ShowRecoveryKey()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ShowRecoveryKey',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ShowRecoveryKey.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ShowRecoveryKey clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ShowRecoveryKey copyWith(void Function(ShowRecoveryKey) updates) =>
+      super.copyWith((message) => updates(message as ShowRecoveryKey))
+          as ShowRecoveryKey;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ShowRecoveryKey() / ShowRecoveryKey.new instead')
+  static ShowRecoveryKey create() => ShowRecoveryKey._();
+  static $pb.GeneratedMessage $_createMessage() => ShowRecoveryKey._();
+  @$core.override
+  ShowRecoveryKey createEmptyInstance() => ShowRecoveryKey._();
+  @$core.pragma('dart2js:noInline')
+  static ShowRecoveryKey getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ShowRecoveryKey>(
+          ShowRecoveryKey.$_createMessage);
+  static ShowRecoveryKey? _defaultInstance;
 }
 
 const $core.bool _omitFieldNames =

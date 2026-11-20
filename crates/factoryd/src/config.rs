@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
+use factory_agent::CacheTtl;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -80,6 +81,60 @@ pub struct Config {
     /// The vault's settings (`crate::vault`). Only written when changed.
     #[serde(default, skip_serializing_if = "VaultConfig::is_default")]
     pub vault: VaultConfig,
+    /// When agents compact besides a full context (`crate::idle`). Only
+    /// written when changed.
+    #[serde(default, skip_serializing_if = "CompactionConfig::is_default")]
+    pub compaction: CompactionConfig,
+    /// How long prompt caches are asked to last, by provider id or model id
+    /// (a model's wins); what isn't listed asks for the provider's default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prompt_cache: BTreeMap<String, CacheTtl>,
+    /// Signing in to claktory.com (`crate::account`). Only written when
+    /// changed.
+    #[serde(default, skip_serializing_if = "AccountConfig::is_default")]
+    pub account: AccountConfig,
+}
+
+/// Claktory's account at claktory.com, or at a service of the person's own.
+/// What it's signed in with lives in `<home>/account`, never here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AccountConfig {
+    /// Signing in is on: the app asks for it, and a signed-in Claktory calls
+    /// the service. Off until the whole flow is proven; then on by default.
+    pub enabled: bool,
+    /// The service to sign in at next; empty for claktory.com's
+    /// (`crate::account::DEFAULT_SERVICE`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub service: String,
+}
+
+impl AccountConfig {
+    fn is_default(&self) -> bool {
+        *self == AccountConfig::default()
+    }
+}
+
+/// When agents compact besides a full context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CompactionConfig {
+    /// An idle agent compacts just before its prompt cache expires.
+    pub idle: bool,
+    /// Also when the cache lasts only 5 minutes (after 4 idle minutes).
+    pub idle_short_cache: bool,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> CompactionConfig {
+        CompactionConfig { idle: true, idle_short_cache: false }
+    }
+}
+
+impl CompactionConfig {
+    fn is_default(&self) -> bool {
+        *self == CompactionConfig::default()
+    }
 }
 
 /// The vault's settings. Which secrets exist and who may use them live in
@@ -395,6 +450,9 @@ impl Default for Config {
             display: DisplayConfig::default(),
             user: UserConfig::default(),
             vault: VaultConfig::default(),
+            compaction: CompactionConfig::default(),
+            prompt_cache: BTreeMap::new(),
+            account: AccountConfig::default(),
         }
     }
 }
@@ -437,6 +495,10 @@ pub enum Invalid {
     BadDisplay(String),
     #[error("vault: unlock_minutes must be 1 to 60")]
     BadVault,
+    #[error("account: service \"{0}\" must be an https:// address (http:// only on this computer)")]
+    BadAccountService(String),
+    #[error("prompt_cache: \"{0}\" must be a provider whose cache lifetime can be chosen ({providers}) or one of its models (\"anthropic/<model id>\")", providers = CACHE_TTL_PROVIDERS.join(", "))]
+    BadPromptCache(String),
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
@@ -486,6 +548,15 @@ impl Config {
         self.display.check()?;
         if !(1..=60).contains(&self.vault.unlock_minutes) {
             return Err(Invalid::BadVault);
+        }
+        if !self.account.service.is_empty() && crate::account::service_url(&self.account.service).is_none() {
+            return Err(Invalid::BadAccountService(self.account.service.clone()));
+        }
+        for key in self.prompt_cache.keys() {
+            let provider = key.split_once('/').map_or(key.as_str(), |(provider, model)| if model.is_empty() { "" } else { provider });
+            if !CACHE_TTL_PROVIDERS.contains(&provider) {
+                return Err(Invalid::BadPromptCache(key.clone()));
+            }
         }
         check_model(&self.default_model)?;
         check_effort(&self.default_effort)?;
@@ -577,7 +648,21 @@ const AGENT_RGB: [[u8; 3]; 8] = [
     [0x5A, 0x63, 0x77],
 ];
 
+/// Providers whose requests can choose how long the prompt cache lasts.
+pub const CACHE_TTL_PROVIDERS: &[&str] = &["anthropic"];
+
 impl Config {
+    /// How long the prompt cache of `model` ("provider/model id") is asked to
+    /// last: its own setting, its provider's, or the provider's default; None
+    /// for a provider whose cache lifetime Claktory can't choose or know.
+    pub fn cache_ttl(&self, model: &str) -> Option<CacheTtl> {
+        let provider = model.split_once('/').map_or(model, |(provider, _)| provider);
+        if !CACHE_TTL_PROVIDERS.contains(&provider) {
+            return None;
+        }
+        Some(self.prompt_cache.get(model).or_else(|| self.prompt_cache.get(provider)).copied().unwrap_or_default())
+    }
+
     /// Gives every agent without a color one, and says whether any needed
     /// it, so the file is written back. An agent keeps the color it had in
     /// `before`, the config this one replaces, and one new since gets

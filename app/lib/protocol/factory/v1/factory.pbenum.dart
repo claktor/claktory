@@ -146,6 +146,16 @@ class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_NOT_GRANTED =
       ErrorCode._(12, _omitEnumNames ? '' : 'ERROR_CODE_NOT_GRANTED');
 
+  /// The account service asks to wait (too many codes or tries); the
+  /// message says how long.
+  static const ErrorCode ERROR_CODE_RATE_LIMITED =
+      ErrorCode._(13, _omitEnumNames ? '' : 'ERROR_CODE_RATE_LIMITED');
+
+  /// The account service can't be reached (or answered something Claktory
+  /// can't trust); the message says which. Claktory keeps working.
+  static const ErrorCode ERROR_CODE_UNREACHABLE =
+      ErrorCode._(14, _omitEnumNames ? '' : 'ERROR_CODE_UNREACHABLE');
+
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
     ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
@@ -160,10 +170,12 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_PROOF_REQUIRED,
     ERROR_CODE_WRONG_PROOF,
     ERROR_CODE_NOT_GRANTED,
+    ERROR_CODE_RATE_LIMITED,
+    ERROR_CODE_UNREACHABLE,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 12);
+      $pb.ProtobufEnum.$_initByValueList(values, 14);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -614,6 +626,46 @@ class SecretRequestState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const SecretRequestState._(super.value, super.name);
+}
+
+class ClaktoryAccountState extends $pb.ProtobufEnum {
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_UNSPECIFIED =
+      ClaktoryAccountState._(
+          0, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_UNSPECIFIED');
+
+  /// Not signed in: AccountSignIn.
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_SIGNED_OUT =
+      ClaktoryAccountState._(
+          1, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_SIGNED_OUT');
+
+  /// A code was emailed: AccountVerify, or AccountResend.
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_AWAITING_CODE =
+      ClaktoryAccountState._(
+          2, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_AWAITING_CODE');
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_SIGNED_IN =
+      ClaktoryAccountState._(
+          3, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_SIGNED_IN');
+
+  /// Removed at claktory.com: it keeps running, but after a restart its
+  /// secrets open only with the recovery key, until it signs in again.
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_REVOKED =
+      ClaktoryAccountState._(
+          4, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_REVOKED');
+
+  static const $core.List<ClaktoryAccountState> values = <ClaktoryAccountState>[
+    CLAKTORY_ACCOUNT_STATE_UNSPECIFIED,
+    CLAKTORY_ACCOUNT_STATE_SIGNED_OUT,
+    CLAKTORY_ACCOUNT_STATE_AWAITING_CODE,
+    CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
+    CLAKTORY_ACCOUNT_STATE_REVOKED,
+  ];
+
+  static final $core.List<ClaktoryAccountState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static ClaktoryAccountState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ClaktoryAccountState._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

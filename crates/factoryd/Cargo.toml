@@ -9,7 +9,10 @@ publish.workspace = true
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 bytes = "1.12.2"
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+# The account service's API and its cryptography (`account.rs`), without the server.
+claktory-account = { path = "../claktory-account", default-features = false }
 dom_smoothie = "0.19"
+ed25519-dalek = "3"
 factory-agent = { version = "0.1.0", path = "../factory-agent" }
 factory-protocol = { version = "0.1.0", path = "../factory-protocol" }
 futures-util = "0.3.34"
@@ -30,6 +33,7 @@ prost = "0.14.6"
 # `factoryd pair` shows the code as a QR code in the terminal; no image formats.
 qrcode = { version = "0.15", default-features = false, features = ["std"] }
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
 # ring is the process default (main.rs), and the tunnel's (iroh, tls-ring).
 rustls = { version = "0.23", features = ["ring"] }
@@ -47,6 +51,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
 
 [dev-dependencies]
+# A local account service to sign in at (tests/all/account.rs).
+claktory-account = { path = "../claktory-account" }
 # tests/tls.rs: a TLS server with a certificate of its own, and the other
 # crypto provider beside ring.
 rcgen = "0.14"

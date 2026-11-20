@@ -293,3 +293,59 @@ async fn budget_notes_reach_anthropic_with_a_cache_breakpoint_and_the_selected_r
         }
     }
 }
+
+/// Every `cache_control` in a request body, as written.
+fn cache_controls(value: &Value, found: &mut Vec<Value>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "cache_control" {
+                    found.push(value.clone());
+                } else {
+                    cache_controls(value, found);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| cache_controls(item, found)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn an_hour_s_cache_asks_for_it_on_every_breakpoint_and_the_default_sends_no_ttl() {
+    use factory_agent::stream::{CacheTtl, LlmContext};
+    use factory_agent::types::{Message, UserMessage};
+    for (ttl, sent) in [(CacheTtl::FiveMinutes, None), (CacheTtl::OneHour, Some("1h"))] {
+        let fixture = serde_json::from_str::<Vec<BudgetFixture>>(include_str!("../fixtures/anthropic.json"))
+            .unwrap()
+            .into_iter()
+            .find(|case| case.name == "thinking off")
+            .unwrap();
+        let server = serve(vec![served(fixture.http.chunks, false, false)]).await;
+        let mut model = models("anthropic").into_iter().find(|model| model.id == "claude-sonnet-5-5").unwrap();
+        model.base_url = server.base_url.clone();
+        let tool = ToolSpec {
+            name: "read".into(),
+            label: "Read".into(),
+            description: "Read a file.".into(),
+            parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            constrained_sampling: Value::Null,
+        };
+        let context = LlmContext {
+            system_prompt: Some("You are a coding agent.".into()),
+            messages: vec![Message::User(UserMessage::text("hello", 1))],
+            tools: vec![tool],
+        };
+        let options = StreamOptions { api_key: Some("test-key".into()), cache_ttl: ttl, ..Default::default() };
+        let result = stream_simple(&model, context, options).unwrap().result().await.unwrap();
+        assert_eq!(result.stop_reason, StopReason::Stop, "{:?}", result.error_message);
+        let body: Value = serde_json::from_str(&server.requests.lock()[0].body.to_string()).unwrap();
+        let mut controls = Vec::new();
+        cache_controls(&body, &mut controls);
+        assert!(controls.len() >= 3, "system, tools and the last message: {controls:?}");
+        for control in controls {
+            assert_eq!(control["type"], "ephemeral");
+            assert_eq!(control.get("ttl").and_then(Value::as_str), sent, "{control}");
+        }
+    }
+}

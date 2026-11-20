@@ -1,0 +1,10 @@
+[Unit]
+Description=Fetch the GeoIP file for Claktory's account service monthly
+
+[Timer]
+OnCalendar=*-*-03 04:00:00
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

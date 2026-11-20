@@ -489,6 +489,41 @@ void main() {
     });
   });
 
+  testWidgets('a compaction says whether it happened while idle', (
+    tester,
+  ) async {
+    final store = TranscriptStore()
+      ..load(
+        Transcript(
+          agentId: 'a',
+          entries: [
+            Entry(
+              seq: Int64(1),
+              compaction: Compaction(
+                summary: 'Built the app.',
+                tokensBefore: Int64(412000),
+              ),
+            ),
+            Entry(
+              seq: Int64(2),
+              compaction: Compaction(
+                summary: 'Fixed the tests.',
+                tokensBefore: Int64(180000),
+                idle: true,
+              ),
+            ),
+          ],
+        ),
+      );
+    await show(tester, store, ValueNotifier(0));
+    expect(find.text('Earlier messages summarized'), findsOneWidget);
+    expect(find.text('Earlier messages summarized while idle'), findsOneWidget);
+    await tester.tap(find.text('Earlier messages summarized while idle'));
+    await tester.pumpAndSettle();
+    expect(find.text('Summarized at 180k tokens.'), findsOneWidget);
+    expect(find.text('Fixed the tests.'), findsOneWidget);
+  });
+
   group('tool calls', () {
     Entry call(int seq, int reply, String name) => Entry(
       seq: Int64(seq),

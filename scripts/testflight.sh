@@ -84,15 +84,20 @@ auth=(
 echo "Building Claktory $version ($build) for iPhone…"
 cd "$root/app"
 # Flutter's half (the Dart code, its assets and the tunnel's Rust library),
-# then Xcode's archive of it.
+# then Xcode's archive of it. The bundle id, com.claktory.app, comes from
+# the project: set on the command line it would reach the plugins' resource
+# bundles too, and App Store Connect refuses two bundles with one id.
+# The archive is left unsigned, and exporting it signs it for the App Store:
+# signing the archive itself would use the project's development identity,
+# whose profile needs a registered device (the team may have none), while
+# the export's distribution certificate and App Store profile need none.
 flutter build ios --release --config-only --build-name "$version" --build-number "$build"
 cd ios
 xcodebuild archive -quiet \
   -workspace Runner.xcworkspace -scheme Runner -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
-  PRODUCT_BUNDLE_IDENTIFIER=com.claktory.app \
-  "${auth[@]}"
+  CODE_SIGNING_ALLOWED=NO
 
 destination=export
 $upload && destination=upload

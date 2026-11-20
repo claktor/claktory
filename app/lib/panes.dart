@@ -7,10 +7,13 @@ import 'characters/character.dart';
 import 'controls.dart';
 import 'highlights.dart';
 import 'identity.dart';
+import 'changelog.dart';
 import 'layout.dart';
+import 'marketplace.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'pane_chrome.dart';
+import 'settings_view.dart';
 import 'viewers/registry.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
@@ -18,8 +21,86 @@ import 'viewers/registry.dart';
 const paneMinWidth = 200.0;
 const paneMinHeight = 120.0;
 
+/// A page's pane (Settings…) is at least as wide as a small phone's screen,
+/// which its rows are laid out for.
+const pagePaneMinWidth = 320.0;
+
 /// A pane's header.
 const paneHeaderHeight = 32.0;
+
+/// Settings, the Marketplace and What's new open as panes in the selected
+/// agent's layout on a Mac, right of its conversation, so it can be read
+/// meanwhile (a phone shows them as pages). Their leaves have no path.
+const pageKinds = {
+  AppPage.settings: 'settings',
+  AppPage.marketplace: 'marketplace',
+  AppPage.changelog: 'changelog',
+};
+
+/// The page a leaf of [kind] shows, or null for a file's viewer or the
+/// conversation.
+AppPage? pageOfKind(String kind) {
+  for (final MapEntry(key: page, value: pageKind) in pageKinds.entries) {
+    if (pageKind == kind) return page;
+  }
+  return null;
+}
+
+/// The pane showing [page] in [root], or null.
+ViewNode? pagePane(ViewNode root, AppPage page) {
+  for (final leaf in leaves(root)) {
+    if (leaf.leaf.kind == pageKinds[page]) return leaf;
+  }
+  return null;
+}
+
+/// [root] with a pane for [page] right of the conversation. In a row, it
+/// takes half the conversation's share and the panes beside keep theirs;
+/// else the two share the conversation's place. At [maxPanes] the oldest
+/// pane other than the conversation gives way.
+ViewNode withPage(ViewNode root, AppPage page) {
+  final pane = ViewNode(
+    id: newPaneId(pageKinds[page]!),
+    leaf: ViewLeaf(kind: pageKinds[page]!),
+  );
+  var tree = root;
+  if (leaves(tree).length >= maxPanes) {
+    final oldest = leaves(tree)
+        .firstWhere((leaf) => leaf.leaf.kind != chatKind);
+    tree = close(tree, oldest.id) ?? tree;
+  }
+  final chat = leaves(tree).firstWhere((leaf) => leaf.leaf.kind == chatKind);
+  ViewNode place(ViewNode node) {
+    if (!node.hasSplit()) return node;
+    final split = node.split;
+    final at = split.children.indexWhere((child) => child.id == chat.id);
+    if (at < 0 || split.axis == ViewAxis.VIEW_AXIS_COLUMN) {
+      return ViewNode(
+        id: node.id,
+        split: ViewSplit(
+          axis: split.axis,
+          children: [for (final child in split.children) place(child)],
+          weights: split.weights,
+        ),
+      );
+    }
+    final shares = sharesOf(split);
+    return ViewNode(
+      id: node.id,
+      split: ViewSplit(
+        axis: split.axis,
+        children: [...split.children]..insert(at + 1, pane),
+        weights: [...shares]
+          ..[at] = shares[at] / 2
+          ..insert(at + 1, shares[at] / 2),
+      ),
+    );
+  }
+
+  final placed = place(tree);
+  if (find(placed, pane.id) != null) return placed;
+  return insert(tree, pane, chat.id, DropEdge.right) ?? tree;
+}
 
 /// What a pane's header carries while it's dragged.
 class PaneDrag {
@@ -206,7 +287,12 @@ class _PaneLayoutState extends State<PaneLayout> {
         ? chat
         : KeyedSubtree(
             key: _keys.putIfAbsent(node.id, GlobalKey.new),
-            child: Builder(builder: (context) => viewerBody(context, leaf)),
+            child: switch (pageOfKind(leaf.kind)) {
+              AppPage.settings => const _PagePane(child: SettingsView()),
+              AppPage.marketplace => const _PagePane(child: MarketplaceView()),
+              AppPage.changelog => const _PagePane(child: ChangelogView()),
+              _ => Builder(builder: (context) => viewerBody(context, leaf)),
+            },
           );
     return Pane(
       key: ValueKey('pane-${node.id}'),
@@ -219,9 +305,37 @@ class _PaneLayoutState extends State<PaneLayout> {
   }
 }
 
+/// A page in a pane ([InPane]): squeezed narrower than [pagePaneMinWidth]
+/// (a narrow window, many panes), it keeps that width and scrolls sideways
+/// rather than breaking its rows.
+class _PagePane extends StatelessWidget {
+  const _PagePane({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => InPane(
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth >= pagePaneMinWidth) return child;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: pagePaneMinWidth,
+            height: constraints.maxHeight,
+            child: child,
+          ),
+        );
+      },
+    ),
+  );
+}
+
 /// The smallest [node] can be along a row ([row]) or a column.
 double minExtent(ViewNode node, bool row) {
-  final own = row ? paneMinWidth : paneMinHeight;
+  final own = row
+      ? (pageOfKind(node.leaf.kind) != null ? pagePaneMinWidth : paneMinWidth)
+      : paneMinHeight;
   if (!node.hasSplit()) return own;
   final split = node.split;
   final along = (split.axis != ViewAxis.VIEW_AXIS_COLUMN) == row;
@@ -323,6 +437,9 @@ class _PaneState extends State<Pane> {
     final agent = widget.agent;
     final node = widget.node;
     final isChat = node.leaf.kind == chatKind;
+    // The conversation and a page (Settings…) under a header of their own;
+    // a file's viewer fills its header with its details and controls.
+    final ownHeader = isChat || pageOfKind(node.leaf.kind) != null;
     final backend = AppScope.of(context);
     Widget header(String details, List<Widget> controls) => PaneHeader(
       drag: PaneDrag(agent.id, node.id),
@@ -332,7 +449,7 @@ class _PaneState extends State<Pane> {
       controls: controls,
       onClose: widget.onClose,
     );
-    final body = isChat
+    final body = ownHeader
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -386,13 +503,34 @@ class _PaneState extends State<Pane> {
 /// What a pane's header says it is.
 String paneTitle(ViewLeaf leaf) {
   if (leaf.kind == chatKind) return 'Conversation';
-  return viewerTitle(leaf);
+  return switch (pageOfKind(leaf.kind)) {
+    AppPage.settings => 'Settings',
+    AppPage.marketplace => 'Marketplace',
+    AppPage.changelog => "What's new",
+    _ => viewerTitle(leaf),
+  };
 }
 
 /// A pane's 14px glyph: the agent for the conversation, else its viewer's.
 Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
   if (leaf.kind == chatKind) return AgentCharacter(agent: agent, size: 14);
-  return viewerIcon(leaf, color);
+  return switch (pageOfKind(leaf.kind)) {
+    AppPage.settings => SizedBox.square(
+      dimension: 14,
+      child: CogGlyph(color: color),
+    ),
+    AppPage.marketplace => SizedBox.square(
+      dimension: 14,
+      child: BagGlyph(color: color),
+    ),
+    AppPage.changelog => ExtensionGlyph(
+      icon: 'scroll-text',
+      name: '',
+      color: color,
+      size: 14,
+    ),
+    _ => viewerIcon(leaf, color),
+  };
 }
 
 /// A pane's 32px header: glyph, title, details, the viewer's controls and

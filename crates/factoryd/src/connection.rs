@@ -165,6 +165,11 @@ async fn session<S: Stream>(
     let mut vault_session = crate::vault::requests::Session::new(device);
     let mut events = sync(socket, factory).await?;
     factory.health.served();
+    // A vault still locked after a restart tries the account service again.
+    tokio::spawn({
+        let factory = factory.clone();
+        async move { crate::account::unlock_now(&factory).await }
+    });
 
     loop {
         tokio::select! {
@@ -373,7 +378,13 @@ async fn handle(
         Some(Request::SetVaultLockedMode(request)) => {
             return answer(vault::set_locked_mode(factory, vault_session, &request).await, Body::VaultSession);
         }
-        Some(Request::DecideSecretRequest(_)) => return error(ErrorCode::UnknownMessage, "This needs a newer Claktory."),
+        Some(Request::DecideSecretRequest(request)) => vault::decide_request(factory, &request),
+        Some(Request::AccountSignIn(request)) => crate::account::sign_in(factory, &request.email).await,
+        Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await,
+        Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
+        Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
+        Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
+        Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
         Some(Request::DecideProposal(request)) => {
             crate::proposals::decide(factory, &request.agent_id, &request.proposal_id, request.approve, &request.comment)
         }

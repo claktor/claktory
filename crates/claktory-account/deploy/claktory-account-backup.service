@@ -1,0 +1,20 @@
+# A consistent copy of the account service's database, kept 14 days in
+# /var/lib/claktory-account/backups (scripts/deploy-account.sh HOST backup
+# copies the newest to your Mac).
+[Unit]
+Description=Back up Claktory's account service database
+
+[Service]
+Type=oneshot
+User=claktory-account
+Group=claktory-account
+ExecStart=/usr/local/bin/claktory-account backup \
+  --db /var/lib/claktory-account/account.db \
+  --to /var/lib/claktory-account/backups \
+  --keep 14
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/claktory-account

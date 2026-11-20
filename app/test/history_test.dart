@@ -194,12 +194,16 @@ void main() {
     expect(harness.history.forward, isNull);
   });
 
-  testWidgets('opening Settings starts over', (tester) async {
+  testWidgets('Settings opens beside the conversation, which keeps its way '
+      'back', (tester) async {
     final harness = await showMessage(tester);
+    harness.backend.appliesLayouts = true;
     await followWriter(tester, harness);
+    final back = harness.history.back;
+    expect(back, isNotNull);
     await tester.tap(find.bySemanticsLabel('Settings'));
     await settle(tester);
-    expect(harness.history.back, isNull);
+    expect(harness.history.back, back);
   });
 
   testWidgets('an agent deleted meanwhile has no chip', (tester) async {

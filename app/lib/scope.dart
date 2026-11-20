@@ -4,7 +4,11 @@ import 'backend.dart';
 import 'connections.dart';
 import 'drafts.dart';
 import 'history.dart';
+import 'identity.dart';
+import 'layout.dart';
 import 'login.dart';
+import 'panes.dart' show pagePane, withPage;
+import 'protocol/factory/v1/factory.pb.dart' show Agent;
 import 'scanner.dart';
 import 'update.dart';
 
@@ -72,15 +76,63 @@ class AppScope extends InheritedWidget {
   static Backend of(BuildContext context) => scope(context).backend;
 
   /// Shows Settings, where providers are signed in.
-  static void openSettings(BuildContext context) {
-    scope(context).history.clear();
-    scope(context).page.value = AppPage.settings;
+  static void openSettings(BuildContext context) =>
+      openPage(context, AppPage.settings);
+
+  /// Shows what changed in each version of Claktory.
+  static void openChangelog(BuildContext context) =>
+      openPage(context, AppPage.changelog);
+
+  /// The agent whose layout [page]s open in: the selected one on a Mac;
+  /// none on a phone, where they're pages of their own.
+  static Agent? _besideAgent(BuildContext context) => isPhoneLayout(context)
+      ? null
+      : scope(context).backend.workspace.selectedAgent;
+
+  /// Shows [page] (Settings, the Marketplace, What's new). On a Mac it's a
+  /// pane right of the selected agent's conversation, so the two are read
+  /// side by side; one already there glows instead. On a phone, or with no
+  /// agent to show it beside, it takes the agent view's place.
+  static void openPage(BuildContext context, AppPage page) {
+    final scope = AppScope.scope(context);
+    final agent = _besideAgent(context);
+    if (agent == null) {
+      scope.history.clear();
+      scope.page.value = page;
+      return;
+    }
+    if (scope.page.value != AppPage.agent) scope.page.value = AppPage.agent;
+    final root = layoutOf(agent);
+    final shown = pagePane(root, page);
+    if (shown != null) {
+      scope.backend.highlights.glow('pane:${agent.id}:${shown.id}', [
+        agentColor(agent.color),
+      ]);
+      return;
+    }
+    fireAndLog(scope.backend.setLayout(agent.id, withPage(root, page)));
   }
 
-  /// Shows what changed in each version of Factory.
-  static void openChangelog(BuildContext context) {
-    scope(context).history.clear();
-    scope(context).page.value = AppPage.changelog;
+  /// Whether [page] shows: as the agent view's page, or as a pane in the
+  /// selected agent's layout.
+  static bool pageShown(BuildContext context, AppPage page) {
+    if (scope(context).page.value == page) return true;
+    final agent = _besideAgent(context);
+    return agent != null && pagePane(layoutOf(agent), page) != null;
+  }
+
+  /// The sidebar's buttons: [page] shows, or goes when it's showing.
+  static void togglePage(BuildContext context, AppPage page) {
+    final scope = AppScope.scope(context);
+    if (scope.page.value == page) return closePage(context);
+    final agent = _besideAgent(context);
+    final shown = agent == null ? null : pagePane(layoutOf(agent), page);
+    if (agent == null || shown == null) return openPage(context, page);
+    final root = close(layoutOf(agent), shown.id);
+    if (root == null) return;
+    fireAndLog(
+      scope.backend.setLayout(agent.id, isChatOnly(root) ? null : root),
+    );
   }
 
   /// Shows [target]'s Factory from now on (null for this Mac's): the

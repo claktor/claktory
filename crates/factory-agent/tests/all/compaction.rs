@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::support::{collect, event_names, luna, reply};
-use factory_agent::compaction::{COMPACTION_PROMPT, SUMMARY_PREAMBLE};
+use factory_agent::compaction::{COMPACTION_PROMPT, IDLE_PREAMBLE, REQUESTED_PREAMBLE, Reason, SUMMARY_PREAMBLE};
 use factory_agent::stream::{LlmContext, event_stream};
 use factory_agent::{
     Agent, AgentEvent, AgentOptions, AssistantMessage, AssistantPart, Message, StopReason, StreamEvent, StreamFn, ThinkingLevel,
@@ -74,7 +74,7 @@ fn is_compaction(context: &LlmContext) -> bool {
 fn compacted(events: &[AgentEvent]) -> Vec<(String, u64, Vec<Message>)> {
     let mut found = Vec::new();
     for event in events {
-        if let AgentEvent::Compacted { summary, tokens_before, messages } = event {
+        if let AgentEvent::Compacted { summary, tokens_before, messages, .. } = event {
             found.push((summary.clone(), *tokens_before, messages.clone()));
         }
     }
@@ -234,11 +234,31 @@ async fn compact_summarizes_now_whatever_the_size() {
     assert_eq!(requests.lock().len(), 2);
     agent.prompt("what next?").await.unwrap();
     let sent: Vec<Option<String>> = requests.lock()[2].iter().map(user_text).collect();
-    assert_eq!(sent, [Some(format!("{SUMMARY_PREAMBLE}\n\nThe user said hello.")), Some("what next?".to_owned())]);
+    assert_eq!(sent, [Some(format!("{REQUESTED_PREAMBLE}\n\nThe user said hello.")), Some("what next?".to_owned())]);
 }
 
 #[tokio::test]
-async fn notes_only_for_this_context_are_not_summarized() {
+async fn compacting_while_idle_says_so_carries_its_usage_and_asks_nothing_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let (stream, requests) =
+        scripted(|_, context| if is_compaction(context) { text("<summary>The user said hello.</summary>") } else { text("Hi.") });
+    let mut agent = Agent::new(options(dir.path(), stream, 1_000_000));
+    agent.prompt("hello").await.unwrap();
+    let events = collect(&mut agent);
+    agent.compact_for(Reason::Idle).await.unwrap();
+    let events = events.lock().clone();
+    assert_eq!(event_names(&events), ["compacted"], "no run: nothing else happens");
+    let Some(AgentEvent::Compacted { messages, usage, reason, .. }) = events.first() else { panic!("{events:?}") };
+    assert_eq!(*reason, Reason::Idle);
+    // What writing the summary took, as the provider reported it.
+    assert_eq!(factory_agent::compaction::context_tokens(usage), REPLY_CONTEXT_TOKENS);
+    let [summary] = &messages[..] else { panic!("{messages:?}") };
+    assert_eq!(user_text(summary), Some(format!("{IDLE_PREAMBLE}\n\nThe user said hello.")), "not told to carry on");
+    assert_eq!(requests.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn notes_only_for_this_context_are_summarized_as_sent_but_not_kept() {
     let dir = tempfile::tempdir().unwrap();
     let (stream, requests) =
         scripted(|_, context| if is_compaction(context) { text("<summary>The user said hello.</summary>") } else { text("Hi.") });
@@ -258,6 +278,12 @@ async fn notes_only_for_this_context_are_not_summarized() {
         .await
         .unwrap();
     agent.compact().await.unwrap();
-    let summarized: Vec<String> = requests.lock()[1].iter().filter_map(user_text).collect();
-    assert_eq!(summarized, ["hello", COMPACTION_PROMPT]);
+    // The summary is asked for after the context exactly as it was last
+    // sent, so the provider's prompt cache covers all of it…
+    let requests = requests.lock().clone();
+    assert_eq!(requests[1][..2], requests[0][..]);
+    assert_eq!(user_text(&requests[1][3]).as_deref(), Some(COMPACTION_PROMPT));
+    // …and the note isn't in the new context: the next one's setup says it.
+    let kept: Vec<String> = agent.state.messages.iter().filter_map(user_text).collect();
+    assert_eq!(kept, [format!("{REQUESTED_PREAMBLE}\n\nThe user said hello.")]);
 }

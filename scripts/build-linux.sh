@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Builds Factory's backend for Linux: one static binary (musl), which runs on
 # any distribution, x86_64 or aarch64. It builds in a container, with podman or
-# docker, so this Mac needs no Linux toolchain; on Apple Silicon, x86_64 builds
-# under emulation (enable Rosetta in the podman machine or Docker Desktop to
-# make that fast). FACTORY_VERSION and FACTORY_UPDATE_URL are stamped in as for
-# the Mac build. scripts/publish.sh runs it for each release.
+# docker, so this Mac needs no Linux toolchain. The container is this machine's
+# own architecture and cross-compiles for the other with zig (cargo-zigbuild),
+# since building under emulation takes hours. FACTORY_VERSION and
+# FACTORY_UPDATE_URL are stamped in as for the Mac build. scripts/publish.sh
+# runs it for each release.
 #
 #   scripts/build-linux.sh ARCH OUT    ARCH: x86_64 or aarch64; OUT: the binary to write
 #
@@ -18,8 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="${1:-}" OUT="${2:-}"
 case "$ARCH" in
-  x86_64) PLATFORM=linux/amd64 ;;
-  aarch64) PLATFORM=linux/arm64 ;;
+  x86_64 | aarch64) ;;
   *) echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2 ;;
 esac
 [[ -n "$OUT" ]] || { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2; }
@@ -29,13 +29,22 @@ if [[ -z "$ENGINE" ]]; then
   if command -v podman >/dev/null; then ENGINE=podman
   elif command -v docker >/dev/null; then ENGINE=docker
   else
-    echo "building for Linux needs podman (brew install podman; podman machine init --rosetta; podman machine start) or docker" >&2
+    echo "building for Linux needs podman (brew install podman; podman machine init; podman machine start) or docker" >&2
     exit 1
   fi
 fi
 
+# The container runs natively: the same architecture as this machine.
+case "$(uname -m)" in
+  arm64 | aarch64) PLATFORM=linux/arm64 ;;
+  *) PLATFORM=linux/amd64 ;;
+esac
+TARGET="$ARCH-unknown-linux-musl"
+
 mkdir -p "$(dirname "$OUT")"
-OUT_DIR="$(cd "$(dirname "$OUT")" && pwd)"
+# The real path: the container engine's VM shares /private, not the /tmp
+# symlink to it.
+OUT_DIR="$(cd "$(dirname "$OUT")" && pwd -P)"
 IMAGE="docker.io/library/rust:1-alpine"
 
 # The checkout goes in read-only and is copied, so nothing in it changes; the
@@ -45,18 +54,19 @@ IMAGE="docker.io/library/rust:1-alpine"
   -v "factory-linux-target-$ARCH:/target" -v "factory-linux-cargo:/usr/local/cargo/registry" \
   -e FACTORY_VERSION -e FACTORY_UPDATE_URL -e CARGO_TARGET_DIR=/target \
   "$IMAGE" sh -euc '
-    apk add --no-cache musl-dev >/dev/null
+    apk add --no-cache musl-dev zig cargo-zigbuild file >/dev/null
+    rustup target add "$3" >/dev/null 2>&1
     mkdir /work
     cd /src
     tar --exclude=./target --exclude=./app --exclude=./.git -cf - . | tar -xf - -C /work
     cd /work
-    cargo build --release --locked -p factoryd -j "$1"
-    file=/target/release/factoryd
+    cargo zigbuild --release --locked -p factoryd --target "$3" -j "$1"
+    file="/target/$3/release/factoryd"
     # Static, or it would need the libraries of the distribution it was built on.
-    if ldd "$file" 2>&1 | grep -q "=>"; then echo "factoryd isn'"'"'t static" >&2; exit 1; fi
-    # And it runs: an unknown command answers with the usage.
-    "$file" not-a-command 2>&1 | grep -q usage
+    if ! file "$file" | grep -Eq "statically linked|static-pie linked"; then echo "factoryd isn'"'"'t static" >&2; exit 1; fi
+    # And it runs, when it can here: an unknown command answers with the usage.
+    if [ "$3" = "$(uname -m)-unknown-linux-musl" ]; then "$file" not-a-command 2>&1 | grep -q usage; fi
     cp "$file" "/out/.$2.partial"
-  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")"
+  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")" "$TARGET"
 mv -f "$OUT_DIR/.$(basename "$OUT").partial" "$OUT"
 echo "built $OUT ($ARCH)"

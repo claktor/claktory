@@ -27,9 +27,9 @@ VaultState _vault(Backend backend) => backend.workspace.workspace.vault;
 String _agentName(Backend backend, String id) =>
     backend.workspace.agent(id)?.name ?? id;
 
-/// Settings → Secrets: the secrets with what's given to whom, and adding
-/// them. The backend keeps them encrypted from the start; there's nothing
-/// to set up or unlock.
+/// Settings → Secrets: agents' requests waiting for the person, the
+/// secrets with what's given to whom, and adding them. The backend keeps
+/// them encrypted from the start; there's nothing to set up or unlock.
 class SecretsSettings extends StatelessWidget {
   const SecretsSettings({super.key});
 
@@ -44,6 +44,13 @@ class SecretsSettings extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Asked for in conversations the person may not be watching:
+            // the same cards, decided here as there. A decided one leaves.
+            for (final request in vault.requests)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.l),
+                child: SecretRequestCard(request, key: ValueKey(request.id)),
+              ),
             if (vault.secrets.isEmpty)
               Text(
                 'No secrets yet.',

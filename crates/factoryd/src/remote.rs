@@ -90,7 +90,7 @@ fn dir(home: &Home) -> PathBuf {
 }
 
 /// Written so only this user can read it.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     // Its own name per write, so two writers never rename each other's.
@@ -361,7 +361,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
 }
 
 /// This machine's name, as devices show it ("mac-mini").
-fn machine_name() -> &'static str {
+pub(crate) fn machine_name() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
         // The system call, not the `hostname` program, which a minimal

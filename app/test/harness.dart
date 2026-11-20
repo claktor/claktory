@@ -168,12 +168,30 @@ class RecordingBackend extends Backend {
     return files[path] ?? FileContent(path: path, error: 'No such file: $path');
   }
 
+  /// Whether [setLayout] changes the agent's layout, as the backend would
+  /// (Settings and other pages open as panes); else it's only recorded.
+  var appliesLayouts = false;
+
   @override
-  Future<void> setLayout(String agentId, ViewNode? root) => _record(
-    ClientMessage(
-      setLayout: SetLayout(agentId: agentId, root: root),
-    ),
-  );
+  Future<void> setLayout(String agentId, ViewNode? root) async {
+    await _record(
+      ClientMessage(
+        setLayout: SetLayout(agentId: agentId, root: root),
+      ),
+    );
+    if (!appliesLayouts) return;
+    // As the backend does: the agent's layout is it now.
+    final now = workspace.workspace.deepCopy();
+    for (final agent in now.agents) {
+      if (agent.id != agentId) continue;
+      if (root == null) {
+        agent.clearLayout();
+      } else {
+        agent.layout = root;
+      }
+    }
+    workspace.apply(now);
+  }
 
   /// The code [createPairing] answers.
   var pairingCode = PairingCode(
@@ -468,6 +486,35 @@ class RecordingBackend extends Backend {
       ),
     );
     return secretUses;
+  }
+
+  @override
+  Future<void> accountSignIn(String email) =>
+      _record(ClientMessage(accountSignIn: AccountSignIn(email: email)));
+
+  @override
+  Future<void> accountVerify(String code) =>
+      _record(ClientMessage(accountVerify: AccountVerify(code: code)));
+
+  @override
+  Future<void> accountResend() =>
+      _record(ClientMessage(accountResend: AccountResend()));
+
+  @override
+  Future<void> accountSignOut() =>
+      _record(ClientMessage(accountSignOut: AccountSignOut()));
+
+  @override
+  Future<void> setAccountService(String url) =>
+      _record(ClientMessage(setAccountService: SetAccountService(url: url)));
+
+  /// What [showRecoveryKey] answers.
+  var recoveryKey = 'ABCD-EFGH-IJKL-MNOP';
+
+  @override
+  Future<String> showRecoveryKey() async {
+    await _record(ClientMessage(showRecoveryKey: ShowRecoveryKey()));
+    return recoveryKey;
   }
 }
 

@@ -9,6 +9,7 @@ import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
 import 'marketplace.dart';
+import 'account.dart';
 import 'name_step.dart';
 import 'phone.dart';
 import 'controls.dart';
@@ -110,16 +111,25 @@ class _ShellState extends State<Shell> {
   }
 
   Widget _buildWindow(BuildContext context) => ListenableBuilder(
-    listenable: AppScope.of(context).workspace,
+    listenable: Listenable.merge([
+      AppScope.of(context).workspace,
+      signInPutOff(AppScope.of(context)),
+    ]),
     builder: (context, _) {
       final window = _layout(context);
-      if (!asksName(context)) return window;
-      // The first launch asks the person's name, over everything.
+      final step = asksSignIn(context)
+          ? const SignInStep()
+          : asksName(context)
+          ? const NameStep()
+          : null;
+      if (step == null) return window;
+      // The first launch asks the person to sign in, then their name, over
+      // everything.
       return Stack(
         fit: StackFit.expand,
         children: [
           ExcludeFocus(child: window),
-          const NameStepBarrier(child: NameStep()),
+          NameStepBarrier(child: step),
         ],
       );
     },

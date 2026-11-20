@@ -1,0 +1,42 @@
+# Claktory's account service. Installed by scripts/deploy-account.sh (its
+# deploy/install.sh); options are in /etc/claktory-account/options.
+[Unit]
+Description=Claktory account service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=claktory-account
+Group=claktory-account
+EnvironmentFile=-/etc/claktory-account/options
+ExecStart=/usr/local/bin/claktory-account serve \
+  --db /var/lib/claktory-account/account.db \
+  --secrets /var/lib/claktory-account/secrets.json \
+  --mail-dir /var/lib/claktory-account/mail \
+  --trust-proxy \
+  $CLAKTORY_ACCOUNT_OPTIONS
+Restart=always
+RestartSec=2
+StateDirectory=claktory-account
+StateDirectoryMode=0700
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

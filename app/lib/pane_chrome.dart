@@ -52,3 +52,18 @@ class PaneScaffold extends StatelessWidget {
     );
   }
 }
+
+/// Settings, the Marketplace or What's new shown in a pane beside an
+/// agent's conversation, whose header names and closes it: the page leaves
+/// out its own bar's title and Done, and doesn't take the keyboard's focus
+/// from the conversation. As a page of its own (a phone, or no agent to
+/// show it beside), there's none.
+class InPane extends InheritedWidget {
+  const InPane({super.key, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<InPane>() != null;
+
+  @override
+  bool updateShouldNotify(InPane old) => false;
+}

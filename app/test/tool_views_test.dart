@@ -125,17 +125,32 @@ void main() {
       expect(find.text('ghost'), findsOneWidget);
     });
 
-    testWidgets('a long message folds, with Show more', (tester) async {
-      final long = List.generate(12, (i) => 'Line $i of the message.');
+    testWidgets('a message shows its first line, Show more opens it', (
+      tester,
+    ) async {
+      final long = List.generate(12, (i) => 'Line $i of the **message**.');
       await showing(tester, [
         call('agents_send', {'to': 'builder', 'text': long.join('\n\n')}),
       ]);
-      expect(find.text('Show more'), findsOneWidget);
-      final folded = tester.getSize(find.byType(ShowMore)).height;
+      expect(find.text('Line 0 of the message.'), findsOneWidget);
+      expect(find.textContaining('Line 1 of'), findsNothing);
       await tester.tap(find.text('Show more'));
       await settle(tester);
-      expect(find.text('Show less'), findsOneWidget);
-      expect(tester.getSize(find.byType(ShowMore)).height, greaterThan(folded));
+      expect(find.textContaining('Line 11 of'), findsOneWidget);
+      await tester.tap(find.text('Show less'));
+      await settle(tester);
+      expect(find.textContaining('Line 11 of'), findsNothing);
+      expect(find.text('Show more'), findsOneWidget);
+    });
+
+    testWidgets('a short plain message has nothing to show more of', (
+      tester,
+    ) async {
+      await showing(tester, [
+        call('agents_send', {'to': 'builder', 'text': 'Done.'}),
+      ]);
+      expect(find.text('Done.'), findsOneWidget);
+      expect(find.text('Show more'), findsNothing);
     });
 
     testWidgets('a failed send shows its error', (tester) async {
@@ -173,6 +188,25 @@ void main() {
     expect(find.text('Input'), findsOneWidget);
     expect(find.text('Output'), findsOneWidget);
     expect(find.text('Sent.'), findsOneWidget);
+  });
+
+  testWidgets('a tool called through extension_call gets its view', (
+    tester,
+  ) async {
+    await showing(tester, [
+      call(
+        'extension_call',
+        {
+          'tool': 'agents_send',
+          'args': {'to': 'builder', 'text': 'Through the extension.'},
+        },
+        output: 'Sent.',
+        details: {'to': 'builder', 'name': 'Sam', 'working': false},
+      ),
+    ]);
+    expect(find.text('Sam  Backend'), findsOneWidget);
+    expect(find.text('Through the extension.'), findsOneWidget);
+    expect(find.text('extension_call'), findsNothing);
   });
 
   testWidgets('a tool with no view keeps the generic row', (tester) async {
@@ -295,6 +329,28 @@ void main() {
       ]);
       expect(find.text('Read note release  How to release'), findsOneWidget);
       expect(find.text('Stamp, then release.'), findsOneWidget);
+    });
+
+    testWidgets('a long note folds to its first line', (tester) async {
+      await showing(tester, [
+        call(
+          'memory_read',
+          {'note': 'release'},
+          output:
+              'release: How to release (updated 11-19)\n\n'
+              '# Steps\n\nStamp the changelog.\n\nThen run the release.',
+          details: {
+            'instance': '',
+            'slug': 'release',
+            'title': 'How to release',
+          },
+        ),
+      ]);
+      expect(find.text('Steps'), findsOneWidget);
+      expect(find.textContaining('Stamp the changelog'), findsNothing);
+      await tester.tap(find.text('Show more'));
+      await settle(tester);
+      expect(find.textContaining('Stamp the changelog'), findsOneWidget);
     });
 
     testWidgets('memory_read of the manual says so', (tester) async {

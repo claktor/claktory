@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/controls.dart' show showModal;
+import 'package:factory_app/devices.dart' show FactoryChooser;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_view.dart';
+import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -111,7 +117,17 @@ void main() {
     harness.page.value = AppPage.settings;
     await harness.show(tester);
     await pumpFrames(tester);
-    await tester.ensureVisible(find.text('Devices'));
+    // Settings builds its sections as they scroll into view.
+    await tester.scrollUntilVisible(
+      find.text('Devices'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     await pumpFrames(tester);
     return harness;
   }
@@ -233,13 +249,20 @@ void main() {
     expect(find.text('Scan with your iPhone'), findsNothing);
   });
 
-  testWidgets('the footer connects to another Factory from its code', (
+  testWidgets('the chooser connects to another Factory from its code', (
     tester,
   ) async {
     final harness = Harness(workspace());
     await harness.show(tester);
     await pumpFrames(tester);
-    await tester.tap(labeled('Claktories'));
+    // The version line isn't a way in (the rail's + is, rail_test).
+    expect(labeled('Claktories'), findsNothing);
+    unawaited(
+      showModal(
+        tester.element(find.byType(Sidebar).first),
+        (context, close) => FactoryChooser(close: close),
+      ),
+    );
     await pumpFrames(tester);
     expect(find.text('This Mac'), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, 'nonsense');

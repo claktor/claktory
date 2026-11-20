@@ -7,13 +7,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::clock::now_ms;
-use crate::compaction::{COMPACTION_PROMPT, extract_summary, latest_context_tokens, summary_message};
+use crate::compaction::{COMPACTION_PROMPT, Reason, extract_summary, latest_context_tokens, summary_message};
 use crate::errors::Error;
 use crate::guard::{ResponsePolicy, guard_responses, recoverable_response};
 use crate::reasoning::{coalesce_history, coalesce_reasoning};
 use crate::schema::validate_tool_arguments;
 use crate::secrets::Secrets;
-use crate::stream::{BoxFuture, LlmContext, StreamFn, StreamOptions, ThinkingLevel};
+use crate::stream::{BoxFuture, CacheTtl, LlmContext, StreamFn, StreamOptions, ThinkingLevel};
 use crate::tools::Tool;
 use crate::types::{
     AgentEvent, AssistantMessage, AssistantPart, Message, Model, StopReason, StreamEvent, ToolResult, ToolResultMessage, Usage, UserMessage,
@@ -102,6 +102,8 @@ pub struct AgentState {
     pub messages: Vec<Message>,
     pub compact_at: Option<u64>,
     pub error_message: Option<String>,
+    /// How long the provider is asked to keep the prompt cache.
+    pub cache_ttl: CacheTtl,
 }
 
 /// Dropping a run, finished or not, releases the agent and cancels whatever the run was waiting on.
@@ -192,6 +194,7 @@ impl Agent {
                 messages: coalesce_history(options.messages),
                 compact_at: options.compact_at,
                 error_message: None,
+                cache_ttl: CacheTtl::default(),
             },
             stream: coalesce_reasoning(guard_responses(options.stream, policy.clone())),
             session_id: options.session_id,
@@ -426,7 +429,13 @@ impl Agent {
 
     fn stream_options(&self, token: &CancellationToken) -> StreamOptions {
         let reasoning = (self.state.thinking_level != ThinkingLevel::Off).then_some(self.state.thinking_level);
-        StreamOptions { cancel: token.clone(), session_id: self.session_id.clone(), reasoning, ..StreamOptions::default() }
+        StreamOptions {
+            cancel: token.clone(),
+            session_id: self.session_id.clone(),
+            reasoning,
+            cache_ttl: self.state.cache_ttl,
+            ..StreamOptions::default()
+        }
     }
 
     /// How long to wait before sending a failed request again, if its failure is transient and retries remain.
@@ -472,12 +481,19 @@ impl Agent {
         let Some(compact_at) = self.state.compact_at else { return Ok(()) };
         let Some(tokens_before) = latest_context_tokens(context).filter(|tokens| *tokens >= compact_at) else { return Ok(()) };
         tracing::info!(tokens_before, compact_at, "compacting context");
-        self.compact_context(context, new_prompts, mid_task, tokens_before, token).await
+        self.compact_context(context, new_prompts, mid_task, tokens_before, Reason::Full, token).await
     }
 
     /// Summarizes the conversation now, whatever its size, so the next run
     /// carries on from the summary.
     pub async fn compact(&mut self) -> Result<(), Error> {
+        self.compact_for(Reason::Requested).await
+    }
+
+    /// Summarizes the conversation now for `reason` (on request, or while
+    /// idle), so the next run carries on from the summary; the model isn't
+    /// told to carry on by itself. Aborted, nothing changes.
+    pub async fn compact_for(&mut self, reason: Reason) -> Result<(), Error> {
         if self.state.messages.is_empty() {
             return Err(Error::Other("Nothing to compact yet.".into()));
         }
@@ -489,8 +505,8 @@ impl Agent {
         let _active = ActiveRun(self.active.clone());
         let mut context = self.state.messages.clone();
         let tokens_before = latest_context_tokens(&context).unwrap_or(0);
-        tracing::info!(tokens_before, "compacting context on request");
-        self.compact_context(&mut context, 0, false, tokens_before, &token).await
+        tracing::info!(tokens_before, ?reason, "compacting context");
+        self.compact_context(&mut context, 0, false, tokens_before, reason, &token).await
     }
 
     async fn compact_context(
@@ -499,19 +515,21 @@ impl Agent {
         new_prompts: usize,
         mid_task: bool,
         tokens_before: u64,
+        reason: Reason,
         token: &CancellationToken,
     ) -> Result<(), Error> {
         // On failure the run ends and this context is dropped; `state.messages` is untouched.
         let mut kept = context.split_off(context.len().saturating_sub(new_prompts));
-        // Notes only for this context, such as what changed in the agent's
+        // The summary is asked for after the context exactly as it was sent,
+        // so the request reads it all from the prompt cache.
+        let (summary, usage) = self.summarize(context, token).await?;
+        // Notes only for the old context, such as what changed in the agent's
         // settings, which the next context's setup carries anyway.
-        context.retain(|message| !is_transient(message));
         kept.retain(|message| !is_transient(message));
-        let summary = self.summarize(context, token).await?;
-        let mut messages = vec![summary_message(&summary, mid_task, now_ms())];
+        let mut messages = vec![summary_message(&summary, mid_task, reason, now_ms())];
         messages.extend(kept);
         context.clone_from(&messages);
-        self.emit(AgentEvent::Compacted { summary, tokens_before, messages }).await?;
+        self.emit(AgentEvent::Compacted { summary, tokens_before, messages, usage, reason }).await?;
         if let Some(after) = &self.after_compaction
             && let Some(NewContext { system_prompt, tools }) = after().await
         {
@@ -523,7 +541,7 @@ impl Agent {
 
     /// Asks the model for a summary of the context. The request keeps the system prompt and tools so the
     /// provider's prompt cache covers the whole context; the prompt forbids tool calls.
-    async fn summarize(&self, context: &[Message], token: &CancellationToken) -> Result<String, Error> {
+    async fn summarize(&self, context: &[Message], token: &CancellationToken) -> Result<(String, Usage), Error> {
         let mut messages = context.to_vec();
         messages.push(Message::User(UserMessage::text(COMPACTION_PROMPT, now_ms())));
         let mut attempt = 0;
@@ -541,7 +559,8 @@ impl Agent {
             if response.stop_reason == StopReason::Error {
                 return Err(Error::Compaction(response.error_message.unwrap_or_else(|| "the model returned an error".into())));
             }
-            return extract_summary(&response).ok_or_else(|| Error::Compaction("the model wrote no summary".into()));
+            let summary = extract_summary(&response).ok_or_else(|| Error::Compaction("the model wrote no summary".into()))?;
+            return Ok((summary, response.usage));
         }
     }
 

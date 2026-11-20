@@ -170,13 +170,14 @@ void main() {
       reason: 'shown in the conversation',
     );
     expect(find.text('Fix the build'), findsOneWidget);
-    expect(find.text('Context compacted at 412k tokens'), findsOneWidget);
+    expect(find.text('Earlier messages summarized'), findsOneWidget);
     expect(find.text('Failed'), findsOneWidget);
     expect(find.textContaining('passes'), findsOneWidget);
 
     await tester.tap(find.text('src/lib.rs'));
-    await tester.tap(find.text('Context compacted at 412k tokens'));
+    await tester.tap(find.text('Earlier messages summarized'));
     await tester.pump();
+    expect(find.text('Summarized at 412k tokens.'), findsOneWidget);
     expect(find.textContaining('+    new();'), findsOneWidget);
     expect(find.textContaining('set up the crate'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -192,6 +193,7 @@ void main() {
         agents: [builder(modelAvailable: false, working: false)],
       ),
     );
+    harness.backend.appliesLayouts = true;
 
     expect(find.text('No model available'), findsOneWidget);
     expect(find.text('Opus 5.5 · high'), findsNothing);

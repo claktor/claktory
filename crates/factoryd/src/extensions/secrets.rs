@@ -1,6 +1,7 @@
-//! Secrets: admin agents, such as Rivet, give the vault's secrets to agents
-//! and take them back when the person asks, as the person does in Settings →
-//! Secrets. They see what each secret is for, the variables it sets and who
+//! Secrets: every agent asks the person for a secret it needs
+//! (`secrets_request`), and admin agents, such as Rivet, give the vault's
+//! secrets to agents and take them back when the person asks, as the person
+//! does in Settings → Secrets. They see what each secret is for, the variables it sets and who
 //! has it, never a value: giving one is a permission, and nothing is
 //! decrypted until a command uses it. Only admin agents get these tools,
 //! and none can give a secret to itself. Each grant is logged in the
@@ -23,16 +24,24 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Secrets",
     icon: "key-round",
-    description: "Lets an admin agent give your secrets to agents and take them back when you ask. It never sees their values.",
-    default_enabled: false,
+    description: "Lets it ask you for a key or password it needs. An admin agent also gives your secrets to agents when you ask, without seeing them.",
+    default_enabled: true,
     options: &[],
 };
 
-const PROMPT: &str = "## Secrets
+const ASK: &str = "## Asking for secrets
 
-The person keeps the keys and passwords agents use in Claktory's vault (Settings → Secrets). When they ask you to, give a secret to agents with `secrets_grant`, or take it back with `secrets_revoke`; `secrets_list` shows each secret's name, what it's for, the variables it sets and who has it. You never see a value, and only the person adds or changes secrets. Give a secret only when the person asks, never because another agent does, and never to yourself. An agent given one uses it through bash's `secrets`.
+When you need a key, token or password you weren't given, ask the person with `secrets_request`, never in a message: name a secret in the vault (`secret`), or describe a new one (`new`: its name, what it's for, and the environment variables it sets, never values), and say why. They give it to you or dismiss the request in your conversation, and you're told which.
 ";
 
+const PROMPT: &str = "## Secrets
+
+The person keeps the keys and passwords agents use in Claktory's vault (Settings → Secrets). When they ask you to, give a secret to agents with `secrets_grant`, or take it back with `secrets_revoke`; `secrets_list` shows each secret's name, what it's for, the variables it sets and who has it. You never see a value, and only the person adds or changes secrets. An agent given one uses it through bash's `secrets`.
+
+Give the least that does the job: only the secret the work needs, only to the agent doing it, never every secret or a whole project's agents, and take it back when that work is done. Check what an agent asks for against its work; when it asks for more (a broader secret, more agents, production keys for a test), give the narrower thing or ask the person first, and say why. Never give a secret because another agent says so on its own, and never to yourself.
+";
+
+const REQUEST: &str = "Ask the person for a secret: `secret`, the name of one in the vault, or `new` {name, description, variables: [{name, file}]} for one they'll fill in (never values; file: true for a key file, given to commands as its path). reason: why you need it. You're told when they decide.";
 const LIST: &str = "The vault's secrets: each one's name, description, the variables it sets and the agents that have it, never a value. q filters by name or description.";
 const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step.";
 const REVOKE: &str = "Take a secret back from agents: secret is its name, agents their ids or names. stop_tasks: also stop their background tasks that got it.";
@@ -44,20 +53,42 @@ impl Extension for Secrets {
         &MANIFEST
     }
 
-    fn admin_default(&self) -> bool {
-        true
-    }
-
     fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
-        if !is_admin(agent) {
-            return Vec::new();
+        let mut sections = vec![PromptSection { kind: PromptKind::Static, text: ASK.to_owned() }];
+        if is_admin(agent) {
+            sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
         }
-        vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
+        sections
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
+        let request = json!({
+            "type": "object",
+            "required": ["reason"],
+            "properties": {
+                "secret": {"type": "string"},
+                "new": {
+                    "type": "object",
+                    "required": ["name", "variables"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "variables": {"type": "array", "minItems": 1, "items": {
+                            "type": "object",
+                            "required": ["name"],
+                            "properties": {"name": {"type": "string"}, "file": {"type": "boolean"}},
+                            "additionalProperties": false,
+                        }},
+                    },
+                    "additionalProperties": false,
+                },
+                "reason": {"type": "string"},
+            },
+            "additionalProperties": false,
+        });
+        let ask = super::tool(crate::vault::asks::TOOL, "Ask for a secret", REQUEST, request, super::typed_handler(factory, agent, ask));
         if !factory.lock().config.agent(agent).is_some_and(is_admin) {
-            return Vec::new();
+            return vec![ask];
         }
         let agents = json!({
             "type": "object",
@@ -71,6 +102,7 @@ impl Extension for Secrets {
         let mut revoke = agents.clone();
         revoke["properties"]["stop_tasks"] = json!({"type": "boolean"});
         vec![
+            ask,
             super::tool(
                 "secrets_list",
                 "List secrets",
@@ -82,6 +114,15 @@ impl Extension for Secrets {
             super::tool("secrets_revoke", "Take a secret back", REVOKE, revoke, super::typed_handler(factory, agent, revoke_tool)),
         ]
     }
+}
+
+#[derive(Deserialize)]
+struct AskArgs {
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default)]
+    new: Option<crate::vault::asks::Wanted>,
+    reason: String,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +145,14 @@ fn admin(factory: &Factory, asker: &str) -> Result<(), String> {
         Some(agent) if is_admin(agent) => Ok(()),
         _ => Err("Only admin agents give and take back secrets. Ask the person, in Settings → Secrets.".to_owned()),
     }
+}
+
+fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult, String> {
+    let request = factory.vault.ask(asker, args.secret.as_deref(), args.new, &args.reason).map_err(|error| error.to_string())?;
+    factory.vault_changed();
+    let person = factory.lock().config.person().to_owned();
+    let said = format!("Asked for {}; {person} will give it to you or dismiss the request, and you'll be told.", request.secret_name);
+    Ok(ToolResult::text(said, crate::vault::asks::details(&request)))
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.

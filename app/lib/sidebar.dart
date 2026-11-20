@@ -1299,7 +1299,8 @@ class _Footer extends StatelessWidget {
         ),
       );
     }
-    if (workspace.hasLogin() && page != AppPage.settings) {
+    if (workspace.hasLogin() &&
+        !AppScope.pageShown(context, AppPage.settings)) {
       final login = workspace.login;
       var provider = login.providerId;
       for (final candidate in workspace.providers) {
@@ -1380,13 +1381,8 @@ class _Footer extends StatelessWidget {
                 matches: (key) => key == 'settings:',
                 child: GlyphButton(
                   label: 'Settings',
-                  active: page == AppPage.settings,
-                  onTap: () {
-                    scope.history.clear();
-                    scope.page.value = page == AppPage.settings
-                        ? AppPage.agent
-                        : AppPage.settings;
-                  },
+                  active: AppScope.pageShown(context, AppPage.settings),
+                  onTap: () => AppScope.togglePage(context, AppPage.settings),
                   glyph: (color) => CogGlyph(color: color),
                 ),
               ),
@@ -1396,26 +1392,17 @@ class _Footer extends StatelessWidget {
                 matches: (key) => key == 'marketplace:',
                 child: GlyphButton(
                   label: 'Marketplace',
-                  active: page == AppPage.marketplace,
-                  onTap: () {
-                    scope.history.clear();
-                    scope.page.value = page == AppPage.marketplace
-                        ? AppPage.agent
-                        : AppPage.marketplace;
-                  },
+                  active: AppScope.pageShown(context, AppPage.marketplace),
+                  onTap: () =>
+                      AppScope.togglePage(context, AppPage.marketplace),
                   glyph: (color) => BagGlyph(color: color),
                 ),
               ),
               const SizedBox(width: Space.xs),
               GlyphButton(
                 label: "What's new",
-                active: page == AppPage.changelog,
-                onTap: () {
-                  scope.history.clear();
-                  scope.page.value = page == AppPage.changelog
-                      ? AppPage.agent
-                      : AppPage.changelog;
-                },
+                active: AppScope.pageShown(context, AppPage.changelog),
+                onTap: () => AppScope.togglePage(context, AppPage.changelog),
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
               ),
@@ -1423,23 +1410,17 @@ class _Footer extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.s, Space.xs, Space.s, 0),
-            // Which Factory this is; a click picks another.
-            child: Semantics(
-              button: true,
-              label: 'Claktories',
-              child: Pressable(
-                onTap: chooseFactory,
-                builder: (context, hovered) => Text(
-                  [
-                    if (remote != null)
-                      'on ${workspace.remote.machine.isEmpty ? remote.label : workspace.remote.machine}',
-                    _versions(workspace.version, appVersion),
-                  ].join(' · '),
-                  style: TextStyles.caption.copyWith(
-                    color: hovered ? palette.textMuted : palette.textFaint,
-                    fontSize: 11,
-                  ),
-                ),
+            // Which Claktory this is, and the versions: plain text, as the
+            // rail switches and adds Claktories (a phone's list of them).
+            child: Text(
+              [
+                if (remote != null)
+                  'on ${workspace.remote.machine.isEmpty ? remote.label : workspace.remote.machine}',
+                _versions(workspace.version, appVersion),
+              ].join(' · '),
+              style: TextStyles.caption.copyWith(
+                color: palette.textFaint,
+                fontSize: 11,
               ),
             ),
           ),

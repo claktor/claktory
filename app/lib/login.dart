@@ -585,6 +585,49 @@ class _ProviderCardState extends State<ProviderCard> {
               ),
             ],
           ],
+          // How long the provider keeps a conversation ready, where
+          // Claktory can choose it (Anthropic only, for now).
+          if (provider.cacheTtl.isNotEmpty) ...[
+            const SizedBox(height: Space.m),
+            Wrap(
+              spacing: Space.m,
+              runSpacing: Space.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  'Keep conversations ready',
+                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                ),
+                SizedBox(
+                  width: 140,
+                  child: Select(
+                    value: provider.cacheTtl,
+                    options: [
+                      if (provider.cacheTtl != '5m' &&
+                          provider.cacheTtl != '1h')
+                        SelectOption(provider.cacheTtl, provider.cacheTtl),
+                      const SelectOption('5m', '5 minutes'),
+                      const SelectOption('1h', '1 hour'),
+                    ],
+                    onChanged: (ttl) => _run(
+                      () => scope.backend.updateSettings(
+                        UpdateSettings(
+                          cacheTtl: CacheTtl(key: provider.id, ttl: ttl),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              '${provider.name} keeps a conversation ready so the next '
+              'message is cheaper. An hour costs a bit more each time (2× '
+              'instead of 1.25×) and saves money after longer breaks.',
+              style: TextStyles.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
           if (flow != null) ...[
             const SizedBox(height: Space.l),
             Container(height: 1, color: palette.hairline),

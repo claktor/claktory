@@ -1,6 +1,7 @@
 //! factoryd: the Factory backend. Clients connect over WebSocket and speak the
 //! protocol defined in `proto/factory/v1/factory.proto`.
 
+mod account;
 mod app_archive;
 mod arrange;
 pub mod channel;
@@ -12,6 +13,7 @@ mod explorer;
 mod extensions;
 pub mod factory;
 pub mod home;
+mod idle;
 pub mod launch_agent;
 mod login;
 mod manual;
