@@ -403,7 +403,11 @@ impl Cron {
     pub(crate) fn next_after(&self, after: i64) -> Option<i64> {
         let start = zoned(after)?.datetime();
         // The next whole minute.
-        let mut at = start.date().to_datetime(jiff::civil::time(start.hour(), start.minute(), 0, 0)).checked_add(jiff::Span::new().minutes(1)).ok()?;
+        let mut at = start
+            .date()
+            .to_datetime(jiff::civil::time(start.hour(), start.minute(), 0, 0))
+            .checked_add(jiff::Span::new().minutes(1))
+            .ok()?;
         let limit = start.date().year() + 5;
         while at.date().year() <= limit {
             let date = at.date();
@@ -520,13 +524,19 @@ mod tests {
             read(serde_json::json!({"watch": "tail -F app.log"})),
             Ok((When::Watch { command: "tail -F app.log".into(), pattern: None, gap: 30 * SECOND }, None))
         );
-        assert_eq!(read(serde_json::json!({"cron": "0 9 * * *"})), Ok((When::Cron { cron: "0 9 * * *".into() }, Some(at("2026-11-19 09:00")))));
+        assert_eq!(
+            read(serde_json::json!({"cron": "0 9 * * *"})),
+            Ok((When::Cron { cron: "0 9 * * *".into() }, Some(at("2026-11-19 09:00"))))
+        );
     }
 
     #[test]
     fn errors_say_what_would_work() {
         let read = |json: Value| parse(&json, Path::new("/"), 0).expect_err("refused");
-        assert_eq!(read(serde_json::json!({"every": "20s"})), "every must be at least 1m; got 20s. For faster reactions use watch or files.");
+        assert_eq!(
+            read(serde_json::json!({"every": "20s"})),
+            "every must be at least 1m; got 20s. For faster reactions use watch or files."
+        );
         assert!(read(serde_json::json!({"check": "x", "every": "10s"})).contains("at least 30s"));
         assert!(read(serde_json::json!({"check": "x", "match": "("})).contains("regex"));
         assert!(read(serde_json::json!({"cron": "0 9 * *"})).contains("5 fields"));

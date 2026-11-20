@@ -229,7 +229,7 @@ void main() {
 
   testWidgets('says when there are none', (tester) async {
     await show(tester, []);
-    expect(inPanel(find.textContaining('No monitors.')), findsOneWidget);
+    expect(inPanel(find.textContaining('No monitors yet.')), findsOneWidget);
   });
 
   testWidgets('a monitor firing is a line in the conversation', (tester) async {

@@ -36,6 +36,19 @@ pub type LimitsFn = fn(base_url: String, auth: RequestAuth) -> BoxFuture<'static
 /// "ChatGPT Pro"; empty when the provider doesn't say.
 pub type PlanFn = fn(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<String, Error>>;
 
+/// Who a sign-in is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    /// Tells the account apart from the provider's others (its user id, say);
+    /// empty when the provider doesn't say.
+    pub key: String,
+    /// What people know it by: its email, or else its name.
+    pub label: String,
+}
+
+/// Reads who a subscription sign-in is.
+pub type IdentityFn = fn(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Identity, Error>>;
+
 fn limit(id: impl Into<String>, label: impl Into<String>, used_percent: f64, resets_at: u64) -> UsageLimit {
     UsageLimit { id: id.into(), label: label.into(), used_percent: used_percent.clamp(0.0, 100.0), resets_at }
 }
@@ -111,6 +124,19 @@ pub fn anthropic(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Resu
 
 pub fn anthropic_plan(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<String, Error>> {
     Box::pin(async move { Ok(parse_anthropic_plan(&anthropic_get("Anthropic plan", "profile", &base_url, auth).await?)) })
+}
+
+pub fn anthropic_identity(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Identity, Error>> {
+    Box::pin(async move { Ok(parse_anthropic_identity(&anthropic_get("Anthropic account", "profile", &base_url, auth).await?)) })
+}
+
+/// The account in Anthropic's OAuth profile: its `uuid`, and its `email`
+/// (or else its `display_name` or `full_name`).
+pub fn parse_anthropic_identity(profile: &Value) -> Identity {
+    let account = &profile["account"];
+    let text = |key: &str| account[key].as_str().map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned);
+    let label = text("email").or_else(|| text("email_address")).or_else(|| text("display_name")).or_else(|| text("full_name"));
+    Identity { key: text("uuid").or_else(|| label.clone()).unwrap_or_default(), label: label.unwrap_or_default() }
 }
 
 /// The plan in Anthropic's OAuth profile: the organization's
@@ -201,6 +227,12 @@ pub fn codex_plan(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Res
         let usage = codex_usage("OpenAI Codex plan", &base_url, auth).await?;
         Ok(usage["plan_type"].as_str().map(chatgpt_plan).unwrap_or_default())
     })
+}
+
+/// Who the access token is: its ChatGPT user and account (one person can be
+/// in several, each with its own limits), and its email.
+pub fn codex_identity(_base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Identity, Error>> {
+    Box::pin(async move { Ok(auth.api_key.as_deref().map(crate::providers::openai_codex::oauth::identity).unwrap_or_default()) })
 }
 
 /// "plus" -> "ChatGPT Plus", "pro" -> "ChatGPT Pro", "edu" -> "ChatGPT Edu";

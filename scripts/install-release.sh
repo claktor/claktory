@@ -5,8 +5,12 @@
 # this script that comes in each published release, so it needs nothing else
 # from the repo.
 #   ~/.factory/bin/factoryd     the backend, which updates replace
-#   ~/.factory/bin/factoryd-supervisor  keeps it running and undoes updates
-#                               that don't start; a LaunchAgent runs it
+#   ~/.factory/bin/Claktory Agents.app  the supervisor, which keeps it
+#                               running and undoes updates that don't start; a
+#                               LaunchAgent runs it. An app, so it can be added
+#                               under Privacy & Security → Developer Tools.
+#                               (Releases made before it had one install the
+#                               bare ~/.factory/bin/factoryd-supervisor.)
 #   ~/Applications/Factory.app  the app
 #
 #   install-release.sh RELEASE_DIR [--open]
@@ -25,7 +29,7 @@ LABEL="dev.factory.factoryd"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 if [[ ! -f "$RELEASE/factoryd" || ! -d "$RELEASE/Factory.app" ]]; then
-  echo "$RELEASE isn't a Factory release: it needs factoryd and Factory.app" >&2
+  echo "$RELEASE isn't a Claktory release: it needs factoryd and Factory.app" >&2
   exit 1
 fi
 
@@ -33,9 +37,19 @@ mkdir -p "$HOME_DIR/bin" "$HOME/Applications" "$HOME/Library/LaunchAgents"
 cp "$RELEASE/factoryd" "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
-cp "$RELEASE/factoryd" "$BIN-supervisor.new"
-chmod 755 "$BIN-supervisor.new"
-mv -f "$BIN-supervisor.new" "$BIN-supervisor"
+SUPERVISOR_APP="$HOME_DIR/bin/Claktory Agents.app"
+if [[ -d "$RELEASE/supervisor/Claktory Agents.app" ]]; then
+  rm -rf "$SUPERVISOR_APP.new"
+  ditto "$RELEASE/supervisor/Claktory Agents.app" "$SUPERVISOR_APP.new"
+  rm -rf "$SUPERVISOR_APP"
+  mv "$SUPERVISOR_APP.new" "$SUPERVISOR_APP"
+  SUPERVISOR="$SUPERVISOR_APP/Contents/MacOS/factoryd-supervisor"
+else
+  cp "$RELEASE/factoryd" "$BIN-supervisor.new"
+  chmod 755 "$BIN-supervisor.new"
+  mv -f "$BIN-supervisor.new" "$BIN-supervisor"
+  SUPERVISOR="$BIN-supervisor"
+fi
 # A fresh install isn't an update on trial.
 rm -f "$HOME_DIR/bin/trial.json"
 
@@ -67,7 +81,7 @@ cat >"$AGENT_PLIST" <<PLIST
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$BIN-supervisor</string><string>supervise</string></array>
+  <key>ProgramArguments</key><array><string>$SUPERVISOR</string><string>supervise</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -80,10 +94,12 @@ PLIST
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 while launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; do sleep 0.1; done
+# The supervisor that ran before, when it's now the app.
+[[ "$SUPERVISOR" == "$BIN-supervisor" ]] || rm -f "$BIN-supervisor"
 launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
 if $OPEN; then
   open "$APP"
 elif $was_open; then
   open -g "$APP"
 fi
-echo "Factory installed. Backend log: $HOME_DIR/factoryd.log"
+echo "Claktory installed. Backend log: $HOME_DIR/factoryd.log"

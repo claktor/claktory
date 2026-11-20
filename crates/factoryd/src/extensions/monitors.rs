@@ -48,7 +48,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Monitors",
     icon: "alarm-clock",
-    description: "The agent sets prompts that wake it later: at a time, on a schedule, or when a command, files or a running command's output change.",
+    description: "Lets it wake itself later: at a set time, on a schedule, or when something changes.",
     default_enabled: true,
     options: &[],
 };
@@ -59,8 +59,7 @@ A monitor wakes you later with a prompt you write: at a time (at), on an interva
 ";
 
 const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what to do when it fires; self-contained), when, and optionally until (a time), max_fires, idle_only (wait until you're not working; default true for at/every/cron), agent (set it for another agent you can message). when is one of: {\"at\": \"2026-11-19 09:00\"} or {\"in\": \"45m\"}; {\"every\": \"24h\", \"start\"?: time}; {\"cron\": \"0 9 * * 1-5\"} (local time); {\"check\": \"<command>\", \"every\": \"5m\", \"fire_on\": \"success|failure|match|changed\", \"match\"?: regex, \"repeat\"?: true (each time it becomes true again) or \"always\" (at every check it holds)} (the command gets $FACTORY_MONITOR_LAST_FIRED: unix seconds of the last fire, or of when it was added); {\"files\": [paths], \"glob\"?: \"*.rs\"}; {\"watch\": \"<long-running command>\", \"match\"?: regex, \"gap\"?: \"30s\"}. Commands run in your folder.";
-const LIST: &str =
-    "Your monitors, one line each, and what else can wake you. all: monitors that ended in the last 7 days too. agent: another agent's, if you can message it.";
+const LIST: &str = "Your monitors, one line each, and what else can wake you. all: monitors that ended in the last 7 days too. agent: another agent's, if you can message it.";
 const CHANGE: &str = "Change monitors: changes is a list of {id (\"m3\"), action: pause, resume, cancel or fire (fire now, to try the prompt)}, and agent for another agent's.";
 
 pub(crate) const SCHEMA: &str = "
@@ -218,8 +217,7 @@ pub(crate) struct Query<'a> {
     pub ended_since: Option<i64>,
 }
 
-const COLUMNS: &str =
-    "agent, id, name, prompt, spec, until, max_fires, idle_only, created_by, created, state, reason, next_due, last_fired, fires, carry, cursor";
+const COLUMNS: &str = "agent, id, name, prompt, spec, until, max_fires, idle_only, created_by, created, state, reason, next_due, last_fired, fires, carry, cursor";
 
 /// The monitors `query` asks for, by agent and id. Not-yet-ended ones
 /// always; ended ones only with `ended_since`.
@@ -326,7 +324,14 @@ fn record(db: &rusqlite::Connection, agent: &str, monitor: u32, time: i64, actor
 /// it. With `while_active` (the scheduler's saves), only if it's still
 /// active, so a change made meanwhile (cancelled, paused, deleted) stands.
 /// Says whether it saved.
-pub(crate) fn save(store: &Store, monitor: &Monitor, now: i64, actor: &str, event: Option<(&str, &str)>, while_active: bool) -> rusqlite::Result<bool> {
+pub(crate) fn save(
+    store: &Store,
+    monitor: &Monitor,
+    now: i64,
+    actor: &str,
+    event: Option<(&str, &str)>,
+    while_active: bool,
+) -> rusqlite::Result<bool> {
     let mut db = store.db();
     let transaction = db.transaction()?;
     let saved = transaction.execute(
@@ -458,7 +463,8 @@ impl Extension for Monitors {
         inner.config.agent(agent)?;
         let now = factory.monitors.now();
         let read = || -> rusqlite::Result<(Vec<Monitor>, Vec<String>)> {
-            let monitors = query(&factory.store, &Query { agent: Some(agent), ended_since: Some(now - ENDED_LISTED_MS), ..Query::default() })?;
+            let monitors =
+                query(&factory.store, &Query { agent: Some(agent), ended_since: Some(now - ENDED_LISTED_MS), ..Query::default() })?;
             Ok((monitors, builtins(&factory.store, &inner.config, agent)?))
         };
         let (monitors, builtins) = read().unwrap_or_else(|error| {
@@ -531,9 +537,15 @@ impl Factory {
     }
 }
 
-type Run = fn(&Arc<Factory>, &str, Value) -> Result<String, String>;
-
-fn tool(factory: &Arc<Factory>, agent: &str, name: &'static str, label: &'static str, description: &'static str, parameters: Value, run: Run) -> Tool {
+fn tool<R: super::Reply>(
+    factory: &Arc<Factory>,
+    agent: &str,
+    name: &'static str,
+    label: &'static str,
+    description: &'static str,
+    parameters: Value,
+    run: fn(&Arc<Factory>, &str, Value) -> Result<R, String>,
+) -> Tool {
     let factory = Arc::downgrade(factory);
     let agent = agent.to_owned();
     super::tool(
@@ -545,9 +557,8 @@ fn tool(factory: &Arc<Factory>, agent: &str, name: &'static str, label: &'static
             let factory = factory.upgrade();
             let agent = agent.clone();
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let text = run(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+                run(&factory, &agent, args).map(super::Reply::result).map_err(factory_agent::Error::Other)
             })
         }),
     )
@@ -565,7 +576,7 @@ fn whose(config: &Config, asker: &str, agent: Option<&str>) -> Result<String, St
         let id = agent.ok_or("Say whose monitors.")?;
         return config.agent(id).map(|agent| agent.id.clone()).ok_or_else(|| format!("No agent has the id \"{id}\"."));
     }
-    let Some(me) = config.agent(asker) else { return Err("You're no longer in this Factory.".to_owned()) };
+    let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
     let Some(wanted) = agent.filter(|wanted| *wanted != asker && !me.name.eq_ignore_ascii_case(wanted)) else {
         return Ok(asker.to_owned());
     };
@@ -604,7 +615,7 @@ struct AddOne {
     agent: Option<String>,
 }
 
-fn run_add(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<String, String> {
+fn run_add(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<ToolResult, String> {
     let args: AddArgs = serde_json::from_value(args).map_err(|error| format!("{error}; monitors is a list of {{name, prompt, when}}."))?;
     add_monitors(factory, asker, args.monitors)
 }
@@ -615,7 +626,7 @@ fn clean_name(name: &str) -> String {
     name.trim().to_owned()
 }
 
-fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Result<String, String> {
+fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Result<ToolResult, String> {
     if wanted.is_empty() {
         return Err("monitors is empty; give at least one {name, prompt, when}.".to_owned());
     }
@@ -674,6 +685,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
     }
     let ids = add(&factory.store, asker, &new, now).map_err(db_error)?;
     let mut lines = Vec::new();
+    let mut added = Vec::new();
     for (monitor, id) in new.iter().zip(&ids) {
         run::added(factory, &monitor.agent, *id);
         let whose = if monitor.agent == asker { String::new() } else { format!(" for {}", monitor.agent) };
@@ -683,10 +695,16 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
             (When::Files { .. }, _) => "; watching from now".to_owned(),
             _ => "; starting it now".to_owned(),
         };
-        lines.push(format!("Added m{id}{whose} \"{}\": {}{first}.", monitor.name, monitor.when.describe(now)));
+        let schedule = monitor.when.describe(now);
+        lines.push(format!("Added m{id}{whose} \"{}\": {schedule}{first}.", monitor.name));
+        let mut shown = json!({"id": format!("m{id}"), "agent": monitor.agent, "name": monitor.name, "schedule": schedule});
+        if let Some(due) = monitor.next_due {
+            shown["next"] = json!(due);
+        }
+        added.push(shown);
     }
     refresh_view(factory);
-    Ok(lines.join("\n"))
+    Ok(ToolResult::text(lines.join("\n"), json!({"monitors": added})))
 }
 
 #[derive(Deserialize)]
@@ -697,27 +715,30 @@ struct ListArgs {
     agent: Option<String>,
 }
 
-fn run_list(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<String, String> {
+fn run_list(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<ToolResult, String> {
     let args: ListArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let agent = whose(&factory.lock().config, asker, args.agent.as_deref())?;
-    list(factory, &agent, args.all.unwrap_or(false))
+    let (text, count) = list(factory, &agent, args.all.unwrap_or(false))?;
+    Ok(ToolResult::text(text, json!({"agent": agent, "count": count})))
 }
 
-/// One line per monitor, then what else can wake the agent.
-fn list(factory: &Factory, agent: &str, all: bool) -> Result<String, String> {
+/// One line per monitor, then what else can wake the agent; and how many
+/// monitors it listed.
+fn list(factory: &Factory, agent: &str, all: bool) -> Result<(String, usize), String> {
     let now = factory.monitors.now();
     let ended_since = all.then_some(now - ENDED_LISTED_MS);
     let monitors = query(&factory.store, &Query { agent: Some(agent), ended_since, ..Query::default() }).map_err(db_error)?;
-    let mut lines: Vec<String> = monitors.iter().map(|monitor| line(monitor, agent, now)).collect();
+    let person = factory.lock().config.person().to_owned();
+    let mut lines: Vec<String> = monitors.iter().map(|monitor| line(monitor, agent, &person, now)).collect();
     lines.extend(builtins(&factory.store, &factory.lock().config, agent).map_err(db_error)?);
     if lines.is_empty() {
-        return Ok("No monitors.".to_owned());
+        return Ok(("No monitors.".to_owned(), 0));
     }
-    Ok(lines.join("\n"))
+    Ok((lines.join("\n"), monitors.len()))
 }
 
 /// "m3 deploy check — check `gh run view…` every 5m, fires on match \"success\" · next 14:10 · fired 0".
-fn line(monitor: &Monitor, agent: &str, now: i64) -> String {
+fn line(monitor: &Monitor, agent: &str, person: &str, now: i64) -> String {
     let mut line = format!("m{} {} — {}", monitor.id, monitor.name, monitor.when.describe(now));
     match monitor.status {
         Status::Active => {
@@ -740,7 +761,7 @@ fn line(monitor: &Monitor, agent: &str, now: i64) -> String {
         let _ = write!(line, " · at most {max}");
     }
     if monitor.created_by != agent {
-        let by = if monitor.created_by.is_empty() { "the person" } else { monitor.created_by.as_str() };
+        let by = if monitor.created_by.is_empty() { person } else { monitor.created_by.as_str() };
         let _ = write!(line, " · set by {by}");
     }
     line
@@ -777,9 +798,8 @@ pub(crate) struct ChangeOne {
     pub action: String,
 }
 
-fn run_change(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<String, String> {
-    let args: ChangeArgs =
-        serde_json::from_value(args).map_err(|error| format!("{error}; changes is a list of {{id, action}}."))?;
+fn run_change(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<ToolResult, String> {
+    let args: ChangeArgs = serde_json::from_value(args).map_err(|error| format!("{error}; changes is a list of {{id, action}}."))?;
     let agent = whose(&factory.lock().config, asker, args.agent.as_deref())?;
     change(factory, &agent, asker, &args.changes)
 }
@@ -793,15 +813,18 @@ enum Action {
 }
 
 /// Pauses, resumes, cancels or fires the agent's monitors, all or none;
-/// `actor` is who asked (an agent id, or '' for the person). Says what changed.
-pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: &[ChangeOne]) -> Result<String, String> {
+/// `actor` is who asked (an agent id, or '' for the person). Says what
+/// changed, with each monitor's {id, name, action} as details.
+pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: &[ChangeOne]) -> Result<ToolResult, String> {
     if changes.is_empty() {
         return Err("changes is empty; give at least one {id, action}.".to_owned());
     }
+    let by = if actor.is_empty() { format!("by {}", factory.lock().config.person()) } else { format!("by {actor}") };
     let mut planned = Vec::new();
     for change in changes {
         let wanted = change.id.trim();
-        let id: u32 = wanted.trim_start_matches(['m', 'M']).parse().map_err(|_| format!("\"{wanted}\" isn't a monitor id; ids are m1, m2…"))?;
+        let id: u32 =
+            wanted.trim_start_matches(['m', 'M']).parse().map_err(|_| format!("\"{wanted}\" isn't a monitor id; ids are m1, m2…"))?;
         let action = match change.action.trim() {
             "pause" => Action::Pause,
             "resume" => Action::Resume,
@@ -826,6 +849,7 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
     }
     let now = factory.monitors.now();
     let mut said = Vec::new();
+    let mut changed = Vec::new();
     for (id, action) in planned {
         // Read again, with processes held still: the scheduler may have
         // started or stopped one since.
@@ -838,18 +862,19 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
                 drop(processes);
                 run::fire_by_hand(factory, &mut monitor, actor, now).map_err(db_error)?;
                 said.push(format!("m{} fired", monitor.id));
+                changed.push(json!({"id": format!("m{}", monitor.id), "name": monitor.name, "action": "fired"}));
                 continue;
             }
             Action::Pause => {
                 run::stop_process(factory, &monitor);
                 monitor.status = Status::Paused;
-                monitor.reason = if actor.is_empty() { "by the person".to_owned() } else { format!("by {actor}") };
+                monitor.reason = by.clone();
                 monitor.cursor.pid = None;
             }
             Action::Cancel => {
                 run::stop_process(factory, &monitor);
                 monitor.status = Status::Cancelled;
-                monitor.reason = if actor.is_empty() { "by the person".to_owned() } else { format!("by {actor}") };
+                monitor.reason = by.clone();
                 monitor.cursor.pid = None;
             }
             Action::Resume => {
@@ -872,9 +897,10 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
         drop(processes);
         run::forget_live(factory, &monitor);
         said.push(format!("m{} {kind}", monitor.id));
+        changed.push(json!({"id": format!("m{}", monitor.id), "name": monitor.name, "action": kind}));
     }
     refresh_view(factory);
-    Ok(format!("{}.", said.join("; ")))
+    Ok(ToolResult::text(format!("{}.", said.join("; ")), json!({"monitors": changed})))
 }
 
 fn past(action: Action) -> &'static str {

@@ -40,9 +40,13 @@ pub(crate) fn manual() -> &'static Manual {
     &PARSED
 }
 
-/// `text` with `{{home}}`, `{{config}}` and `{{workspace}}` made this Factory's paths.
-pub(crate) fn render(text: &str, home: &Home) -> String {
-    text.replace("{{config}}", &home.config_path().display().to_string())
+/// `text` with `{{home}}`, `{{config}}` and `{{workspace}}` made this
+/// Factory's paths, and `{{user}}` and `{{User}}` the user's name, or "the
+/// person" and "The person" without one.
+pub(crate) fn render(text: &str, home: &Home, user: Option<&str>) -> String {
+    text.replace("{{user}}", user.unwrap_or("the person"))
+        .replace("{{User}}", user.unwrap_or("The person"))
+        .replace("{{config}}", &home.config_path().display().to_string())
         .replace("{{workspace}}", &home.workspace().display().to_string())
         .replace("{{home}}", &home.root().display().to_string())
 }
@@ -66,7 +70,8 @@ fn block_end(lines: &[&str], start: usize) -> usize {
     if let Some(level) = heading(lines[start]) {
         // A marker just before the next heading belongs to it.
         let ends = |line: &str| heading(line).is_some_and(|next| next <= level);
-        while end < lines.len() && !ends(lines[end]) && !(marker(lines[end]).is_some() && lines.get(end + 1).is_some_and(|line| ends(line))) {
+        while end < lines.len() && !ends(lines[end]) && !(marker(lines[end]).is_some() && lines.get(end + 1).is_some_and(|line| ends(line)))
+        {
             end += 1;
         }
     } else {
@@ -165,7 +170,7 @@ mod tests {
             assert!(!note.body.is_empty(), "{} is empty", note.slug);
         }
         assert!(!manual.core.contains("<!--"), "a marker that marks nothing");
-        assert!(manual.core.starts_with("# Factory manual"));
+        assert!(manual.core.starts_with("# Claktory manual"));
         assert!(manual.core.contains("## Agents"));
         assert!(manual.core.len() < 16_000, "the core manual is {} bytes", manual.core.len());
     }

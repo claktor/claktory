@@ -22,7 +22,7 @@ set -euo pipefail
 MANIFEST_URL=""
 
 fail() {
-  echo "Factory can't be installed: $*" >&2
+  echo "Claktory can't be installed: $*" >&2
   exit 1
 }
 
@@ -50,7 +50,7 @@ main() {
   [[ -n "$url" ]] || fail "this installer doesn't know where releases are published (set FACTORY_UPDATE_URL)."
   local os
   os="$(uname -s)"
-  [[ "$os" == Darwin || "$os" == Linux ]] || fail "Factory runs on macOS and Linux."
+  [[ "$os" == Darwin || "$os" == Linux ]] || fail "Claktory runs on macOS and Linux."
 
   # Global, for the trap that runs after main returns.
   work="$(mktemp -d)"
@@ -63,13 +63,13 @@ main() {
     case "$arch" in
       x86_64 | amd64) arch=x86_64 ;;
       aarch64 | arm64) arch=aarch64 ;;
-      *) fail "Factory runs on x86_64 and aarch64 Linux, and this machine is $arch." ;;
+      *) fail "Claktory runs on x86_64 and aarch64 Linux, and this machine is $arch." ;;
     esac
     version="$(top_field version "$work/latest.json")"
     backend="$(top_field backend "$work/latest.json")"
     local build
     build="$(grep "^    \"$arch\": {" "$work/latest.json" || true)"
-    [[ -n "$build" || -z "$version" ]] || fail "Factory $version has no build for Linux $arch."
+    [[ -n "$build" || -z "$version" ]] || fail "Claktory $version has no build for Linux $arch."
     tarball="$(linux_field url "$build")"
     sha256="$(linux_field sha256 "$build")"
     size="$(linux_field size "$build")"
@@ -95,7 +95,7 @@ main() {
     fail "this release is built for $archs, and this Mac is $arch."
   fi
 
-  echo "Downloading Factory $version"
+  echo "Downloading Claktory $version"
   curl -fSL --progress-bar --proto '=https,file' "$tarball" -o "$work/release.tar.gz" || fail "couldn't download $tarball"
   [[ -z "$size" || "$(file_size "$work/release.tar.gz")" == "$size" ]] || fail "the download's size doesn't match the manifest."
   [[ "$(file_sha256 "$work/release.tar.gz")" == "$(tr 'A-F' 'a-f' <<<"$sha256")" ]] ||
@@ -108,6 +108,9 @@ main() {
     [[ -f "$work/release/factoryd" && -d "$work/release/Factory.app" && -f "$work/release/install-release.sh" ]] ||
       fail "the release is incomplete."
     codesign --verify --deep --strict "$work/release/Factory.app" || fail "the app's signature doesn't verify."
+    if [[ -d "$work/release/supervisor/Claktory Agents.app" ]]; then
+      codesign --verify --deep --strict "$work/release/supervisor/Claktory Agents.app" || fail "the supervisor's signature doesn't verify."
+    fi
   fi
   echo "$backend" >"$work/release/backend-version"
 
@@ -117,7 +120,7 @@ main() {
   rm -rf "${releases:?}/$version"
   mv "$work/release" "$releases/$version"
   if [[ -n "$download_only" ]]; then
-    echo "Factory $version downloaded to $releases/$version"
+    echo "Claktory $version downloaded to $releases/$version"
     return
   fi
   # Named only once complete, as scripts/release.sh does.
@@ -127,13 +130,13 @@ main() {
   if [[ "$os" == Linux ]]; then
     bash "$releases/$version/install-linux.sh" "$releases/$version" </dev/null
     echo
-    echo "Factory $version is installed and running here. Once your Mac's Factory is connected to it, sign in to a model provider there, under Settings → Providers."
+    echo "Claktory $version is installed and running here. Once your Mac's Claktory is connected to it, sign in to a model provider there, under Settings → Providers."
     return
   fi
   bash "$releases/$version/install-release.sh" "$releases/$version" --open </dev/null
   echo
-  echo "Factory $version is installed in ~/Applications and open."
-  echo "Sign in to a model provider in Factory, under Settings → Providers."
+  echo "Claktory $version is installed in ~/Applications and open."
+  echo "Sign in to a model provider in Claktory, under Settings → Providers."
   if ! xcode-select -p >/dev/null 2>&1; then
     echo "Agents need git and other developer tools: run  xcode-select --install"
   fi

@@ -1,10 +1,9 @@
 //! `factoryd [--dev]` serves a Factory; `factoryd [--dev] supervise` keeps
 //! one running and undoes updates that don't start (see `update`);
 //! `factoryd [--dev] login [PROVIDER]` signs it in to a model provider;
-//! `factoryd [--dev] pair NAME [--host ADDRESS]` pairs a device on another
-//! machine and prints its pairing code (naming this machine by ADDRESS),
-//! `unpair DEVICE` unpairs one, `devices` lists them, and `remote on [PORT]`
-//! and `remote off` turn the listener for them on and off (see `remote`).
+//! `factoryd [--dev] pair NAME` pairs a device on another machine and prints
+//! its pairing code, `unpair DEVICE` unpairs one and `devices` lists them;
+//! remote access is on while any is paired (see `remote`).
 //!
 //! `FACTORY_HOME` and `FACTORY_PORT` override where the Factory lives and
 //! which port it serves, for tests and side-by-side Factories.
@@ -23,7 +22,7 @@ use factoryd::update;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: factoryd [--dev] [supervise | login [PROVIDER] | pair NAME [--host ADDRESS] | unpair DEVICE | devices | remote on [PORT] | remote off]";
+const USAGE: &str = "usage: factoryd [--dev] [supervise | login [PROVIDER] | pair NAME | unpair DEVICE | devices]";
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
@@ -45,11 +44,20 @@ enum MainError {
     Remote(#[from] factoryd::remote::RemoteError),
 }
 
+fn main() -> ExitCode {
+    // A command's log filter (see factory_agent::secrets::filter_main): one
+    // per command with secrets, so it starts lean, without a runtime or logs.
+    if std::env::args().nth(1).as_deref() == Some("redact") {
+        return factory_agent::secrets::filter_main();
+    }
+    serve_main()
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn serve_main() -> ExitCode {
     // One crypto provider for TLS code that asks rustls for the process default:
-    // with two in the build (ring for the providers, aws-lc-rs for remote
-    // access) there's none, and rustls panics. Factory's own clients name theirs.
+    // with two in the build (ring for the providers and the tunnel, aws-lc-rs
+    // through other crates) there's none, and rustls panics. Factory's own clients name theirs.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // Colors only for a terminal; log files stay plain text.
@@ -83,6 +91,12 @@ async fn run() -> Result<(), MainError> {
     }
     match command.as_slice() {
         [] => {
+            // It holds the vault's key: no core dumps, and on Linux no other
+            // process of this user reads its memory.
+            factoryd::vault::memory::harden();
+            if let Ok(factoryd) = std::env::current_exe() {
+                factoryd::set_filter_executable(factoryd);
+            }
             let home = instance.home.clone();
             let served = serve(instance).await;
             if let Err(error) = &served {
@@ -94,16 +108,36 @@ async fn run() -> Result<(), MainError> {
         [login] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), None).await?),
         [login, provider] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), Some(provider)).await?),
         [pair, name @ ..] if pair == "pair" && !name.is_empty() => {
-            // `--host ADDRESS`: the address the device reaches this machine by.
-            let (name, host) = match name {
-                [name @ .., flag, host] if flag == "--host" => (name, host.as_str()),
-                name => (name, ""),
+            // `--host ADDRESS`, from before the private tunnel: devices find
+            // this machine by its key now, so it's left out.
+            let name = match name {
+                [name @ .., flag, _] if flag == "--host" => name,
+                name => name,
             };
             if name.is_empty() {
                 return Err(MainError::Usage);
             }
-            let (code, _) = factoryd::remote::pair(&instance.home, &name.join(" "), host)?;
-            println!("Paste this pairing code into Factory on the other device (it's shown once, and holds the device's key):\n\n{code}");
+            let (code, _) = factoryd::remote::pair_offline(&instance.home, &name.join(" "))?;
+            let minutes = factoryd::remote::CODE_LIFETIME.as_secs() / 60;
+            // A terminal gets the code as a QR code too, to scan from the
+            // screen; piped elsewhere, just the text.
+            use std::io::IsTerminal;
+            let qr = if std::io::stdout().is_terminal() { factoryd::terminal_qr::lines(&code) } else { None };
+            match qr {
+                Some(lines) => {
+                    println!("Scan this with Claktory on your iPhone:\n");
+                    for line in lines {
+                        println!("  {line}");
+                    }
+                    println!(
+                        "\nOr, on your Mac, click Add a Claktory (+) at the far left of Claktory's window and paste this code:\n\n{code}\n"
+                    );
+                }
+                None => println!(
+                    "Paste this code into Claktory on your other device (on a Mac: Add a Claktory, the + at the far left of the window):\n\n{code}\n"
+                ),
+            }
+            println!("It works once, for {minutes} minutes. Don't share it: it lets a device into your Claktory.");
             Ok(())
         }
         [unpair, device @ ..] if unpair == "unpair" && !device.is_empty() => {
@@ -112,7 +146,7 @@ async fn run() -> Result<(), MainError> {
             Ok(())
         }
         [devices] if devices == "devices" => {
-            for device in factoryd::remote::devices(&instance.home)? {
+            for device in factoryd::remote::devices(&instance.home)?.into_iter().filter(|device| !device.local) {
                 let seen = match device.last_seen.map(jiff::Timestamp::from_millisecond) {
                     Some(Ok(seen)) => format!("last connected {seen}"),
                     _ => "never connected".to_owned(),
@@ -121,12 +155,9 @@ async fn run() -> Result<(), MainError> {
             }
             Ok(())
         }
-        [remote, on, port @ ..] if remote == "remote" && (on == "on" || on == "off") && port.len() <= usize::from(on == "on") => {
-            let port = port.first().map(|port| port.parse::<u16>()).transpose().map_err(|_| MainError::Usage)?;
-            match factoryd::remote::set_remote(&instance.home, on == "on", port)? {
-                Some(remote) => println!("Remote access is on, on port {} (devices pair with: factoryd pair NAME).", remote.port),
-                None => println!("Remote access is off."),
-            }
+        // From before the private tunnel, which needs no switch.
+        [remote, ..] if remote == "remote" => {
+            println!("Remote access is on while devices are paired: pair one with factoryd pair NAME.");
             Ok(())
         }
         _ => Err(MainError::Usage),

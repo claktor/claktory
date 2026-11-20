@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OpenFlags};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::home::Home;
 
@@ -36,6 +36,28 @@ const BYTES_SHOWN: usize = 16 * 1024;
 const CELL_CHARS: usize = 300;
 /// …and how far past that it counts.
 const ROWS_COUNTED: usize = 10_000;
+
+/// What a call says: its text for the model, and its details for the app's
+/// view of it (counts and names). Reads as its text.
+#[derive(Debug)]
+pub(crate) struct Answer {
+    pub text: String,
+    pub details: Value,
+}
+
+impl Answer {
+    fn new(text: impl Into<String>, details: Value) -> Answer {
+        Answer { text: text.into(), details }
+    }
+}
+
+impl std::ops::Deref for Answer {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
 
 pub(crate) fn path(home: &Home, target: &Target) -> PathBuf {
     match target {
@@ -152,8 +174,10 @@ fn cell(value: ValueRef<'_>) -> String {
 }
 
 /// One read-only statement's rows: a header line, then a line per row,
-/// cells joined with " | ", capped, with how many more there were.
-pub(crate) fn query(db: &Connection, target: &Target, sql: &str, args: Option<&Value>) -> Result<String, String> {
+/// cells joined with " | ", capped, with how many more there were. Its
+/// details: the columns, the rows shown, how many more, and `capped` when it
+/// stopped counting them.
+pub(crate) fn query(db: &Connection, target: &Target, sql: &str, args: Option<&Value>) -> Result<Answer, String> {
     let values = params(args)?;
     let mut statement = db.prepare(sql).map_err(|error| sql_error(&error, target))?;
     if !statement.readonly() {
@@ -173,22 +197,24 @@ pub(crate) fn query(db: &Connection, target: &Target, sql: &str, args: Option<&V
             more += 1;
             if shown + more >= ROWS_COUNTED {
                 let _ = write!(out, "\n(+{more} or more rows; add LIMIT/OFFSET or narrow it)");
-                return Ok(out);
+                return Ok(Answer::new(out, json!({"columns": columns, "rows": shown, "more": more, "capped": true})));
             }
         }
     }
+    let details = json!({"columns": columns, "rows": shown, "more": more});
     if shown == 0 {
-        return Ok(format!("No rows. Columns: {}.", columns.join(", ")));
+        return Ok(Answer::new(format!("No rows. Columns: {}.", columns.join(", ")), details));
     }
     if more > 0 {
         let _ = write!(out, "\n(+{more} more rows; add LIMIT/OFFSET or narrow it)");
     }
-    Ok(out)
+    Ok(Answer::new(out, details))
 }
 
 /// Runs `sql`, all or none, and says what it changed. With params it's one
-/// statement; without, it may be several.
-pub(crate) fn exec(db: &mut Connection, target: &Target, sql: &str, args: Option<&Value>) -> Result<String, String> {
+/// statement; without, it may be several. Its details: how many rows it
+/// `changed`, and the `last_id` it inserted.
+pub(crate) fn exec(db: &mut Connection, target: &Target, sql: &str, args: Option<&Value>) -> Result<Answer, String> {
     let values = params(args)?;
     let before = db.total_changes();
     let transaction = db.transaction().map_err(|error| sql_error(&error, target))?;
@@ -199,15 +225,17 @@ pub(crate) fn exec(db: &mut Connection, target: &Target, sql: &str, args: Option
     }
     transaction.commit().map_err(|error| sql_error(&error, target))?;
     let changed = db.total_changes() - before;
+    let mut details = json!({"changed": changed});
     if changed == 0 {
-        return Ok("ok".to_owned());
+        return Ok(Answer::new("ok", details));
     }
     let mut said = format!("ok: {changed} row{} changed", if changed == 1 { "" } else { "s" });
     let last = db.last_insert_rowid();
     if last != 0 {
         let _ = write!(said, ", last id {last}");
+        details["last_id"] = json!(last);
     }
-    Ok(said)
+    Ok(Answer::new(said, details))
 }
 
 pub(crate) struct Table {
@@ -242,11 +270,13 @@ pub(crate) fn tables(db: &Connection, target: &Target) -> Result<Vec<Table>, Str
 }
 
 /// db_schema: every table and view in a line, or one table's definition.
-pub(crate) fn schema(db: &Connection, target: &Target, table: Option<&str>) -> Result<String, String> {
+/// Its details: how many `tables` there are, or the `table` asked for.
+pub(crate) fn schema(db: &Connection, target: &Target, table: Option<&str>) -> Result<Answer, String> {
     let tables = tables(db, target)?;
     let Some(wanted) = table else {
+        let details = json!({"tables": tables.len()});
         if tables.is_empty() {
-            return Ok("No tables yet; create them with db_exec.".to_owned());
+            return Ok(Answer::new("No tables yet; create them with db_exec.", details));
         }
         let lines: Vec<String> = tables
             .iter()
@@ -260,7 +290,7 @@ pub(crate) fn schema(db: &Connection, target: &Target, table: Option<&str>) -> R
                 format!("{} ({kind}{} rows): {}", table.name, table.rows, columns.join(", "))
             })
             .collect();
-        return Ok(lines.join("\n"));
+        return Ok(Answer::new(lines.join("\n"), details));
     };
     if !tables.iter().any(|table| table.name == wanted) {
         let names: Vec<&str> = tables.iter().map(|table| table.name.as_str()).collect();
@@ -273,7 +303,7 @@ pub(crate) fn schema(db: &Connection, target: &Target, table: Option<&str>) -> R
     let mut statement =
         db.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name = ?1 AND sql IS NOT NULL ORDER BY type DESC, name").map_err(error)?;
     let sql: Vec<String> = statement.query_map([wanted], |row| row.get(0)).map_err(error)?.collect::<Result<_, _>>().map_err(error)?;
-    Ok(sql.join(";\n") + ";")
+    Ok(Answer::new(sql.join(";\n") + ";", json!({"table": wanted})))
 }
 
 #[cfg(test)]
@@ -323,12 +353,12 @@ mod tests {
             None,
         )
         .expect("insert");
-        let many = query(&db, &own, "SELECT id FROM leads", None).expect("query");
+        let many = query(&db, &own, "SELECT id FROM leads", None).expect("query").text;
         assert_eq!(many.lines().count(), 1 + ROWS_SHOWN + 1);
         assert!(many.ends_with("(+101 more rows; add LIMIT/OFFSET or narrow it)"), "{many}");
 
         assert_eq!(schema(&db, &own, None).as_deref(), Ok("leads (301 rows): id INTEGER, name TEXT, note TEXT"));
-        let one = schema(&db, &own, Some("leads")).expect("schema");
+        let one = schema(&db, &own, Some("leads")).expect("schema").text;
         assert!(one.starts_with("CREATE TABLE leads") && one.contains("CREATE INDEX by_name"), "{one}");
         let attach = exec(&mut db, &own, "ATTACH DATABASE '/tmp/elsewhere.db' AS other", None).unwrap_err();
         assert!(attach.contains("ATTACH and load_extension aren't allowed"), "{attach}");

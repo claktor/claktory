@@ -131,8 +131,9 @@ impl Factory {
         drop(inner);
         for (agent, task) in self.store.running_tasks()? {
             let factory = Arc::downgrade(self);
+            let redaction = self.redaction.clone();
             tokio::spawn(async move {
-                let done = task.wait_detached().await;
+                let done = task.wait_detached(&redaction).await;
                 if let Some(factory) = factory.upgrade() {
                     factory.task_finished(&agent, done);
                 }
@@ -145,16 +146,16 @@ impl Factory {
 /// What a resumed agent is told first: an event from Factory.
 fn resume_note(stopped_on: &str) -> (String, factory_agent::Event) {
     let summary = if stopped_on.is_empty() || stopped_on == VERSION {
-        "Factory restarted".to_owned()
+        "Claktory restarted".to_owned()
     } else {
-        format!("Factory restarted: updated from {stopped_on} to {VERSION}")
+        format!("Claktory restarted: updated from {stopped_on} to {VERSION}")
     };
     let text = format!(
         "{summary} while you were working. Whatever you were doing when it stopped may not have finished (a tool call shows \"Interrupted\" if so), so check before relying on it, then carry on with your task."
     );
     let event = factory_agent::Event {
         source: factory_agent::EventSource::Host,
-        from: "Factory".to_owned(),
+        from: "Claktory".to_owned(),
         id: String::new(),
         summary,
         transient: false,

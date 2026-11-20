@@ -192,11 +192,19 @@ void main() {
         ExpandFolder(projectId: 'p1', path: 'app', expanded: false),
       );
 
-      // Files can't be opened yet: a click sends nothing.
-      final sent = harness.backend.sent.length;
+      // A file opens in a viewer beside the selected agent's conversation.
       await tester.tap(find.text('README.md'));
       await settle(tester);
-      expect(harness.backend.sent.length, sent);
+      final layout = harness.last.setLayout;
+      expect(layout.agentId, 'a1');
+      expect(
+        layout.root.split.children.last.leaf,
+        ViewLeaf(
+          kind: 'text',
+          path: '/Users/me/factory/README.md',
+          title: 'README.md',
+        ),
+      );
 
       await tester.tap(find.text('Show everything'));
       await settle(tester);
@@ -494,11 +502,11 @@ void main() {
           version: '2026.11.18-1700',
           app: '2026.11.18-1600',
         );
-        harness.updater.fails = "the download's SHA-256 doesn't match";
+        harness.updater.fails = "the download is damaged";
         await tester.tap(find.text('Update'));
         await tester.pump(const Duration(milliseconds: 400));
         expect(
-          find.text("Couldn't update: the download's SHA-256 doesn't match"),
+          find.text("Couldn't update: the download is damaged"),
           findsOneWidget,
         );
         expect(find.textContaining('Checking'), findsNothing);
@@ -621,7 +629,7 @@ void main() {
       tester,
     ) async {
       const why =
-          "Factory 2026.11.18-1700 didn't start, so Factory went back to "
+          "Claktory 2026.11.18-1700 didn't start, so you're still on "
           '2026.11.18-1600. It stopped (exit status: 3).';
       final harness = Harness(
         focusedOn(

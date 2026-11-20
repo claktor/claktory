@@ -41,3 +41,10 @@ condition = "AND"
 paths = ['''^crates/factory-agent/tests/fixtures/openai_codex(?:_ws)?\.json$''']
 regexTarget = "secret"
 regexes = ['''^eyJhbGciOiJub25lIn0\.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0\.sig$''']
+
+[[allowlists]]
+description = "The secrets tests' made-up values (vault and bash's secrets): a fake Stripe-shaped key, a fake Resend key and AWS's documented sample secret key, cut short; they only check that values are hidden in output and sealed on disk"
+condition = "AND"
+paths = ['''^crates/factory-agent/tests/all/secrets\.rs$''', '''^crates/factory-agent/src/secrets\.rs$''', '''^crates/factoryd/src/vault/mod\.rs$''']
+regexTarget = "secret"
+regexes = ['''^(?:sk_live_4f9a8b7c6d5e4f3a2b1c|re_123456789abcdef|wJalrXUtnFEMI/K7MDENG)$''']

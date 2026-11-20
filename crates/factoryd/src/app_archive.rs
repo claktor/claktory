@@ -193,7 +193,7 @@ impl Factory {
     /// while its archive is being made.
     pub(crate) async fn fetch_app(&self, version: &str, offset: u64) -> Result<v1::AppChunk, RequestError> {
         let Some(release) = release_dir(&self.home.releases(), version) else {
-            return Err(no_app(version, "this Factory has no such release"));
+            return Err(no_app(version, "this Claktory has no such release"));
         };
         let Some(meta) = ready(&release) else {
             let mut making = lock();

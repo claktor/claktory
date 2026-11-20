@@ -21,10 +21,13 @@ pub mod remote;
 mod runner;
 mod runs;
 mod store;
+pub mod terminal_qr;
 pub mod transcript;
 mod trees;
 pub mod update;
 mod usage;
+pub mod vault;
 
 pub use connection::{ConnectionError, serve};
 pub use factory::Factory;
+pub use runner::set_filter_executable;

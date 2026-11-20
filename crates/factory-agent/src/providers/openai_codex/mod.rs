@@ -60,6 +60,7 @@ pub fn provider() -> Provider {
     let mut provider = Provider::new("openai-codex", "OpenAI Codex", DEFAULT_CODEX_BASE_URL, None, oauth(CodexOAuth::new()), stream_simple);
     provider.limits = Some(crate::limits::codex);
     provider.plan = Some(crate::limits::codex_plan);
+    provider.identity = Some(crate::limits::codex_identity);
     provider
 }
 
@@ -187,6 +188,27 @@ fn truthy_str(value: &Value) -> Option<&str> {
     value.as_str().filter(|text| !text.is_empty())
 }
 
+/// Whether a Codex error object is the account's usage limit:
+/// `usage_limit_reached`, or `usage_not_included` (a plan without Codex).
+/// Some, with when it resets (`resets_at`, seconds since 1970, or
+/// `resets_in_seconds`) if said.
+fn usage_limit(error: &Value) -> Option<Option<u64>> {
+    let code = truthy_str(&error["code"]).or_else(|| truthy_str(&error["type"]))?;
+    if !["usage_limit_reached", "usage_not_included"].iter().any(|limit| code.eq_ignore_ascii_case(limit)) {
+        return None;
+    }
+    let at = error["resets_at"].as_f64().filter(|at| *at > 0.0).map(|at| (at * 1000.0) as u64);
+    let after = error["resets_in_seconds"].as_f64().filter(|after| *after > 0.0).map(|after| now_ms() + (after * 1000.0) as u64);
+    Some(at.or(after))
+}
+
+/// Marks `output` when a failed response's body says the account reached its usage limit.
+fn mark_if_usage_limit(output: &mut AssistantMessage, error: &Value) {
+    if let Some(resets_at) = usage_limit(error) {
+        crate::accounts::mark_usage_limit(output, resets_at);
+    }
+}
+
 /// `parseErrorResponse` followed by `throw new Error(info.friendlyMessage || info.message)`.
 pub fn parse_error_response(status: u16, status_text: Option<&str>, raw: &str) -> String {
     let mut message =
@@ -230,6 +252,7 @@ pub fn map_codex_event(event: Value, output: &mut AssistantMessage) -> Result<Ma
     match kind.as_str() {
         "error" => {
             let nested = event.get("error").filter(|nested| nested.is_object());
+            mark_if_usage_limit(output, nested.unwrap_or(&event));
             let code = event["code"].as_str().or_else(|| nested.and_then(|nested| nested["code"].as_str())).map(str::to_owned);
             let message = event["message"].as_str().or_else(|| nested.and_then(|nested| nested["message"].as_str())).map(str::to_owned);
             let text = message
@@ -241,6 +264,7 @@ pub fn map_codex_event(event: Value, output: &mut AssistantMessage) -> Result<Ma
         }
         "response.failed" => {
             let error = &event["response"]["error"];
+            mark_if_usage_limit(output, error);
             let message = truthy_str(&error["message"]).unwrap_or("Codex response failed").to_owned();
             Err(CodexFailure::Api { code: error["code"].as_str().map(str::to_owned), message })
         }
@@ -334,6 +358,9 @@ async fn sse_request(
     let status = response.status();
     if !status.is_success() {
         let text = response_text(response).await;
+        if let Ok(body) = serde_json::from_str::<Value>(&text) {
+            mark_if_usage_limit(&mut parser.output, &body["error"]);
+        }
         return Err(CodexFailure::Api { code: None, message: parse_error_response(status.as_u16(), status.canonical_reason(), &text) });
     }
     if !*start_emitted {

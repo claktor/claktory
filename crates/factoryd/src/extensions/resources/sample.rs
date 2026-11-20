@@ -149,7 +149,7 @@ impl Sampler {
             false
         };
         let app_dir = format!("/{}/Contents/MacOS/", known.app);
-        let mut backend = entry("Factory's backend", "backend", "", me);
+        let mut backend = entry("Claktory service", "backend", "", me);
         let mut supervising = supervisor.map(|pid| entry("Supervisor", "supervisor", "", pid));
         let mut app: Option<v1::ResourceProcess> = None;
         let mut groups: Vec<v1::ResourceProcess> =

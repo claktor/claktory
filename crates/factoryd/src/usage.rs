@@ -1,5 +1,5 @@
 //! How much of their usage limits the providers signed in with a subscription
-//! have used, and which plan each has. Read from each provider at sign-in,
+//! have used, and which plan each has, account by account. Read from each provider at sign-in,
 //! often while its agents work and rarely while they're idle, so it stays
 //! current without wasting requests.
 
@@ -79,9 +79,19 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     }
 }
 
+/// A provider's accounts by id, in order; one with no id ("") when it lists
+/// none but may still be signed in (with an API key from the environment).
+pub(crate) fn account_ids(provider: &v1::Provider) -> Vec<String> {
+    if provider.accounts.is_empty() { vec![String::new()] } else { provider.accounts.iter().map(|account| account.id.clone()).collect() }
+}
+
+/// An account's usage and plan, by provider and account id.
+pub(crate) type AccountKey = (String, String);
+
 impl Factory {
-    async fn check_usage(&self, tracked: &mut HashMap<String, Tracked>) {
-        let (providers, working) = {
+    async fn check_usage(&self, tracked: &mut HashMap<AccountKey, Tracked>) {
+        let now = now_ms();
+        let (providers, working, reset) = {
             let inner = self.lock();
             let mut working = HashSet::new();
             for (id, runtime) in &inner.agents {
@@ -92,81 +102,116 @@ impl Factory {
                     working.insert(provider.to_owned());
                 }
             }
-            let providers: Vec<(String, String)> =
-                inner.providers.iter().map(|provider| (provider.id.clone(), provider.signed_in_with.clone())).collect();
-            (providers, working)
+            // An account at its limit until now has capacity again; a key out of
+            // credit is tried again after a while, which may make it the one in use.
+            let reset = inner
+                .providers
+                .iter()
+                .flat_map(|provider| &provider.accounts)
+                .any(|account| (account.exhausted_until != 0 && account.exhausted_until <= now) || account.out_of_credit);
+            (inner.providers.clone(), working, reset)
         };
-        tracked.retain(|id, _| providers.iter().any(|(provider, signed_in_with)| provider == id && !signed_in_with.is_empty()));
-        for (id, signed_in_with) in providers {
-            if signed_in_with.is_empty() {
-                self.set_usage(&id, None);
-                self.set_plan(&id, None);
+        if reset {
+            self.refresh_models().await;
+        }
+        tracked.retain(|(id, account), _| {
+            providers
+                .iter()
+                .any(|provider| provider.id == *id && !provider.signed_in_with.is_empty() && account_ids(provider).contains(account))
+        });
+        let mut named = false;
+        for provider in providers {
+            let id = provider.id.clone();
+            if provider.signed_in_with.is_empty() {
+                self.forget_usage(&id);
                 continue;
             }
-            let entry = tracked.entry(id.clone()).or_default();
-            if entry.signed_in_with != signed_in_with {
-                // A new sign-in: forget the old one's usage and plan and read them afresh.
-                *entry = Tracked { signed_in_with, ..Tracked::default() };
-                self.set_usage(&id, None);
-                self.set_plan(&id, None);
-            }
-            let is_working = working.contains(&id);
-            entry.worked |= is_working;
-            if !due(entry, is_working, now_ms()) {
-                continue;
-            }
-            let (result, plan) = tokio::join!(self.models.usage(&id), self.models.plan(&id));
-            match plan {
-                // A plan once read stays until a read names another.
-                Ok(plan) if !plan.is_empty() => self.set_plan(&id, Some(plan)),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(provider = %id, %error, "could not read the plan"),
-            }
-            let now = now_ms();
-            entry.read = Some(now);
-            entry.worked = is_working;
-            match result {
-                Ok(None) => {
-                    entry.unlimited = true;
-                    self.set_usage(&id, None);
-                    self.set_plan(&id, None);
+            // Requests go to the account in use; the others wait.
+            let in_use = provider.accounts.iter().find(|account| account.in_use).map_or_else(String::new, |account| account.id.clone());
+            for account in account_ids(&provider) {
+                let key = (id.clone(), account.clone());
+                let signed_in_with = provider.signed_in_with.clone();
+                let entry = tracked.entry(key.clone()).or_default();
+                if entry.signed_in_with != signed_in_with {
+                    // A new sign-in: forget the old one's usage and plan and read them afresh.
+                    *entry = Tracked { signed_in_with, ..Tracked::default() };
+                    self.set_usage(&key, None);
+                    self.set_plan(&key, None);
                 }
-                Ok(Some(windows)) => {
-                    entry.failed = false;
-                    let resets = windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
-                    entry.next_reset = resets.min().unwrap_or(0);
-                    self.set_usage(&id, Some(v1::ProviderUsage { windows, updated: now, error: String::new() }));
+                let is_working = working.contains(&id) && account == in_use;
+                entry.worked |= is_working;
+                if !due(entry, is_working, now_ms()) {
+                    continue;
                 }
-                Err(error) => {
-                    tracing::warn!(provider = %id, %error, "could not read usage");
-                    entry.failed = true;
-                    // Keep showing the last good read, with why it's not newer.
-                    let mut usage = self.lock().usage.get(&id).cloned().unwrap_or_default();
-                    usage.error = error.to_string();
-                    self.set_usage(&id, Some(usage));
+                let (result, plan) = tokio::join!(self.models.usage(&id, &account), self.models.plan(&id, &account));
+                named |= provider.accounts.iter().any(|known| known.id == account && known.label.is_empty());
+                match plan {
+                    // A plan once read stays until a read names another.
+                    Ok(plan) if !plan.is_empty() => self.set_plan(&key, Some(plan)),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(provider = %id, %account, %error, "could not read the plan"),
+                }
+                let now = now_ms();
+                entry.read = Some(now);
+                entry.worked = is_working;
+                match result {
+                    Ok(None) => {
+                        entry.unlimited = true;
+                        self.set_usage(&key, None);
+                        self.set_plan(&key, None);
+                    }
+                    Ok(Some(windows)) => {
+                        entry.failed = false;
+                        let resets = windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
+                        entry.next_reset = resets.min().unwrap_or(0);
+                        self.set_usage(&key, Some(v1::ProviderUsage { windows, updated: now, error: String::new() }));
+                    }
+                    Err(error) => {
+                        tracing::warn!(provider = %id, %account, %error, "could not read usage");
+                        entry.failed = true;
+                        // Keep showing the last good read, with why it's not newer.
+                        let mut usage = self.lock().usage.get(&key).cloned().unwrap_or_default();
+                        usage.error = error.to_string();
+                        self.set_usage(&key, Some(usage));
+                    }
                 }
             }
         }
+        // Who an account is, unknown until now, was read with its plan.
+        if named {
+            self.refresh_models().await;
+        }
     }
 
-    /// Records a provider's usage and tells clients if it changed.
-    fn set_usage(&self, provider: &str, usage: Option<v1::ProviderUsage>) {
+    /// Forgets the usage and plan of all of a provider's accounts.
+    fn forget_usage(&self, provider: &str) {
+        let mut inner = self.lock();
+        let before = (inner.usage.len(), inner.plans.len());
+        inner.usage.retain(|(id, _), _| id != provider);
+        inner.plans.retain(|(id, _), _| id != provider);
+        if before != (inner.usage.len(), inner.plans.len()) {
+            self.broadcast_workspace(&inner);
+        }
+    }
+
+    /// Records an account's usage and tells clients if it changed.
+    fn set_usage(&self, key: &AccountKey, usage: Option<v1::ProviderUsage>) {
         let mut inner = self.lock();
         let changed = match usage {
-            Some(usage) => inner.usage.insert(provider.to_owned(), usage.clone()).as_ref() != Some(&usage),
-            None => inner.usage.remove(provider).is_some(),
+            Some(usage) => inner.usage.insert(key.clone(), usage.clone()).as_ref() != Some(&usage),
+            None => inner.usage.remove(key).is_some(),
         };
         if changed {
             self.broadcast_workspace(&inner);
         }
     }
 
-    /// Records a provider's plan and tells clients if it changed.
-    fn set_plan(&self, provider: &str, plan: Option<String>) {
+    /// Records an account's plan and tells clients if it changed.
+    fn set_plan(&self, key: &AccountKey, plan: Option<String>) {
         let mut inner = self.lock();
         let changed = match plan {
-            Some(plan) => inner.plans.insert(provider.to_owned(), plan.clone()).as_ref() != Some(&plan),
-            None => inner.plans.remove(provider).is_some(),
+            Some(plan) => inner.plans.insert(key.clone(), plan.clone()).as_ref() != Some(&plan),
+            None => inner.plans.remove(key).is_some(),
         };
         if changed {
             self.broadcast_workspace(&inner);

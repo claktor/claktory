@@ -345,13 +345,10 @@ void main() {
     expect(find.text('Agents'), findsOneWidget);
     expect(find.text('Messaging between agents.'), findsOneWidget);
     expect(
-      find.text('On for every agent unless turned off in its settings'),
+      find.text("On for every agent. Turn it off in an agent's settings."),
       findsOneWidget,
     );
-    expect(
-      find.text("Off until turned on in an agent's settings"),
-      findsOneWidget,
-    );
+    expect(find.text("Turn it on in an agent's settings."), findsOneWidget);
     expect(find.text('No extensions yet.'), findsNothing);
   });
 

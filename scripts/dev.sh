@@ -67,7 +67,7 @@ app() {
   make_dev_app "$APP" DebugProfile.entitlements
   # -g: open in the background, never take focus from whoever is working.
   open -g "$APP"
-  echo "Factory Dev launched: $APP"
+  echo "Claktory Dev launched: $APP"
 }
 
 case "${1:-all}" in

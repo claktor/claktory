@@ -61,8 +61,9 @@ pub struct Config {
     /// Admin agents hear of a background task once it has run this many hours.
     #[serde(default = "default_task_alert_hours", skip_serializing_if = "is_default_task_alert_hours")]
     pub task_alert_hours: u64,
-    /// Serve paired devices on other machines too (`crate::remote`); left
-    /// out, only this machine's app connects.
+    /// How paired devices on other machines reach Factory (`crate::remote`):
+    /// the relays of its private tunnel. Whether they may is decided by the
+    /// devices paired, not by this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteConfig>,
     /// When agents with the Resources extension hear the machine runs low.
@@ -73,6 +74,49 @@ pub struct Config {
     /// changed.
     #[serde(default, skip_serializing_if = "DisplayConfig::is_default")]
     pub display: DisplayConfig,
+    /// The person agents work for. Only written when set.
+    #[serde(default, skip_serializing_if = "UserConfig::is_default")]
+    pub user: UserConfig,
+    /// The vault's settings (`crate::vault`). Only written when changed.
+    #[serde(default, skip_serializing_if = "VaultConfig::is_default")]
+    pub vault: VaultConfig,
+}
+
+/// The vault's settings. Which secrets exist and who may use them live in
+/// the vault itself, never here: agents can edit this file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct VaultConfig {
+    /// Minutes a connection stays unlocked after the person gave the vault
+    /// passphrase on it, 1 to 60.
+    pub unlock_minutes: u32,
+}
+
+impl Default for VaultConfig {
+    fn default() -> VaultConfig {
+        VaultConfig { unlock_minutes: 5 }
+    }
+}
+
+impl VaultConfig {
+    fn is_default(&self) -> bool {
+        *self == VaultConfig::default()
+    }
+}
+
+/// The person agents work for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UserConfig {
+    /// Their first name, which agents call them by; empty when not given.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+impl UserConfig {
+    fn is_default(&self) -> bool {
+        *self == UserConfig::default()
+    }
 }
 
 /// The widths the person dragged the sidebar and the right panel to, in
@@ -105,8 +149,9 @@ fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
-/// The Resources extension's alerts (`crate::extensions::resources`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The Resources extension's alerts (`crate::extensions::resources`), and
+/// the build caches' budget (`crate::extensions::tree::caches`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ResourcesConfig {
     /// Memory used above this percentage for a few minutes.
@@ -118,11 +163,22 @@ pub struct ResourcesConfig {
     /// The processors busier than this percentage for several minutes; 0, as
     /// unless set, turns it off.
     pub cpu_percent: u32,
+    /// GB the build caches of one checkout or project folder may take before
+    /// they're cleared, when nothing works there; 0 never clears them. Only
+    /// written when changed, so a backend from before it reads the rest.
+    #[serde(skip_serializing_if = "is_default_build_cache")]
+    pub build_cache_gb: f64,
+}
+
+const DEFAULT_BUILD_CACHE_GB: f64 = 25.0;
+
+fn is_default_build_cache(gb: &f64) -> bool {
+    *gb == DEFAULT_BUILD_CACHE_GB
 }
 
 impl Default for ResourcesConfig {
     fn default() -> ResourcesConfig {
-        ResourcesConfig { ram_percent: 90, disk_free_gb: 10, disk_free_percent: 10, cpu_percent: 0 }
+        ResourcesConfig { ram_percent: 90, disk_free_gb: 10, disk_free_percent: 10, cpu_percent: 0, build_cache_gb: DEFAULT_BUILD_CACHE_GB }
     }
 }
 
@@ -132,41 +188,49 @@ impl ResourcesConfig {
     }
 
     fn check(&self) -> Result<(), Invalid> {
-        for (name, value, least) in [
-            ("ram_percent", self.ram_percent, 1),
-            ("disk_free_percent", self.disk_free_percent, 1),
-            ("cpu_percent", self.cpu_percent, 0),
-        ] {
+        for (name, value, least) in
+            [("ram_percent", self.ram_percent, 1), ("disk_free_percent", self.disk_free_percent, 1), ("cpu_percent", self.cpu_percent, 0)]
+        {
             if !(least..=100).contains(&value) {
                 return Err(Invalid::BadResources(format!("{name} must be from {least} to 100")));
             }
+        }
+        if !self.build_cache_gb.is_finite() || self.build_cache_gb < 0.0 {
+            return Err(Invalid::BadResources("build_cache_gb must be 0 (never cleared) or more".to_owned()));
         }
         Ok(())
     }
 }
 
-/// Factory's remote listener: TLS, for devices paired with `factoryd pair`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The private tunnel's settings. `port` and `listen` were the TLS
+/// listener's, which is gone: still read, so older files load, and kept, but
+/// unused.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
+    #[serde(default, skip_serializing_if = "is_zero_port")]
     pub port: u16,
-    /// The address to listen on, such as the machine's Tailscale address;
-    /// empty for every address it has.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub listen: String,
+    /// The relays devices reach Factory through when there's no direct path,
+    /// as URLs; empty for the default ones (n0's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
+}
+
+fn is_zero_port(port: &u16) -> bool {
+    *port == 0
 }
 
 impl RemoteConfig {
-    pub fn addr(&self) -> Result<std::net::SocketAddr, Invalid> {
-        let ip: std::net::IpAddr = if self.listen.is_empty() {
-            std::net::Ipv4Addr::UNSPECIFIED.into()
-        } else {
-            self.listen.parse().map_err(|_| Invalid::BadRemote(format!("listen \"{}\" isn't an IP address", self.listen)))?
-        };
-        if self.port == 0 {
-            return Err(Invalid::BadRemote("port must be above 0".into()));
+    pub fn check(&self) -> Result<(), Invalid> {
+        for relay in &self.relays {
+            let url: iroh::RelayUrl = relay.parse().map_err(|_| Invalid::BadRemote(format!("relay \"{relay}\" isn't a URL")))?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err(Invalid::BadRemote(format!("relay \"{relay}\" isn't an http or https URL")));
+            }
         }
-        Ok(std::net::SocketAddr::new(ip, self.port))
+        Ok(())
     }
 }
 
@@ -329,6 +393,8 @@ impl Default for Config {
             remote: None,
             resources: ResourcesConfig::default(),
             display: DisplayConfig::default(),
+            user: UserConfig::default(),
+            vault: VaultConfig::default(),
         }
     }
 }
@@ -369,6 +435,8 @@ pub enum Invalid {
     BadResources(String),
     #[error("display: {0}")]
     BadDisplay(String),
+    #[error("vault: unlock_minutes must be 1 to 60")]
+    BadVault,
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
@@ -380,6 +448,22 @@ impl Config {
         let config: Config = serde_json::from_str(text)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// The user's name, when it's set.
+    pub fn user_name(&self) -> Option<&str> {
+        Some(self.user.name.trim()).filter(|name| !name.is_empty())
+    }
+
+    /// How agents and Factory's texts call the user: their name, or "the
+    /// person" when it isn't set.
+    pub fn person(&self) -> &str {
+        self.user_name().unwrap_or("the person")
+    }
+
+    /// `person` at the start of a sentence: their name, or "The person".
+    pub fn person_capitalized(&self) -> &str {
+        self.user_name().unwrap_or("The person")
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -396,10 +480,13 @@ impl Config {
             return Err(Invalid::ZeroTaskAlert);
         }
         if let Some(remote) = &self.remote {
-            remote.addr()?;
+            remote.check()?;
         }
         self.resources.check()?;
         self.display.check()?;
+        if !(1..=60).contains(&self.vault.unlock_minutes) {
+            return Err(Invalid::BadVault);
+        }
         check_model(&self.default_model)?;
         check_effort(&self.default_effort)?;
         let mut ids = HashSet::new();

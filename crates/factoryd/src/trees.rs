@@ -60,7 +60,7 @@ struct Record {
 pub(crate) enum Unavailable {
     #[error("{0} isn't in a git repository")]
     NotGit(PathBuf),
-    #[error("the git repository at {0} holds Factory's own folder")]
+    #[error("the git repository at {0} holds Claktory's own folder")]
     HoldsFactory(PathBuf),
 }
 
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(checkout.folder, checkout.tree.join("crates/factoryd"));
         assert_eq!(checkout.branch, "factory/builder");
         let dev = plan(&Home::new(PathBuf::from("/h/.factory-dev")), "builder", here).expect("plan");
-        assert_eq!(dev.branch, "factory-dev/builder", "another Factory's branches are its own");
+        assert_eq!(dev.branch, "factory-dev/builder", "another Claktory's branches are its own");
     }
 
     #[test]

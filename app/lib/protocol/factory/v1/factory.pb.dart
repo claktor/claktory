@@ -59,6 +59,27 @@ enum ClientMessage_Body {
   fetchApp,
   listFolders,
   decideProposal,
+  moveAccount,
+  clearBuildCache,
+  readFile,
+  setLayout,
+  updateAccount,
+  createVault,
+  unlockVault,
+  lockVaultSession,
+  createSecret,
+  updateSecret,
+  deleteSecret,
+  grantSecret,
+  revokeSecret,
+  revealSecret,
+  previewEnv,
+  importEnv,
+  decideSecretRequest,
+  listSecretUses,
+  changePassphrase,
+  newRecoveryKey,
+  setVaultLockedMode,
   notSet
 }
 
@@ -102,6 +123,27 @@ class ClientMessage extends $pb.GeneratedMessage {
     FetchApp? fetchApp,
     ListFolders? listFolders,
     DecideProposal? decideProposal,
+    MoveAccount? moveAccount,
+    ClearBuildCache? clearBuildCache,
+    ReadFile? readFile,
+    SetLayout? setLayout,
+    UpdateAccount? updateAccount,
+    CreateVault? createVault,
+    UnlockVault? unlockVault,
+    LockVaultSession? lockVaultSession,
+    CreateSecret? createSecret,
+    UpdateSecret? updateSecret,
+    DeleteSecret? deleteSecret,
+    GrantSecret? grantSecret,
+    RevokeSecret? revokeSecret,
+    RevealSecret? revealSecret,
+    PreviewEnv? previewEnv,
+    ImportEnv? importEnv,
+    DecideSecretRequest? decideSecretRequest,
+    ListSecretUses? listSecretUses,
+    ChangePassphrase? changePassphrase,
+    NewRecoveryKey? newRecoveryKey,
+    SetVaultLockedMode? setVaultLockedMode,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -143,6 +185,29 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (fetchApp != null) result.fetchApp = fetchApp;
     if (listFolders != null) result.listFolders = listFolders;
     if (decideProposal != null) result.decideProposal = decideProposal;
+    if (moveAccount != null) result.moveAccount = moveAccount;
+    if (clearBuildCache != null) result.clearBuildCache = clearBuildCache;
+    if (readFile != null) result.readFile = readFile;
+    if (setLayout != null) result.setLayout = setLayout;
+    if (updateAccount != null) result.updateAccount = updateAccount;
+    if (createVault != null) result.createVault = createVault;
+    if (unlockVault != null) result.unlockVault = unlockVault;
+    if (lockVaultSession != null) result.lockVaultSession = lockVaultSession;
+    if (createSecret != null) result.createSecret = createSecret;
+    if (updateSecret != null) result.updateSecret = updateSecret;
+    if (deleteSecret != null) result.deleteSecret = deleteSecret;
+    if (grantSecret != null) result.grantSecret = grantSecret;
+    if (revokeSecret != null) result.revokeSecret = revokeSecret;
+    if (revealSecret != null) result.revealSecret = revealSecret;
+    if (previewEnv != null) result.previewEnv = previewEnv;
+    if (importEnv != null) result.importEnv = importEnv;
+    if (decideSecretRequest != null)
+      result.decideSecretRequest = decideSecretRequest;
+    if (listSecretUses != null) result.listSecretUses = listSecretUses;
+    if (changePassphrase != null) result.changePassphrase = changePassphrase;
+    if (newRecoveryKey != null) result.newRecoveryKey = newRecoveryKey;
+    if (setVaultLockedMode != null)
+      result.setVaultLockedMode = setVaultLockedMode;
     return result;
   }
 
@@ -194,6 +259,27 @@ class ClientMessage extends $pb.GeneratedMessage {
     36: ClientMessage_Body.fetchApp,
     37: ClientMessage_Body.listFolders,
     38: ClientMessage_Body.decideProposal,
+    39: ClientMessage_Body.moveAccount,
+    40: ClientMessage_Body.clearBuildCache,
+    41: ClientMessage_Body.readFile,
+    42: ClientMessage_Body.setLayout,
+    43: ClientMessage_Body.updateAccount,
+    44: ClientMessage_Body.createVault,
+    45: ClientMessage_Body.unlockVault,
+    46: ClientMessage_Body.lockVaultSession,
+    47: ClientMessage_Body.createSecret,
+    48: ClientMessage_Body.updateSecret,
+    49: ClientMessage_Body.deleteSecret,
+    50: ClientMessage_Body.grantSecret,
+    51: ClientMessage_Body.revokeSecret,
+    52: ClientMessage_Body.revealSecret,
+    53: ClientMessage_Body.previewEnv,
+    54: ClientMessage_Body.importEnv,
+    55: ClientMessage_Body.decideSecretRequest,
+    56: ClientMessage_Body.listSecretUses,
+    57: ClientMessage_Body.changePassphrase,
+    58: ClientMessage_Body.newRecoveryKey,
+    59: ClientMessage_Body.setVaultLockedMode,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -237,7 +323,28 @@ class ClientMessage extends $pb.GeneratedMessage {
       35,
       36,
       37,
-      38
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -315,6 +422,48 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: ListFolders.$_createMessage)
     ..aOM<DecideProposal>(38, _omitFieldNames ? '' : 'decideProposal',
         subBuilder: DecideProposal.$_createMessage)
+    ..aOM<MoveAccount>(39, _omitFieldNames ? '' : 'moveAccount',
+        subBuilder: MoveAccount.$_createMessage)
+    ..aOM<ClearBuildCache>(40, _omitFieldNames ? '' : 'clearBuildCache',
+        subBuilder: ClearBuildCache.$_createMessage)
+    ..aOM<ReadFile>(41, _omitFieldNames ? '' : 'readFile',
+        subBuilder: ReadFile.$_createMessage)
+    ..aOM<SetLayout>(42, _omitFieldNames ? '' : 'setLayout',
+        subBuilder: SetLayout.$_createMessage)
+    ..aOM<UpdateAccount>(43, _omitFieldNames ? '' : 'updateAccount',
+        subBuilder: UpdateAccount.$_createMessage)
+    ..aOM<CreateVault>(44, _omitFieldNames ? '' : 'createVault',
+        subBuilder: CreateVault.$_createMessage)
+    ..aOM<UnlockVault>(45, _omitFieldNames ? '' : 'unlockVault',
+        subBuilder: UnlockVault.$_createMessage)
+    ..aOM<LockVaultSession>(46, _omitFieldNames ? '' : 'lockVaultSession',
+        subBuilder: LockVaultSession.$_createMessage)
+    ..aOM<CreateSecret>(47, _omitFieldNames ? '' : 'createSecret',
+        subBuilder: CreateSecret.$_createMessage)
+    ..aOM<UpdateSecret>(48, _omitFieldNames ? '' : 'updateSecret',
+        subBuilder: UpdateSecret.$_createMessage)
+    ..aOM<DeleteSecret>(49, _omitFieldNames ? '' : 'deleteSecret',
+        subBuilder: DeleteSecret.$_createMessage)
+    ..aOM<GrantSecret>(50, _omitFieldNames ? '' : 'grantSecret',
+        subBuilder: GrantSecret.$_createMessage)
+    ..aOM<RevokeSecret>(51, _omitFieldNames ? '' : 'revokeSecret',
+        subBuilder: RevokeSecret.$_createMessage)
+    ..aOM<RevealSecret>(52, _omitFieldNames ? '' : 'revealSecret',
+        subBuilder: RevealSecret.$_createMessage)
+    ..aOM<PreviewEnv>(53, _omitFieldNames ? '' : 'previewEnv',
+        subBuilder: PreviewEnv.$_createMessage)
+    ..aOM<ImportEnv>(54, _omitFieldNames ? '' : 'importEnv',
+        subBuilder: ImportEnv.$_createMessage)
+    ..aOM<DecideSecretRequest>(55, _omitFieldNames ? '' : 'decideSecretRequest',
+        subBuilder: DecideSecretRequest.$_createMessage)
+    ..aOM<ListSecretUses>(56, _omitFieldNames ? '' : 'listSecretUses',
+        subBuilder: ListSecretUses.$_createMessage)
+    ..aOM<ChangePassphrase>(57, _omitFieldNames ? '' : 'changePassphrase',
+        subBuilder: ChangePassphrase.$_createMessage)
+    ..aOM<NewRecoveryKey>(58, _omitFieldNames ? '' : 'newRecoveryKey',
+        subBuilder: NewRecoveryKey.$_createMessage)
+    ..aOM<SetVaultLockedMode>(59, _omitFieldNames ? '' : 'setVaultLockedMode',
+        subBuilder: SetVaultLockedMode.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -376,6 +525,27 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(36)
   @$pb.TagNumber(37)
   @$pb.TagNumber(38)
+  @$pb.TagNumber(39)
+  @$pb.TagNumber(40)
+  @$pb.TagNumber(41)
+  @$pb.TagNumber(42)
+  @$pb.TagNumber(43)
+  @$pb.TagNumber(44)
+  @$pb.TagNumber(45)
+  @$pb.TagNumber(46)
+  @$pb.TagNumber(47)
+  @$pb.TagNumber(48)
+  @$pb.TagNumber(49)
+  @$pb.TagNumber(50)
+  @$pb.TagNumber(51)
+  @$pb.TagNumber(52)
+  @$pb.TagNumber(53)
+  @$pb.TagNumber(54)
+  @$pb.TagNumber(55)
+  @$pb.TagNumber(56)
+  @$pb.TagNumber(57)
+  @$pb.TagNumber(58)
+  @$pb.TagNumber(59)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -414,6 +584,27 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(36)
   @$pb.TagNumber(37)
   @$pb.TagNumber(38)
+  @$pb.TagNumber(39)
+  @$pb.TagNumber(40)
+  @$pb.TagNumber(41)
+  @$pb.TagNumber(42)
+  @$pb.TagNumber(43)
+  @$pb.TagNumber(44)
+  @$pb.TagNumber(45)
+  @$pb.TagNumber(46)
+  @$pb.TagNumber(47)
+  @$pb.TagNumber(48)
+  @$pb.TagNumber(49)
+  @$pb.TagNumber(50)
+  @$pb.TagNumber(51)
+  @$pb.TagNumber(52)
+  @$pb.TagNumber(53)
+  @$pb.TagNumber(54)
+  @$pb.TagNumber(55)
+  @$pb.TagNumber(56)
+  @$pb.TagNumber(57)
+  @$pb.TagNumber(58)
+  @$pb.TagNumber(59)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -831,6 +1022,239 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearDecideProposal() => $_clearField(38);
   @$pb.TagNumber(38)
   DecideProposal ensureDecideProposal() => $_ensure(37);
+
+  @$pb.TagNumber(39)
+  MoveAccount get moveAccount => $_getN(38);
+  @$pb.TagNumber(39)
+  set moveAccount(MoveAccount value) => $_setField(39, value);
+  @$pb.TagNumber(39)
+  $core.bool hasMoveAccount() => $_has(38);
+  @$pb.TagNumber(39)
+  void clearMoveAccount() => $_clearField(39);
+  @$pb.TagNumber(39)
+  MoveAccount ensureMoveAccount() => $_ensure(38);
+
+  @$pb.TagNumber(40)
+  ClearBuildCache get clearBuildCache => $_getN(39);
+  @$pb.TagNumber(40)
+  set clearBuildCache(ClearBuildCache value) => $_setField(40, value);
+  @$pb.TagNumber(40)
+  $core.bool hasClearBuildCache() => $_has(39);
+  @$pb.TagNumber(40)
+  void clearClearBuildCache() => $_clearField(40);
+  @$pb.TagNumber(40)
+  ClearBuildCache ensureClearBuildCache() => $_ensure(39);
+
+  @$pb.TagNumber(41)
+  ReadFile get readFile => $_getN(40);
+  @$pb.TagNumber(41)
+  set readFile(ReadFile value) => $_setField(41, value);
+  @$pb.TagNumber(41)
+  $core.bool hasReadFile() => $_has(40);
+  @$pb.TagNumber(41)
+  void clearReadFile() => $_clearField(41);
+  @$pb.TagNumber(41)
+  ReadFile ensureReadFile() => $_ensure(40);
+
+  @$pb.TagNumber(42)
+  SetLayout get setLayout => $_getN(41);
+  @$pb.TagNumber(42)
+  set setLayout(SetLayout value) => $_setField(42, value);
+  @$pb.TagNumber(42)
+  $core.bool hasSetLayout() => $_has(41);
+  @$pb.TagNumber(42)
+  void clearSetLayout() => $_clearField(42);
+  @$pb.TagNumber(42)
+  SetLayout ensureSetLayout() => $_ensure(41);
+
+  @$pb.TagNumber(43)
+  UpdateAccount get updateAccount => $_getN(42);
+  @$pb.TagNumber(43)
+  set updateAccount(UpdateAccount value) => $_setField(43, value);
+  @$pb.TagNumber(43)
+  $core.bool hasUpdateAccount() => $_has(42);
+  @$pb.TagNumber(43)
+  void clearUpdateAccount() => $_clearField(43);
+  @$pb.TagNumber(43)
+  UpdateAccount ensureUpdateAccount() => $_ensure(42);
+
+  /// The vault (Settings → Secrets). The backend makes it by itself, and
+  /// the person's requests need no proof: see VaultProof.
+  @$pb.TagNumber(44)
+  CreateVault get createVault => $_getN(43);
+  @$pb.TagNumber(44)
+  set createVault(CreateVault value) => $_setField(44, value);
+  @$pb.TagNumber(44)
+  $core.bool hasCreateVault() => $_has(43);
+  @$pb.TagNumber(44)
+  void clearCreateVault() => $_clearField(44);
+  @$pb.TagNumber(44)
+  CreateVault ensureCreateVault() => $_ensure(43);
+
+  @$pb.TagNumber(45)
+  UnlockVault get unlockVault => $_getN(44);
+  @$pb.TagNumber(45)
+  set unlockVault(UnlockVault value) => $_setField(45, value);
+  @$pb.TagNumber(45)
+  $core.bool hasUnlockVault() => $_has(44);
+  @$pb.TagNumber(45)
+  void clearUnlockVault() => $_clearField(45);
+  @$pb.TagNumber(45)
+  UnlockVault ensureUnlockVault() => $_ensure(44);
+
+  @$pb.TagNumber(46)
+  LockVaultSession get lockVaultSession => $_getN(45);
+  @$pb.TagNumber(46)
+  set lockVaultSession(LockVaultSession value) => $_setField(46, value);
+  @$pb.TagNumber(46)
+  $core.bool hasLockVaultSession() => $_has(45);
+  @$pb.TagNumber(46)
+  void clearLockVaultSession() => $_clearField(46);
+  @$pb.TagNumber(46)
+  LockVaultSession ensureLockVaultSession() => $_ensure(45);
+
+  @$pb.TagNumber(47)
+  CreateSecret get createSecret => $_getN(46);
+  @$pb.TagNumber(47)
+  set createSecret(CreateSecret value) => $_setField(47, value);
+  @$pb.TagNumber(47)
+  $core.bool hasCreateSecret() => $_has(46);
+  @$pb.TagNumber(47)
+  void clearCreateSecret() => $_clearField(47);
+  @$pb.TagNumber(47)
+  CreateSecret ensureCreateSecret() => $_ensure(46);
+
+  @$pb.TagNumber(48)
+  UpdateSecret get updateSecret => $_getN(47);
+  @$pb.TagNumber(48)
+  set updateSecret(UpdateSecret value) => $_setField(48, value);
+  @$pb.TagNumber(48)
+  $core.bool hasUpdateSecret() => $_has(47);
+  @$pb.TagNumber(48)
+  void clearUpdateSecret() => $_clearField(48);
+  @$pb.TagNumber(48)
+  UpdateSecret ensureUpdateSecret() => $_ensure(47);
+
+  @$pb.TagNumber(49)
+  DeleteSecret get deleteSecret => $_getN(48);
+  @$pb.TagNumber(49)
+  set deleteSecret(DeleteSecret value) => $_setField(49, value);
+  @$pb.TagNumber(49)
+  $core.bool hasDeleteSecret() => $_has(48);
+  @$pb.TagNumber(49)
+  void clearDeleteSecret() => $_clearField(49);
+  @$pb.TagNumber(49)
+  DeleteSecret ensureDeleteSecret() => $_ensure(48);
+
+  @$pb.TagNumber(50)
+  GrantSecret get grantSecret => $_getN(49);
+  @$pb.TagNumber(50)
+  set grantSecret(GrantSecret value) => $_setField(50, value);
+  @$pb.TagNumber(50)
+  $core.bool hasGrantSecret() => $_has(49);
+  @$pb.TagNumber(50)
+  void clearGrantSecret() => $_clearField(50);
+  @$pb.TagNumber(50)
+  GrantSecret ensureGrantSecret() => $_ensure(49);
+
+  @$pb.TagNumber(51)
+  RevokeSecret get revokeSecret => $_getN(50);
+  @$pb.TagNumber(51)
+  set revokeSecret(RevokeSecret value) => $_setField(51, value);
+  @$pb.TagNumber(51)
+  $core.bool hasRevokeSecret() => $_has(50);
+  @$pb.TagNumber(51)
+  void clearRevokeSecret() => $_clearField(51);
+  @$pb.TagNumber(51)
+  RevokeSecret ensureRevokeSecret() => $_ensure(50);
+
+  @$pb.TagNumber(52)
+  RevealSecret get revealSecret => $_getN(51);
+  @$pb.TagNumber(52)
+  set revealSecret(RevealSecret value) => $_setField(52, value);
+  @$pb.TagNumber(52)
+  $core.bool hasRevealSecret() => $_has(51);
+  @$pb.TagNumber(52)
+  void clearRevealSecret() => $_clearField(52);
+  @$pb.TagNumber(52)
+  RevealSecret ensureRevealSecret() => $_ensure(51);
+
+  @$pb.TagNumber(53)
+  PreviewEnv get previewEnv => $_getN(52);
+  @$pb.TagNumber(53)
+  set previewEnv(PreviewEnv value) => $_setField(53, value);
+  @$pb.TagNumber(53)
+  $core.bool hasPreviewEnv() => $_has(52);
+  @$pb.TagNumber(53)
+  void clearPreviewEnv() => $_clearField(53);
+  @$pb.TagNumber(53)
+  PreviewEnv ensurePreviewEnv() => $_ensure(52);
+
+  @$pb.TagNumber(54)
+  ImportEnv get importEnv => $_getN(53);
+  @$pb.TagNumber(54)
+  set importEnv(ImportEnv value) => $_setField(54, value);
+  @$pb.TagNumber(54)
+  $core.bool hasImportEnv() => $_has(53);
+  @$pb.TagNumber(54)
+  void clearImportEnv() => $_clearField(54);
+  @$pb.TagNumber(54)
+  ImportEnv ensureImportEnv() => $_ensure(53);
+
+  @$pb.TagNumber(55)
+  DecideSecretRequest get decideSecretRequest => $_getN(54);
+  @$pb.TagNumber(55)
+  set decideSecretRequest(DecideSecretRequest value) => $_setField(55, value);
+  @$pb.TagNumber(55)
+  $core.bool hasDecideSecretRequest() => $_has(54);
+  @$pb.TagNumber(55)
+  void clearDecideSecretRequest() => $_clearField(55);
+  @$pb.TagNumber(55)
+  DecideSecretRequest ensureDecideSecretRequest() => $_ensure(54);
+
+  @$pb.TagNumber(56)
+  ListSecretUses get listSecretUses => $_getN(55);
+  @$pb.TagNumber(56)
+  set listSecretUses(ListSecretUses value) => $_setField(56, value);
+  @$pb.TagNumber(56)
+  $core.bool hasListSecretUses() => $_has(55);
+  @$pb.TagNumber(56)
+  void clearListSecretUses() => $_clearField(56);
+  @$pb.TagNumber(56)
+  ListSecretUses ensureListSecretUses() => $_ensure(55);
+
+  @$pb.TagNumber(57)
+  ChangePassphrase get changePassphrase => $_getN(56);
+  @$pb.TagNumber(57)
+  set changePassphrase(ChangePassphrase value) => $_setField(57, value);
+  @$pb.TagNumber(57)
+  $core.bool hasChangePassphrase() => $_has(56);
+  @$pb.TagNumber(57)
+  void clearChangePassphrase() => $_clearField(57);
+  @$pb.TagNumber(57)
+  ChangePassphrase ensureChangePassphrase() => $_ensure(56);
+
+  @$pb.TagNumber(58)
+  NewRecoveryKey get newRecoveryKey => $_getN(57);
+  @$pb.TagNumber(58)
+  set newRecoveryKey(NewRecoveryKey value) => $_setField(58, value);
+  @$pb.TagNumber(58)
+  $core.bool hasNewRecoveryKey() => $_has(57);
+  @$pb.TagNumber(58)
+  void clearNewRecoveryKey() => $_clearField(58);
+  @$pb.TagNumber(58)
+  NewRecoveryKey ensureNewRecoveryKey() => $_ensure(57);
+
+  @$pb.TagNumber(59)
+  SetVaultLockedMode get setVaultLockedMode => $_getN(58);
+  @$pb.TagNumber(59)
+  set setVaultLockedMode(SetVaultLockedMode value) => $_setField(59, value);
+  @$pb.TagNumber(59)
+  $core.bool hasSetVaultLockedMode() => $_has(58);
+  @$pb.TagNumber(59)
+  void clearSetVaultLockedMode() => $_clearField(59);
+  @$pb.TagNumber(59)
+  SetVaultLockedMode ensureSetVaultLockedMode() => $_ensure(58);
 }
 
 enum ServerMessage_Body {
@@ -848,6 +1272,12 @@ enum ServerMessage_Body {
   pairingCode,
   appChunk,
   folderList,
+  fileContent,
+  vaultSession,
+  secretValue,
+  envPreview,
+  recoveryKey,
+  secretUses,
   notSet
 }
 
@@ -868,6 +1298,12 @@ class ServerMessage extends $pb.GeneratedMessage {
     PairingCode? pairingCode,
     AppChunk? appChunk,
     FolderList? folderList,
+    FileContent? fileContent,
+    VaultSession? vaultSession,
+    SecretValue? secretValue,
+    EnvPreview? envPreview,
+    RecoveryKey? recoveryKey,
+    SecretUses? secretUses,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -885,6 +1321,12 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (pairingCode != null) result.pairingCode = pairingCode;
     if (appChunk != null) result.appChunk = appChunk;
     if (folderList != null) result.folderList = folderList;
+    if (fileContent != null) result.fileContent = fileContent;
+    if (vaultSession != null) result.vaultSession = vaultSession;
+    if (secretValue != null) result.secretValue = secretValue;
+    if (envPreview != null) result.envPreview = envPreview;
+    if (recoveryKey != null) result.recoveryKey = recoveryKey;
+    if (secretUses != null) result.secretUses = secretUses;
     return result;
   }
 
@@ -913,13 +1355,40 @@ class ServerMessage extends $pb.GeneratedMessage {
     13: ServerMessage_Body.pairingCode,
     14: ServerMessage_Body.appChunk,
     15: ServerMessage_Body.folderList,
+    16: ServerMessage_Body.fileContent,
+    20: ServerMessage_Body.vaultSession,
+    21: ServerMessage_Body.secretValue,
+    22: ServerMessage_Body.envPreview,
+    23: ServerMessage_Body.recoveryKey,
+    24: ServerMessage_Body.secretUses,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ServerMessage',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: ServerMessage.$_createMessage)
-    ..oo(0, [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    ..oo(0, [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      20,
+      21,
+      22,
+      23,
+      24
+    ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aOM<Welcome>(2, _omitFieldNames ? '' : 'welcome',
@@ -949,6 +1418,18 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: AppChunk.$_createMessage)
     ..aOM<FolderList>(15, _omitFieldNames ? '' : 'folderList',
         subBuilder: FolderList.$_createMessage)
+    ..aOM<FileContent>(16, _omitFieldNames ? '' : 'fileContent',
+        subBuilder: FileContent.$_createMessage)
+    ..aOM<VaultSession>(20, _omitFieldNames ? '' : 'vaultSession',
+        subBuilder: VaultSession.$_createMessage)
+    ..aOM<SecretValue>(21, _omitFieldNames ? '' : 'secretValue',
+        subBuilder: SecretValue.$_createMessage)
+    ..aOM<EnvPreview>(22, _omitFieldNames ? '' : 'envPreview',
+        subBuilder: EnvPreview.$_createMessage)
+    ..aOM<RecoveryKey>(23, _omitFieldNames ? '' : 'recoveryKey',
+        subBuilder: RecoveryKey.$_createMessage)
+    ..aOM<SecretUses>(24, _omitFieldNames ? '' : 'secretUses',
+        subBuilder: SecretUses.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -987,6 +1468,12 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(13)
   @$pb.TagNumber(14)
   @$pb.TagNumber(15)
+  @$pb.TagNumber(16)
+  @$pb.TagNumber(20)
+  @$pb.TagNumber(21)
+  @$pb.TagNumber(22)
+  @$pb.TagNumber(23)
+  @$pb.TagNumber(24)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1002,6 +1489,12 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(13)
   @$pb.TagNumber(14)
   @$pb.TagNumber(15)
+  @$pb.TagNumber(16)
+  @$pb.TagNumber(20)
+  @$pb.TagNumber(21)
+  @$pb.TagNumber(22)
+  @$pb.TagNumber(23)
+  @$pb.TagNumber(24)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1169,6 +1662,80 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearFolderList() => $_clearField(15);
   @$pb.TagNumber(15)
   FolderList ensureFolderList() => $_ensure(14);
+
+  /// The answer to ReadFile, to the asker only.
+  @$pb.TagNumber(16)
+  FileContent get fileContent => $_getN(15);
+  @$pb.TagNumber(16)
+  set fileContent(FileContent value) => $_setField(16, value);
+  @$pb.TagNumber(16)
+  $core.bool hasFileContent() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearFileContent() => $_clearField(16);
+  @$pb.TagNumber(16)
+  FileContent ensureFileContent() => $_ensure(15);
+
+  /// The answer, to the asker only, to UnlockVault, ChangePassphrase,
+  /// DeleteSecret, GrantSecret, SetVaultLockedMode and LockVaultSession;
+  /// always 0 now (see VaultSession).
+  @$pb.TagNumber(20)
+  VaultSession get vaultSession => $_getN(16);
+  @$pb.TagNumber(20)
+  set vaultSession(VaultSession value) => $_setField(20, value);
+  @$pb.TagNumber(20)
+  $core.bool hasVaultSession() => $_has(16);
+  @$pb.TagNumber(20)
+  void clearVaultSession() => $_clearField(20);
+  @$pb.TagNumber(20)
+  VaultSession ensureVaultSession() => $_ensure(16);
+
+  /// The answer to RevealSecret, to the asker only.
+  @$pb.TagNumber(21)
+  SecretValue get secretValue => $_getN(17);
+  @$pb.TagNumber(21)
+  set secretValue(SecretValue value) => $_setField(21, value);
+  @$pb.TagNumber(21)
+  $core.bool hasSecretValue() => $_has(17);
+  @$pb.TagNumber(21)
+  void clearSecretValue() => $_clearField(21);
+  @$pb.TagNumber(21)
+  SecretValue ensureSecretValue() => $_ensure(17);
+
+  /// The answer to PreviewEnv, to the asker only.
+  @$pb.TagNumber(22)
+  EnvPreview get envPreview => $_getN(18);
+  @$pb.TagNumber(22)
+  set envPreview(EnvPreview value) => $_setField(22, value);
+  @$pb.TagNumber(22)
+  $core.bool hasEnvPreview() => $_has(18);
+  @$pb.TagNumber(22)
+  void clearEnvPreview() => $_clearField(22);
+  @$pb.TagNumber(22)
+  EnvPreview ensureEnvPreview() => $_ensure(18);
+
+  /// The answer to CreateVault and NewRecoveryKey, to the asker only.
+  @$pb.TagNumber(23)
+  RecoveryKey get recoveryKey => $_getN(19);
+  @$pb.TagNumber(23)
+  set recoveryKey(RecoveryKey value) => $_setField(23, value);
+  @$pb.TagNumber(23)
+  $core.bool hasRecoveryKey() => $_has(19);
+  @$pb.TagNumber(23)
+  void clearRecoveryKey() => $_clearField(23);
+  @$pb.TagNumber(23)
+  RecoveryKey ensureRecoveryKey() => $_ensure(19);
+
+  /// The answer to ListSecretUses, to the asker only.
+  @$pb.TagNumber(24)
+  SecretUses get secretUses => $_getN(20);
+  @$pb.TagNumber(24)
+  set secretUses(SecretUses value) => $_setField(24, value);
+  @$pb.TagNumber(24)
+  $core.bool hasSecretUses() => $_has(20);
+  @$pb.TagNumber(24)
+  void clearSecretUses() => $_clearField(24);
+  @$pb.TagNumber(24)
+  SecretUses ensureSecretUses() => $_ensure(20);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -1241,8 +1808,9 @@ class Hello extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   void clearClientVersion() => $_clearField(2);
 
-  /// The device's token from its pairing code (`factory://…?t=<token>`), on
-  /// Factory's remote listener; on the local one it isn't needed.
+  /// The device's token from its pairing code (`factory://…?t=<token>`),
+  /// through the private tunnel (iroh); on the loopback port (7420) it isn't
+  /// needed.
   @$pb.TagNumber(3)
   $core.String get token => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -1323,9 +1891,10 @@ class Welcome extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   void clearServerVersion() => $_clearField(2);
 
-  /// On the remote listener, the paired device this connection is (see
-  /// RemoteAccess.devices), so the app can mark it "This device"; empty on
-  /// the local listener.
+  /// Through the tunnel, the paired device this connection is (see
+  /// RemoteAccess.devices), so the app can mark it "This device"; "local" for
+  /// this machine's own app (its code from <data folder>/remote/local-pairing);
+  /// empty on the loopback port.
   @$pb.TagNumber(3)
   $core.String get deviceId => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -1398,8 +1967,8 @@ class CreatePairing extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearName() => $_clearField(1);
 
-  /// The address the device will reach this machine by: one of
-  /// RemoteAccess.addresses, or any host name; empty for the first of them.
+  /// No longer used: devices reach this machine through the tunnel, by its
+  /// endpoint id (RemoteAccess.endpoint_id), wherever they are.
   @$pb.TagNumber(2)
   $core.String get host => $_getSZ(1);
   @$pb.TagNumber(2)
@@ -1462,8 +2031,12 @@ class PairingCode extends $pb.GeneratedMessage {
           PairingCode.$_createMessage);
   static PairingCode? _defaultInstance;
 
-  /// factory://<host>:<port>?t=<token>&fp=<certificate SHA-256>&name=<this
-  /// machine>: what the device pastes or scans to connect.
+  /// factory://?t=<token>&name=<this machine>&e=<endpoint id>[&r=<relay
+  /// URL>…]: what the device pastes or scans to connect, through the tunnel.
+  /// e= is the backend's iroh endpoint id (what iroh's EndpointId parses);
+  /// each r= a relay it can be reached through (percent-encoded). Until it's
+  /// first used it expires (PairedDevice.code_expires_ms); the first device
+  /// to connect with it binds its key to it, and no other key can use it.
   @$pb.TagNumber(1)
   $core.String get code => $_getSZ(0);
   @$pb.TagNumber(1)
@@ -1543,18 +2116,23 @@ class UnpairDevice extends $pb.GeneratedMessage {
   void clearDeviceId() => $_clearField(1);
 }
 
-/// Turns remote access (Factory's listener for devices on other machines) on
-/// or off, in config.json's `remote`. Answered with Ack.
+/// Turns remote access (devices on other machines reaching this Factory
+/// through the private tunnel) on or off, in config.json's `remote`. Answered
+/// with Ack.
 class SetRemoteAccess extends $pb.GeneratedMessage {
   factory SetRemoteAccess({
     $core.bool? on,
     $core.int? port,
     $core.String? listen,
+    $core.Iterable<$core.String>? relays,
+    $core.bool? setRelays,
   }) {
     final result = SetRemoteAccess._();
     if (on != null) result.on = on;
     if (port != null) result.port = port;
     if (listen != null) result.listen = listen;
+    if (relays != null) result.relays.addAll(relays);
+    if (setRelays != null) result.setRelays = setRelays;
     return result;
   }
 
@@ -1574,6 +2152,8 @@ class SetRemoteAccess extends $pb.GeneratedMessage {
     ..aOB(1, _omitFieldNames ? '' : 'on')
     ..aI(2, _omitFieldNames ? '' : 'port', fieldType: $pb.PbFieldType.OU3)
     ..aOS(3, _omitFieldNames ? '' : 'listen')
+    ..pPS(4, _omitFieldNames ? '' : 'relays')
+    ..aOB(5, _omitFieldNames ? '' : 'setRelays')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1607,7 +2187,7 @@ class SetRemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearOn() => $_clearField(1);
 
-  /// The port; 0 keeps it, or 7443 when it was never set.
+  /// No longer used (there's no listening port); kept in config.json.
   @$pb.TagNumber(2)
   $core.int get port => $_getIZ(1);
   @$pb.TagNumber(2)
@@ -1617,8 +2197,7 @@ class SetRemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   void clearPort() => $_clearField(2);
 
-  /// An IP address to listen on only, such as the Tailscale one; empty for
-  /// every address; unset keeps it.
+  /// No longer used; kept in config.json.
   @$pb.TagNumber(3)
   $core.String get listen => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -1627,9 +2206,26 @@ class SetRemoteAccess extends $pb.GeneratedMessage {
   $core.bool hasListen() => $_has(2);
   @$pb.TagNumber(3)
   void clearListen() => $_clearField(3);
+
+  /// The relays to use, as URLs (config.json `remote.relays`), when
+  /// set_relays; empty for the default ones (RemoteAccess.relays).
+  @$pb.TagNumber(4)
+  $pb.PbList<$core.String> get relays => $_getList(3);
+
+  @$pb.TagNumber(5)
+  $core.bool get setRelays => $_getBF(4);
+  @$pb.TagNumber(5)
+  set setRelays($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasSetRelays() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSetRelays() => $_clearField(5);
 }
 
-/// Remote access: devices on other machines connecting to this Factory.
+/// Remote access: devices on other machines connecting to this Factory,
+/// through the private tunnel (iroh): end-to-end encrypted, by the backend's
+/// key, directly or through a relay that can't read it. Factory listens on no
+/// port for them.
 class RemoteAccess extends $pb.GeneratedMessage {
   factory RemoteAccess({
     $core.bool? on,
@@ -1640,6 +2236,11 @@ class RemoteAccess extends $pb.GeneratedMessage {
     $core.Iterable<$core.String>? addresses,
     $core.Iterable<PairedDevice>? devices,
     $core.String? machine,
+    $core.String? endpointId,
+    $core.Iterable<$core.String>? relays,
+    $core.bool? customRelays,
+    $core.String? homeRelay,
+    $core.bool? relayConnected,
   }) {
     final result = RemoteAccess._();
     if (on != null) result.on = on;
@@ -1650,6 +2251,11 @@ class RemoteAccess extends $pb.GeneratedMessage {
     if (addresses != null) result.addresses.addAll(addresses);
     if (devices != null) result.devices.addAll(devices);
     if (machine != null) result.machine = machine;
+    if (endpointId != null) result.endpointId = endpointId;
+    if (relays != null) result.relays.addAll(relays);
+    if (customRelays != null) result.customRelays = customRelays;
+    if (homeRelay != null) result.homeRelay = homeRelay;
+    if (relayConnected != null) result.relayConnected = relayConnected;
     return result;
   }
 
@@ -1675,6 +2281,11 @@ class RemoteAccess extends $pb.GeneratedMessage {
     ..pPM<PairedDevice>(7, _omitFieldNames ? '' : 'devices',
         subBuilder: PairedDevice.$_createMessage)
     ..aOS(8, _omitFieldNames ? '' : 'machine')
+    ..aOS(9, _omitFieldNames ? '' : 'endpointId')
+    ..pPS(10, _omitFieldNames ? '' : 'relays')
+    ..aOB(11, _omitFieldNames ? '' : 'customRelays')
+    ..aOS(12, _omitFieldNames ? '' : 'homeRelay')
+    ..aOB(13, _omitFieldNames ? '' : 'relayConnected')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1699,7 +2310,8 @@ class RemoteAccess extends $pb.GeneratedMessage {
           RemoteAccess.$_createMessage);
   static RemoteAccess? _defaultInstance;
 
-  /// config.json has `remote`.
+  /// config.json has `remote`: paired devices may connect. Off, only this
+  /// machine's app can (the tunnel then binds to 127.0.0.1 only).
   @$pb.TagNumber(1)
   $core.bool get on => $_getBF(0);
   @$pb.TagNumber(1)
@@ -1709,6 +2321,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearOn() => $_clearField(1);
 
+  /// No longer used (config.json's `remote.port` is kept, unused).
   @$pb.TagNumber(2)
   $core.int get port => $_getIZ(1);
   @$pb.TagNumber(2)
@@ -1718,7 +2331,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   void clearPort() => $_clearField(2);
 
-  /// The IP address it listens on only; empty for every address.
+  /// No longer used.
   @$pb.TagNumber(3)
   $core.String get listen => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -1728,7 +2341,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   void clearListen() => $_clearField(3);
 
-  /// It's on but not listening, and why (e.g. the port is taken).
+  /// The tunnel can't run, and why; empty while all's well.
   @$pb.TagNumber(4)
   $core.String get error => $_getSZ(3);
   @$pb.TagNumber(4)
@@ -1738,8 +2351,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearError() => $_clearField(4);
 
-  /// The SHA-256 of Factory's certificate, in hex, which pairing codes pin;
-  /// empty until remote access is first turned on.
+  /// No longer used (there's no certificate to pin): empty.
   @$pb.TagNumber(5)
   $core.String get fingerprint => $_getSZ(4);
   @$pb.TagNumber(5)
@@ -1749,10 +2361,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearFingerprint() => $_clearField(5);
 
-  /// How other machines may reach this one, best first: Tailscale addresses
-  /// (100.64.0.0/10), then its .local name, then its other addresses (on
-  /// Linux: its other addresses, then its name). Only the listen address when
-  /// remote access listens on one.
+  /// No longer used: empty.
   @$pb.TagNumber(6)
   $pb.PbList<$core.String> get addresses => $_getList(5);
 
@@ -1768,6 +2377,52 @@ class RemoteAccess extends $pb.GeneratedMessage {
   $core.bool hasMachine() => $_has(7);
   @$pb.TagNumber(8)
   void clearMachine() => $_clearField(8);
+
+  /// This backend's iroh endpoint id, as pairing codes give it (e=).
+  @$pb.TagNumber(9)
+  $core.String get endpointId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set endpointId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasEndpointId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearEndpointId() => $_clearField(9);
+
+  /// The relays it uses while on: config.json's `remote.relays`, or the
+  /// default ones (n0's for now) when that's empty.
+  @$pb.TagNumber(10)
+  $pb.PbList<$core.String> get relays => $_getList(9);
+
+  /// config.json sets its own relays (relays are those); false for the
+  /// default ones.
+  @$pb.TagNumber(11)
+  $core.bool get customRelays => $_getBF(10);
+  @$pb.TagNumber(11)
+  set customRelays($core.bool value) => $_setBool(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasCustomRelays() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearCustomRelays() => $_clearField(11);
+
+  /// The relay it's connected to now (its home relay), and whether it is;
+  /// empty and false while off or offline.
+  @$pb.TagNumber(12)
+  $core.String get homeRelay => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set homeRelay($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasHomeRelay() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearHomeRelay() => $_clearField(12);
+
+  @$pb.TagNumber(13)
+  $core.bool get relayConnected => $_getBF(12);
+  @$pb.TagNumber(13)
+  set relayConnected($core.bool value) => $_setBool(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasRelayConnected() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearRelayConnected() => $_clearField(13);
 }
 
 class PairedDevice extends $pb.GeneratedMessage {
@@ -1778,6 +2433,8 @@ class PairedDevice extends $pb.GeneratedMessage {
     $fixnum.Int64? lastSeenMs,
     $core.bool? connected,
     $core.String? lastAddress,
+    DevicePath? path,
+    $fixnum.Int64? codeExpiresMs,
   }) {
     final result = PairedDevice._();
     if (id != null) result.id = id;
@@ -1786,6 +2443,8 @@ class PairedDevice extends $pb.GeneratedMessage {
     if (lastSeenMs != null) result.lastSeenMs = lastSeenMs;
     if (connected != null) result.connected = connected;
     if (lastAddress != null) result.lastAddress = lastAddress;
+    if (path != null) result.path = path;
+    if (codeExpiresMs != null) result.codeExpiresMs = codeExpiresMs;
     return result;
   }
 
@@ -1808,6 +2467,9 @@ class PairedDevice extends $pb.GeneratedMessage {
     ..aInt64(4, _omitFieldNames ? '' : 'lastSeenMs')
     ..aOB(5, _omitFieldNames ? '' : 'connected')
     ..aOS(6, _omitFieldNames ? '' : 'lastAddress')
+    ..aE<DevicePath>(7, _omitFieldNames ? '' : 'path',
+        enumValues: DevicePath.values)
+    ..aInt64(8, _omitFieldNames ? '' : 'codeExpiresMs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1880,7 +2542,8 @@ class PairedDevice extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearConnected() => $_clearField(5);
 
-  /// The IP address it last connected from; empty if it never has.
+  /// The IP address it last connected from; empty if it never has, or when
+  /// only a relay carried it.
   @$pb.TagNumber(6)
   $core.String get lastAddress => $_getSZ(5);
   @$pb.TagNumber(6)
@@ -1889,6 +2552,28 @@ class PairedDevice extends $pb.GeneratedMessage {
   $core.bool hasLastAddress() => $_has(5);
   @$pb.TagNumber(6)
   void clearLastAddress() => $_clearField(6);
+
+  /// How it's connected now; NONE when it isn't.
+  @$pb.TagNumber(7)
+  DevicePath get path => $_getN(6);
+  @$pb.TagNumber(7)
+  set path(DevicePath value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasPath() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearPath() => $_clearField(7);
+
+  /// Its pairing code hasn't been used yet and stops working at this time
+  /// (ms since 1970); 0 once a device has used it. Past it, the device can't
+  /// connect: pair it again.
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get codeExpiresMs => $_getI64(7);
+  @$pb.TagNumber(8)
+  set codeExpiresMs($fixnum.Int64 value) => $_setInt64(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasCodeExpiresMs() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCodeExpiresMs() => $_clearField(8);
 }
 
 /// Creates a project. Its folder is named after it, inside Factory's
@@ -3083,6 +3768,9 @@ class UpdateSettings extends $pb.GeneratedMessage {
     $core.int? cpuPercent,
     $core.double? sidebarWidth,
     $core.double? panelWidth,
+    $core.String? userName,
+    $core.double? buildCacheGb,
+    $core.int? vaultUnlockMinutes,
   }) {
     final result = UpdateSettings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -3094,6 +3782,10 @@ class UpdateSettings extends $pb.GeneratedMessage {
     if (cpuPercent != null) result.cpuPercent = cpuPercent;
     if (sidebarWidth != null) result.sidebarWidth = sidebarWidth;
     if (panelWidth != null) result.panelWidth = panelWidth;
+    if (userName != null) result.userName = userName;
+    if (buildCacheGb != null) result.buildCacheGb = buildCacheGb;
+    if (vaultUnlockMinutes != null)
+      result.vaultUnlockMinutes = vaultUnlockMinutes;
     return result;
   }
 
@@ -3122,6 +3814,10 @@ class UpdateSettings extends $pb.GeneratedMessage {
     ..aI(7, _omitFieldNames ? '' : 'cpuPercent', fieldType: $pb.PbFieldType.OU3)
     ..aD(8, _omitFieldNames ? '' : 'sidebarWidth')
     ..aD(9, _omitFieldNames ? '' : 'panelWidth')
+    ..aOS(10, _omitFieldNames ? '' : 'userName')
+    ..aD(11, _omitFieldNames ? '' : 'buildCacheGb')
+    ..aI(20, _omitFieldNames ? '' : 'vaultUnlockMinutes',
+        fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3230,6 +3926,37 @@ class UpdateSettings extends $pb.GeneratedMessage {
   $core.bool hasPanelWidth() => $_has(8);
   @$pb.TagNumber(9)
   void clearPanelWidth() => $_clearField(9);
+
+  /// The user's first name (see Settings); "" removes it.
+  @$pb.TagNumber(10)
+  $core.String get userName => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set userName($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasUserName() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearUserName() => $_clearField(10);
+
+  /// The build caches' budget (see Settings); 0 never clears them. Negative
+  /// is refused.
+  @$pb.TagNumber(11)
+  $core.double get buildCacheGb => $_getN(10);
+  @$pb.TagNumber(11)
+  set buildCacheGb($core.double value) => $_setDouble(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasBuildCacheGb() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearBuildCacheGb() => $_clearField(11);
+
+  /// Unused: requests need no vault passphrase. Still kept in config.json.
+  @$pb.TagNumber(20)
+  $core.int get vaultUnlockMinutes => $_getIZ(11);
+  @$pb.TagNumber(20)
+  set vaultUnlockMinutes($core.int value) => $_setUnsignedInt32(11, value);
+  @$pb.TagNumber(20)
+  $core.bool hasVaultUnlockMinutes() => $_has(11);
+  @$pb.TagNumber(20)
+  void clearVaultUnlockMinutes() => $_clearField(20);
 }
 
 /// Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -4433,6 +5160,68 @@ class ChangeMonitor extends $pb.GeneratedMessage {
   void clearAction() => $_clearField(3);
 }
 
+/// Clears one build cache now (a `DiskUsage` of kind "build_cache", by its
+/// `path`): moved aside at once, deleted in the background; the agents
+/// working there hear of it at their next run. Answered with Ack, or an error
+/// saying why not: it isn't a build cache Factory knows, or an agent is
+/// working there, or a build is running in it.
+class ClearBuildCache extends $pb.GeneratedMessage {
+  factory ClearBuildCache({
+    $core.String? path,
+  }) {
+    final result = ClearBuildCache._();
+    if (path != null) result.path = path;
+    return result;
+  }
+
+  ClearBuildCache._();
+
+  factory ClearBuildCache.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClearBuildCache()..mergeFromBuffer(data, registry);
+  factory ClearBuildCache.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClearBuildCache()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ClearBuildCache',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ClearBuildCache.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClearBuildCache clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClearBuildCache copyWith(void Function(ClearBuildCache) updates) =>
+      super.copyWith((message) => updates(message as ClearBuildCache))
+          as ClearBuildCache;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ClearBuildCache() / ClearBuildCache.new instead')
+  static ClearBuildCache create() => ClearBuildCache._();
+  static $pb.GeneratedMessage $_createMessage() => ClearBuildCache._();
+  @$core.override
+  ClearBuildCache createEmptyInstance() => ClearBuildCache._();
+  @$core.pragma('dart2js:noInline')
+  static ClearBuildCache getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ClearBuildCache>(
+          ClearBuildCache.$_createMessage);
+  static ClearBuildCache? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+}
+
 /// The person approves or dismisses an agent's proposal to Rivet (a
 /// `Proposal` entry in `agent_id`'s transcript), answered with Ack. Approved,
 /// Rivet gets it as the person's own message: `comment` (if any), a blank
@@ -4699,6 +5488,554 @@ class RunCommand extends $pb.GeneratedMessage {
   void clearArgs() => $_clearField(3);
 }
 
+/// Reads a file on Factory's machine, for a viewer: the app may be on another
+/// machine. Answered to the asker only with FileContent (whose `error` says
+/// why it couldn't be read), never with Error.
+class ReadFile extends $pb.GeneratedMessage {
+  factory ReadFile({
+    $core.String? path,
+    $fixnum.Int64? maxBytes,
+  }) {
+    final result = ReadFile._();
+    if (path != null) result.path = path;
+    if (maxBytes != null) result.maxBytes = maxBytes;
+    return result;
+  }
+
+  ReadFile._();
+
+  factory ReadFile.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReadFile()..mergeFromBuffer(data, registry);
+  factory ReadFile.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReadFile()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReadFile',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReadFile.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'maxBytes', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReadFile clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReadFile copyWith(void Function(ReadFile) updates) =>
+      super.copyWith((message) => updates(message as ReadFile)) as ReadFile;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReadFile() / ReadFile.new instead')
+  static ReadFile create() => ReadFile._();
+  static $pb.GeneratedMessage $_createMessage() => ReadFile._();
+  @$core.override
+  ReadFile createEmptyInstance() => ReadFile._();
+  @$core.pragma('dart2js:noInline')
+  static ReadFile getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReadFile>(ReadFile.$_createMessage);
+  static ReadFile? _defaultInstance;
+
+  /// Absolute, or from the home folder ("~/notes.md").
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  /// At most this many bytes; 0 for the default. Text is read up to 2 MB and
+  /// images up to 20 MB, whatever is asked.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get maxBytes => $_getI64(1);
+  @$pb.TagNumber(2)
+  set maxBytes($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMaxBytes() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMaxBytes() => $_clearField(2);
+}
+
+class FileContent extends $pb.GeneratedMessage {
+  factory FileContent({
+    $core.String? path,
+    $core.String? mime,
+    $fixnum.Int64? size,
+    $core.List<$core.int>? data,
+    $core.bool? truncated,
+    $fixnum.Int64? modifiedMs,
+    $core.String? error,
+  }) {
+    final result = FileContent._();
+    if (path != null) result.path = path;
+    if (mime != null) result.mime = mime;
+    if (size != null) result.size = size;
+    if (data != null) result.data = data;
+    if (truncated != null) result.truncated = truncated;
+    if (modifiedMs != null) result.modifiedMs = modifiedMs;
+    if (error != null) result.error = error;
+    return result;
+  }
+
+  FileContent._();
+
+  factory FileContent.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileContent()..mergeFromBuffer(data, registry);
+  factory FileContent.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileContent()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FileContent',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: FileContent.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..aOS(2, _omitFieldNames ? '' : 'mime')
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'size', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(
+        4, _omitFieldNames ? '' : 'data', $pb.PbFieldType.OY)
+    ..aOB(5, _omitFieldNames ? '' : 'truncated')
+    ..aInt64(6, _omitFieldNames ? '' : 'modifiedMs')
+    ..aOS(7, _omitFieldNames ? '' : 'error')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileContent clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileContent copyWith(void Function(FileContent) updates) =>
+      super.copyWith((message) => updates(message as FileContent))
+          as FileContent;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use FileContent() / FileContent.new instead')
+  static FileContent create() => FileContent._();
+  static $pb.GeneratedMessage $_createMessage() => FileContent._();
+  @$core.override
+  FileContent createEmptyInstance() => FileContent._();
+  @$core.pragma('dart2js:noInline')
+  static FileContent getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<FileContent>(
+          FileContent.$_createMessage);
+  static FileContent? _defaultInstance;
+
+  /// As asked, with "~" expanded.
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  /// Sniffed from its content and extension: "text/plain", "text/markdown",
+  /// "application/json", "image/png", "image/jpeg", "image/gif",
+  /// "image/webp", "application/pdf", "application/octet-stream"…
+  @$pb.TagNumber(2)
+  $core.String get mime => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set mime($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMime() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMime() => $_clearField(2);
+
+  /// The whole file's size in bytes.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get size => $_getI64(2);
+  @$pb.TagNumber(3)
+  set size($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSize() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSize() => $_clearField(3);
+
+  /// Its first bytes, up to the limit.
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get data => $_getN(3);
+  @$pb.TagNumber(4)
+  set data($core.List<$core.int> value) => $_setBytes(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasData() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearData() => $_clearField(4);
+
+  /// `data` is only the start of it.
+  @$pb.TagNumber(5)
+  $core.bool get truncated => $_getBF(4);
+  @$pb.TagNumber(5)
+  set truncated($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTruncated() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTruncated() => $_clearField(5);
+
+  /// When it was last changed, in ms since 1970.
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get modifiedMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set modifiedMs($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasModifiedMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearModifiedMs() => $_clearField(6);
+
+  /// Why it couldn't be read ("No such file: …", "… is a folder", "Can't
+  /// read …: permission denied"); empty when it was. The rest is empty then.
+  @$pb.TagNumber(7)
+  $core.String get error => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set error($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasError() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearError() => $_clearField(7);
+}
+
+/// Sets an agent's layout (`Agent.layout`) for every device, answered with
+/// Ack. Refused unless it has exactly one "chat" leaf, at most 12 leaves,
+/// unique non-empty ids, and splits of two or more children with as many
+/// positive weights (or none). An unset root, or a lone chat leaf, goes back
+/// to just the conversation.
+class SetLayout extends $pb.GeneratedMessage {
+  factory SetLayout({
+    $core.String? agentId,
+    ViewNode? root,
+  }) {
+    final result = SetLayout._();
+    if (agentId != null) result.agentId = agentId;
+    if (root != null) result.root = root;
+    return result;
+  }
+
+  SetLayout._();
+
+  factory SetLayout.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetLayout()..mergeFromBuffer(data, registry);
+  factory SetLayout.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetLayout()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetLayout',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetLayout.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOM<ViewNode>(2, _omitFieldNames ? '' : 'root',
+        subBuilder: ViewNode.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetLayout clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetLayout copyWith(void Function(SetLayout) updates) =>
+      super.copyWith((message) => updates(message as SetLayout)) as SetLayout;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetLayout() / SetLayout.new instead')
+  static SetLayout create() => SetLayout._();
+  static $pb.GeneratedMessage $_createMessage() => SetLayout._();
+  @$core.override
+  SetLayout createEmptyInstance() => SetLayout._();
+  @$core.pragma('dart2js:noInline')
+  static SetLayout getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetLayout>(SetLayout.$_createMessage);
+  static SetLayout? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  ViewNode get root => $_getN(1);
+  @$pb.TagNumber(2)
+  set root(ViewNode value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRoot() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRoot() => $_clearField(2);
+  @$pb.TagNumber(2)
+  ViewNode ensureRoot() => $_ensure(1);
+}
+
+enum ViewNode_Node { split, leaf, notSet }
+
+/// A pane of an agent's main area, or a split of several.
+class ViewNode extends $pb.GeneratedMessage {
+  factory ViewNode({
+    $core.String? id,
+    ViewSplit? split,
+    ViewLeaf? leaf,
+  }) {
+    final result = ViewNode._();
+    if (id != null) result.id = id;
+    if (split != null) result.split = split;
+    if (leaf != null) result.leaf = leaf;
+    return result;
+  }
+
+  ViewNode._();
+
+  factory ViewNode.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewNode()..mergeFromBuffer(data, registry);
+  factory ViewNode.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewNode()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, ViewNode_Node> _ViewNode_NodeByTag = {
+    2: ViewNode_Node.split,
+    3: ViewNode_Node.leaf,
+    0: ViewNode_Node.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ViewNode',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ViewNode.$_createMessage)
+    ..oo(0, [2, 3])
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOM<ViewSplit>(2, _omitFieldNames ? '' : 'split',
+        subBuilder: ViewSplit.$_createMessage)
+    ..aOM<ViewLeaf>(3, _omitFieldNames ? '' : 'leaf',
+        subBuilder: ViewLeaf.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewNode clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewNode copyWith(void Function(ViewNode) updates) =>
+      super.copyWith((message) => updates(message as ViewNode)) as ViewNode;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ViewNode() / ViewNode.new instead')
+  static ViewNode create() => ViewNode._();
+  static $pb.GeneratedMessage $_createMessage() => ViewNode._();
+  @$core.override
+  ViewNode createEmptyInstance() => ViewNode._();
+  @$core.pragma('dart2js:noInline')
+  static ViewNode getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ViewNode>(ViewNode.$_createMessage);
+  static ViewNode? _defaultInstance;
+
+  @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  ViewNode_Node whichNode() => _ViewNode_NodeByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(2)
+  @$pb.TagNumber(3)
+  void clearNode() => $_clearField($_whichOneof(0));
+
+  /// Unique within the layout; the app keeps a pane by it.
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  ViewSplit get split => $_getN(1);
+  @$pb.TagNumber(2)
+  set split(ViewSplit value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSplit() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSplit() => $_clearField(2);
+  @$pb.TagNumber(2)
+  ViewSplit ensureSplit() => $_ensure(1);
+
+  @$pb.TagNumber(3)
+  ViewLeaf get leaf => $_getN(2);
+  @$pb.TagNumber(3)
+  set leaf(ViewLeaf value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLeaf() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLeaf() => $_clearField(3);
+  @$pb.TagNumber(3)
+  ViewLeaf ensureLeaf() => $_ensure(2);
+}
+
+class ViewSplit extends $pb.GeneratedMessage {
+  factory ViewSplit({
+    ViewAxis? axis,
+    $core.Iterable<ViewNode>? children,
+    $core.Iterable<$core.double>? weights,
+  }) {
+    final result = ViewSplit._();
+    if (axis != null) result.axis = axis;
+    if (children != null) result.children.addAll(children);
+    if (weights != null) result.weights.addAll(weights);
+    return result;
+  }
+
+  ViewSplit._();
+
+  factory ViewSplit.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewSplit()..mergeFromBuffer(data, registry);
+  factory ViewSplit.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewSplit()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ViewSplit',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ViewSplit.$_createMessage)
+    ..aE<ViewAxis>(1, _omitFieldNames ? '' : 'axis',
+        enumValues: ViewAxis.values)
+    ..pPM<ViewNode>(2, _omitFieldNames ? '' : 'children',
+        subBuilder: ViewNode.$_createMessage)
+    ..p<$core.double>(3, _omitFieldNames ? '' : 'weights', $pb.PbFieldType.KD)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewSplit clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewSplit copyWith(void Function(ViewSplit) updates) =>
+      super.copyWith((message) => updates(message as ViewSplit)) as ViewSplit;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ViewSplit() / ViewSplit.new instead')
+  static ViewSplit create() => ViewSplit._();
+  static $pb.GeneratedMessage $_createMessage() => ViewSplit._();
+  @$core.override
+  ViewSplit createEmptyInstance() => ViewSplit._();
+  @$core.pragma('dart2js:noInline')
+  static ViewSplit getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ViewSplit>(ViewSplit.$_createMessage);
+  static ViewSplit? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  ViewAxis get axis => $_getN(0);
+  @$pb.TagNumber(1)
+  set axis(ViewAxis value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAxis() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAxis() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<ViewNode> get children => $_getList(1);
+
+  /// Each child's share, as many as children; empty for equal shares.
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.double> get weights => $_getList(2);
+}
+
+class ViewLeaf extends $pb.GeneratedMessage {
+  factory ViewLeaf({
+    $core.String? kind,
+    $core.String? path,
+    $core.String? title,
+  }) {
+    final result = ViewLeaf._();
+    if (kind != null) result.kind = kind;
+    if (path != null) result.path = path;
+    if (title != null) result.title = title;
+    return result;
+  }
+
+  ViewLeaf._();
+
+  factory ViewLeaf.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewLeaf()..mergeFromBuffer(data, registry);
+  factory ViewLeaf.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ViewLeaf()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ViewLeaf',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ViewLeaf.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'kind')
+    ..aOS(2, _omitFieldNames ? '' : 'path')
+    ..aOS(3, _omitFieldNames ? '' : 'title')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewLeaf clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ViewLeaf copyWith(void Function(ViewLeaf) updates) =>
+      super.copyWith((message) => updates(message as ViewLeaf)) as ViewLeaf;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ViewLeaf() / ViewLeaf.new instead')
+  static ViewLeaf create() => ViewLeaf._();
+  static $pb.GeneratedMessage $_createMessage() => ViewLeaf._();
+  @$core.override
+  ViewLeaf createEmptyInstance() => ViewLeaf._();
+  @$core.pragma('dart2js:noInline')
+  static ViewLeaf getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ViewLeaf>(ViewLeaf.$_createMessage);
+  static ViewLeaf? _defaultInstance;
+
+  /// "chat" (the conversation, which every layout has once and can't be
+  /// closed), "text" or "image"; more kinds will come (pdf, documents,
+  /// dashboards, extension panels). An app that doesn't know a kind shows
+  /// that it can't show it here.
+  @$pb.TagNumber(1)
+  $core.String get kind => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set kind($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKind() => $_clearField(1);
+
+  /// The file it shows, absolute; empty for "chat".
+  @$pb.TagNumber(2)
+  $core.String get path => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set path($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPath() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPath() => $_clearField(2);
+
+  /// What its tab or header says: the file's name, unless set otherwise.
+  @$pb.TagNumber(3)
+  $core.String get title => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set title($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasTitle() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTitle() => $_clearField(3);
+}
+
 /// Opens an extension's panel beside an agent (`Agent.open_panel`); an empty id
 /// closes it. Each agent keeps its own.
 class OpenPanel extends $pb.GeneratedMessage {
@@ -4774,10 +6111,12 @@ class StartLogin extends $pb.GeneratedMessage {
   factory StartLogin({
     $core.String? providerId,
     $core.String? methodId,
+    $core.bool? addAccount,
   }) {
     final result = StartLogin._();
     if (providerId != null) result.providerId = providerId;
     if (methodId != null) result.methodId = methodId;
+    if (addAccount != null) result.addAccount = addAccount;
     return result;
   }
 
@@ -4796,6 +6135,7 @@ class StartLogin extends $pb.GeneratedMessage {
       createEmptyInstance: StartLogin.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'providerId')
     ..aOS(2, _omitFieldNames ? '' : 'methodId')
+    ..aOB(3, _omitFieldNames ? '' : 'addAccount')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4835,6 +6175,19 @@ class StartLogin extends $pb.GeneratedMessage {
   $core.bool hasMethodId() => $_has(1);
   @$pb.TagNumber(2)
   void clearMethodId() => $_clearField(2);
+
+  /// Signs in to another account of the provider, keeping the ones signed in
+  /// (a second Claude subscription, say). False signs in as before: the
+  /// account replaces the first one, unless it's one already signed in, which
+  /// is signed in again.
+  @$pb.TagNumber(3)
+  $core.bool get addAccount => $_getBF(2);
+  @$pb.TagNumber(3)
+  set addAccount($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAddAccount() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAddAccount() => $_clearField(3);
 }
 
 /// Answers `LoginFlow.prompt`: the pasted code or redirect address, the secret,
@@ -4942,9 +6295,11 @@ class CancelLogin extends $pb.GeneratedMessage {
 class SignOut extends $pb.GeneratedMessage {
   factory SignOut({
     $core.String? providerId,
+    $core.String? accountId,
   }) {
     final result = SignOut._();
     if (providerId != null) result.providerId = providerId;
+    if (accountId != null) result.accountId = accountId;
     return result;
   }
 
@@ -4962,6 +6317,7 @@ class SignOut extends $pb.GeneratedMessage {
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: SignOut.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'providerId')
+    ..aOS(2, _omitFieldNames ? '' : 'accountId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4992,6 +6348,198 @@ class SignOut extends $pb.GeneratedMessage {
   $core.bool hasProviderId() => $_has(0);
   @$pb.TagNumber(1)
   void clearProviderId() => $_clearField(1);
+
+  /// The account to sign out of (`Account.id`); empty signs out of all of the
+  /// provider's accounts.
+  @$pb.TagNumber(2)
+  $core.String get accountId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set accountId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAccountId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAccountId() => $_clearField(2);
+}
+
+/// Moves one of a provider's accounts to `position` (0 is first) in the
+/// order requests try them: the first with capacity is used. Answered with Ack.
+class MoveAccount extends $pb.GeneratedMessage {
+  factory MoveAccount({
+    $core.String? providerId,
+    $core.String? accountId,
+    $core.int? position,
+  }) {
+    final result = MoveAccount._();
+    if (providerId != null) result.providerId = providerId;
+    if (accountId != null) result.accountId = accountId;
+    if (position != null) result.position = position;
+    return result;
+  }
+
+  MoveAccount._();
+
+  factory MoveAccount.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MoveAccount()..mergeFromBuffer(data, registry);
+  factory MoveAccount.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MoveAccount()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'MoveAccount',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: MoveAccount.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerId')
+    ..aOS(2, _omitFieldNames ? '' : 'accountId')
+    ..aI(3, _omitFieldNames ? '' : 'position', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MoveAccount clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MoveAccount copyWith(void Function(MoveAccount) updates) =>
+      super.copyWith((message) => updates(message as MoveAccount))
+          as MoveAccount;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use MoveAccount() / MoveAccount.new instead')
+  static MoveAccount create() => MoveAccount._();
+  static $pb.GeneratedMessage $_createMessage() => MoveAccount._();
+  @$core.override
+  MoveAccount createEmptyInstance() => MoveAccount._();
+  @$core.pragma('dart2js:noInline')
+  static MoveAccount getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MoveAccount>(
+          MoveAccount.$_createMessage);
+  static MoveAccount? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get providerId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get accountId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set accountId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAccountId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAccountId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get position => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set position($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasPosition() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPosition() => $_clearField(3);
+}
+
+/// Changes one of a provider's accounts. Answered with Ack.
+class UpdateAccount extends $pb.GeneratedMessage {
+  factory UpdateAccount({
+    $core.String? providerId,
+    $core.String? accountId,
+    $core.String? label,
+    $core.bool? retry,
+  }) {
+    final result = UpdateAccount._();
+    if (providerId != null) result.providerId = providerId;
+    if (accountId != null) result.accountId = accountId;
+    if (label != null) result.label = label;
+    if (retry != null) result.retry = retry;
+    return result;
+  }
+
+  UpdateAccount._();
+
+  factory UpdateAccount.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UpdateAccount()..mergeFromBuffer(data, registry);
+  factory UpdateAccount.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UpdateAccount()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UpdateAccount',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UpdateAccount.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerId')
+    ..aOS(2, _omitFieldNames ? '' : 'accountId')
+    ..aOS(3, _omitFieldNames ? '' : 'label')
+    ..aOB(4, _omitFieldNames ? '' : 'retry')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateAccount clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateAccount copyWith(void Function(UpdateAccount) updates) =>
+      super.copyWith((message) => updates(message as UpdateAccount))
+          as UpdateAccount;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UpdateAccount() / UpdateAccount.new instead')
+  static UpdateAccount create() => UpdateAccount._();
+  static $pb.GeneratedMessage $_createMessage() => UpdateAccount._();
+  @$core.override
+  UpdateAccount createEmptyInstance() => UpdateAccount._();
+  @$core.pragma('dart2js:noInline')
+  static UpdateAccount getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UpdateAccount>(
+          UpdateAccount.$_createMessage);
+  static UpdateAccount? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get providerId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get accountId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set accountId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAccountId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAccountId() => $_clearField(2);
+
+  /// A name for it, such as "Work credits"; empty goes back to the one
+  /// Factory gives it (an API key's last characters). Unset leaves it.
+  @$pb.TagNumber(3)
+  $core.String get label => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set label($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLabel() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLabel() => $_clearField(3);
+
+  /// Try it again now: an API key out of credit (`Account.out_of_credit`)
+  /// gets requests again, as if topped up.
+  @$pb.TagNumber(4)
+  $core.bool get retry => $_getBF(3);
+  @$pb.TagNumber(4)
+  set retry($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasRetry() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearRetry() => $_clearField(4);
 }
 
 class Ack extends $pb.GeneratedMessage {
@@ -5128,6 +6676,7 @@ class Workspace extends $pb.GeneratedMessage {
     $core.bool? highlights,
     $core.Iterable<ChangelogVersion>? changelog,
     RemoteAccess? remote,
+    VaultState? vault,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -5149,6 +6698,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (highlights != null) result.highlights = highlights;
     if (changelog != null) result.changelog.addAll(changelog);
     if (remote != null) result.remote = remote;
+    if (vault != null) result.vault = vault;
     return result;
   }
 
@@ -5193,6 +6743,8 @@ class Workspace extends $pb.GeneratedMessage {
         subBuilder: ChangelogVersion.$_createMessage)
     ..aOM<RemoteAccess>(19, _omitFieldNames ? '' : 'remote',
         subBuilder: RemoteAccess.$_createMessage)
+    ..aOM<VaultState>(20, _omitFieldNames ? '' : 'vault',
+        subBuilder: VaultState.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -5383,6 +6935,18 @@ class Workspace extends $pb.GeneratedMessage {
   void clearRemote() => $_clearField(19);
   @$pb.TagNumber(19)
   RemoteAccess ensureRemote() => $_ensure(18);
+
+  /// The vault's state and its secrets' metadata, never values.
+  @$pb.TagNumber(20)
+  VaultState get vault => $_getN(19);
+  @$pb.TagNumber(20)
+  set vault(VaultState value) => $_setField(20, value);
+  @$pb.TagNumber(20)
+  $core.bool hasVault() => $_has(19);
+  @$pb.TagNumber(20)
+  void clearVault() => $_clearField(20);
+  @$pb.TagNumber(20)
+  VaultState ensureVault() => $_ensure(19);
 }
 
 class ChangelogVersion extends $pb.GeneratedMessage {
@@ -7102,7 +8666,9 @@ class DiskUsage extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearLabel() => $_clearField(1);
 
-  /// home, releases, agent, project or folder.
+  /// home, releases, agent, project or folder; among an agent's, project's
+  /// or folder's parts, "build_cache" for each build cache in it (its
+  /// checkout's, or the folder's), which ClearBuildCache clears by `path`.
   @$pb.TagNumber(2)
   $core.String get kind => $_getSZ(1);
   @$pb.TagNumber(2)
@@ -7142,7 +8708,8 @@ class DiskUsage extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearBytes() => $_clearField(5);
 
-  /// An agent's: its conversations, task logs, database and checkout.
+  /// An agent's: its conversations, task logs, database and checkout, and its
+  /// checkout's build caches; a project's or folder's: its build caches.
   @$pb.TagNumber(6)
   $pb.PbList<DiskUsage> get parts => $_getList(5);
 
@@ -8624,6 +10191,9 @@ class Settings extends $pb.GeneratedMessage {
     $core.int? cpuPercent,
     $core.double? sidebarWidth,
     $core.double? panelWidth,
+    $core.String? userName,
+    $core.double? buildCacheGb,
+    $core.int? vaultUnlockMinutes,
   }) {
     final result = Settings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -8635,6 +10205,10 @@ class Settings extends $pb.GeneratedMessage {
     if (cpuPercent != null) result.cpuPercent = cpuPercent;
     if (sidebarWidth != null) result.sidebarWidth = sidebarWidth;
     if (panelWidth != null) result.panelWidth = panelWidth;
+    if (userName != null) result.userName = userName;
+    if (buildCacheGb != null) result.buildCacheGb = buildCacheGb;
+    if (vaultUnlockMinutes != null)
+      result.vaultUnlockMinutes = vaultUnlockMinutes;
     return result;
   }
 
@@ -8663,6 +10237,10 @@ class Settings extends $pb.GeneratedMessage {
     ..aI(7, _omitFieldNames ? '' : 'cpuPercent', fieldType: $pb.PbFieldType.OU3)
     ..aD(8, _omitFieldNames ? '' : 'sidebarWidth')
     ..aD(9, _omitFieldNames ? '' : 'panelWidth')
+    ..aOS(10, _omitFieldNames ? '' : 'userName')
+    ..aD(11, _omitFieldNames ? '' : 'buildCacheGb')
+    ..aI(20, _omitFieldNames ? '' : 'vaultUnlockMinutes',
+        fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -8777,6 +10355,40 @@ class Settings extends $pb.GeneratedMessage {
   $core.bool hasPanelWidth() => $_has(8);
   @$pb.TagNumber(9)
   void clearPanelWidth() => $_clearField(9);
+
+  /// The user's first name, which agents call them by (config.json's
+  /// `user.name`); empty when not given, and agents say "the person".
+  @$pb.TagNumber(10)
+  $core.String get userName => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set userName($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasUserName() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearUserName() => $_clearField(10);
+
+  /// GB the build caches of one agent's checkout, or of one project folder,
+  /// may take (config.json's `resources.build_cache_gb`, 25 unless changed):
+  /// over it, Factory clears them while nothing works there. 0: never.
+  @$pb.TagNumber(11)
+  $core.double get buildCacheGb => $_getN(10);
+  @$pb.TagNumber(11)
+  set buildCacheGb($core.double value) => $_setDouble(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasBuildCacheGb() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearBuildCacheGb() => $_clearField(11);
+
+  /// Unused: requests need no vault passphrase (config.json's
+  /// `vault.unlock_minutes`, 5 unless changed).
+  @$pb.TagNumber(20)
+  $core.int get vaultUnlockMinutes => $_getIZ(11);
+  @$pb.TagNumber(20)
+  set vaultUnlockMinutes($core.int value) => $_setUnsignedInt32(11, value);
+  @$pb.TagNumber(20)
+  $core.bool hasVaultUnlockMinutes() => $_has(11);
+  @$pb.TagNumber(20)
+  void clearVaultUnlockMinutes() => $_clearField(20);
 }
 
 class Provider extends $pb.GeneratedMessage {
@@ -8788,6 +10400,7 @@ class Provider extends $pb.GeneratedMessage {
     $core.Iterable<LoginMethod>? methods,
     ProviderUsage? usage,
     $core.String? plan,
+    $core.Iterable<Account>? accounts,
   }) {
     final result = Provider._();
     if (id != null) result.id = id;
@@ -8797,6 +10410,7 @@ class Provider extends $pb.GeneratedMessage {
     if (methods != null) result.methods.addAll(methods);
     if (usage != null) result.usage = usage;
     if (plan != null) result.plan = plan;
+    if (accounts != null) result.accounts.addAll(accounts);
     return result;
   }
 
@@ -8822,6 +10436,8 @@ class Provider extends $pb.GeneratedMessage {
     ..aOM<ProviderUsage>(6, _omitFieldNames ? '' : 'usage',
         subBuilder: ProviderUsage.$_createMessage)
     ..aOS(7, _omitFieldNames ? '' : 'plan')
+    ..pPM<Account>(8, _omitFieldNames ? '' : 'accounts',
+        subBuilder: Account.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -8914,6 +10530,186 @@ class Provider extends $pb.GeneratedMessage {
   $core.bool hasPlan() => $_has(6);
   @$pb.TagNumber(7)
   void clearPlan() => $_clearField(7);
+
+  /// Every account signed in to it, in the order requests try them. The fields
+  /// above describe the first, as before several accounts could be signed in.
+  @$pb.TagNumber(8)
+  $pb.PbList<Account> get accounts => $_getList(7);
+}
+
+/// One account signed in to a provider, such as one of two Claude
+/// subscriptions. Requests go to the first account with capacity; when one
+/// reaches its usage limit they carry on with the next.
+class Account extends $pb.GeneratedMessage {
+  factory Account({
+    $core.String? id,
+    $core.String? label,
+    $core.String? plan,
+    ProviderUsage? usage,
+    $core.bool? canSignOut,
+    $core.bool? inUse,
+    $fixnum.Int64? exhaustedUntil,
+    $core.bool? outOfCredit,
+    $core.String? methodId,
+  }) {
+    final result = Account._();
+    if (id != null) result.id = id;
+    if (label != null) result.label = label;
+    if (plan != null) result.plan = plan;
+    if (usage != null) result.usage = usage;
+    if (canSignOut != null) result.canSignOut = canSignOut;
+    if (inUse != null) result.inUse = inUse;
+    if (exhaustedUntil != null) result.exhaustedUntil = exhaustedUntil;
+    if (outOfCredit != null) result.outOfCredit = outOfCredit;
+    if (methodId != null) result.methodId = methodId;
+    return result;
+  }
+
+  Account._();
+
+  factory Account.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Account()..mergeFromBuffer(data, registry);
+  factory Account.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Account()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'Account',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: Account.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aOS(3, _omitFieldNames ? '' : 'plan')
+    ..aOM<ProviderUsage>(4, _omitFieldNames ? '' : 'usage',
+        subBuilder: ProviderUsage.$_createMessage)
+    ..aOB(5, _omitFieldNames ? '' : 'canSignOut')
+    ..aOB(6, _omitFieldNames ? '' : 'inUse')
+    ..aInt64(7, _omitFieldNames ? '' : 'exhaustedUntil')
+    ..aOB(8, _omitFieldNames ? '' : 'outOfCredit')
+    ..aOS(9, _omitFieldNames ? '' : 'methodId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Account clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Account copyWith(void Function(Account) updates) =>
+      super.copyWith((message) => updates(message as Account)) as Account;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use Account() / Account.new instead')
+  static Account create() => Account._();
+  static $pb.GeneratedMessage $_createMessage() => Account._();
+  @$core.override
+  Account createEmptyInstance() => Account._();
+  @$core.pragma('dart2js:noInline')
+  static Account getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<Account>(Account.$_createMessage);
+  static Account? _defaultInstance;
+
+  /// Made by Factory, stable for as long as the account is signed in.
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// Who it is: a subscription's email, as the provider says (empty until
+  /// known); an API key's name, given with `UpdateAccount.label`, or else
+  /// its last characters ("sk-…a1b2"); a key from the environment, the
+  /// variable's name.
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// Its plan, such as "Claude Max 20x"; "API key" for a key; empty when
+  /// unknown.
+  @$pb.TagNumber(3)
+  $core.String get plan => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set plan($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasPlan() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPlan() => $_clearField(3);
+
+  /// How much of its usage limits it has used; unset when it has none to read.
+  @$pb.TagNumber(4)
+  ProviderUsage get usage => $_getN(3);
+  @$pb.TagNumber(4)
+  set usage(ProviderUsage value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasUsage() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearUsage() => $_clearField(4);
+  @$pb.TagNumber(4)
+  ProviderUsage ensureUsage() => $_ensure(3);
+
+  /// Factory stored it and `SignOut` removes it (false for an API key from the
+  /// environment).
+  @$pb.TagNumber(5)
+  $core.bool get canSignOut => $_getBF(4);
+  @$pb.TagNumber(5)
+  set canSignOut($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasCanSignOut() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearCanSignOut() => $_clearField(5);
+
+  /// Requests go to it now.
+  @$pb.TagNumber(6)
+  $core.bool get inUse => $_getBF(5);
+  @$pb.TagNumber(6)
+  set inUse($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasInUse() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearInUse() => $_clearField(6);
+
+  /// It reached a usage limit: requests skip it until then, in ms since 1970;
+  /// 0 when it has capacity.
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get exhaustedUntil => $_getI64(6);
+  @$pb.TagNumber(7)
+  set exhaustedUntil($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasExhaustedUntil() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearExhaustedUntil() => $_clearField(7);
+
+  /// An API key that ran out of credit: requests skip it until it's tried
+  /// again, by itself every hour or with `UpdateAccount.retry`. Its
+  /// `exhausted_until` stays 0, since nothing says when it gets credit.
+  @$pb.TagNumber(8)
+  $core.bool get outOfCredit => $_getBF(7);
+  @$pb.TagNumber(8)
+  set outOfCredit($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasOutOfCredit() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearOutOfCredit() => $_clearField(8);
+
+  /// How it's signed in: the `LoginMethod` id, "oauth" (a subscription or
+  /// OAuth account) or "api_key" (a key, stored or from the environment).
+  @$pb.TagNumber(9)
+  $core.String get methodId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set methodId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasMethodId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearMethodId() => $_clearField(9);
 }
 
 class ProviderUsage extends $pb.GeneratedMessage {
@@ -9703,6 +11499,7 @@ class Agent extends $pb.GeneratedMessage {
     $core.String? avatarShapeOverride,
     $core.String? avatarFaceOverride,
     $core.String? role,
+    ViewNode? layout,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -9737,6 +11534,7 @@ class Agent extends $pb.GeneratedMessage {
     if (avatarFaceOverride != null)
       result.avatarFaceOverride = avatarFaceOverride;
     if (role != null) result.role = role;
+    if (layout != null) result.layout = layout;
     return result;
   }
 
@@ -9792,6 +11590,8 @@ class Agent extends $pb.GeneratedMessage {
     ..aOS(27, _omitFieldNames ? '' : 'avatarShapeOverride')
     ..aOS(28, _omitFieldNames ? '' : 'avatarFaceOverride')
     ..aOS(29, _omitFieldNames ? '' : 'role')
+    ..aOM<ViewNode>(30, _omitFieldNames ? '' : 'layout',
+        subBuilder: ViewNode.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10114,6 +11914,19 @@ class Agent extends $pb.GeneratedMessage {
   $core.bool hasRole() => $_has(28);
   @$pb.TagNumber(29)
   void clearRole() => $_clearField(29);
+
+  /// How the agent's main area is laid out: its conversation and the viewers
+  /// open beside it (SetLayout, the show tool). Unset: just its conversation.
+  @$pb.TagNumber(30)
+  ViewNode get layout => $_getN(29);
+  @$pb.TagNumber(30)
+  set layout(ViewNode value) => $_setField(30, value);
+  @$pb.TagNumber(30)
+  $core.bool hasLayout() => $_has(29);
+  @$pb.TagNumber(30)
+  void clearLayout() => $_clearField(30);
+  @$pb.TagNumber(30)
+  ViewNode ensureLayout() => $_ensure(29);
 }
 
 class SlashCommand extends $pb.GeneratedMessage {
@@ -10722,6 +12535,7 @@ enum Entry_Kind {
   notice,
   event,
   proposal,
+  secretRequest,
   notSet
 }
 
@@ -10738,6 +12552,7 @@ class Entry extends $pb.GeneratedMessage {
     Event? event,
     $fixnum.Int64? reply,
     Proposal? proposal,
+    SecretRequest? secretRequest,
   }) {
     final result = Entry._();
     if (seq != null) result.seq = seq;
@@ -10751,6 +12566,7 @@ class Entry extends $pb.GeneratedMessage {
     if (event != null) result.event = event;
     if (reply != null) result.reply = reply;
     if (proposal != null) result.proposal = proposal;
+    if (secretRequest != null) result.secretRequest = secretRequest;
     return result;
   }
 
@@ -10772,13 +12588,14 @@ class Entry extends $pb.GeneratedMessage {
     8: Entry_Kind.notice,
     9: Entry_Kind.event,
     11: Entry_Kind.proposal,
+    12: Entry_Kind.secretRequest,
     0: Entry_Kind.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'Entry',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: Entry.$_createMessage)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 11])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 11, 12])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aInt64(2, _omitFieldNames ? '' : 'timestampMs')
@@ -10800,6 +12617,8 @@ class Entry extends $pb.GeneratedMessage {
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aOM<Proposal>(11, _omitFieldNames ? '' : 'proposal',
         subBuilder: Proposal.$_createMessage)
+    ..aOM<SecretRequest>(12, _omitFieldNames ? '' : 'secretRequest',
+        subBuilder: SecretRequest.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10830,6 +12649,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(8)
   @$pb.TagNumber(9)
   @$pb.TagNumber(11)
+  @$pb.TagNumber(12)
   Entry_Kind whichKind() => _Entry_KindByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -10839,6 +12659,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(8)
   @$pb.TagNumber(9)
   @$pb.TagNumber(11)
+  @$pb.TagNumber(12)
   void clearKind() => $_clearField($_whichOneof(0));
 
   /// Position in the transcript; unique per agent and never reused.
@@ -10960,6 +12781,18 @@ class Entry extends $pb.GeneratedMessage {
   void clearProposal() => $_clearField(11);
   @$pb.TagNumber(11)
   Proposal ensureProposal() => $_ensure(10);
+
+  /// An agent asks for a secret (secret_request): see SecretRequest.
+  @$pb.TagNumber(12)
+  SecretRequest get secretRequest => $_getN(11);
+  @$pb.TagNumber(12)
+  set secretRequest(SecretRequest value) => $_setField(12, value);
+  @$pb.TagNumber(12)
+  $core.bool hasSecretRequest() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearSecretRequest() => $_clearField(12);
+  @$pb.TagNumber(12)
+  SecretRequest ensureSecretRequest() => $_ensure(11);
 }
 
 /// Something other than the person prompting the agent: Factory itself,
@@ -11364,6 +13197,7 @@ class ToolCall extends $pb.GeneratedMessage {
     $fixnum.Int64? started,
     $fixnum.Int64? ended,
     $fixnum.Int64? timeoutMs,
+    $core.String? details,
   }) {
     final result = ToolCall._();
     if (callId != null) result.callId = callId;
@@ -11374,6 +13208,7 @@ class ToolCall extends $pb.GeneratedMessage {
     if (started != null) result.started = started;
     if (ended != null) result.ended = ended;
     if (timeoutMs != null) result.timeoutMs = timeoutMs;
+    if (details != null) result.details = details;
     return result;
   }
 
@@ -11401,6 +13236,7 @@ class ToolCall extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(
         8, _omitFieldNames ? '' : 'timeoutMs', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(9, _omitFieldNames ? '' : 'details')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -11503,6 +13339,20 @@ class ToolCall extends $pb.GeneratedMessage {
   $core.bool hasTimeoutMs() => $_has(7);
   @$pb.TagNumber(8)
   void clearTimeoutMs() => $_clearField(8);
+
+  /// What the tool returned for the app to draw its view from, as JSON: ids,
+  /// names, counts, paths, links (docs/EXTENSIONS.md, "Its view in the
+  /// conversation"). Each tool has its own shape; keys are only ever added.
+  /// Empty while the call runs, and for a tool that returns none ("{}" and
+  /// null are sent as empty).
+  @$pb.TagNumber(9)
+  $core.String get details => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set details($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasDetails() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearDetails() => $_clearField(9);
 }
 
 /// The context was summarized to make room; everything above this entry is
@@ -11987,6 +13837,2496 @@ class FileEntry extends $pb.GeneratedMessage {
   $core.bool hasHidden() => $_has(5);
   @$pb.TagNumber(6)
   void clearHidden() => $_clearField(6);
+}
+
+/// Part of the Workspace: the same on every device. Metadata only.
+class VaultState extends $pb.GeneratedMessage {
+  factory VaultState({
+    $core.bool? exists,
+    $core.bool? unlocked,
+    $core.bool? lockedMode,
+    $core.Iterable<SecretInfo>? secrets,
+    $core.Iterable<SecretRequest>? requests,
+  }) {
+    final result = VaultState._();
+    if (exists != null) result.exists = exists;
+    if (unlocked != null) result.unlocked = unlocked;
+    if (lockedMode != null) result.lockedMode = lockedMode;
+    if (secrets != null) result.secrets.addAll(secrets);
+    if (requests != null) result.requests.addAll(requests);
+    return result;
+  }
+
+  VaultState._();
+
+  factory VaultState.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultState()..mergeFromBuffer(data, registry);
+  factory VaultState.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultState()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'VaultState',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: VaultState.$_createMessage)
+    ..aOB(1, _omitFieldNames ? '' : 'exists')
+    ..aOB(2, _omitFieldNames ? '' : 'unlocked')
+    ..aOB(3, _omitFieldNames ? '' : 'lockedMode')
+    ..pPM<SecretInfo>(4, _omitFieldNames ? '' : 'secrets',
+        subBuilder: SecretInfo.$_createMessage)
+    ..pPM<SecretRequest>(5, _omitFieldNames ? '' : 'requests',
+        subBuilder: SecretRequest.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultState clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultState copyWith(void Function(VaultState) updates) =>
+      super.copyWith((message) => updates(message as VaultState)) as VaultState;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use VaultState() / VaultState.new instead')
+  static VaultState create() => VaultState._();
+  static $pb.GeneratedMessage $_createMessage() => VaultState._();
+  @$core.override
+  VaultState createEmptyInstance() => VaultState._();
+  @$core.pragma('dart2js:noInline')
+  static VaultState getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<VaultState>(VaultState.$_createMessage);
+  static VaultState? _defaultInstance;
+
+  /// There's a vault: the backend makes one when it starts, so false only
+  /// when it couldn't. Without one, everything else is empty.
+  @$pb.TagNumber(1)
+  $core.bool get exists => $_getBF(0);
+  @$pb.TagNumber(1)
+  set exists($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasExists() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearExists() => $_clearField(1);
+
+  /// The backend holds the vault's key now. False only in locked mode, until
+  /// the person unlocks it after the backend started (UnlockVault); agents
+  /// can't use secrets meanwhile.
+  @$pb.TagNumber(2)
+  $core.bool get unlocked => $_getBF(1);
+  @$pb.TagNumber(2)
+  set unlocked($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUnlocked() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUnlocked() => $_clearField(2);
+
+  /// No key is kept on disk: the vault opens only with the passphrase (or the
+  /// recovery key) after each start of the backend. Off (always, unless the
+  /// person gave it a key of their own and turned it on): it opens by itself.
+  @$pb.TagNumber(3)
+  $core.bool get lockedMode => $_getBF(2);
+  @$pb.TagNumber(3)
+  set lockedMode($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLockedMode() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLockedMode() => $_clearField(3);
+
+  /// By name.
+  @$pb.TagNumber(4)
+  $pb.PbList<SecretInfo> get secrets => $_getList(3);
+
+  /// Agents' requests still waiting for the person, oldest first. Each is also
+  /// an entry in its agent's conversation.
+  @$pb.TagNumber(5)
+  $pb.PbList<SecretRequest> get requests => $_getList(4);
+}
+
+class SecretInfo extends $pb.GeneratedMessage {
+  factory SecretInfo({
+    $core.String? id,
+    $core.String? name,
+    $core.String? description,
+    $core.Iterable<SecretVariable>? variables,
+    $core.Iterable<SecretGrant>? grants,
+    $fixnum.Int64? createdMs,
+    $fixnum.Int64? updatedMs,
+    $core.int? version,
+    $core.String? lastUsedBy,
+    $fixnum.Int64? lastUsedMs,
+    $core.Iterable<$core.String>? warnings,
+    $core.String? ownerAgentId,
+  }) {
+    final result = SecretInfo._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (variables != null) result.variables.addAll(variables);
+    if (grants != null) result.grants.addAll(grants);
+    if (createdMs != null) result.createdMs = createdMs;
+    if (updatedMs != null) result.updatedMs = updatedMs;
+    if (version != null) result.version = version;
+    if (lastUsedBy != null) result.lastUsedBy = lastUsedBy;
+    if (lastUsedMs != null) result.lastUsedMs = lastUsedMs;
+    if (warnings != null) result.warnings.addAll(warnings);
+    if (ownerAgentId != null) result.ownerAgentId = ownerAgentId;
+    return result;
+  }
+
+  SecretInfo._();
+
+  factory SecretInfo.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretInfo()..mergeFromBuffer(data, registry);
+  factory SecretInfo.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretInfo()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretInfo',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretInfo.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'description')
+    ..pPM<SecretVariable>(4, _omitFieldNames ? '' : 'variables',
+        subBuilder: SecretVariable.$_createMessage)
+    ..pPM<SecretGrant>(5, _omitFieldNames ? '' : 'grants',
+        subBuilder: SecretGrant.$_createMessage)
+    ..aInt64(6, _omitFieldNames ? '' : 'createdMs')
+    ..aInt64(7, _omitFieldNames ? '' : 'updatedMs')
+    ..aI(8, _omitFieldNames ? '' : 'version', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(9, _omitFieldNames ? '' : 'lastUsedBy')
+    ..aInt64(10, _omitFieldNames ? '' : 'lastUsedMs')
+    ..pPS(11, _omitFieldNames ? '' : 'warnings')
+    ..aOS(12, _omitFieldNames ? '' : 'ownerAgentId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretInfo clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretInfo copyWith(void Function(SecretInfo) updates) =>
+      super.copyWith((message) => updates(message as SecretInfo)) as SecretInfo;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretInfo() / SecretInfo.new instead')
+  static SecretInfo create() => SecretInfo._();
+  static $pb.GeneratedMessage $_createMessage() => SecretInfo._();
+  @$core.override
+  SecretInfo createEmptyInstance() => SecretInfo._();
+  @$core.pragma('dart2js:noInline')
+  static SecretInfo getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SecretInfo>(SecretInfo.$_createMessage);
+  static SecretInfo? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// How agents name it (bash's `secrets`), such as "AWS". Unique.
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  /// What it is and what it's for; agents read it.
+  @$pb.TagNumber(3)
+  $core.String get description => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set description($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDescription() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDescription() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $pb.PbList<SecretVariable> get variables => $_getList(3);
+
+  /// The agents that may use it, by when they were granted it.
+  @$pb.TagNumber(5)
+  $pb.PbList<SecretGrant> get grants => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get createdMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set createdMs($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasCreatedMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearCreatedMs() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get updatedMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set updatedMs($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasUpdatedMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearUpdatedMs() => $_clearField(7);
+
+  /// Counts up each time its values change.
+  @$pb.TagNumber(8)
+  $core.int get version => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set version($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasVersion() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearVersion() => $_clearField(8);
+
+  /// The last agent that used it, and when; empty and 0 if none has.
+  @$pb.TagNumber(9)
+  $core.String get lastUsedBy => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set lastUsedBy($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasLastUsedBy() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearLastUsedBy() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get lastUsedMs => $_getI64(9);
+  @$pb.TagNumber(10)
+  set lastUsedMs($fixnum.Int64 value) => $_setInt64(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasLastUsedMs() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearLastUsedMs() => $_clearField(10);
+
+  /// What the person should know, such as "MY_PIN is too short to hide in
+  /// agents' output".
+  @$pb.TagNumber(11)
+  $pb.PbList<$core.String> get warnings => $_getList(10);
+
+  /// The agent that saved it (a key it made itself); empty when the person
+  /// added it.
+  @$pb.TagNumber(12)
+  $core.String get ownerAgentId => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set ownerAgentId($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasOwnerAgentId() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearOwnerAgentId() => $_clearField(12);
+}
+
+class SecretVariable extends $pb.GeneratedMessage {
+  factory SecretVariable({
+    $core.String? name,
+    $core.String? hint,
+    $core.bool? file,
+  }) {
+    final result = SecretVariable._();
+    if (name != null) result.name = name;
+    if (hint != null) result.hint = hint;
+    if (file != null) result.file = file;
+    return result;
+  }
+
+  SecretVariable._();
+
+  factory SecretVariable.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretVariable()..mergeFromBuffer(data, registry);
+  factory SecretVariable.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretVariable()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretVariable',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretVariable.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'hint')
+    ..aOB(3, _omitFieldNames ? '' : 'file')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretVariable clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretVariable copyWith(void Function(SecretVariable) updates) =>
+      super.copyWith((message) => updates(message as SecretVariable))
+          as SecretVariable;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretVariable() / SecretVariable.new instead')
+  static SecretVariable create() => SecretVariable._();
+  static $pb.GeneratedMessage $_createMessage() => SecretVariable._();
+  @$core.override
+  SecretVariable createEmptyInstance() => SecretVariable._();
+  @$core.pragma('dart2js:noInline')
+  static SecretVariable getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretVariable>(
+          SecretVariable.$_createMessage);
+  static SecretVariable? _defaultInstance;
+
+  /// The environment variable, such as AWS_SECRET_ACCESS_KEY.
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  /// The value's last 4 characters, to tell values apart ("••••3f9a"); empty
+  /// when the value is shorter than 12 characters.
+  @$pb.TagNumber(2)
+  $core.String get hint => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set hint($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasHint() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearHint() => $_clearField(2);
+
+  /// The value is written to a private file, and `name` holds its path (as
+  /// KUBECONFIG or GOOGLE_APPLICATION_CREDENTIALS expect).
+  @$pb.TagNumber(3)
+  $core.bool get file => $_getBF(2);
+  @$pb.TagNumber(3)
+  set file($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFile() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFile() => $_clearField(3);
+}
+
+class SecretGrant extends $pb.GeneratedMessage {
+  factory SecretGrant({
+    $core.String? agentId,
+    $fixnum.Int64? grantedMs,
+    $core.int? runningTasks,
+  }) {
+    final result = SecretGrant._();
+    if (agentId != null) result.agentId = agentId;
+    if (grantedMs != null) result.grantedMs = grantedMs;
+    if (runningTasks != null) result.runningTasks = runningTasks;
+    return result;
+  }
+
+  SecretGrant._();
+
+  factory SecretGrant.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretGrant()..mergeFromBuffer(data, registry);
+  factory SecretGrant.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretGrant()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretGrant',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretGrant.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aInt64(2, _omitFieldNames ? '' : 'grantedMs')
+    ..aI(3, _omitFieldNames ? '' : 'runningTasks',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretGrant clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretGrant copyWith(void Function(SecretGrant) updates) =>
+      super.copyWith((message) => updates(message as SecretGrant))
+          as SecretGrant;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretGrant() / SecretGrant.new instead')
+  static SecretGrant create() => SecretGrant._();
+  static $pb.GeneratedMessage $_createMessage() => SecretGrant._();
+  @$core.override
+  SecretGrant createEmptyInstance() => SecretGrant._();
+  @$core.pragma('dart2js:noInline')
+  static SecretGrant getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretGrant>(
+          SecretGrant.$_createMessage);
+  static SecretGrant? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get grantedMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set grantedMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasGrantedMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearGrantedMs() => $_clearField(2);
+
+  /// How many of the agent's background tasks running now got this secret:
+  /// what RevokeSecret's stop_running_tasks would stop.
+  @$pb.TagNumber(3)
+  $core.int get runningTasks => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set runningTasks($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRunningTasks() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRunningTasks() => $_clearField(3);
+}
+
+/// A variable with its value, in requests from the app and in SecretValue.
+class SecretEntry extends $pb.GeneratedMessage {
+  factory SecretEntry({
+    $core.String? variable,
+    $core.String? value,
+    $core.bool? file,
+  }) {
+    final result = SecretEntry._();
+    if (variable != null) result.variable = variable;
+    if (value != null) result.value = value;
+    if (file != null) result.file = file;
+    return result;
+  }
+
+  SecretEntry._();
+
+  factory SecretEntry.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretEntry()..mergeFromBuffer(data, registry);
+  factory SecretEntry.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretEntry()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretEntry',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretEntry.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'variable')
+    ..aOS(2, _omitFieldNames ? '' : 'value')
+    ..aOB(3, _omitFieldNames ? '' : 'file')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretEntry clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretEntry copyWith(void Function(SecretEntry) updates) =>
+      super.copyWith((message) => updates(message as SecretEntry))
+          as SecretEntry;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretEntry() / SecretEntry.new instead')
+  static SecretEntry create() => SecretEntry._();
+  static $pb.GeneratedMessage $_createMessage() => SecretEntry._();
+  @$core.override
+  SecretEntry createEmptyInstance() => SecretEntry._();
+  @$core.pragma('dart2js:noInline')
+  static SecretEntry getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretEntry>(
+          SecretEntry.$_createMessage);
+  static SecretEntry? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get variable => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set variable($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasVariable() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearVariable() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get value => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set value($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasValue() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearValue() => $_clearField(2);
+
+  /// See SecretVariable.file.
+  @$pb.TagNumber(3)
+  $core.bool get file => $_getBF(2);
+  @$pb.TagNumber(3)
+  set file($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFile() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFile() => $_clearField(3);
+}
+
+/// No longer needed: the person's requests come from their app, signed in to
+/// the backend as one of their devices, and agents can't make them. Leave it
+/// out. Only a vault in locked mode, still locked, takes its passphrase or
+/// recovery key here to open it, as UnlockVault does.
+class VaultProof extends $pb.GeneratedMessage {
+  factory VaultProof({
+    $core.String? passphrase,
+  }) {
+    final result = VaultProof._();
+    if (passphrase != null) result.passphrase = passphrase;
+    return result;
+  }
+
+  VaultProof._();
+
+  factory VaultProof.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultProof()..mergeFromBuffer(data, registry);
+  factory VaultProof.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultProof()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'VaultProof',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: VaultProof.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'passphrase')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultProof clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultProof copyWith(void Function(VaultProof) updates) =>
+      super.copyWith((message) => updates(message as VaultProof)) as VaultProof;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use VaultProof() / VaultProof.new instead')
+  static VaultProof create() => VaultProof._();
+  static $pb.GeneratedMessage $_createMessage() => VaultProof._();
+  @$core.override
+  VaultProof createEmptyInstance() => VaultProof._();
+  @$core.pragma('dart2js:noInline')
+  static VaultProof getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<VaultProof>(VaultProof.$_createMessage);
+  static VaultProof? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get passphrase => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set passphrase($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPassphrase() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPassphrase() => $_clearField(1);
+}
+
+/// Unused: the backend makes the vault by itself when it starts. Refused
+/// with ERROR_CODE_INVALID_REQUEST (there's one already).
+class CreateVault extends $pb.GeneratedMessage {
+  factory CreateVault({
+    $core.String? passphrase,
+    $core.bool? lockedMode,
+  }) {
+    final result = CreateVault._();
+    if (passphrase != null) result.passphrase = passphrase;
+    if (lockedMode != null) result.lockedMode = lockedMode;
+    return result;
+  }
+
+  CreateVault._();
+
+  factory CreateVault.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CreateVault()..mergeFromBuffer(data, registry);
+  factory CreateVault.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CreateVault()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CreateVault',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: CreateVault.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'passphrase')
+    ..aOB(2, _omitFieldNames ? '' : 'lockedMode')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CreateVault clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CreateVault copyWith(void Function(CreateVault) updates) =>
+      super.copyWith((message) => updates(message as CreateVault))
+          as CreateVault;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use CreateVault() / CreateVault.new instead')
+  static CreateVault create() => CreateVault._();
+  static $pb.GeneratedMessage $_createMessage() => CreateVault._();
+  @$core.override
+  CreateVault createEmptyInstance() => CreateVault._();
+  @$core.pragma('dart2js:noInline')
+  static CreateVault getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CreateVault>(
+          CreateVault.$_createMessage);
+  static CreateVault? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get passphrase => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set passphrase($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPassphrase() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPassphrase() => $_clearField(1);
+
+  /// See VaultState.locked_mode.
+  @$pb.TagNumber(2)
+  $core.bool get lockedMode => $_getBF(1);
+  @$pb.TagNumber(2)
+  set lockedMode($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLockedMode() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLockedMode() => $_clearField(2);
+}
+
+/// Opens a vault in locked mode after a restart. `passphrase` may be the
+/// recovery key.
+class UnlockVault extends $pb.GeneratedMessage {
+  factory UnlockVault({
+    $core.String? passphrase,
+  }) {
+    final result = UnlockVault._();
+    if (passphrase != null) result.passphrase = passphrase;
+    return result;
+  }
+
+  UnlockVault._();
+
+  factory UnlockVault.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UnlockVault()..mergeFromBuffer(data, registry);
+  factory UnlockVault.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UnlockVault()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UnlockVault',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UnlockVault.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'passphrase')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UnlockVault clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UnlockVault copyWith(void Function(UnlockVault) updates) =>
+      super.copyWith((message) => updates(message as UnlockVault))
+          as UnlockVault;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UnlockVault() / UnlockVault.new instead')
+  static UnlockVault create() => UnlockVault._();
+  static $pb.GeneratedMessage $_createMessage() => UnlockVault._();
+  @$core.override
+  UnlockVault createEmptyInstance() => UnlockVault._();
+  @$core.pragma('dart2js:noInline')
+  static UnlockVault getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UnlockVault>(
+          UnlockVault.$_createMessage);
+  static UnlockVault? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get passphrase => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set passphrase($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPassphrase() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPassphrase() => $_clearField(1);
+}
+
+/// Unused: there's no unlocked window any more. Answered with VaultSession 0.
+class LockVaultSession extends $pb.GeneratedMessage {
+  factory LockVaultSession() => LockVaultSession._();
+
+  LockVaultSession._();
+
+  factory LockVaultSession.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LockVaultSession()..mergeFromBuffer(data, registry);
+  factory LockVaultSession.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LockVaultSession()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'LockVaultSession',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: LockVaultSession.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LockVaultSession clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LockVaultSession copyWith(void Function(LockVaultSession) updates) =>
+      super.copyWith((message) => updates(message as LockVaultSession))
+          as LockVaultSession;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use LockVaultSession() / LockVaultSession.new instead')
+  static LockVaultSession create() => LockVaultSession._();
+  static $pb.GeneratedMessage $_createMessage() => LockVaultSession._();
+  @$core.override
+  LockVaultSession createEmptyInstance() => LockVaultSession._();
+  @$core.pragma('dart2js:noInline')
+  static LockVaultSession getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<LockVaultSession>(
+          LockVaultSession.$_createMessage);
+  static LockVaultSession? _defaultInstance;
+}
+
+/// Adds a secret, granted to no one. No proof needed.
+class CreateSecret extends $pb.GeneratedMessage {
+  factory CreateSecret({
+    $core.String? name,
+    $core.String? description,
+    $core.Iterable<SecretEntry>? entries,
+  }) {
+    final result = CreateSecret._();
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (entries != null) result.entries.addAll(entries);
+    return result;
+  }
+
+  CreateSecret._();
+
+  factory CreateSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CreateSecret()..mergeFromBuffer(data, registry);
+  factory CreateSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CreateSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CreateSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: CreateSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'description')
+    ..pPM<SecretEntry>(3, _omitFieldNames ? '' : 'entries',
+        subBuilder: SecretEntry.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CreateSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CreateSecret copyWith(void Function(CreateSecret) updates) =>
+      super.copyWith((message) => updates(message as CreateSecret))
+          as CreateSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use CreateSecret() / CreateSecret.new instead')
+  static CreateSecret create() => CreateSecret._();
+  static $pb.GeneratedMessage $_createMessage() => CreateSecret._();
+  @$core.override
+  CreateSecret createEmptyInstance() => CreateSecret._();
+  @$core.pragma('dart2js:noInline')
+  static CreateSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CreateSecret>(
+          CreateSecret.$_createMessage);
+  static CreateSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get description => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set description($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDescription() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDescription() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<SecretEntry> get entries => $_getList(2);
+}
+
+/// Changes a secret's name and description, and with `entries`, replaces its
+/// variables and values (a new version). Empty `entries`: values unchanged.
+/// No proof needed: agents granted it are told it changed.
+class UpdateSecret extends $pb.GeneratedMessage {
+  factory UpdateSecret({
+    $core.String? id,
+    $core.String? name,
+    $core.String? description,
+    $core.Iterable<SecretEntry>? entries,
+  }) {
+    final result = UpdateSecret._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (entries != null) result.entries.addAll(entries);
+    return result;
+  }
+
+  UpdateSecret._();
+
+  factory UpdateSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UpdateSecret()..mergeFromBuffer(data, registry);
+  factory UpdateSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UpdateSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UpdateSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UpdateSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'description')
+    ..pPM<SecretEntry>(4, _omitFieldNames ? '' : 'entries',
+        subBuilder: SecretEntry.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateSecret copyWith(void Function(UpdateSecret) updates) =>
+      super.copyWith((message) => updates(message as UpdateSecret))
+          as UpdateSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UpdateSecret() / UpdateSecret.new instead')
+  static UpdateSecret create() => UpdateSecret._();
+  static $pb.GeneratedMessage $_createMessage() => UpdateSecret._();
+  @$core.override
+  UpdateSecret createEmptyInstance() => UpdateSecret._();
+  @$core.pragma('dart2js:noInline')
+  static UpdateSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UpdateSecret>(
+          UpdateSecret.$_createMessage);
+  static UpdateSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get description => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set description($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDescription() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDescription() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $pb.PbList<SecretEntry> get entries => $_getList(3);
+}
+
+class DeleteSecret extends $pb.GeneratedMessage {
+  factory DeleteSecret({
+    $core.String? id,
+    VaultProof? proof,
+  }) {
+    final result = DeleteSecret._();
+    if (id != null) result.id = id;
+    if (proof != null) result.proof = proof;
+    return result;
+  }
+
+  DeleteSecret._();
+
+  factory DeleteSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteSecret()..mergeFromBuffer(data, registry);
+  factory DeleteSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeleteSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeleteSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOM<VaultProof>(2, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteSecret copyWith(void Function(DeleteSecret) updates) =>
+      super.copyWith((message) => updates(message as DeleteSecret))
+          as DeleteSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeleteSecret() / DeleteSecret.new instead')
+  static DeleteSecret create() => DeleteSecret._();
+  static $pb.GeneratedMessage $_createMessage() => DeleteSecret._();
+  @$core.override
+  DeleteSecret createEmptyInstance() => DeleteSecret._();
+  @$core.pragma('dart2js:noInline')
+  static DeleteSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeleteSecret>(
+          DeleteSecret.$_createMessage);
+  static DeleteSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  VaultProof get proof => $_getN(1);
+  @$pb.TagNumber(2)
+  set proof(VaultProof value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProof() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProof() => $_clearField(2);
+  @$pb.TagNumber(2)
+  VaultProof ensureProof() => $_ensure(1);
+}
+
+class GrantSecret extends $pb.GeneratedMessage {
+  factory GrantSecret({
+    $core.String? id,
+    $core.String? agentId,
+    VaultProof? proof,
+  }) {
+    final result = GrantSecret._();
+    if (id != null) result.id = id;
+    if (agentId != null) result.agentId = agentId;
+    if (proof != null) result.proof = proof;
+    return result;
+  }
+
+  GrantSecret._();
+
+  factory GrantSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GrantSecret()..mergeFromBuffer(data, registry);
+  factory GrantSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GrantSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GrantSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: GrantSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'agentId')
+    ..aOM<VaultProof>(3, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantSecret copyWith(void Function(GrantSecret) updates) =>
+      super.copyWith((message) => updates(message as GrantSecret))
+          as GrantSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use GrantSecret() / GrantSecret.new instead')
+  static GrantSecret create() => GrantSecret._();
+  static $pb.GeneratedMessage $_createMessage() => GrantSecret._();
+  @$core.override
+  GrantSecret createEmptyInstance() => GrantSecret._();
+  @$core.pragma('dart2js:noInline')
+  static GrantSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GrantSecret>(
+          GrantSecret.$_createMessage);
+  static GrantSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get agentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set agentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAgentId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  VaultProof get proof => $_getN(2);
+  @$pb.TagNumber(3)
+  set proof(VaultProof value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasProof() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearProof() => $_clearField(3);
+  @$pb.TagNumber(3)
+  VaultProof ensureProof() => $_ensure(2);
+}
+
+/// No proof needed: it only takes access away. The agent is told.
+class RevokeSecret extends $pb.GeneratedMessage {
+  factory RevokeSecret({
+    $core.String? id,
+    $core.String? agentId,
+    $core.bool? stopRunningTasks,
+  }) {
+    final result = RevokeSecret._();
+    if (id != null) result.id = id;
+    if (agentId != null) result.agentId = agentId;
+    if (stopRunningTasks != null) result.stopRunningTasks = stopRunningTasks;
+    return result;
+  }
+
+  RevokeSecret._();
+
+  factory RevokeSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RevokeSecret()..mergeFromBuffer(data, registry);
+  factory RevokeSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RevokeSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RevokeSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: RevokeSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'agentId')
+    ..aOB(3, _omitFieldNames ? '' : 'stopRunningTasks')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RevokeSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RevokeSecret copyWith(void Function(RevokeSecret) updates) =>
+      super.copyWith((message) => updates(message as RevokeSecret))
+          as RevokeSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use RevokeSecret() / RevokeSecret.new instead')
+  static RevokeSecret create() => RevokeSecret._();
+  static $pb.GeneratedMessage $_createMessage() => RevokeSecret._();
+  @$core.override
+  RevokeSecret createEmptyInstance() => RevokeSecret._();
+  @$core.pragma('dart2js:noInline')
+  static RevokeSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RevokeSecret>(
+          RevokeSecret.$_createMessage);
+  static RevokeSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get agentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set agentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAgentId() => $_clearField(2);
+
+  /// Also stops the agent's background tasks that got the secret.
+  @$pb.TagNumber(3)
+  $core.bool get stopRunningTasks => $_getBF(2);
+  @$pb.TagNumber(3)
+  set stopRunningTasks($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasStopRunningTasks() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearStopRunningTasks() => $_clearField(3);
+}
+
+class RevealSecret extends $pb.GeneratedMessage {
+  factory RevealSecret({
+    $core.String? id,
+    VaultProof? proof,
+  }) {
+    final result = RevealSecret._();
+    if (id != null) result.id = id;
+    if (proof != null) result.proof = proof;
+    return result;
+  }
+
+  RevealSecret._();
+
+  factory RevealSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RevealSecret()..mergeFromBuffer(data, registry);
+  factory RevealSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RevealSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RevealSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: RevealSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOM<VaultProof>(2, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RevealSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RevealSecret copyWith(void Function(RevealSecret) updates) =>
+      super.copyWith((message) => updates(message as RevealSecret))
+          as RevealSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use RevealSecret() / RevealSecret.new instead')
+  static RevealSecret create() => RevealSecret._();
+  static $pb.GeneratedMessage $_createMessage() => RevealSecret._();
+  @$core.override
+  RevealSecret createEmptyInstance() => RevealSecret._();
+  @$core.pragma('dart2js:noInline')
+  static RevealSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RevealSecret>(
+          RevealSecret.$_createMessage);
+  static RevealSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  VaultProof get proof => $_getN(1);
+  @$pb.TagNumber(2)
+  set proof(VaultProof value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProof() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProof() => $_clearField(2);
+  @$pb.TagNumber(2)
+  VaultProof ensureProof() => $_ensure(1);
+}
+
+/// Reads a pasted .env: answered with the variables found, without values.
+class PreviewEnv extends $pb.GeneratedMessage {
+  factory PreviewEnv({
+    $core.String? text,
+  }) {
+    final result = PreviewEnv._();
+    if (text != null) result.text = text;
+    return result;
+  }
+
+  PreviewEnv._();
+
+  factory PreviewEnv.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PreviewEnv()..mergeFromBuffer(data, registry);
+  factory PreviewEnv.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PreviewEnv()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PreviewEnv',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PreviewEnv.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PreviewEnv clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PreviewEnv copyWith(void Function(PreviewEnv) updates) =>
+      super.copyWith((message) => updates(message as PreviewEnv)) as PreviewEnv;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PreviewEnv() / PreviewEnv.new instead')
+  static PreviewEnv create() => PreviewEnv._();
+  static $pb.GeneratedMessage $_createMessage() => PreviewEnv._();
+  @$core.override
+  PreviewEnv createEmptyInstance() => PreviewEnv._();
+  @$core.pragma('dart2js:noInline')
+  static PreviewEnv getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PreviewEnv>(PreviewEnv.$_createMessage);
+  static PreviewEnv? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+}
+
+/// Adds what a pasted .env holds: one secret named `name` with every
+/// variable, or with `one_per_variable` one secret per variable, named after
+/// it. No proof needed.
+class ImportEnv extends $pb.GeneratedMessage {
+  factory ImportEnv({
+    $core.String? text,
+    $core.String? name,
+    $core.String? description,
+    $core.bool? onePerVariable,
+  }) {
+    final result = ImportEnv._();
+    if (text != null) result.text = text;
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (onePerVariable != null) result.onePerVariable = onePerVariable;
+    return result;
+  }
+
+  ImportEnv._();
+
+  factory ImportEnv.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ImportEnv()..mergeFromBuffer(data, registry);
+  factory ImportEnv.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ImportEnv()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ImportEnv',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ImportEnv.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'description')
+    ..aOB(4, _omitFieldNames ? '' : 'onePerVariable')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportEnv clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportEnv copyWith(void Function(ImportEnv) updates) =>
+      super.copyWith((message) => updates(message as ImportEnv)) as ImportEnv;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ImportEnv() / ImportEnv.new instead')
+  static ImportEnv create() => ImportEnv._();
+  static $pb.GeneratedMessage $_createMessage() => ImportEnv._();
+  @$core.override
+  ImportEnv createEmptyInstance() => ImportEnv._();
+  @$core.pragma('dart2js:noInline')
+  static ImportEnv getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ImportEnv>(ImportEnv.$_createMessage);
+  static ImportEnv? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get description => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set description($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDescription() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDescription() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get onePerVariable => $_getBF(3);
+  @$pb.TagNumber(4)
+  set onePerVariable($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasOnePerVariable() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearOnePerVariable() => $_clearField(4);
+}
+
+/// Grants (approve) or dismisses an agent's secret request. For a new secret, `entries` holds its values, and the secret is
+/// made with the request's name and description and granted to the agent.
+class DecideSecretRequest extends $pb.GeneratedMessage {
+  factory DecideSecretRequest({
+    $core.String? agentId,
+    $core.String? requestId,
+    $core.bool? approve,
+    VaultProof? proof,
+    $core.Iterable<SecretEntry>? entries,
+    $core.String? comment,
+  }) {
+    final result = DecideSecretRequest._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestId != null) result.requestId = requestId;
+    if (approve != null) result.approve = approve;
+    if (proof != null) result.proof = proof;
+    if (entries != null) result.entries.addAll(entries);
+    if (comment != null) result.comment = comment;
+    return result;
+  }
+
+  DecideSecretRequest._();
+
+  factory DecideSecretRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideSecretRequest()..mergeFromBuffer(data, registry);
+  factory DecideSecretRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideSecretRequest()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DecideSecretRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DecideSecretRequest.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOS(2, _omitFieldNames ? '' : 'requestId')
+    ..aOB(3, _omitFieldNames ? '' : 'approve')
+    ..aOM<VaultProof>(4, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..pPM<SecretEntry>(5, _omitFieldNames ? '' : 'entries',
+        subBuilder: SecretEntry.$_createMessage)
+    ..aOS(6, _omitFieldNames ? '' : 'comment')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideSecretRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideSecretRequest copyWith(void Function(DecideSecretRequest) updates) =>
+      super.copyWith((message) => updates(message as DecideSecretRequest))
+          as DecideSecretRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use DecideSecretRequest() / DecideSecretRequest.new instead')
+  static DecideSecretRequest create() => DecideSecretRequest._();
+  static $pb.GeneratedMessage $_createMessage() => DecideSecretRequest._();
+  @$core.override
+  DecideSecretRequest createEmptyInstance() => DecideSecretRequest._();
+  @$core.pragma('dart2js:noInline')
+  static DecideSecretRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DecideSecretRequest>(
+          DecideSecretRequest.$_createMessage);
+  static DecideSecretRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get requestId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set requestId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.bool get approve => $_getBF(2);
+  @$pb.TagNumber(3)
+  set approve($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasApprove() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearApprove() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  VaultProof get proof => $_getN(3);
+  @$pb.TagNumber(4)
+  set proof(VaultProof value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasProof() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearProof() => $_clearField(4);
+  @$pb.TagNumber(4)
+  VaultProof ensureProof() => $_ensure(3);
+
+  @$pb.TagNumber(5)
+  $pb.PbList<SecretEntry> get entries => $_getList(4);
+
+  /// Told to the agent; may be empty.
+  @$pb.TagNumber(6)
+  $core.String get comment => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set comment($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasComment() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearComment() => $_clearField(6);
+}
+
+/// Who used a secret and when, newest first; `id` empty for every secret.
+class ListSecretUses extends $pb.GeneratedMessage {
+  factory ListSecretUses({
+    $core.String? id,
+    $core.int? limit,
+  }) {
+    final result = ListSecretUses._();
+    if (id != null) result.id = id;
+    if (limit != null) result.limit = limit;
+    return result;
+  }
+
+  ListSecretUses._();
+
+  factory ListSecretUses.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListSecretUses()..mergeFromBuffer(data, registry);
+  factory ListSecretUses.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListSecretUses()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListSecretUses',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ListSecretUses.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aI(2, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListSecretUses clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListSecretUses copyWith(void Function(ListSecretUses) updates) =>
+      super.copyWith((message) => updates(message as ListSecretUses))
+          as ListSecretUses;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ListSecretUses() / ListSecretUses.new instead')
+  static ListSecretUses create() => ListSecretUses._();
+  static $pb.GeneratedMessage $_createMessage() => ListSecretUses._();
+  @$core.override
+  ListSecretUses createEmptyInstance() => ListSecretUses._();
+  @$core.pragma('dart2js:noInline')
+  static ListSecretUses getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ListSecretUses>(
+          ListSecretUses.$_createMessage);
+  static ListSecretUses? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// 0 for 100.
+  @$pb.TagNumber(2)
+  $core.int get limit => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set limit($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLimit() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLimit() => $_clearField(2);
+}
+
+/// For a vault with a key of the person's own: `old_passphrase` is the
+/// passphrase or the recovery key. The new one has 8 characters at least.
+/// Answered with VaultSession.
+class ChangePassphrase extends $pb.GeneratedMessage {
+  factory ChangePassphrase({
+    $core.String? oldPassphrase,
+    $core.String? newPassphrase,
+  }) {
+    final result = ChangePassphrase._();
+    if (oldPassphrase != null) result.oldPassphrase = oldPassphrase;
+    if (newPassphrase != null) result.newPassphrase = newPassphrase;
+    return result;
+  }
+
+  ChangePassphrase._();
+
+  factory ChangePassphrase.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ChangePassphrase()..mergeFromBuffer(data, registry);
+  factory ChangePassphrase.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ChangePassphrase()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChangePassphrase',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ChangePassphrase.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'oldPassphrase')
+    ..aOS(2, _omitFieldNames ? '' : 'newPassphrase')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChangePassphrase clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChangePassphrase copyWith(void Function(ChangePassphrase) updates) =>
+      super.copyWith((message) => updates(message as ChangePassphrase))
+          as ChangePassphrase;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ChangePassphrase() / ChangePassphrase.new instead')
+  static ChangePassphrase create() => ChangePassphrase._();
+  static $pb.GeneratedMessage $_createMessage() => ChangePassphrase._();
+  @$core.override
+  ChangePassphrase createEmptyInstance() => ChangePassphrase._();
+  @$core.pragma('dart2js:noInline')
+  static ChangePassphrase getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ChangePassphrase>(
+          ChangePassphrase.$_createMessage);
+  static ChangePassphrase? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get oldPassphrase => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set oldPassphrase($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasOldPassphrase() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearOldPassphrase() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get newPassphrase => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set newPassphrase($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasNewPassphrase() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearNewPassphrase() => $_clearField(2);
+}
+
+/// A recovery key, a key of the person's own that opens the vault too; it
+/// replaces the last one, which stops working. Answered with RecoveryKey.
+class NewRecoveryKey extends $pb.GeneratedMessage {
+  factory NewRecoveryKey({
+    VaultProof? proof,
+  }) {
+    final result = NewRecoveryKey._();
+    if (proof != null) result.proof = proof;
+    return result;
+  }
+
+  NewRecoveryKey._();
+
+  factory NewRecoveryKey.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      NewRecoveryKey()..mergeFromBuffer(data, registry);
+  factory NewRecoveryKey.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      NewRecoveryKey()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'NewRecoveryKey',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: NewRecoveryKey.$_createMessage)
+    ..aOM<VaultProof>(1, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  NewRecoveryKey clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  NewRecoveryKey copyWith(void Function(NewRecoveryKey) updates) =>
+      super.copyWith((message) => updates(message as NewRecoveryKey))
+          as NewRecoveryKey;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use NewRecoveryKey() / NewRecoveryKey.new instead')
+  static NewRecoveryKey create() => NewRecoveryKey._();
+  static $pb.GeneratedMessage $_createMessage() => NewRecoveryKey._();
+  @$core.override
+  NewRecoveryKey createEmptyInstance() => NewRecoveryKey._();
+  @$core.pragma('dart2js:noInline')
+  static NewRecoveryKey getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<NewRecoveryKey>(
+          NewRecoveryKey.$_createMessage);
+  static NewRecoveryKey? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  VaultProof get proof => $_getN(0);
+  @$pb.TagNumber(1)
+  set proof(VaultProof value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProof() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProof() => $_clearField(1);
+  @$pb.TagNumber(1)
+  VaultProof ensureProof() => $_ensure(0);
+}
+
+/// Turns locked mode on (the key kept on disk is deleted) or off (it's kept
+/// again). On needs a key of the person's own (a passphrase or recovery
+/// key) first. Answered with VaultSession.
+class SetVaultLockedMode extends $pb.GeneratedMessage {
+  factory SetVaultLockedMode({
+    $core.bool? lockedMode,
+    VaultProof? proof,
+  }) {
+    final result = SetVaultLockedMode._();
+    if (lockedMode != null) result.lockedMode = lockedMode;
+    if (proof != null) result.proof = proof;
+    return result;
+  }
+
+  SetVaultLockedMode._();
+
+  factory SetVaultLockedMode.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetVaultLockedMode()..mergeFromBuffer(data, registry);
+  factory SetVaultLockedMode.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetVaultLockedMode()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetVaultLockedMode',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetVaultLockedMode.$_createMessage)
+    ..aOB(1, _omitFieldNames ? '' : 'lockedMode')
+    ..aOM<VaultProof>(2, _omitFieldNames ? '' : 'proof',
+        subBuilder: VaultProof.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetVaultLockedMode clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetVaultLockedMode copyWith(void Function(SetVaultLockedMode) updates) =>
+      super.copyWith((message) => updates(message as SetVaultLockedMode))
+          as SetVaultLockedMode;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetVaultLockedMode() / SetVaultLockedMode.new instead')
+  static SetVaultLockedMode create() => SetVaultLockedMode._();
+  static $pb.GeneratedMessage $_createMessage() => SetVaultLockedMode._();
+  @$core.override
+  SetVaultLockedMode createEmptyInstance() => SetVaultLockedMode._();
+  @$core.pragma('dart2js:noInline')
+  static SetVaultLockedMode getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetVaultLockedMode>(
+          SetVaultLockedMode.$_createMessage);
+  static SetVaultLockedMode? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.bool get lockedMode => $_getBF(0);
+  @$pb.TagNumber(1)
+  set lockedMode($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasLockedMode() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearLockedMode() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  VaultProof get proof => $_getN(1);
+  @$pb.TagNumber(2)
+  set proof(VaultProof value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProof() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProof() => $_clearField(2);
+  @$pb.TagNumber(2)
+  VaultProof ensureProof() => $_ensure(1);
+}
+
+/// Unused: always 0, and never sent unasked any more. Requests need no
+/// VaultProof, so there's no unlocked window to show.
+class VaultSession extends $pb.GeneratedMessage {
+  factory VaultSession({
+    $fixnum.Int64? unlockedUntilMs,
+  }) {
+    final result = VaultSession._();
+    if (unlockedUntilMs != null) result.unlockedUntilMs = unlockedUntilMs;
+    return result;
+  }
+
+  VaultSession._();
+
+  factory VaultSession.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultSession()..mergeFromBuffer(data, registry);
+  factory VaultSession.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      VaultSession()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'VaultSession',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: VaultSession.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'unlockedUntilMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultSession clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  VaultSession copyWith(void Function(VaultSession) updates) =>
+      super.copyWith((message) => updates(message as VaultSession))
+          as VaultSession;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use VaultSession() / VaultSession.new instead')
+  static VaultSession create() => VaultSession._();
+  static $pb.GeneratedMessage $_createMessage() => VaultSession._();
+  @$core.override
+  VaultSession createEmptyInstance() => VaultSession._();
+  @$core.pragma('dart2js:noInline')
+  static VaultSession getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<VaultSession>(
+          VaultSession.$_createMessage);
+  static VaultSession? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get unlockedUntilMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set unlockedUntilMs($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasUnlockedUntilMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUnlockedUntilMs() => $_clearField(1);
+}
+
+class SecretValue extends $pb.GeneratedMessage {
+  factory SecretValue({
+    $core.String? id,
+    $core.Iterable<SecretEntry>? entries,
+    $fixnum.Int64? unlockedUntilMs,
+  }) {
+    final result = SecretValue._();
+    if (id != null) result.id = id;
+    if (entries != null) result.entries.addAll(entries);
+    if (unlockedUntilMs != null) result.unlockedUntilMs = unlockedUntilMs;
+    return result;
+  }
+
+  SecretValue._();
+
+  factory SecretValue.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretValue()..mergeFromBuffer(data, registry);
+  factory SecretValue.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretValue()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretValue',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretValue.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..pPM<SecretEntry>(2, _omitFieldNames ? '' : 'entries',
+        subBuilder: SecretEntry.$_createMessage)
+    ..aInt64(3, _omitFieldNames ? '' : 'unlockedUntilMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretValue clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretValue copyWith(void Function(SecretValue) updates) =>
+      super.copyWith((message) => updates(message as SecretValue))
+          as SecretValue;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretValue() / SecretValue.new instead')
+  static SecretValue create() => SecretValue._();
+  static $pb.GeneratedMessage $_createMessage() => SecretValue._();
+  @$core.override
+  SecretValue createEmptyInstance() => SecretValue._();
+  @$core.pragma('dart2js:noInline')
+  static SecretValue getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretValue>(
+          SecretValue.$_createMessage);
+  static SecretValue? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<SecretEntry> get entries => $_getList(1);
+
+  /// Unused: always 0.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get unlockedUntilMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set unlockedUntilMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasUnlockedUntilMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearUnlockedUntilMs() => $_clearField(3);
+}
+
+class EnvPreview extends $pb.GeneratedMessage {
+  factory EnvPreview({
+    $core.Iterable<SecretVariable>? variables,
+    $core.Iterable<$core.String>? warnings,
+  }) {
+    final result = EnvPreview._();
+    if (variables != null) result.variables.addAll(variables);
+    if (warnings != null) result.warnings.addAll(warnings);
+    return result;
+  }
+
+  EnvPreview._();
+
+  factory EnvPreview.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      EnvPreview()..mergeFromBuffer(data, registry);
+  factory EnvPreview.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      EnvPreview()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'EnvPreview',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: EnvPreview.$_createMessage)
+    ..pPM<SecretVariable>(1, _omitFieldNames ? '' : 'variables',
+        subBuilder: SecretVariable.$_createMessage)
+    ..pPS(2, _omitFieldNames ? '' : 'warnings')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  EnvPreview clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  EnvPreview copyWith(void Function(EnvPreview) updates) =>
+      super.copyWith((message) => updates(message as EnvPreview)) as EnvPreview;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use EnvPreview() / EnvPreview.new instead')
+  static EnvPreview create() => EnvPreview._();
+  static $pb.GeneratedMessage $_createMessage() => EnvPreview._();
+  @$core.override
+  EnvPreview createEmptyInstance() => EnvPreview._();
+  @$core.pragma('dart2js:noInline')
+  static EnvPreview getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<EnvPreview>(EnvPreview.$_createMessage);
+  static EnvPreview? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<SecretVariable> get variables => $_getList(0);
+
+  /// Duplicates, empty values, values too short to hide in agents' output,
+  /// lines that couldn't be read (by line number, never with their text).
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get warnings => $_getList(1);
+}
+
+/// Shown once: the person keeps it, to open the vault when the passphrase is
+/// forgotten or the key on disk is lost.
+class RecoveryKey extends $pb.GeneratedMessage {
+  factory RecoveryKey({
+    $core.String? key,
+    $fixnum.Int64? unlockedUntilMs,
+  }) {
+    final result = RecoveryKey._();
+    if (key != null) result.key = key;
+    if (unlockedUntilMs != null) result.unlockedUntilMs = unlockedUntilMs;
+    return result;
+  }
+
+  RecoveryKey._();
+
+  factory RecoveryKey.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RecoveryKey()..mergeFromBuffer(data, registry);
+  factory RecoveryKey.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RecoveryKey()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RecoveryKey',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: RecoveryKey.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'key')
+    ..aInt64(2, _omitFieldNames ? '' : 'unlockedUntilMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecoveryKey clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecoveryKey copyWith(void Function(RecoveryKey) updates) =>
+      super.copyWith((message) => updates(message as RecoveryKey))
+          as RecoveryKey;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use RecoveryKey() / RecoveryKey.new instead')
+  static RecoveryKey create() => RecoveryKey._();
+  static $pb.GeneratedMessage $_createMessage() => RecoveryKey._();
+  @$core.override
+  RecoveryKey createEmptyInstance() => RecoveryKey._();
+  @$core.pragma('dart2js:noInline')
+  static RecoveryKey getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RecoveryKey>(
+          RecoveryKey.$_createMessage);
+  static RecoveryKey? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get key => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set key($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKey() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKey() => $_clearField(1);
+
+  /// Unused: always 0.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get unlockedUntilMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set unlockedUntilMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUnlockedUntilMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUnlockedUntilMs() => $_clearField(2);
+}
+
+class SecretUses extends $pb.GeneratedMessage {
+  factory SecretUses({
+    $core.Iterable<SecretUse>? uses,
+  }) {
+    final result = SecretUses._();
+    if (uses != null) result.uses.addAll(uses);
+    return result;
+  }
+
+  SecretUses._();
+
+  factory SecretUses.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretUses()..mergeFromBuffer(data, registry);
+  factory SecretUses.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretUses()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretUses',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretUses.$_createMessage)
+    ..pPM<SecretUse>(1, _omitFieldNames ? '' : 'uses',
+        subBuilder: SecretUse.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretUses clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretUses copyWith(void Function(SecretUses) updates) =>
+      super.copyWith((message) => updates(message as SecretUses)) as SecretUses;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretUses() / SecretUses.new instead')
+  static SecretUses create() => SecretUses._();
+  static $pb.GeneratedMessage $_createMessage() => SecretUses._();
+  @$core.override
+  SecretUses createEmptyInstance() => SecretUses._();
+  @$core.pragma('dart2js:noInline')
+  static SecretUses getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SecretUses>(SecretUses.$_createMessage);
+  static SecretUses? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<SecretUse> get uses => $_getList(0);
+}
+
+class SecretUse extends $pb.GeneratedMessage {
+  factory SecretUse({
+    $core.String? secretId,
+    $core.String? secretName,
+    $fixnum.Int64? timeMs,
+    $core.String? kind,
+    $core.String? agentId,
+    $core.String? taskId,
+    $core.String? detail,
+  }) {
+    final result = SecretUse._();
+    if (secretId != null) result.secretId = secretId;
+    if (secretName != null) result.secretName = secretName;
+    if (timeMs != null) result.timeMs = timeMs;
+    if (kind != null) result.kind = kind;
+    if (agentId != null) result.agentId = agentId;
+    if (taskId != null) result.taskId = taskId;
+    if (detail != null) result.detail = detail;
+    return result;
+  }
+
+  SecretUse._();
+
+  factory SecretUse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretUse()..mergeFromBuffer(data, registry);
+  factory SecretUse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretUse()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretUse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretUse.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'secretId')
+    ..aOS(2, _omitFieldNames ? '' : 'secretName')
+    ..aInt64(3, _omitFieldNames ? '' : 'timeMs')
+    ..aOS(4, _omitFieldNames ? '' : 'kind')
+    ..aOS(5, _omitFieldNames ? '' : 'agentId')
+    ..aOS(6, _omitFieldNames ? '' : 'taskId')
+    ..aOS(7, _omitFieldNames ? '' : 'detail')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretUse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretUse copyWith(void Function(SecretUse) updates) =>
+      super.copyWith((message) => updates(message as SecretUse)) as SecretUse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretUse() / SecretUse.new instead')
+  static SecretUse create() => SecretUse._();
+  static $pb.GeneratedMessage $_createMessage() => SecretUse._();
+  @$core.override
+  SecretUse createEmptyInstance() => SecretUse._();
+  @$core.pragma('dart2js:noInline')
+  static SecretUse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SecretUse>(SecretUse.$_createMessage);
+  static SecretUse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get secretId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set secretId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSecretId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSecretId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get secretName => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set secretName($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSecretName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSecretName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get timeMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set timeMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasTimeMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTimeMs() => $_clearField(3);
+
+  /// "use" (an agent's command got it), "reveal" (the person saw it in the
+  /// app), "grant", "revoke".
+  @$pb.TagNumber(4)
+  $core.String get kind => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set kind($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasKind() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearKind() => $_clearField(4);
+
+  /// The agent; for reveal, grant and revoke, the one concerned, if any.
+  @$pb.TagNumber(5)
+  $core.String get agentId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set agentId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAgentId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAgentId() => $_clearField(5);
+
+  /// The background task that got it; empty for a command run in the
+  /// foreground.
+  @$pb.TagNumber(6)
+  $core.String get taskId => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set taskId($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasTaskId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearTaskId() => $_clearField(6);
+
+  /// The command's first line (uses), the device (reveals), or for grants
+  /// and revokes the admin agent's id that made them (empty: the person).
+  @$pb.TagNumber(7)
+  $core.String get detail => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set detail($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasDetail() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearDetail() => $_clearField(7);
+}
+
+/// An agent's request (secret_request), shown in its conversation after the
+/// call, for the person to grant or dismiss with DecideSecretRequest. The
+/// entry is sent again when it's decided.
+class SecretRequest extends $pb.GeneratedMessage {
+  factory SecretRequest({
+    $core.String? id,
+    $core.String? agentId,
+    $core.String? secretId,
+    $core.String? secretName,
+    NewSecret? newSecret,
+    $core.String? reason,
+    SecretRequestState? state,
+    $fixnum.Int64? decidedMs,
+    $core.String? comment,
+  }) {
+    final result = SecretRequest._();
+    if (id != null) result.id = id;
+    if (agentId != null) result.agentId = agentId;
+    if (secretId != null) result.secretId = secretId;
+    if (secretName != null) result.secretName = secretName;
+    if (newSecret != null) result.newSecret = newSecret;
+    if (reason != null) result.reason = reason;
+    if (state != null) result.state = state;
+    if (decidedMs != null) result.decidedMs = decidedMs;
+    if (comment != null) result.comment = comment;
+    return result;
+  }
+
+  SecretRequest._();
+
+  factory SecretRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretRequest()..mergeFromBuffer(data, registry);
+  factory SecretRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretRequest()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretRequest.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'agentId')
+    ..aOS(3, _omitFieldNames ? '' : 'secretId')
+    ..aOS(4, _omitFieldNames ? '' : 'secretName')
+    ..aOM<NewSecret>(5, _omitFieldNames ? '' : 'newSecret',
+        subBuilder: NewSecret.$_createMessage)
+    ..aOS(6, _omitFieldNames ? '' : 'reason')
+    ..aE<SecretRequestState>(7, _omitFieldNames ? '' : 'state',
+        enumValues: SecretRequestState.values)
+    ..aInt64(8, _omitFieldNames ? '' : 'decidedMs')
+    ..aOS(9, _omitFieldNames ? '' : 'comment')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretRequest copyWith(void Function(SecretRequest) updates) =>
+      super.copyWith((message) => updates(message as SecretRequest))
+          as SecretRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretRequest() / SecretRequest.new instead')
+  static SecretRequest create() => SecretRequest._();
+  static $pb.GeneratedMessage $_createMessage() => SecretRequest._();
+  @$core.override
+  SecretRequest createEmptyInstance() => SecretRequest._();
+  @$core.pragma('dart2js:noInline')
+  static SecretRequest getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretRequest>(
+          SecretRequest.$_createMessage);
+  static SecretRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// The agent that asked.
+  @$pb.TagNumber(2)
+  $core.String get agentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set agentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAgentId() => $_clearField(2);
+
+  /// An existing secret it asks for; empty when it asks for a new one.
+  @$pb.TagNumber(3)
+  $core.String get secretId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set secretId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSecretId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSecretId() => $_clearField(3);
+
+  /// That secret's name, as the agent asked for it.
+  @$pb.TagNumber(4)
+  $core.String get secretName => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set secretName($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSecretName() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSecretName() => $_clearField(4);
+
+  /// A new secret it asks for: name, description and variables (no values;
+  /// the person fills them in). Unset for an existing one.
+  @$pb.TagNumber(5)
+  NewSecret get newSecret => $_getN(4);
+  @$pb.TagNumber(5)
+  set newSecret(NewSecret value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasNewSecret() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearNewSecret() => $_clearField(5);
+  @$pb.TagNumber(5)
+  NewSecret ensureNewSecret() => $_ensure(4);
+
+  /// Why it needs it, in the agent's words.
+  @$pb.TagNumber(6)
+  $core.String get reason => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set reason($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasReason() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearReason() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  SecretRequestState get state => $_getN(6);
+  @$pb.TagNumber(7)
+  set state(SecretRequestState value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasState() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearState() => $_clearField(7);
+
+  /// When it was decided, in ms since 1970; 0 while pending.
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get decidedMs => $_getI64(7);
+  @$pb.TagNumber(8)
+  set decidedMs($fixnum.Int64 value) => $_setInt64(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasDecidedMs() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearDecidedMs() => $_clearField(8);
+
+  /// The person's comment; may be empty.
+  @$pb.TagNumber(9)
+  $core.String get comment => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set comment($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasComment() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearComment() => $_clearField(9);
+}
+
+class NewSecret extends $pb.GeneratedMessage {
+  factory NewSecret({
+    $core.String? name,
+    $core.String? description,
+    $core.Iterable<SecretVariable>? variables,
+  }) {
+    final result = NewSecret._();
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (variables != null) result.variables.addAll(variables);
+    return result;
+  }
+
+  NewSecret._();
+
+  factory NewSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      NewSecret()..mergeFromBuffer(data, registry);
+  factory NewSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      NewSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'NewSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: NewSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'description')
+    ..pPM<SecretVariable>(3, _omitFieldNames ? '' : 'variables',
+        subBuilder: SecretVariable.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  NewSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  NewSecret copyWith(void Function(NewSecret) updates) =>
+      super.copyWith((message) => updates(message as NewSecret)) as NewSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use NewSecret() / NewSecret.new instead')
+  static NewSecret create() => NewSecret._();
+  static $pb.GeneratedMessage $_createMessage() => NewSecret._();
+  @$core.override
+  NewSecret createEmptyInstance() => NewSecret._();
+  @$core.pragma('dart2js:noInline')
+  static NewSecret getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<NewSecret>(NewSecret.$_createMessage);
+  static NewSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get description => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set description($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDescription() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDescription() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<SecretVariable> get variables => $_getList(2);
 }
 
 const $core.bool _omitFieldNames =

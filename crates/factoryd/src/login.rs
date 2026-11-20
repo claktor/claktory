@@ -32,8 +32,10 @@ struct Interaction {
 }
 
 impl Factory {
-    /// Starts signing in, replacing any sign-in in progress.
-    pub async fn start_login(self: &Arc<Self>, provider_id: &str, method_id: &str) -> Result<(), RequestError> {
+    /// Starts signing in, replacing any sign-in in progress: to another
+    /// account of the provider with `add_account`, else in place of its
+    /// first (unless it's one already signed in).
+    pub async fn start_login(self: &Arc<Self>, provider_id: &str, method_id: &str, add_account: bool) -> Result<(), RequestError> {
         let providers = self.lock().providers.clone();
         let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) else {
             return Err(RequestError::UnknownProvider(provider_id.to_owned()));
@@ -59,7 +61,7 @@ impl Factory {
         let factory = self.clone();
         let (provider_id, method_id) = (provider_id.to_owned(), method_id.to_owned());
         tokio::spawn(async move {
-            let outcome = factory.models.login(&provider_id, &method_id, &interaction).await;
+            let outcome = factory.models.login(&provider_id, &method_id, &interaction, add_account).await;
             factory.finish_login(generation, outcome).await;
         });
         Ok(())
@@ -83,12 +85,48 @@ impl Factory {
         }
     }
 
-    pub async fn sign_out(&self, provider_id: &str) -> Result<(), RequestError> {
-        if !self.lock().providers.iter().any(|provider| provider.id == provider_id) {
-            return Err(RequestError::UnknownProvider(provider_id.to_owned()));
-        }
-        self.models.logout(provider_id).await?;
+    /// Signs out of one of a provider's accounts; an empty `account_id`, all.
+    pub async fn sign_out(&self, provider_id: &str, account_id: &str) -> Result<(), RequestError> {
+        self.known_account(provider_id, account_id)?;
+        self.models.logout(provider_id, account_id).await?;
         self.refresh_models().await;
+        Ok(())
+    }
+
+    /// Moves one of a provider's accounts to `position` (0 is first) in the
+    /// order requests try them.
+    pub async fn move_account(&self, provider_id: &str, account_id: &str, position: u32) -> Result<(), RequestError> {
+        self.known_account(provider_id, account_id)?;
+        if account_id.is_empty() {
+            return Err(RequestError::Empty("account_id"));
+        }
+        self.models.move_account(provider_id, account_id, usize::try_from(position).unwrap_or(usize::MAX)).await?;
+        self.refresh_models().await;
+        Ok(())
+    }
+
+    /// Renames one of a provider's accounts and, with `retry`, tries a key
+    /// out of credit again.
+    pub async fn update_account(&self, provider_id: &str, account_id: &str, label: Option<&str>, retry: bool) -> Result<(), RequestError> {
+        self.known_account(provider_id, account_id)?;
+        if account_id.is_empty() {
+            return Err(RequestError::Empty("account_id"));
+        }
+        self.models.update_account(provider_id, account_id, label, retry).await?;
+        self.refresh_models().await;
+        Ok(())
+    }
+
+    /// Fails unless the provider exists and, when `account_id` isn't empty,
+    /// has that account.
+    fn known_account(&self, provider_id: &str, account_id: &str) -> Result<(), RequestError> {
+        let inner = self.lock();
+        let Some(provider) = inner.providers.iter().find(|provider| provider.id == provider_id) else {
+            return Err(RequestError::UnknownProvider(provider_id.to_owned()));
+        };
+        if !account_id.is_empty() && !provider.accounts.iter().any(|account| account.id == account_id) {
+            return Err(RequestError::UnknownAccount { provider: provider.name.clone(), account: account_id.to_owned() });
+        }
         Ok(())
     }
 

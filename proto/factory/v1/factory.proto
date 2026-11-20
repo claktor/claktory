@@ -65,6 +65,29 @@ message ClientMessage {
     FetchApp fetch_app = 36;
     ListFolders list_folders = 37;
     DecideProposal decide_proposal = 38;
+    MoveAccount move_account = 39;
+    ClearBuildCache clear_build_cache = 40;
+    ReadFile read_file = 41;
+    SetLayout set_layout = 42;
+    UpdateAccount update_account = 43;
+    // The vault (Settings → Secrets). The backend makes it by itself, and
+    // the person's requests need no proof: see VaultProof.
+    CreateVault create_vault = 44;
+    UnlockVault unlock_vault = 45;
+    LockVaultSession lock_vault_session = 46;
+    CreateSecret create_secret = 47;
+    UpdateSecret update_secret = 48;
+    DeleteSecret delete_secret = 49;
+    GrantSecret grant_secret = 50;
+    RevokeSecret revoke_secret = 51;
+    RevealSecret reveal_secret = 52;
+    PreviewEnv preview_env = 53;
+    ImportEnv import_env = 54;
+    DecideSecretRequest decide_secret_request = 55;
+    ListSecretUses list_secret_uses = 56;
+    ChangePassphrase change_passphrase = 57;
+    NewRecoveryKey new_recovery_key = 58;
+    SetVaultLockedMode set_vault_locked_mode = 59;
   }
 }
 
@@ -88,6 +111,20 @@ message ServerMessage {
     AppChunk app_chunk = 14;
     // The answer to ListFolders, to the asker only.
     FolderList folder_list = 15;
+    // The answer to ReadFile, to the asker only.
+    FileContent file_content = 16;
+    // The answer, to the asker only, to UnlockVault, ChangePassphrase,
+    // DeleteSecret, GrantSecret, SetVaultLockedMode and LockVaultSession;
+    // always 0 now (see VaultSession).
+    VaultSession vault_session = 20;
+    // The answer to RevealSecret, to the asker only.
+    SecretValue secret_value = 21;
+    // The answer to PreviewEnv, to the asker only.
+    EnvPreview env_preview = 22;
+    // The answer to CreateVault and NewRecoveryKey, to the asker only.
+    RecoveryKey recovery_key = 23;
+    // The answer to ListSecretUses, to the asker only.
+    SecretUses secret_uses = 24;
   }
 }
 
@@ -96,17 +133,19 @@ message ServerMessage {
 message Hello {
   uint32 protocol_version = 1;
   string client_version = 2;
-  // The device's token from its pairing code (`factory://…?t=<token>`), on
-  // Factory's remote listener; on the local one it isn't needed.
+  // The device's token from its pairing code (`factory://…?t=<token>`),
+  // through the private tunnel (iroh); on the loopback port (7420) it isn't
+  // needed.
   string token = 3;
 }
 
 message Welcome {
   uint32 protocol_version = 1;
   string server_version = 2;
-  // On the remote listener, the paired device this connection is (see
-  // RemoteAccess.devices), so the app can mark it "This device"; empty on
-  // the local listener.
+  // Through the tunnel, the paired device this connection is (see
+  // RemoteAccess.devices), so the app can mark it "This device"; "local" for
+  // this machine's own app (its code from <data folder>/remote/local-pairing);
+  // empty on the loopback port.
   string device_id = 3;
 }
 
@@ -115,16 +154,20 @@ message Welcome {
 message CreatePairing {
   // What the device is called, e.g. "Laptop".
   string name = 1;
-  // The address the device will reach this machine by: one of
-  // RemoteAccess.addresses, or any host name; empty for the first of them.
+  // No longer used: devices reach this machine through the tunnel, by its
+  // endpoint id (RemoteAccess.endpoint_id), wherever they are.
   string host = 2;
 }
 
 // A new device's pairing code. Sent only to the client that asked, once:
 // Factory keeps only a hash of the key in it.
 message PairingCode {
-  // factory://<host>:<port>?t=<token>&fp=<certificate SHA-256>&name=<this
-  // machine>: what the device pastes or scans to connect.
+  // factory://?t=<token>&name=<this machine>&e=<endpoint id>[&r=<relay
+  // URL>…]: what the device pastes or scans to connect, through the tunnel.
+  // e= is the backend's iroh endpoint id (what iroh's EndpointId parses);
+  // each r= a relay it can be reached through (percent-encoded). Until it's
+  // first used it expires (PairedDevice.code_expires_ms); the first device
+  // to connect with it binds its key to it, and no other key can use it.
   string code = 1;
   // The new device's id in RemoteAccess.devices.
   string device_id = 2;
@@ -136,37 +179,65 @@ message UnpairDevice {
   string device_id = 1;
 }
 
-// Turns remote access (Factory's listener for devices on other machines) on
-// or off, in config.json's `remote`. Answered with Ack.
+// Turns remote access (devices on other machines reaching this Factory
+// through the private tunnel) on or off, in config.json's `remote`. Answered
+// with Ack.
 message SetRemoteAccess {
   bool on = 1;
-  // The port; 0 keeps it, or 7443 when it was never set.
+  // No longer used (there's no listening port); kept in config.json.
   uint32 port = 2;
-  // An IP address to listen on only, such as the Tailscale one; empty for
-  // every address; unset keeps it.
+  // No longer used; kept in config.json.
   optional string listen = 3;
+  // The relays to use, as URLs (config.json `remote.relays`), when
+  // set_relays; empty for the default ones (RemoteAccess.relays).
+  repeated string relays = 4;
+  bool set_relays = 5;
 }
 
-// Remote access: devices on other machines connecting to this Factory.
+// Remote access: devices on other machines connecting to this Factory,
+// through the private tunnel (iroh): end-to-end encrypted, by the backend's
+// key, directly or through a relay that can't read it. Factory listens on no
+// port for them.
 message RemoteAccess {
-  // config.json has `remote`.
+  // config.json has `remote`: paired devices may connect. Off, only this
+  // machine's app can (the tunnel then binds to 127.0.0.1 only).
   bool on = 1;
+  // No longer used (config.json's `remote.port` is kept, unused).
   uint32 port = 2;
-  // The IP address it listens on only; empty for every address.
+  // No longer used.
   string listen = 3;
-  // It's on but not listening, and why (e.g. the port is taken).
+  // The tunnel can't run, and why; empty while all's well.
   string error = 4;
-  // The SHA-256 of Factory's certificate, in hex, which pairing codes pin;
-  // empty until remote access is first turned on.
+  // No longer used (there's no certificate to pin): empty.
   string fingerprint = 5;
-  // How other machines may reach this one, best first: Tailscale addresses
-  // (100.64.0.0/10), then its .local name, then its other addresses (on
-  // Linux: its other addresses, then its name). Only the listen address when
-  // remote access listens on one.
+  // No longer used: empty.
   repeated string addresses = 6;
   repeated PairedDevice devices = 7;
   // This machine's name, as pairing codes give it ("mac-mini").
   string machine = 8;
+  // This backend's iroh endpoint id, as pairing codes give it (e=).
+  string endpoint_id = 9;
+  // The relays it uses while on: config.json's `remote.relays`, or the
+  // default ones (n0's for now) when that's empty.
+  repeated string relays = 10;
+  // config.json sets its own relays (relays are those); false for the
+  // default ones.
+  bool custom_relays = 11;
+  // The relay it's connected to now (its home relay), and whether it is;
+  // empty and false while off or offline.
+  string home_relay = 12;
+  bool relay_connected = 13;
+}
+
+// How a device's connection travels.
+enum DevicePath {
+  // Not connected.
+  DEVICE_PATH_NONE = 0;
+  // Straight between the two machines (the same machine, a LAN, or a hole
+  // punched through the NATs).
+  DEVICE_PATH_DIRECT = 1;
+  // Through a relay, end-to-end encrypted.
+  DEVICE_PATH_RELAYED = 2;
 }
 
 message PairedDevice {
@@ -178,8 +249,15 @@ message PairedDevice {
   int64 last_seen_ms = 4;
   // It's connected now.
   bool connected = 5;
-  // The IP address it last connected from; empty if it never has.
+  // The IP address it last connected from; empty if it never has, or when
+  // only a relay carried it.
   string last_address = 6;
+  // How it's connected now; NONE when it isn't.
+  DevicePath path = 7;
+  // Its pairing code hasn't been used yet and stops working at this time
+  // (ms since 1970); 0 once a device has used it. Past it, the device can't
+  // connect: pair it again.
+  int64 code_expires_ms = 8;
 }
 
 // ---- Requests (client → server). Each is answered with `ack` or `error`. ----
@@ -334,6 +412,13 @@ message UpdateSettings {
   // app's default. Negative or not finite is refused.
   optional double sidebar_width = 8;
   optional double panel_width = 9;
+  // The build caches' budget (see Settings); 0 never clears them. Negative
+  // is refused.
+  optional double build_cache_gb = 11;
+  // The user's first name (see Settings); "" removes it.
+  optional string user_name = 10;
+  // Unused: requests need no vault passphrase. Still kept in config.json.
+  optional uint32 vault_unlock_minutes = 20;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -489,6 +574,15 @@ message ChangeMonitor {
   MonitorAction action = 3;
 }
 
+// Clears one build cache now (a `DiskUsage` of kind "build_cache", by its
+// `path`): moved aside at once, deleted in the background; the agents
+// working there hear of it at their next run. Answered with Ack, or an error
+// saying why not: it isn't a build cache Factory knows, or an agent is
+// working there, or a build is running in it.
+message ClearBuildCache {
+  string path = 1;
+}
+
 // The person approves or dismisses an agent's proposal to Rivet (a
 // `Proposal` entry in `agent_id`'s transcript), answered with Ack. Approved,
 // Rivet gets it as the person's own message: `comment` (if any), a blank
@@ -528,6 +622,83 @@ message RunCommand {
   string args = 3;
 }
 
+// Reads a file on Factory's machine, for a viewer: the app may be on another
+// machine. Answered to the asker only with FileContent (whose `error` says
+// why it couldn't be read), never with Error.
+message ReadFile {
+  // Absolute, or from the home folder ("~/notes.md").
+  string path = 1;
+  // At most this many bytes; 0 for the default. Text is read up to 2 MB and
+  // images up to 20 MB, whatever is asked.
+  uint64 max_bytes = 2;
+}
+
+message FileContent {
+  // As asked, with "~" expanded.
+  string path = 1;
+  // Sniffed from its content and extension: "text/plain", "text/markdown",
+  // "application/json", "image/png", "image/jpeg", "image/gif",
+  // "image/webp", "application/pdf", "application/octet-stream"…
+  string mime = 2;
+  // The whole file's size in bytes.
+  uint64 size = 3;
+  // Its first bytes, up to the limit.
+  bytes data = 4;
+  // `data` is only the start of it.
+  bool truncated = 5;
+  // When it was last changed, in ms since 1970.
+  int64 modified_ms = 6;
+  // Why it couldn't be read ("No such file: …", "… is a folder", "Can't
+  // read …: permission denied"); empty when it was. The rest is empty then.
+  string error = 7;
+}
+
+// Sets an agent's layout (`Agent.layout`) for every device, answered with
+// Ack. Refused unless it has exactly one "chat" leaf, at most 12 leaves,
+// unique non-empty ids, and splits of two or more children with as many
+// positive weights (or none). An unset root, or a lone chat leaf, goes back
+// to just the conversation.
+message SetLayout {
+  string agent_id = 1;
+  ViewNode root = 2;
+}
+
+// A pane of an agent's main area, or a split of several.
+message ViewNode {
+  // Unique within the layout; the app keeps a pane by it.
+  string id = 1;
+  oneof node {
+    ViewSplit split = 2;
+    ViewLeaf leaf = 3;
+  }
+}
+
+message ViewSplit {
+  ViewAxis axis = 1;
+  repeated ViewNode children = 2;
+  // Each child's share, as many as children; empty for equal shares.
+  repeated double weights = 3;
+}
+
+// ROW: children side by side, left to right; COLUMN: top to bottom.
+enum ViewAxis {
+  VIEW_AXIS_UNSPECIFIED = 0;
+  VIEW_AXIS_ROW = 1;
+  VIEW_AXIS_COLUMN = 2;
+}
+
+message ViewLeaf {
+  // "chat" (the conversation, which every layout has once and can't be
+  // closed), "text" or "image"; more kinds will come (pdf, documents,
+  // dashboards, extension panels). An app that doesn't know a kind shows
+  // that it can't show it here.
+  string kind = 1;
+  // The file it shows, absolute; empty for "chat".
+  string path = 2;
+  // What its tab or header says: the file's name, unless set otherwise.
+  string title = 3;
+}
+
 // Opens an extension's panel beside an agent (`Agent.open_panel`); an empty id
 // closes it. Each agent keeps its own.
 message OpenPanel {
@@ -553,6 +724,11 @@ message OpenPanel {
 message StartLogin {
   string provider_id = 1;
   string method_id = 2;
+  // Signs in to another account of the provider, keeping the ones signed in
+  // (a second Claude subscription, say). False signs in as before: the
+  // account replaces the first one, unless it's one already signed in, which
+  // is signed in again.
+  bool add_account = 3;
 }
 
 // Answers `LoginFlow.prompt`: the pasted code or redirect address, the secret,
@@ -567,6 +743,29 @@ message CancelLogin {}
 // Removes the credential Factory stored for a provider.
 message SignOut {
   string provider_id = 1;
+  // The account to sign out of (`Account.id`); empty signs out of all of the
+  // provider's accounts.
+  string account_id = 2;
+}
+
+// Moves one of a provider's accounts to `position` (0 is first) in the
+// order requests try them: the first with capacity is used. Answered with Ack.
+message MoveAccount {
+  string provider_id = 1;
+  string account_id = 2;
+  uint32 position = 3;
+}
+
+// Changes one of a provider's accounts. Answered with Ack.
+message UpdateAccount {
+  string provider_id = 1;
+  string account_id = 2;
+  // A name for it, such as "Work credits"; empty goes back to the one
+  // Factory gives it (an API key's last characters). Unset leaves it.
+  optional string label = 3;
+  // Try it again now: an API key out of credit (`Account.out_of_credit`)
+  // gets requests again, as if topped up.
+  bool retry = 4;
 }
 // ---- Server → client ----
 
@@ -596,6 +795,16 @@ enum ErrorCode {
   // On the remote listener: the device's token isn't one of a paired device
   // (never paired, or unpaired since). Connection closes.
   ERROR_CODE_UNAUTHORIZED = 8;
+  // The vault is locked (locked mode, after the backend restarted; only a
+  // vault the person gave a key of their own can be): UnlockVault first.
+  ERROR_CODE_VAULT_LOCKED = 9;
+  // No longer sent: requests need no vault passphrase.
+  ERROR_CODE_PROOF_REQUIRED = 10;
+  // The passphrase (or recovery key) is wrong. Answered after a second's
+  // delay.
+  ERROR_CODE_WRONG_PROOF = 11;
+  // The secret isn't granted to that agent (RevokeSecret).
+  ERROR_CODE_NOT_GRANTED = 12;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -652,6 +861,8 @@ message Workspace {
   repeated ChangelogVersion changelog = 18;
   // Devices on other machines: whether they can connect, and which are paired.
   RemoteAccess remote = 19;
+  // The vault's state and its secrets' metadata, never values.
+  VaultState vault = 20;
 }
 
 message ChangelogVersion {
@@ -882,7 +1093,9 @@ message ResourceProcess {
 message DiskUsage {
   // "Factory's data", "Releases", an agent's or project's name, a folder's.
   string label = 1;
-  // home, releases, agent, project or folder.
+  // home, releases, agent, project or folder; among an agent's, project's
+  // or folder's parts, "build_cache" for each build cache in it (its
+  // checkout's, or the folder's), which ClearBuildCache clears by `path`.
   string kind = 2;
   // The agent's or project's id.
   string id = 3;
@@ -890,7 +1103,8 @@ message DiskUsage {
   // In bytes. Checkouts are copy-on-write clones: their bytes are counted
   // in full though they share most of them.
   uint64 bytes = 5;
-  // An agent's: its conversations, task logs, database and checkout.
+  // An agent's: its conversations, task logs, database and checkout, and its
+  // checkout's build caches; a project's or folder's: its build caches.
   repeated DiskUsage parts = 6;
   // The walk took too long and stopped: `bytes` is at least this.
   bool partial = 7;
@@ -1128,6 +1342,16 @@ message Settings {
   // in its own range.
   double sidebar_width = 8;
   double panel_width = 9;
+  // GB the build caches of one agent's checkout, or of one project folder,
+  // may take (config.json's `resources.build_cache_gb`, 25 unless changed):
+  // over it, Factory clears them while nothing works there. 0: never.
+  double build_cache_gb = 11;
+  // The user's first name, which agents call them by (config.json's
+  // `user.name`); empty when not given, and agents say "the person".
+  string user_name = 10;
+  // Unused: requests need no vault passphrase (config.json's
+  // `vault.unlock_minutes`, 5 unless changed).
+  uint32 vault_unlock_minutes = 20;
 }
 
 message Provider {
@@ -1150,6 +1374,42 @@ message Provider {
   // "Claude Max 20x" or "ChatGPT Pro". Empty when it isn't signed in with a
   // subscription, or the plan hasn't been read or the provider doesn't say.
   string plan = 7;
+  // Every account signed in to it, in the order requests try them. The fields
+  // above describe the first, as before several accounts could be signed in.
+  repeated Account accounts = 8;
+}
+
+// One account signed in to a provider, such as one of two Claude
+// subscriptions. Requests go to the first account with capacity; when one
+// reaches its usage limit they carry on with the next.
+message Account {
+  // Made by Factory, stable for as long as the account is signed in.
+  string id = 1;
+  // Who it is: a subscription's email, as the provider says (empty until
+  // known); an API key's name, given with `UpdateAccount.label`, or else
+  // its last characters ("sk-…a1b2"); a key from the environment, the
+  // variable's name.
+  string label = 2;
+  // Its plan, such as "Claude Max 20x"; "API key" for a key; empty when
+  // unknown.
+  string plan = 3;
+  // How much of its usage limits it has used; unset when it has none to read.
+  ProviderUsage usage = 4;
+  // Factory stored it and `SignOut` removes it (false for an API key from the
+  // environment).
+  bool can_sign_out = 5;
+  // Requests go to it now.
+  bool in_use = 6;
+  // It reached a usage limit: requests skip it until then, in ms since 1970;
+  // 0 when it has capacity.
+  int64 exhausted_until = 7;
+  // An API key that ran out of credit: requests skip it until it's tried
+  // again, by itself every hour or with `UpdateAccount.retry`. Its
+  // `exhausted_until` stays 0, since nothing says when it gets credit.
+  bool out_of_credit = 8;
+  // How it's signed in: the `LoginMethod` id, "oauth" (a subscription or
+  // OAuth account) or "api_key" (a key, stored or from the environment).
+  string method_id = 9;
 }
 
 message ProviderUsage {
@@ -1330,6 +1590,9 @@ message Agent {
   // first name, "Mike"). Other agents see it with the name too
   // ("Mike (Coordinator)"). Empty when it has none.
   string role = 29;
+  // How the agent's main area is laid out: its conversation and the viewers
+  // open beside it (SetLayout, the show tool). Unset: just its conversation.
+  ViewNode layout = 30;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -1441,6 +1704,8 @@ message Entry {
     Notice notice = 8;
     Event event = 9;
     Proposal proposal = 11;
+    // An agent asks for a secret (secret_request): see SecretRequest.
+    SecretRequest secret_request = 12;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -1529,6 +1794,12 @@ message ToolCall {
   // bash only: when it will be stopped, in ms after `started` (its timeout).
   // 0 for no timeout (run_in_background) and for other tools.
   uint64 timeout_ms = 8;
+  // What the tool returned for the app to draw its view from, as JSON: ids,
+  // names, counts, paths, links (docs/EXTENSIONS.md, "Its view in the
+  // conversation"). Each tool has its own shape; keys are only ever added.
+  // Empty while the call runs, and for a tool that returns none ("{}" and
+  // null are sent as empty).
+  string details = 9;
 }
 
 enum ToolCallState {
@@ -1607,4 +1878,288 @@ message FileEntry {
   bool expanded = 5;
   // Matched by .factoryignore; only sent when `show_all` is on.
   bool hidden = 6;
+}
+
+// The vault: secrets (API keys, tokens, credentials files) agents use
+// without seeing them. A secret holds one or more variables, each set in
+// the environment of the commands an agent runs with it (or written to a
+// private file whose path is set). Only the person creates the vault,
+// grants, reveals and deletes, proving it with the vault passphrase.
+
+// Part of the Workspace: the same on every device. Metadata only.
+message VaultState {
+  // There's a vault: the backend makes one when it starts, so false only
+  // when it couldn't. Without one, everything else is empty.
+  bool exists = 1;
+  // The backend holds the vault's key now. False only in locked mode, until
+  // the person unlocks it after the backend started (UnlockVault); agents
+  // can't use secrets meanwhile.
+  bool unlocked = 2;
+  // No key is kept on disk: the vault opens only with the passphrase (or the
+  // recovery key) after each start of the backend. Off (always, unless the
+  // person gave it a key of their own and turned it on): it opens by itself.
+  bool locked_mode = 3;
+  // By name.
+  repeated SecretInfo secrets = 4;
+  // Agents' requests still waiting for the person, oldest first. Each is also
+  // an entry in its agent's conversation.
+  repeated SecretRequest requests = 5;
+}
+
+message SecretInfo {
+  string id = 1;
+  // How agents name it (bash's `secrets`), such as "AWS". Unique.
+  string name = 2;
+  // What it is and what it's for; agents read it.
+  string description = 3;
+  repeated SecretVariable variables = 4;
+  // The agents that may use it, by when they were granted it.
+  repeated SecretGrant grants = 5;
+  int64 created_ms = 6;
+  int64 updated_ms = 7;
+  // Counts up each time its values change.
+  uint32 version = 8;
+  // The last agent that used it, and when; empty and 0 if none has.
+  string last_used_by = 9;
+  int64 last_used_ms = 10;
+  // What the person should know, such as "MY_PIN is too short to hide in
+  // agents' output".
+  repeated string warnings = 11;
+  // The agent that saved it (a key it made itself); empty when the person
+  // added it.
+  string owner_agent_id = 12;
+}
+
+message SecretVariable {
+  // The environment variable, such as AWS_SECRET_ACCESS_KEY.
+  string name = 1;
+  // The value's last 4 characters, to tell values apart ("••••3f9a"); empty
+  // when the value is shorter than 12 characters.
+  string hint = 2;
+  // The value is written to a private file, and `name` holds its path (as
+  // KUBECONFIG or GOOGLE_APPLICATION_CREDENTIALS expect).
+  bool file = 3;
+}
+
+message SecretGrant {
+  string agent_id = 1;
+  int64 granted_ms = 2;
+  // How many of the agent's background tasks running now got this secret:
+  // what RevokeSecret's stop_running_tasks would stop.
+  uint32 running_tasks = 3;
+}
+
+// A variable with its value, in requests from the app and in SecretValue.
+message SecretEntry {
+  string variable = 1;
+  string value = 2;
+  // See SecretVariable.file.
+  bool file = 3;
+}
+
+// No longer needed: the person's requests come from their app, signed in to
+// the backend as one of their devices, and agents can't make them. Leave it
+// out. Only a vault in locked mode, still locked, takes its passphrase or
+// recovery key here to open it, as UnlockVault does.
+message VaultProof {
+  string passphrase = 1;
+}
+
+// Unused: the backend makes the vault by itself when it starts. Refused
+// with ERROR_CODE_INVALID_REQUEST (there's one already).
+message CreateVault {
+  string passphrase = 1;
+  // See VaultState.locked_mode.
+  bool locked_mode = 2;
+}
+
+// Opens a vault in locked mode after a restart. `passphrase` may be the
+// recovery key.
+message UnlockVault {
+  string passphrase = 1;
+}
+
+// Unused: there's no unlocked window any more. Answered with VaultSession 0.
+message LockVaultSession {}
+
+// Adds a secret, granted to no one. No proof needed.
+message CreateSecret {
+  string name = 1;
+  string description = 2;
+  repeated SecretEntry entries = 3;
+}
+
+// Changes a secret's name and description, and with `entries`, replaces its
+// variables and values (a new version). Empty `entries`: values unchanged.
+// No proof needed: agents granted it are told it changed.
+message UpdateSecret {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated SecretEntry entries = 4;
+}
+
+message DeleteSecret {
+  string id = 1;
+  VaultProof proof = 2;
+}
+
+message GrantSecret {
+  string id = 1;
+  string agent_id = 2;
+  VaultProof proof = 3;
+}
+
+// No proof needed: it only takes access away. The agent is told.
+message RevokeSecret {
+  string id = 1;
+  string agent_id = 2;
+  // Also stops the agent's background tasks that got the secret.
+  bool stop_running_tasks = 3;
+}
+
+message RevealSecret {
+  string id = 1;
+  VaultProof proof = 2;
+}
+
+// Reads a pasted .env: answered with the variables found, without values.
+message PreviewEnv {
+  string text = 1;
+}
+
+// Adds what a pasted .env holds: one secret named `name` with every
+// variable, or with `one_per_variable` one secret per variable, named after
+// it. No proof needed.
+message ImportEnv {
+  string text = 1;
+  string name = 2;
+  string description = 3;
+  bool one_per_variable = 4;
+}
+
+// Grants (approve) or dismisses an agent's secret request. For a new secret, `entries` holds its values, and the secret is
+// made with the request's name and description and granted to the agent.
+message DecideSecretRequest {
+  string agent_id = 1;
+  string request_id = 2;
+  bool approve = 3;
+  VaultProof proof = 4;
+  repeated SecretEntry entries = 5;
+  // Told to the agent; may be empty.
+  string comment = 6;
+}
+
+// Who used a secret and when, newest first; `id` empty for every secret.
+message ListSecretUses {
+  string id = 1;
+  // 0 for 100.
+  uint32 limit = 2;
+}
+
+// For a vault with a key of the person's own: `old_passphrase` is the
+// passphrase or the recovery key. The new one has 8 characters at least.
+// Answered with VaultSession.
+message ChangePassphrase {
+  string old_passphrase = 1;
+  string new_passphrase = 2;
+}
+
+// A recovery key, a key of the person's own that opens the vault too; it
+// replaces the last one, which stops working. Answered with RecoveryKey.
+message NewRecoveryKey {
+  VaultProof proof = 1;
+}
+
+// Turns locked mode on (the key kept on disk is deleted) or off (it's kept
+// again). On needs a key of the person's own (a passphrase or recovery
+// key) first. Answered with VaultSession.
+message SetVaultLockedMode {
+  bool locked_mode = 1;
+  VaultProof proof = 2;
+}
+
+// Unused: always 0, and never sent unasked any more. Requests need no
+// VaultProof, so there's no unlocked window to show.
+message VaultSession {
+  int64 unlocked_until_ms = 1;
+}
+
+message SecretValue {
+  string id = 1;
+  repeated SecretEntry entries = 2;
+  // Unused: always 0.
+  int64 unlocked_until_ms = 3;
+}
+
+message EnvPreview {
+  repeated SecretVariable variables = 1;
+  // Duplicates, empty values, values too short to hide in agents' output,
+  // lines that couldn't be read (by line number, never with their text).
+  repeated string warnings = 2;
+}
+
+// Shown once: the person keeps it, to open the vault when the passphrase is
+// forgotten or the key on disk is lost.
+message RecoveryKey {
+  string key = 1;
+  // Unused: always 0.
+  int64 unlocked_until_ms = 2;
+}
+
+message SecretUses {
+  repeated SecretUse uses = 1;
+}
+
+message SecretUse {
+  string secret_id = 1;
+  string secret_name = 2;
+  int64 time_ms = 3;
+  // "use" (an agent's command got it), "reveal" (the person saw it in the
+  // app), "grant", "revoke".
+  string kind = 4;
+  // The agent; for reveal, grant and revoke, the one concerned, if any.
+  string agent_id = 5;
+  // The background task that got it; empty for a command run in the
+  // foreground.
+  string task_id = 6;
+  // The command's first line (uses), the device (reveals), or for grants
+  // and revokes the admin agent's id that made them (empty: the person).
+  string detail = 7;
+}
+
+// An agent's request (secret_request), shown in its conversation after the
+// call, for the person to grant or dismiss with DecideSecretRequest. The
+// entry is sent again when it's decided.
+message SecretRequest {
+  string id = 1;
+  // The agent that asked.
+  string agent_id = 2;
+  // An existing secret it asks for; empty when it asks for a new one.
+  string secret_id = 3;
+  // That secret's name, as the agent asked for it.
+  string secret_name = 4;
+  // A new secret it asks for: name, description and variables (no values;
+  // the person fills them in). Unset for an existing one.
+  NewSecret new_secret = 5;
+  // Why it needs it, in the agent's words.
+  string reason = 6;
+  SecretRequestState state = 7;
+  // When it was decided, in ms since 1970; 0 while pending.
+  int64 decided_ms = 8;
+  // The person's comment; may be empty.
+  string comment = 9;
+}
+
+message NewSecret {
+  string name = 1;
+  string description = 2;
+  repeated SecretVariable variables = 3;
+}
+
+enum SecretRequestState {
+  SECRET_REQUEST_STATE_UNSPECIFIED = 0;
+  SECRET_REQUEST_STATE_PENDING = 1;
+  SECRET_REQUEST_STATE_GRANTED = 2;
+  SECRET_REQUEST_STATE_DISMISSED = 3;
 }

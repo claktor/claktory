@@ -105,3 +105,96 @@ make_dev_app() {
   /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$plist" 2>/dev/null || true
   codesign --force --sign - --entitlements "$root/app/macos/Runner/$entitlements" "$app"
 }
+
+# Signing releases for the real Claktory (scripts/sign-release.sh).
+
+# The "Developer ID Application" identity in the keychain to sign with
+# (CLAKTORY_SIGN_IDENTITY names one; with CLAKTORY_TEAM_ID, only that team's),
+# or nothing.
+developer_id_identity() {
+  if [[ -n "${CLAKTORY_SIGN_IDENTITY:-}" ]]; then
+    echo "$CLAKTORY_SIGN_IDENTITY"
+    return
+  fi
+  security find-identity -v -p codesigning 2>/dev/null |
+    sed -n 's/^ *[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Application: .*\)"$/\1/p' |
+    { if [[ -n "${CLAKTORY_TEAM_ID:-}" ]]; then grep -F "($CLAKTORY_TEAM_ID)"; else cat; fi; } |
+    head -1 || true
+}
+
+# Loads the App Store Connect API key's settings, as scripts/testflight.sh
+# does: ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_PATH (by default
+# ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8), from the
+# environment or ~/.appstoreconnect/claktory.env; CLAKTORY_TEAM_ID too.
+# Succeeds when the key is complete and its file is there. Prints nothing.
+notary_key() {
+  local settings="$HOME/.appstoreconnect/claktory.env" key value
+  if [[ -f "$settings" ]]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        CLAKTORY_TEAM_ID | ASC_KEY_ID | ASC_ISSUER_ID | ASC_KEY_PATH)
+          if [[ -z "${!key:-}" ]]; then
+            value="${value%\"}"; value="${value#\"}"
+            export "$key=$value"
+          fi
+          ;;
+      esac
+    done <"$settings"
+  fi
+  ASC_KEY_PATH="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID:-KEYID}.p8}"
+  [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" && -f "$ASC_KEY_PATH" ]]
+}
+
+# How a release for the real Claktory is signed now: "developer-id <identity>"
+# when this Mac has a Developer ID identity and the notarization key, else
+# "adhoc".
+signing_mode() {
+  local identity
+  identity="$(developer_id_identity)"
+  if [[ -n "$identity" ]] && notary_key; then
+    echo "developer-id $identity"
+  else
+    echo adhoc
+  fi
+}
+
+# The supervisor of the real Claktory as an app of its own,
+# <release>/supervisor/Claktory Agents.app, made from the release's factoryd:
+# macOS counts it as responsible for everything agents run, and only an app
+# can be added under Privacy & Security → Developer Tools, which spares the
+# commands agents build macOS's checks of each new program. Installed once
+# (scripts/install-release.sh), never by an update. Signed ad hoc here;
+# scripts/sign-release.sh signs it with the Developer ID when it can.
+make_supervisor_app() {
+  local release="$1" version
+  local app="$release/supervisor/Claktory Agents.app"
+  # Info.plist versions are numbers only: v0.1.3 is 0.1.3.
+  version="$(sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"${FACTORY_VERSION:-}")"
+  rm -rf "$release/supervisor"
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  cp "$release/factoryd" "$app/Contents/MacOS/factoryd-supervisor"
+  chmod 755 "$app/Contents/MacOS/factoryd-supervisor"
+  if [[ -f "$release/Factory.app/Contents/Resources/AppIcon.icns" ]]; then
+    cp "$release/Factory.app/Contents/Resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+  fi
+  cat >"$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.factory.supervisor</string>
+  <key>CFBundleName</key><string>Claktory Agents</string>
+  <key>CFBundleDisplayName</key><string>Claktory Agents</string>
+  <key>CFBundleExecutable</key><string>factoryd-supervisor</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleShortVersionString</key><string>${version:-0.0.0}</string>
+  <key>CFBundleVersion</key><string>${version:-0.0.0}</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSBackgroundOnly</key><true/>
+</dict>
+</plist>
+PLIST
+  plutil -lint -s "$app/Contents/Info.plist"
+  codesign --force --sign - "$app"
+}

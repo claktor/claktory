@@ -23,8 +23,10 @@ pub(crate) mod memory;
 pub(crate) mod monitors;
 pub(crate) mod nudge;
 pub(crate) mod resources;
+pub(crate) mod secrets;
 pub(crate) mod tasks;
 pub(crate) mod tree;
+pub(crate) mod viewer;
 pub(crate) mod web;
 
 use std::sync::Arc;
@@ -135,7 +137,13 @@ pub(crate) trait Extension: Send + Sync {
         &[]
     }
     /// An instance's panel for the agent; None if it has none.
-    fn instance_view(&self, _factory: &Factory, _inner: &Inner, _agent: &str, _instance: &'static InstanceSpec) -> Option<v1::ExtensionView> {
+    fn instance_view(
+        &self,
+        _factory: &Factory,
+        _inner: &Inner,
+        _agent: &str,
+        _instance: &'static InstanceSpec,
+    ) -> Option<v1::ExtensionView> {
         None
     }
 }
@@ -194,7 +202,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 10] = [
+pub(crate) const ALL: [&dyn Extension; 12] = [
     &agents::Agents,
     &checklist::Checklist,
     &database::Database,
@@ -202,8 +210,10 @@ pub(crate) const ALL: [&dyn Extension; 10] = [
     &memory::Memory,
     &monitors::Monitors,
     &resources::Resources,
+    &secrets::Secrets,
     &tasks::Tasks,
     &tree::Tree,
+    &viewer::Viewer,
     &web::Web,
 ];
 
@@ -223,17 +233,52 @@ pub(crate) fn tool(
     tool
 }
 
-type Run = fn(&Factory, &str, Value) -> Result<String, String>;
+/// Binds a typed handler without keeping Factory alive; validates before checking shutdown.
+pub(crate) fn typed_handler<A: serde::de::DeserializeOwned + 'static>(
+    factory: &Arc<Factory>,
+    agent: &str,
+    run: fn(&Arc<Factory>, &str, A) -> Result<ToolResult, String>,
+) -> factory_agent::Handler {
+    let factory = Arc::downgrade(factory);
+    let agent = agent.to_owned();
+    Arc::new(move |args| {
+        let factory = factory.upgrade();
+        let agent = agent.clone();
+        Box::pin(async move {
+            let args = serde_json::from_value(args)?;
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            run(&factory, &agent, args).map_err(factory_agent::Error::Other)
+        })
+    })
+}
 
-/// Binds a synchronous text tool to an agent without keeping Factory alive.
-fn factory_tool(
+/// What a tool's handler returns: its text alone, or a whole result, with
+/// the `details` the app's view of the call draws from.
+pub(crate) trait Reply: Send + 'static {
+    fn result(self) -> ToolResult;
+}
+
+impl Reply for String {
+    fn result(self) -> ToolResult {
+        ToolResult::text(self, json!({}))
+    }
+}
+
+impl Reply for ToolResult {
+    fn result(self) -> ToolResult {
+        self
+    }
+}
+
+/// Binds a synchronous tool to an agent without keeping Factory alive.
+fn factory_tool<R: Reply>(
     factory: &Arc<Factory>,
     agent: &str,
     name: &'static str,
     label: &'static str,
     description: &'static str,
     parameters: Value,
-    run: Run,
+    run: fn(&Factory, &str, Value) -> Result<R, String>,
 ) -> Tool {
     let factory = Arc::downgrade(factory);
     let agent = agent.to_owned();
@@ -246,9 +291,8 @@ fn factory_tool(
             let factory = factory.upgrade();
             let agent = agent.clone();
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let text = run(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+                run(&factory, &agent, args).map(Reply::result).map_err(factory_agent::Error::Other)
             })
         }),
     )
@@ -300,11 +344,7 @@ pub(crate) fn validate(agent: &AgentConfig) -> Result<(), Invalid> {
                     Some(OptionKind::Agents) => "a list of agent ids",
                     _ => "true or false",
                 };
-                return Err(Invalid::BadExtensionSetting {
-                    agent: agent.id.clone(),
-                    setting: format!("{}.{key}", unit.key()),
-                    expected,
-                });
+                return Err(Invalid::BadExtensionSetting { agent: agent.id.clone(), setting: format!("{}.{key}", unit.key()), expected });
             }
         }
     }

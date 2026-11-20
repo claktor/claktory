@@ -76,7 +76,7 @@ An agent's whole system prompt and tool list are written when its context starts
 - **Names** are `<extension id>_<verb>`: `agents_send`, `agents_status`, `agents_map`, `checklist_add`, `checklist_update`, `checklist_list`, `checklist_item`, `memory_update`, `memory_read`. They're public names, so don't rename them.
 - **Schemas aren't enforced while sampling** (no strict tools). Providers cap how many optional parameters strict tools may have in all (Anthropic: 16), and extensions together would exceed it. So optional parameters are plain properties left out of `required`, never `anyOf` with null. Validate arguments in the handler, and name the valid values in the error.
 - An extension may give a tool only to agents with an option on (Messaging's `agents_map` needs `see_map` or `admin`): `tools` reads the agent's settings, and since the tool list is part of the frame, the tool arrives with the agent's next context.
-- **Handlers** hold a `Weak<Factory>`, run on the agent's behalf (the agent id is the actor), and return text.
+- **Handlers** hold a `Weak<Factory>`, run on the agent's behalf (the agent id is the actor), and return their text with its details (a `ToolResult`; see "Its view in the conversation").
 
 Write tools for few tokens:
 1. **Few tools, each with a clear job.** Batch instead of adding verbs: `checklist_add` takes many items, `checklist_update` takes a list of changes, and `memory_update` takes a list of ops, applied all or none.
@@ -87,6 +87,17 @@ Write tools for few tokens:
 6. **History only on request.** `checklist_item` shows one item's log; nothing else does.
 7. **Errors that teach.** Say what's valid or what to call next: `No agent you can message is called "x"; you can message: writer, scout (Lab).`
 8. **Ids that never need guessing.** Names repeat across projects, so output gives ids, plus the project wherever it isn't the caller's own. Look agents up with `agents::find`: by id, then name, preferring the caller's project, and failing with the choices when it's still ambiguous.
+
+### Its view in the conversation
+
+Every tool call shows in the agent's conversation. A tool with no view of its own gets the generic row: its name, a line of its input, and the input and output when the row is clicked. Every extension's tools should come with a compact view of their own in the app instead. The view says what the call did in the app's words, with what a person scans for: whom `agents_send` messaged and the message's first line, which items `checklist_add` added, what `web_fetch` read. Views live in the app, in `app/lib/tool_views.dart`, a registry by tool name. Agree on a new tool's view with Frontend when you add the tool, as with a panel.
+
+A view draws from the result's structured `details`, never from its text, so results carry them:
+- `details` is the result's second part, `ToolResult::text(text, details)`: JSON kept with the result in the transcript and never sent to the model, so it costs no tokens. The app gets it as the call's `ToolCall.details` once the call is done. The text is for the model, and `details` is for the app. Secrets are redacted from both.
+- Put in what the view shows or links to: ids (agent ids, item numbers, task and monitor ids), names as they were at the time, counts, paths and URLs, and for a batch, each item's outcome. Web's `web_fetch` returns `{"url", "title", "lines"}`, and bash in the background returns `{"task", "pid", "log"}`.
+- The keys are a contract with the view, like the protocol's fields: only add keys, never rename or reuse one. Old transcripts keep the shape they were written with, and the view still has to read them.
+- A handler bound with `factory_tool` returns a `ToolResult`, or a plain `String` for text with no details (`extensions::Reply`); `typed_handler`'s return a `ToolResult`. Messaging, Checklist, Memory, Monitors, Tasks, Database, show and Web all return details; `crates/factoryd/tests/all/tool_details.rs` pins their shapes.
+- A failed call needs no details: the view shows its error.
 
 ### Data
 
@@ -114,5 +125,6 @@ An extension can show a panel beside the selected agent. Its icon appears in the
 2. Write its prompt sections (static, plus a pinned one only if it must show data) and its tools, following the token rules above.
 3. If it keeps data: add a migration with its state and event tables, one query function, and its deletion in `delete_agent_data`.
 4. If it has a panel: add its body to `ExtensionView` in `proto/factory/v1/factory.proto`, run `scripts/gen-proto.sh`, implement `view`, call `refresh_view` after writes, and agree on the panel with Frontend.
-5. Tests: its tools through the scripted model (`call <tool> <json>`; see `crates/factoryd/tests/extensions.rs`), its settings, and its view.
-6. Describe it in `docs/MANUAL.md` (Extensions, and its config keys under "Changing Factory as an agent"), so every agent knows it.
+5. Give its tools `details` and agree on their views in `app/lib/tool_views.dart` with Frontend (see "Its view in the conversation").
+6. Tests: its tools through the scripted model (`call <tool> <json>`; see `crates/factoryd/tests/extensions.rs`), its settings, and its view.
+7. Describe it in `docs/MANUAL.md` (Extensions, and its config keys under "Changing Factory as an agent"), so every agent knows it.

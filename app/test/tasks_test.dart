@@ -4,6 +4,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tasks.dart';
 import 'package:factory_app/transcript.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/widgets.dart' show Text;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show builder, workspace;
@@ -151,27 +152,41 @@ void main() {
 
     testWidgets('a running call ticks on its row', (tester) async {
       final harness = Harness(workspace(agents: [builder()]));
-      final started = DateTime.now().subtract(const Duration(seconds: 5));
+      final call = ToolCall(
+        callId: 'c1',
+        name: 'bash',
+        input: '{"command": "cargo test"}',
+        state: ToolCallState.TOOL_CALL_STATE_RUNNING,
+        timeoutMs: Int64(600000),
+      );
       harness.backend.transcript.load(
         Transcript(
           agentId: 'a1',
-          entries: [
-            Entry(
-              seq: Int64(1),
-              toolCall: ToolCall(
-                callId: 'c1',
-                name: 'bash',
-                input: '{"command": "cargo test"}',
-                state: ToolCallState.TOOL_CALL_STATE_RUNNING,
-                started: Int64(started.millisecondsSinceEpoch),
-                timeoutMs: Int64(600000),
-              ),
-            ),
-          ],
+          entries: [Entry(seq: Int64(1), toolCall: call)],
         ),
       );
+      // The row reads the wall clock as it builds, which a loaded machine
+      // can delay by seconds: it shows the clock at some moment between
+      // these two, one of the texts that moment can give.
+      final before = DateTime.now();
+      call.started = Int64(
+        before.subtract(const Duration(seconds: 5)).millisecondsSinceEpoch,
+      );
       await harness.show(tester);
-      expect(find.text('5s · times out in 9m 55s'), findsOneWidget);
+      final after = DateTime.now();
+      final possible = {
+        for (
+          var moment = before;
+          !moment.isAfter(after.add(const Duration(seconds: 1)));
+          moment = moment.add(const Duration(milliseconds: 250))
+        )
+          toolClock(call, moment),
+      };
+      expect(possible, contains('5s · times out in 9m 55s'));
+      final shown = find.byWidgetPredicate(
+        (widget) => widget is Text && possible.contains(widget.data),
+      );
+      expect(shown, findsOneWidget);
       expect(find.byType(Ticking), findsOneWidget);
     });
   });

@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1434205769;
+  int get rustContentHash => -1733062143;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -83,12 +83,17 @@ abstract class RustLibApi extends BaseApi {
 
   int crateApiTunnelTunnelHandlePort({required TunnelHandle that});
 
+  Future<void> crateApiTunnelTunnelHandleReconnect({
+    required TunnelHandle that,
+  });
+
   TunnelStatus crateApiTunnelTunnelHandleStatus({required TunnelHandle that});
 
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
+    required List<String> addresses,
   });
 
   RustArcIncrementStrongCountFnType
@@ -166,6 +171,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "TunnelHandle_port", argNames: ["that"]);
 
   @override
+  Future<void> crateApiTunnelTunnelHandleReconnect({
+    required TunnelHandle that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTunnelTunnelHandleReconnectConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTunnelTunnelHandleReconnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "TunnelHandle_reconnect",
+        argNames: ["that"],
+      );
+
+  @override
   TunnelStatus crateApiTunnelTunnelHandleStatus({required TunnelHandle that}) {
     return handler.executeSync(
       SyncTask(
@@ -175,7 +216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_tunnel_status,
@@ -196,6 +237,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
+    required List<String> addresses,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -204,10 +246,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(deviceKey, serializer);
           sse_encode_String(endpointId, serializer);
           sse_encode_list_String(relays, serializer);
+          sse_encode_list_String(addresses, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -217,7 +260,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiTunnelOpenTunnelConstMeta,
-        argValues: [deviceKey, endpointId, relays],
+        argValues: [deviceKey, endpointId, relays, addresses],
         apiImpl: this,
       ),
     );
@@ -225,7 +268,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiTunnelOpenTunnelConstMeta => const TaskConstMeta(
     debugName: "open_tunnel",
-    argNames: ["deviceKey", "endpointId", "relays"],
+    argNames: ["deviceKey", "endpointId", "relays", "addresses"],
   );
 
   RustArcIncrementStrongCountFnType
@@ -660,6 +703,12 @@ class TunnelHandleImpl extends RustOpaque implements TunnelHandle {
 
   /// Where the app connects: ws://127.0.0.1:<port>.
   int port() => RustLib.instance.api.crateApiTunnelTunnelHandlePort(that: this);
+
+  /// After the app was suspended or the network changed: the connection
+  /// is made afresh by the next socket, and iroh looks at the network
+  /// again.
+  Future<void> reconnect() =>
+      RustLib.instance.api.crateApiTunnelTunnelHandleReconnect(that: this);
 
   TunnelStatus status() =>
       RustLib.instance.api.crateApiTunnelTunnelHandleStatus(that: this);

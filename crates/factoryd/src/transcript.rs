@@ -79,6 +79,9 @@ pub struct Frame {
     /// Its project's folders (id → "Name: /path (yours)").
     #[serde(default)]
     pub folders: BTreeMap<String, String>,
+    /// The vault's secrets it may use (id → "Name (sets A, B): description").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, String>,
     /// Tools the agent was told it can call through extension_call, since
     /// they're not among `tools` (an extension turned on meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -101,6 +104,9 @@ pub enum TranscriptError {
 }
 
 /// A change clients need to hear about.
+// Short-lived: made and sent at once, a few at a time, so an entry inline
+// costs less than boxing every one.
+#[allow(clippy::large_enum_variant)]
 pub enum Change {
     Entry(Entry),
     Delta { seq: u64, text: String },
@@ -197,7 +203,7 @@ impl Transcript {
                 && matches!(call.state(), ToolCallState::Pending | ToolCallState::Running)
             {
                 call.state = ToolCallState::Failed.into();
-                call.output = "Interrupted: Factory restarted before this finished.".to_owned();
+                call.output = "Interrupted: Claktory restarted before this finished.".to_owned();
             }
         }
         Ok(transcript)
@@ -308,7 +314,7 @@ impl Transcript {
                 let due = self.live.tool_pushed.get(&seq).is_none_or(|last| now.duration_since(*last) >= TOOL_OUTPUT_INTERVAL);
                 if due {
                     self.live.tool_pushed.insert(seq, now);
-                    let output = result_text(&partial_result);
+                    let output = ToolOutput { output: result_text(&partial_result), details: String::new() };
                     if let Some(entry) = self.update_tool(&tool_call_id, Some(output), ToolCallState::Running, Times::default()) {
                         applied.changes.push(Change::Entry(entry));
                     }
@@ -317,7 +323,8 @@ impl Transcript {
             AgentEvent::ToolExecutionEnd { tool_call_id, result, is_error, .. } => {
                 let state = if is_error { ToolCallState::Failed } else { ToolCallState::Done };
                 let times = Times { started: None, ended: Some(now_ms()) };
-                if let Some(entry) = self.update_tool(&tool_call_id, Some(result_text(&result)), state, times) {
+                let output = ToolOutput { output: result_text(&result), details: details_json(&result.details) };
+                if let Some(entry) = self.update_tool(&tool_call_id, Some(output), state, times) {
                     applied.changes.push(Change::Entry(entry));
                 }
             }
@@ -397,6 +404,7 @@ impl Transcript {
                 let output = parts_text(&result.content);
                 // The result's own times, so a reload shows what was shown live.
                 let times = Times { started: result.started.map(|time| time as i64), ended: Some(result.timestamp as i64) };
+                let output = ToolOutput { output, details: details_json(&result.details) };
                 let mut changed: Vec<Entry> = self.update_tool(&result.tool_call_id, Some(output), state, times).into_iter().collect();
                 // A proposal to Rivet shows after the call that made it.
                 if let Some(proposal) = crate::proposals::proposed(&result.tool_name, result.is_error, &result.details) {
@@ -535,7 +543,9 @@ impl Transcript {
         entry
     }
 
-    fn update_tool(&mut self, call_id: &str, output: Option<String>, state: ToolCallState, times: Times) -> Option<Entry> {
+    /// `output` is the call's output so far (with no details) while it runs,
+    /// and its result with details once it's done.
+    fn update_tool(&mut self, call_id: &str, output: Option<ToolOutput>, state: ToolCallState, times: Times) -> Option<Entry> {
         let seq = *self.live.tools.get(call_id)?;
         let entry = &mut self.entries[seq as usize];
         let Some(Kind::ToolCall(call)) = &mut entry.kind else { return None };
@@ -543,14 +553,15 @@ impl Transcript {
             self.live.tool_pushed.remove(&seq);
         }
         let unchanged = call.state == i32::from(state)
-            && output.as_ref().is_none_or(|output| *output == call.output)
+            && output.as_ref().is_none_or(|output| output.output == call.output && output.details == call.details)
             && times.started.is_none_or(|started| started == call.started)
             && times.ended.is_none_or(|ended| ended == call.ended);
         if unchanged {
             return None;
         }
         if let Some(output) = output {
-            call.output = output;
+            call.output = output.output;
+            call.details = output.details;
         }
         if let Some(started) = times.started {
             call.started = started;
@@ -642,6 +653,21 @@ fn user_text(content: &UserContent) -> String {
             }
             text
         }
+    }
+}
+
+/// A tool call's output and details (`v1::ToolCall`'s).
+struct ToolOutput {
+    output: String,
+    details: String,
+}
+
+/// A result's details for the app: empty for none (null or `{}`).
+fn details_json(details: &serde_json::Value) -> String {
+    match details {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(map) if map.is_empty() => String::new(),
+        details => details.to_string(),
     }
 }
 

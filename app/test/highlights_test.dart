@@ -3,6 +3,8 @@ import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:factory_app/settings_view.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,15 +59,21 @@ double strength(WidgetTester tester, String text) {
   final glow = find
       .ancestor(of: find.text(text).first, matching: find.byType(Glow))
       .first;
-  final lights = find.descendant(
-    of: glow,
-    matching: find.byWidgetPredicate(
-      (widget) => widget is Opacity && widget.child is DecoratedBox,
-    ),
-  );
+  final lights = find.descendant(of: glow, matching: _light);
   if (lights.evaluate().isEmpty) return 0;
-  return tester.widget<Opacity>(lights.first).opacity;
+  return switch (tester.widget(lights.first)) {
+    final FadeTransition fade => fade.opacity.value,
+    final Opacity still => still.opacity,
+    _ => 0,
+  };
 }
+
+/// The glow's light: fading, or still with reduced motion.
+final _light = find.byWidgetPredicate(
+  (widget) =>
+      (widget is FadeTransition || widget is Opacity) &&
+      (widget as SingleChildRenderObjectWidget).child is DecoratedBox,
+);
 
 /// The colors over [text]'s glow, at its middle.
 List<Color> colors(WidgetTester tester, String text) {
@@ -75,12 +83,7 @@ List<Color> colors(WidgetTester tester, String text) {
   final box = tester.widget<DecoratedBox>(
     find
         .descendant(
-          of: find.descendant(
-            of: glow,
-            matching: find.byWidgetPredicate(
-              (widget) => widget is Opacity && widget.child is DecoratedBox,
-            ),
-          ),
+          of: find.descendant(of: glow, matching: _light),
           matching: find.byType(DecoratedBox),
         )
         .first,
@@ -118,6 +121,32 @@ void main() {
     // It fades out.
     await tester.pump(HighlightStore.duration);
     expect(strength(tester, 'Scout'), 0);
+    await outlast(tester);
+  });
+
+  testWidgets('a glow fades on its own layer, not repainting the window', (
+    tester,
+  ) async {
+    final harness = Harness(snapshot());
+    await harness.show(tester);
+    await tester.pump(const Duration(milliseconds: 300));
+    harness.backend.highlights.glow('agent:lead', [agentColor('red')]);
+    await tester.pump();
+    var paints = 0;
+    debugProfilePaintsEnabled = true;
+    debugOnProfilePaint = (_) => paints++;
+    addTearDown(() {
+      debugProfilePaintsEnabled = false;
+      debugOnProfilePaint = null;
+    });
+    for (var i = 0; i < 30; i++) {
+      await tester.pump(const Duration(microseconds: 16667));
+    }
+    debugProfilePaintsEnabled = false;
+    debugOnProfilePaint = null;
+    expect(strength(tester, 'Lead'), greaterThan(0), reason: 'still glowing');
+    // Not a repaint a frame: the whole window repainted every frame before.
+    expect(paints, lessThan(30));
     await outlast(tester);
   });
 
@@ -312,7 +341,17 @@ void main() {
     await harness.show(tester);
     harness.page.value = AppPage.settings;
     await settle(tester);
-    await tester.ensureVisible(find.text('Display'));
+    // Settings builds its sections as they scroll into view.
+    await tester.scrollUntilVisible(
+      find.text('Display'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     await settle(tester);
     await tester.tap(
       find

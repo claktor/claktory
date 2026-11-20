@@ -5,9 +5,8 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'connections.dart';
 import 'drafts.dart';
-import 'history.dart';
 import 'identity.dart';
-import 'login.dart';
+import 'rail.dart';
 import 'scope.dart';
 import 'shell.dart';
 import 'state.dart';
@@ -15,7 +14,7 @@ import 'update.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final drafts = await Drafts.load(DeviceDraftStorage());
+  final drafts = await DeviceDrafts.load(DeviceDraftStorage());
   final connections = await Connections.load(DeviceConnectionStorage());
   runApp(FactoryApp(drafts: drafts, connections: connections));
 }
@@ -25,52 +24,75 @@ class FactoryApp extends StatefulWidget {
     super.key,
     required this.drafts,
     required this.connections,
+    this.open,
+    this.localBackend,
   });
 
-  final Drafts drafts;
+  /// The drafts this device keeps, for every Claktory.
+  final DeviceDrafts drafts;
 
-  /// Which Factory to show: this Mac's, or one on another machine.
+  /// Every Claktory this app connects to (this Mac's, and others on other
+  /// machines), and which one the window shows.
   final Connections connections;
+
+  /// Connects to a Claktory; tests give one that doesn't.
+  final Backend Function(RemoteFactory? target)? open;
+
+  /// Whether this device runs a Claktory of its own; by default, whether
+  /// it's a Mac ([hasLocalBackend]).
+  final bool? localBackend;
 
   @override
   State<FactoryApp> createState() => _FactoryAppState();
 }
 
 class _FactoryAppState extends State<FactoryApp> {
-  final _backend = Backend(
-    workspace: WorkspaceStore(),
-    transcript: TranscriptStore(),
-    explorer: ExplorerStore(),
-    extensionView: ExtensionViewStore(),
+  late final _claktories = Claktories(
+    connections: widget.connections,
+    localBackend: widget.localBackend ?? hasLocalBackend,
+    open: widget.open ?? _open,
+    drafts: widget.drafts,
   );
-  late final _login = LoginLauncher(
-    workspace: _backend.workspace,
-    send: _backend.startLogin,
-  );
-  late final _history = AgentHistory(
-    workspace: _backend.workspace,
-    select: (id) => fireAndLog(_backend.selectAgent(id)),
-  );
-  final _page = ValueNotifier(AppPage.agent);
   final _appBuild = AppBuild.current();
 
-  @override
-  void initState() {
-    super.initState();
-    widget.drafts.watch(_backend.workspace);
-    // The device's key for each Factory, kept with its pairing.
-    _backend.deviceKey = widget.connections.deviceKey;
-    _backend.connectTo(widget.connections.current);
-    unawaited(_backend.run());
+  /// The window, as an overlay entry: the root layer the phone's list of
+  /// Claktories and its dialogs float in.
+  late final _window = OverlayEntry(builder: _buildWindow);
+
+  /// A live connection to [target] (null: this Mac's Claktory).
+  Backend _open(RemoteFactory? target) {
+    final backend = Backend(
+      workspace: WorkspaceStore(),
+      transcript: TranscriptStore(),
+      explorer: ExplorerStore(),
+      extensionView: ExtensionViewStore(),
+      localBackend: widget.localBackend ?? hasLocalBackend,
+    );
+    // The device's key for each Claktory, kept with its pairing.
+    backend.deviceKey = widget.connections.deviceKey;
+    backend.connectTo(target);
+    unawaited(backend.run());
+    return backend;
   }
 
   @override
   void dispose() {
-    _login.dispose();
-    _page.dispose();
-    _history.dispose();
-    unawaited(_backend.close());
+    _window.remove();
+    _window.dispose();
+    _claktories.dispose();
     super.dispose();
+  }
+
+  Widget _buildWindow(BuildContext context) {
+    final claktories = ClaktoriesScope.of(context)!;
+    final shown = claktories.selected;
+    // Each Claktory gets a window of its own: nothing of one carries over
+    // to the next, and its stores are already live, so it shows at once.
+    // The rail sits inside it, so its dialogs cover the whole window.
+    if (isPhoneLayout(context)) {
+      return PhoneClaktories(shell: Shell(key: ValueKey(shown.key)));
+    }
+    return Shell(key: ValueKey(shown.key), rail: const ClaktoryRail());
   }
 
   @override
@@ -79,17 +101,25 @@ class _FactoryAppState extends State<FactoryApp> {
       title: 'Claktory',
       color: signal,
       debugShowCheckedModeBanner: false,
-      builder: (context, _) => AppScope(
-        backend: _backend,
-        login: _login,
-        page: _page,
-        appBuild: _appBuild,
-        drafts: widget.drafts,
-        history: _history,
-        connections: widget.connections,
-        child: ScrollConfiguration(
-          behavior: const _ScrollBehavior(),
-          child: const DevMark(child: Shell()),
+      builder: (context, _) => ClaktoriesScope(
+        claktories: _claktories,
+        child: Builder(
+          builder: (context) {
+            final shown = ClaktoriesScope.of(context)!.selected;
+            return AppScope(
+              backend: shown.backend,
+              login: shown.login,
+              page: shown.page,
+              appBuild: _appBuild,
+              drafts: shown.drafts,
+              history: shown.history,
+              connections: widget.connections,
+              child: ScrollConfiguration(
+                behavior: const _ScrollBehavior(),
+                child: DevMark(child: Overlay(initialEntries: [_window])),
+              ),
+            );
+          },
         ),
       ),
     );

@@ -7,17 +7,19 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-/// Opens a tunnel to the backend [endpoint_id] (its relays [relays], from
-/// its pairing code), as the device [device_key]. It listens at once and
-/// dials when the app first connects.
+/// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
+/// direct addresses [addresses], from its pairing code), as the device
+/// [device_key]. It listens at once and dials when the app first connects.
 Future<TunnelHandle> openTunnel({
   required String deviceKey,
   required String endpointId,
   required List<String> relays,
+  required List<String> addresses,
 }) => RustLib.instance.api.crateApiTunnelOpenTunnel(
   deviceKey: deviceKey,
   endpointId: endpointId,
   relays: relays,
+  addresses: addresses,
 );
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<TunnelHandle>>
@@ -27,6 +29,11 @@ abstract class TunnelHandle implements RustOpaqueInterface {
 
   /// Where the app connects: ws://127.0.0.1:<port>.
   int port();
+
+  /// After the app was suspended or the network changed: the connection
+  /// is made afresh by the next socket, and iroh looks at the network
+  /// again.
+  Future<void> reconnect();
 
   TunnelStatus status();
 }

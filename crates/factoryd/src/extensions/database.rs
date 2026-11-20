@@ -30,7 +30,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Database",
     icon: "database",
-    description: "A SQLite database of the agent's own, for structured data it collects or keeps track of over time, such as records, lists and results, which it queries with SQL. Made on first use; the person sees its tables.",
+    description: "Gives it a database of its own for records, lists and results it keeps over time. You can browse its tables.",
     default_enabled: false,
     options: &[],
 };
@@ -38,9 +38,9 @@ static MANIFEST: Manifest = Manifest {
 static INSTANCES: [InstanceSpec; 1] = [InstanceSpec {
     key: "database:factory",
     name: "factory",
-    label: "Factory's records",
+    label: "Claktory's records",
     icon: "database",
-    description: "Factory's own records (factory.db) to read with SQL: every message agents were sent, their runs, background tasks and checklists, but not agents' memory. Admin agents like Rivet have it; turn it on for agents that look into what happened.",
+    description: "Lets it look through everything that happened in Claktory: messages, runs, tasks and checklists, but not memories. Rivet has it; turn it on for agents that look into problems.",
     default: InstanceDefault::Admin,
 }];
 const FACTORY: &InstanceSpec = &INSTANCES[0];
@@ -50,20 +50,20 @@ const PROMPT: &str = "## Database
 You have a SQLite database of your own for structured data you collect or keep track of over time (records, lists, results) and want to query rather than reread. db_exec changes it (CREATE TABLE, INSERT, UPDATE, DELETE; several statements at once, applied all or none), db_query reads it (one SELECT), db_schema shows its tables; `params` fill ?1, ?2… It lasts across compactions and /clear, only you use it, and the person sees its tables beside your conversation. Results are capped at 200 rows, so select the columns and rows you need. Documents and code still belong in files.
 ";
 
-const RECORDS_PROMPT: &str = "## Factory's records
+const RECORDS_PROMPT: &str = "## Claktory's records
 
-db_query and db_schema read Factory's own records, factory.db{instance}: every message an agent was sent (`messages`, by `agent`, the one it was sent to: the person's and events, when each was created and delivered), each agent's runs (`runs`), background tasks (`tasks`) and checklists (`checklist_items`, `checklist_events`), as Factory writes them. Use them to see what happened, such as what an agent was sent and when, or why a run failed. They're read only, and agents' memory isn't among them. Times are milliseconds since 1970.
+db_query and db_schema read Claktory's own records, factory.db{instance}: every message an agent was sent (`messages`, by `agent`, the one it was sent to: the person's and events, when each was created and delivered), each agent's runs (`runs`), background tasks (`tasks`) and checklists (`checklist_items`, `checklist_events`), as Claktory writes them. Use them to see what happened, such as what an agent was sent and when, or why a run failed. They're read only, and agents' memory isn't among them. Times are milliseconds since 1970.
 ";
 
 const QUERY: &str = "Read your database with one SELECT (or WITH … SELECT). `params` fill ?1, ?2… Shows a header line and up to 200 rows, cells joined with \" | \", and how many more there were.";
-const QUERY_RECORDS: &str = "Read Factory's records (factory.db) with one SELECT (or WITH … SELECT). `params` fill ?1, ?2… Shows a header line and up to 200 rows, cells joined with \" | \", and how many more there were.";
-const QUERY_BOTH: &str = "Read your database, or with instance \"factory\" Factory's records (factory.db), with one SELECT (or WITH … SELECT). `params` fill ?1, ?2… Shows a header line and up to 200 rows, cells joined with \" | \", and how many more there were.";
+const QUERY_RECORDS: &str = "Read Claktory's records (factory.db) with one SELECT (or WITH … SELECT). `params` fill ?1, ?2… Shows a header line and up to 200 rows, cells joined with \" | \", and how many more there were.";
+const QUERY_BOTH: &str = "Read your database, or with instance \"factory\" Claktory's records (factory.db), with one SELECT (or WITH … SELECT). `params` fill ?1, ?2… Shows a header line and up to 200 rows, cells joined with \" | \", and how many more there were.";
 const EXEC: &str = "Change your database: CREATE TABLE, INSERT, UPDATE, DELETE and the like. Without params, sql may hold several statements; with params (filling ?1, ?2…), one. All of it is applied or none; leave out BEGIN and COMMIT. The database is made on first use.";
 const SCHEMA: &str =
     "Your database's tables and views, each with its row count and columns; with `table`, its CREATE statement and indexes.";
 const SCHEMA_RECORDS: &str =
-    "The tables of Factory's records (factory.db), each with its row count and columns; with `table`, its CREATE statement and indexes.";
-const SCHEMA_BOTH: &str = "Your database's tables and views (or with instance \"factory\" those of Factory's records, factory.db), each with its row count and columns; with `table`, its CREATE statement and indexes.";
+    "The tables of Claktory's records (factory.db), each with its row count and columns; with `table`, its CREATE statement and indexes.";
+const SCHEMA_BOTH: &str = "Your database's tables and views (or with instance \"factory\" those of Claktory's records, factory.db), each with its row count and columns; with `table`, its CREATE statement and indexes.";
 
 pub(crate) struct Database;
 
@@ -99,27 +99,29 @@ fn on(factory: &Factory, agent: &str) -> (bool, bool) {
 fn access(factory: &Factory, agent: &str, instance: Option<&str>, write: bool) -> Result<Target, String> {
     let (own, records) = on(factory, agent);
     match instance.map(str::trim).filter(|instance| !instance.is_empty()) {
-        Some(name) if name == FACTORY.name && !records => Err("Factory's records aren't on for you.".to_owned()),
-        Some(name) if name == FACTORY.name && write => Err("Factory's records are read only.".to_owned()),
+        Some(name) if name == FACTORY.name && !records => Err("Claktory's records aren't on for you.".to_owned()),
+        Some(name) if name == FACTORY.name && write => Err("Claktory's records are read only.".to_owned()),
         Some(name) if name == FACTORY.name => Ok(Target::Factory),
         Some(other) => {
-            Err(format!("instance is \"{}\" for Factory's records, or left out for your own database; got \"{other}\".", FACTORY.name))
+            Err(format!("instance is \"{}\" for Claktory's records, or left out for your own database; got \"{other}\".", FACTORY.name))
         }
         None if own => Ok(Target::Own(agent.to_owned())),
-        None if records && write => Err("Factory's records are read only, and you have no database of your own.".to_owned()),
+        None if records && write => Err("Claktory's records are read only, and you have no database of your own.".to_owned()),
         None if records => Ok(Target::Factory),
         None => Err("The Database extension is turned off for you.".to_owned()),
     }
 }
 
 /// Runs one call against `target`. Blocking: SQLite works synchronously.
-fn run(home: &crate::home::Home, target: &Target, kind: Kind, args: &Args) -> Result<String, String> {
+fn run(home: &crate::home::Home, target: &Target, kind: Kind, args: &Args) -> Result<sql::Answer, String> {
     let sql = || args.sql.as_deref().map(str::trim).filter(|sql| !sql.is_empty()).ok_or_else(|| "sql is empty.".to_owned());
     let table = args.table.as_deref().map(str::trim).filter(|table| !table.is_empty());
     let Some(mut db) = sql::open(home, target, kind == Kind::Exec)? else {
         // The agent's own database, before its first write.
         return match (kind, table) {
-            (Kind::Schema, None) => Ok("No tables yet; create them with db_exec.".to_owned()),
+            (Kind::Schema, None) => {
+                Ok(sql::Answer { text: "No tables yet; create them with db_exec.".to_owned(), details: json!({"tables": 0}) })
+            }
             _ => Err("Your database has no tables yet; create them with db_exec.".to_owned()),
         };
     };
@@ -130,9 +132,10 @@ fn run(home: &crate::home::Home, target: &Target, kind: Kind, args: &Args) -> Re
     }
 }
 
-async fn call(factory: &Factory, agent: &str, kind: Kind, args: Value) -> Result<String, String> {
+async fn call(factory: &Factory, agent: &str, kind: Kind, args: Value) -> Result<ToolResult, String> {
     let args: Args = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let target = access(factory, agent, args.instance.as_deref(), kind == Kind::Exec)?;
+    let instance = if target == Target::Factory { FACTORY.name } else { "" };
     let home = factory.home.clone();
     let done = tokio::task::spawn_blocking(move || run(&home, &target, kind, &args))
         .await
@@ -141,7 +144,9 @@ async fn call(factory: &Factory, agent: &str, kind: Kind, args: Value) -> Result
         // Its tables may have changed: the panel follows.
         factory.refresh_view(agent);
     }
-    done
+    let mut answer = done?;
+    answer.details["instance"] = json!(instance);
+    Ok(ToolResult::text(answer.text, answer.details))
 }
 
 fn db_tool(
@@ -163,9 +168,8 @@ fn db_tool(
         Arc::new(move |args| {
             let (factory, agent) = (factory.upgrade(), agent.clone());
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let text = call(&factory, &agent, kind, args).await.map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+                call(&factory, &agent, kind, args).await.map_err(factory_agent::Error::Other)
             })
         }),
     )

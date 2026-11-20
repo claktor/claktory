@@ -9,10 +9,49 @@ import 'protocol/factory/v1/factory.pb.dart';
 /// The usage window a provider's circle shows.
 const headlineWindow = 'weekly';
 
-/// One small circle per signed-in provider, in the provider's color with
-/// its product mark inside. A subscription's ring fills as its weekly limit
-/// is used; the hover card gives every limit's numbers. Providers without
-/// limits (API keys) show the mark alone, which doesn't read as a meter.
+/// What one circle stands for: one account signed in to a provider (one of
+/// two Claude subscriptions, say), or the provider itself when the backend
+/// doesn't list its accounts.
+class UsageMeter {
+  const UsageMeter(this.provider, [this.account]);
+
+  final Provider provider;
+  final Account? account;
+
+  /// Its usage limits; null when it has none to read (an API key).
+  ProviderUsage? get usage {
+    final account = this.account;
+    if (account != null) return account.hasUsage() ? account.usage : null;
+    return provider.hasUsage() ? provider.usage : null;
+  }
+
+  /// The plan as the provider names it, empty when unknown.
+  String get plan => account?.plan ?? provider.plan;
+
+  /// Who it is: the account's email or name, empty when unknown.
+  String get who => account?.label ?? '';
+
+  /// What screen readers and tests call its circle.
+  String get name =>
+      who.isEmpty ? '${provider.name} usage' : '${provider.name} usage, $who';
+}
+
+/// One meter per account signed in, provider by provider, in the order
+/// requests try them.
+List<UsageMeter> usageMeters(List<Provider> providers) => [
+  for (final provider in providers)
+    if (provider.accounts.isNotEmpty)
+      for (final account in provider.accounts) UsageMeter(provider, account)
+    else if (provider.signedInWith.isNotEmpty)
+      UsageMeter(provider),
+];
+
+/// One small circle per signed-in account (a provider with two Claude
+/// subscriptions has two), in the provider's color with its product mark
+/// inside. A subscription's ring fills as its weekly limit is used; the
+/// hover card gives who it is, its plan and every limit's numbers. Accounts
+/// without limits (API keys) show the mark alone, which doesn't read as a
+/// meter.
 class ProviderUsageCircles extends StatelessWidget {
   const ProviderUsageCircles({super.key, required this.providers});
 
@@ -20,36 +59,34 @@ class ProviderUsageCircles extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final signedIn = [
-      for (final provider in providers)
-        if (provider.signedInWith.isNotEmpty) provider,
-    ];
     // Their own row, wrapping onto more as they multiply.
     return Wrap(
       spacing: Space.xs,
       runSpacing: Space.xs,
       children: [
-        for (final provider in signedIn) _UsageCircle(provider: provider),
+        for (final meter in usageMeters(providers)) UsageCircle(meter: meter),
       ],
     );
   }
 }
 
-class _UsageCircle extends StatelessWidget {
-  const _UsageCircle({required this.provider});
+/// One account's 20px circle in a 24px cell, its card shown on hover.
+class UsageCircle extends StatelessWidget {
+  const UsageCircle({super.key, required this.meter});
 
-  final Provider provider;
+  final UsageMeter meter;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final provider = meter.provider;
     final color = providerColor(provider.id, palette);
-    final usage = provider.hasUsage() ? provider.usage : null;
-    final (mark, used) = usageMark(provider);
+    final usage = meter.usage;
+    final (mark, used) = usageMark(usage);
     return Semantics(
-      label: '${provider.name} usage',
+      label: meter.name,
       child: HoverCard(
-        card: (context) => UsageCard(provider: provider, now: DateTime.now()),
+        card: (context) => UsageCard(meter: meter, now: DateTime.now()),
         child: SizedBox.square(
           dimension: 24,
           child: Center(
@@ -73,11 +110,11 @@ class _UsageCircle extends StatelessWidget {
   }
 }
 
-/// How [provider]'s circle is drawn, and for a meter how full it is (0 to
-/// 1): the share of its weekly limit used.
-(UsageMark, double) usageMark(Provider provider) {
-  if (!provider.hasUsage()) return (UsageMark.noLimits, 0);
-  final weekly = _window(provider.usage, headlineWindow);
+/// How a circle for [usage] is drawn, and for a meter how full it is (0 to
+/// 1): the share of its weekly limit used. Null usage has no limits.
+(UsageMark, double) usageMark(ProviderUsage? usage) {
+  if (usage == null) return (UsageMark.noLimits, 0);
+  final weekly = _window(usage, headlineWindow);
   if (weekly == null) return (UsageMark.unknown, 0);
   return (UsageMark.meter, weekly.usedPercent.clamp(0, 100) / 100);
 }
@@ -189,12 +226,13 @@ UsageWindow? _window(ProviderUsage usage, String id) {
   return null;
 }
 
-/// What a provider's circle says on hover: how it's signed in, each limit's
+/// What a circle says on hover: the provider, who the account is and its
+/// plan (or how it's signed in), whether requests go to it, each limit's
 /// share used and when it resets, and when that was read.
 class UsageCard extends StatelessWidget {
-  const UsageCard({super.key, required this.provider, required this.now});
+  const UsageCard({super.key, required this.meter, required this.now});
 
-  final Provider provider;
+  final UsageMeter meter;
 
   /// The time the ages and resets are counted from.
   final DateTime now;
@@ -203,7 +241,9 @@ class UsageCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final caption = TextStyles.caption.copyWith(color: palette.textMuted);
-    final usage = provider.hasUsage() ? provider.usage : null;
+    final provider = meter.provider;
+    final account = meter.account;
+    final usage = meter.usage;
     // The weekly limit first, then the rest in the provider's order.
     final windows = usage == null
         ? <UsageWindow>[]
@@ -212,6 +252,7 @@ class UsageCard extends StatelessWidget {
             ...usage.windows.where((w) => w.id != headlineWindow),
           ];
     final read = usage != null && usage.updated > 0;
+    final state = account == null ? null : accountState(provider, account, now);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -230,13 +271,19 @@ class UsageCard extends StatelessWidget {
             ),
           ],
         ),
+        if (meter.who.isNotEmpty) Text(meter.who, style: caption),
         // The plan, as the provider names it, once it's known.
-        Text(
-          provider.plan.isNotEmpty
-              ? provider.plan
-              : 'Signed in with ${provider.signedInWith}',
-          style: caption,
-        ),
+        if (meter.plan.isNotEmpty)
+          Text(meter.plan, style: caption)
+        else if (account == null)
+          Text('Signed in with ${provider.signedInWith}', style: caption),
+        if (state != null && state.text.isNotEmpty)
+          Text(
+            state.text,
+            style: TextStyles.caption.copyWith(
+              color: state.problem ? palette.danger : palette.textMuted,
+            ),
+          ),
         if (usage == null)
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
@@ -276,7 +323,7 @@ class UsageCard extends StatelessWidget {
         if (usage != null && !read && usage.error.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
-            child: Text('Usage not read yet.', style: caption),
+            child: Text('Usage not checked yet.', style: caption),
           ),
         if (usage != null && read && windows.isEmpty)
           Padding(
@@ -287,7 +334,7 @@ class UsageCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
             child: Text(
-              "Couldn't read usage: ${usage.error}",
+              "Couldn't check usage: ${usage.error}",
               style: TextStyles.caption.copyWith(color: palette.danger),
             ),
           ),
@@ -295,7 +342,7 @@ class UsageCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
             child: Text(
-              '${usage.error.isEmpty ? 'Read' : 'Last read'} '
+              '${usage.error.isEmpty ? 'Checked' : 'Last checked'} '
               '${formatAge(usage.updated.toInt(), now)}',
               style: TextStyles.caption.copyWith(color: palette.textFaint),
             ),
@@ -303,6 +350,64 @@ class UsageCard extends StatelessWidget {
       ],
     );
   }
+}
+
+/// What [account] is doing now: requests go to it ("In use"), it reached a
+/// usage limit and is skipped until it resets ("Limit reached, back at
+/// 14:00"), an API key ran out of credit, or it waits its turn ("Signed
+/// in"). [problem] marks a state the
+/// person may need to act on.
+({String text, bool problem}) accountState(
+  Provider provider,
+  Account account,
+  DateTime now,
+) {
+  final until = account.exhaustedUntil.toInt();
+  if (until > now.millisecondsSinceEpoch) {
+    return (
+      text: 'Limit reached, back at ${formatUntil(until, now)}',
+      problem: false,
+    );
+  }
+  if (account.outOfCredit) {
+    return (
+      text: 'Out of credit. Add credit at ${provider.name}.',
+      problem: true,
+    );
+  }
+  if (account.inUse) return (text: 'In use', problem: false);
+  return (text: 'Signed in', problem: false);
+}
+
+/// A time to come, from [ms] since 1970: "14:00" today, "Tue 14:00" within
+/// the week, "12 Dec 14:00" after.
+String formatUntil(int ms, DateTime now) {
+  final at = DateTime.fromMillisecondsSinceEpoch(ms);
+  final time =
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}';
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(at.year, at.month, at.day).difference(today).inDays;
+  if (day <= 0) return time;
+  if (day < 7) {
+    const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return '${weekdays[at.weekday - 1]} $time';
+  }
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  return '${at.day} ${months[at.month - 1]} $time';
 }
 
 /// "42%", or "0.5%" below 1 so a little use doesn't look like none.

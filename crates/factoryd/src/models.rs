@@ -2,6 +2,7 @@
 //! Behind a trait so tests can script a provider.
 
 use factory_agent::auth::AuthInteraction;
+use factory_agent::providers::models::Notes;
 use factory_agent::{Error, Model, StreamFn};
 use factory_protocol::v1;
 use futures_util::future::BoxFuture;
@@ -17,21 +18,60 @@ pub trait Models: Send + Sync {
     /// The model for a config id like "anthropic/claude-opus-5-5".
     fn resolve(&self, id: &str) -> Option<Model>;
     fn stream(&self) -> StreamFn;
+    /// `stream`, telling `notes` what the person should know of a request,
+    /// such as that it carried on with another account of its provider.
+    fn stream_noting(&self, notes: Notes) -> StreamFn {
+        let _ = notes;
+        self.stream()
+    }
     /// Runs a provider's sign-in, asking `interaction` for whatever it needs,
-    /// and stores the credential.
-    fn login<'a>(&'a self, provider: &'a str, method: &'a str, interaction: &'a dyn AuthInteraction) -> BoxFuture<'a, Result<(), Error>>;
-    /// Forgets the stored credential.
-    fn logout<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<(), Error>>;
-    /// Reads how much of its usage limits a provider signed in with a
-    /// subscription has used; None when it isn't signed in that way.
-    fn usage<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    /// and stores the credential: as another account with `add`, else in
+    /// place of its first account (unless it's one already signed in).
+    fn login<'a>(
+        &'a self,
+        provider: &'a str,
+        method: &'a str,
+        interaction: &'a dyn AuthInteraction,
+        add: bool,
+    ) -> BoxFuture<'a, Result<(), Error>>;
+    /// Forgets the stored credential of one of its accounts; an empty
+    /// `account`, all of them.
+    fn logout<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<(), Error>>;
+    /// Moves one of a provider's accounts to `position` in the order
+    /// requests try them.
+    fn move_account<'a>(&'a self, provider: &'a str, account: &'a str, position: usize) -> BoxFuture<'a, Result<(), Error>> {
+        let _ = (provider, account, position);
+        Box::pin(async { Err(Error::Other("this provider has only one account".into())) })
+    }
+    /// Renames one of a provider's accounts (`label`; empty: the name
+    /// Factory gives it) and, with `retry`, tries a key out of credit again.
+    fn update_account<'a>(
+        &'a self,
+        provider: &'a str,
+        account: &'a str,
+        label: Option<&'a str>,
+        retry: bool,
+    ) -> BoxFuture<'a, Result<(), Error>> {
+        let _ = (provider, account, label, retry);
+        Box::pin(async { Err(Error::Other("this provider's accounts can't be changed".into())) })
+    }
+    /// Reads how much of its usage limits an account (`provider.accounts`'
+    /// id; empty: the provider's first) signed in with a subscription has
+    /// used; None when it isn't signed in that way.
+    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
         Box::pin(async { Ok(None) })
     }
-    /// Reads which plan a provider signed in with a subscription has, such as
-    /// "Claude Max 20x"; empty when it isn't signed in that way or doesn't say.
-    fn plan<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<String, Error>> {
+    /// Reads which plan an account signed in with a subscription has, such
+    /// as "Claude Max 20x"; empty when it isn't signed in that way or
+    /// doesn't say.
+    fn plan<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(async { Ok(String::new()) })
     }
+}
+
+/// An account id as `Registry` takes it: None for the first.
+fn account_arg(account: &str) -> Option<&str> {
+    (!account.is_empty()).then_some(account)
 }
 
 pub use factory_agent::Registry;
@@ -95,6 +135,29 @@ impl Models for Registry {
                         Some(variable) => (variable.to_owned(), false),
                     },
                 };
+                let stored = match self.accounts(provider.id).await {
+                    Ok(stored) => stored,
+                    Err(error) => {
+                        tracing::warn!(provider = provider.id, %error, "could not read the accounts");
+                        Vec::new()
+                    }
+                };
+                let subscription = provider.limits.is_some() && provider.oauth.as_ref().is_some_and(|oauth| oauth.is_subscription());
+                let mut accounts = Vec::new();
+                for account in stored {
+                    let key = account.kind == API_KEY;
+                    accounts.push(v1::Account {
+                        id: account.id,
+                        label: account.label,
+                        plan: if key { "API key".to_owned() } else { String::new() },
+                        usage: (subscription && account.kind == OAUTH).then(v1::ProviderUsage::default),
+                        can_sign_out: account.stored,
+                        in_use: account.in_use,
+                        exhausted_until: i64::try_from(account.exhausted_until).unwrap_or(0),
+                        out_of_credit: account.out_of_credit,
+                        method_id: account.kind.to_owned(),
+                    });
+                }
                 providers.push(v1::Provider {
                     id: provider.id.to_owned(),
                     name: provider.name.to_owned(),
@@ -103,6 +166,7 @@ impl Models for Registry {
                     methods,
                     usage,
                     plan: String::new(),
+                    accounts,
                 });
             }
             providers
@@ -117,20 +181,44 @@ impl Models for Registry {
         self.stream_fn()
     }
 
-    fn login<'a>(&'a self, provider: &'a str, method: &'a str, interaction: &'a dyn AuthInteraction) -> BoxFuture<'a, Result<(), Error>> {
+    fn stream_noting(&self, notes: Notes) -> StreamFn {
+        self.stream_fn_with(Some(notes))
+    }
+
+    fn login<'a>(
+        &'a self,
+        provider: &'a str,
+        method: &'a str,
+        interaction: &'a dyn AuthInteraction,
+        add: bool,
+    ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            Registry::login(self, provider, method, interaction).await?;
+            Registry::login_account(self, provider, method, interaction, add).await?;
             Ok(())
         })
     }
 
-    fn logout<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(Registry::logout(self, provider))
+    fn logout<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(Registry::logout_account(self, provider, account))
     }
 
-    fn usage<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    fn move_account<'a>(&'a self, provider: &'a str, account: &'a str, position: usize) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(Registry::move_account(self, provider, account, position))
+    }
+
+    fn update_account<'a>(
+        &'a self,
+        provider: &'a str,
+        account: &'a str,
+        label: Option<&'a str>,
+        retry: bool,
+    ) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(Registry::update_account(self, provider, account, label, retry))
+    }
+
+    fn usage<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
         Box::pin(async move {
-            let Some(limits) = self.usage_limits(provider).await? else { return Ok(None) };
+            let Some(limits) = self.account_usage(provider, account_arg(account)).await? else { return Ok(None) };
             let mut windows = Vec::new();
             for limit in limits {
                 windows.push(v1::UsageWindow {
@@ -144,7 +232,7 @@ impl Models for Registry {
         })
     }
 
-    fn plan<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<String, Error>> {
-        Box::pin(async move { Ok(Registry::plan(self, provider).await?.unwrap_or_default()) })
+    fn plan<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(async move { Ok(Registry::account_plan(self, provider, account_arg(account)).await?.unwrap_or_default()) })
     }
 }

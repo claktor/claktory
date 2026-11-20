@@ -47,6 +47,13 @@ impl Job {
     }
 }
 
+/// Where scripts/install-release.sh puts the supervisor: in its app (an app,
+/// so it can be added to Developer Tools), or, before that, bare.
+pub(crate) fn supervisors(home: &Home) -> [PathBuf; 2] {
+    let bin = home.root().join("bin");
+    [bin.join("Claktory Agents.app/Contents/MacOS/factoryd-supervisor"), bin.join("factoryd-supervisor")]
+}
+
 /// Where the marker and the helper's files go.
 fn marker(home: &Home) -> PathBuf {
     home.root().join("bin/launch-agent.json")
@@ -70,9 +77,11 @@ pub(crate) fn prepare(home: &Home, job: &Job) -> Result<Option<PathBuf>, String>
         return Ok(None);
     }
     let current = read(&job.plist)?;
-    // Only the job that runs this Factory's own supervisor.
-    let supervisor = home.root().join("bin/factoryd-supervisor");
-    if current["Label"] != LABEL || current["ProgramArguments"][0].as_str() != Some(&*supervisor.to_string_lossy()) {
+    // Only the job that runs this Factory's own supervisor: its app, or
+    // the bare binary installers put there before.
+    let program = current["ProgramArguments"][0].as_str().unwrap_or_default();
+    let ours = supervisors(home).iter().any(|supervisor| supervisor.to_string_lossy() == program);
+    if current["Label"] != LABEL || !ours {
         return Ok(None);
     }
     let missing: Vec<(&str, &str)> = WANTED.into_iter().filter(|(key, value)| current[*key].as_str() != Some(*value)).collect();
@@ -254,6 +263,16 @@ exit 0
         // Once: tried, it's never tried again, whatever the plist says.
         old_plist(&dir, &home.root().join("bin/factoryd-supervisor"));
         assert_eq!(prepare(&home, &job).expect("again"), None);
+    }
+
+    #[test]
+    fn a_plist_that_runs_the_supervisors_app_is_ours_too() {
+        let dir = temp();
+        let home = Home::new(dir.join("home"));
+        let plist = old_plist(&dir, &supervisors(&home)[0]);
+        let job = Job { plist, launchctl: PathBuf::from("/nonexistent"), domain: "gui/501".into() };
+        let new = prepare(&home, &job).expect("prepared").expect("something to do");
+        assert_eq!(read(&new).expect("read")["ProgramArguments"][0], supervisors(&home)[0].to_string_lossy().as_ref());
     }
 
     #[test]

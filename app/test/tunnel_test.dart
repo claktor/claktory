@@ -45,9 +45,24 @@ class FakeTunnel implements Tunnel {
   TunnelStatus status = tunnelStatus();
 
   var closed = false;
+  var reconnects = 0;
+
+  @override
+  Future<void> reconnect() async => reconnects++;
 
   @override
   Future<void> close() async => closed = true;
+}
+
+/// A tunnel whose status is a new object each time it's read, as the Rust
+/// side's is.
+class _FreshStatusTunnel extends FakeTunnel {
+  _FreshStatusTunnel(super.port);
+
+  TunnelPath path = TunnelPath.direct;
+
+  @override
+  TunnelStatus get status => tunnelStatus(path: path);
 }
 
 class FakeTunnels implements Tunnels {
@@ -55,25 +70,44 @@ class FakeTunnels implements Tunnels {
 
   final FakeTunnel tunnel;
   final opened = <(String, String, List<String>)>[];
+  final addresses = <List<String>>[];
 
   @override
   Future<Tunnel> open({
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
+    List<String> addresses = const [],
   }) async {
     opened.add((deviceKey, endpointId, relays));
+    this.addresses.add(addresses);
     return tunnel;
   }
 }
 
-Backend backendWith(Tunnels tunnels) => Backend(
+Backend backendWith(Tunnels tunnels, {RemoteFactory? local}) => Backend(
   workspace: WorkspaceStore(),
   transcript: TranscriptStore(),
   explorer: ExplorerStore(),
   extensionView: ExtensionViewStore(),
   tunnels: tunnels,
+  localPairing: () async => local,
 );
+
+/// A backend's end of the tunnel: the first Hello it gets.
+Future<(HttpServer, Future<ClientMessage>)> helloServer() async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  final hello = Completer<ClientMessage>();
+  server.listen((request) async {
+    final socket = await WebSocketTransformer.upgrade(request);
+    socket.listen((frame) {
+      if (!hello.isCompleted) {
+        hello.complete(ClientMessage.fromBuffer(frame as List<int>));
+      }
+    });
+  });
+  return (server, hello.future);
+}
 
 void main() {
   group('pairing codes with the tunnel', () {
@@ -110,6 +144,15 @@ void main() {
       expect(old.tunnelled, isFalse);
       // A relay that isn't a URL is left out.
       expect(parsePairingCode('$_code&r=not%20a%20url')!.relays, hasLength(2));
+    });
+
+    test('carry direct addresses', () {
+      final target = parsePairingCode(
+        'factory://?t=$_token&e=$_endpoint&a=127.0.0.1%3A4919'
+        '&a=%5B%3A%3A1%5D%3A4919&a=nowhere',
+      )!;
+      expect(target.addresses, ['127.0.0.1:4919', '[::1]:4919']);
+      expect(target.named('Office').addresses, target.addresses);
     });
   });
 
@@ -179,6 +222,99 @@ void main() {
     await server.close(force: true);
   });
 
+  test('an open tunnel tells listeners only when its status changes', () async {
+    final (server, hello) = await helloServer();
+    final tunnel = _FreshStatusTunnel(server.port);
+    final backend = backendWith(FakeTunnels(tunnel))
+      ..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await hello.timeout(const Duration(seconds: 5));
+    var told = 0;
+    backend.tunnel.addListener(() => told++);
+
+    // Read every second, a new but equal status each time: nothing to tell.
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
+    expect(told, 0);
+    tunnel.path = TunnelPath.relayed;
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    expect(told, 1);
+    expect(backend.tunnel.value?.path, TunnelPath.relayed);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("this Mac's Factory is reached through the tunnel with its own "
+      'code: its direct address, its token, a key of its own', () async {
+    final (server, hello) = await helloServer();
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final local = parsePairingCode(
+      'factory://?t=$_token&name=this-mac&e=$_endpoint&a=127.0.0.1%3A4919',
+    )!;
+    final backend = backendWith(tunnels, local: local)
+      ..deviceKey = (_) => throw StateError('not a paired device');
+    unawaited(backend.run());
+
+    final message = await hello.timeout(const Duration(seconds: 5));
+    expect(message.hello.token, _token);
+    final (key, endpoint, relays) = tunnels.opened.single;
+    expect(key, matches(RegExp(r'^[0-9a-f]{64}$')));
+    expect(endpoint, _endpoint);
+    expect(relays, isEmpty);
+    expect(tunnels.addresses.single, ['127.0.0.1:4919']);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('back from the background, it reconnects at once and quietly', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var hellos = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          hellos++;
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 100 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => backend.connected.value);
+    expect(hellos, 1);
+
+    // A moment away changes nothing.
+    backend.hidden();
+    backend.resumed();
+    expect(backend.reconnecting.value, isFalse);
+    expect(tunnels.tunnel.reconnects, 0);
+
+    // Longer, and it dials afresh at once, saying nothing meanwhile.
+    backend.hidden();
+    backend.resumed(now: DateTime.now().add(const Duration(minutes: 1)));
+    expect(backend.reconnecting.value, isTrue);
+    expect(tunnels.tunnel.reconnects, 1);
+    await until(() => hellos == 2 && backend.connected.value);
+    expect(backend.reconnecting.value, isFalse);
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('turned away at the tunnel, it stops trying and says why', () async {
     // Nothing listens: the tunnel closes every socket at once.
     final unused = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -213,17 +349,47 @@ void main() {
       error: 'Nothing answered within 20 seconds.',
     );
     await harness.show(tester);
-    await tester.tap(find.text("Can't reach mac-mini"));
+    await tester.tap(find.text("Can't connect to mac-mini"));
     await settle(tester);
     expect(find.byType(TunnelProblem), findsOneWidget);
     expect(find.text('Nothing answered within 20 seconds.'), findsOneWidget);
-    expect(find.textContaining('Check that mac-mini is on'), findsOneWidget);
+    expect(
+      find.textContaining('Make sure mac-mini is on, awake and online'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Try again'));
     await settle(tester);
     expect(find.byType(TunnelProblem), findsNothing);
   });
 
-  testWidgets('Settings → Devices says how this device reaches it', (
+  testWidgets('reconnecting after a resume or a drop, the footer says '
+      'nothing for a few seconds', (tester) async {
+    // What showed before stays: the agent's conversation.
+    final snapshot = Workspace(
+      agents: [Agent(id: 'rivet', name: 'Rivet', modelAvailable: true)],
+      selectedAgentId: 'rivet',
+    );
+    final harness = Harness(snapshot);
+    harness.backend.connected.value = false;
+    harness.backend.connectTo(parsePairingCode(_code));
+    harness.backend.workspace.apply(snapshot);
+    harness.backend.reconnecting.value = true;
+    harness.backend.tunnel.value = tunnelStatus(
+      phase: TunnelPhase.failed,
+      path: TunnelPath.none,
+      failure: TunnelFailure.unreachable,
+      error: 'The connection to the machine timed out.',
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.textContaining("Can't connect"), findsNothing);
+    expect(find.textContaining('Connecting'), findsNothing);
+    harness.backend.reconnecting.value = false;
+    await settle(tester);
+    expect(find.text("Can't connect to mac-mini"), findsOneWidget);
+  });
+
+  testWidgets('Settings → Devices says this device is connected', (
     tester,
   ) async {
     final snapshot = Workspace(
@@ -238,10 +404,10 @@ void main() {
     await harness.show(tester);
     await harness.apply(tester, snapshot);
     await pumpFrames(tester);
-    final line = find.text(
-      'Reaches mac-mini through the private tunnel, through a relay',
-    );
+    final line = find.text('Connected to mac-mini');
     await tester.ensureVisible(line);
     expect(line, findsOneWidget);
+    expect(find.text('Private and encrypted.'), findsOneWidget);
+    expect(find.textContaining('relay'), findsNothing);
   });
 }

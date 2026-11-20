@@ -13,12 +13,14 @@ export 'tunnel/api/tunnel.dart'
 /// through a relay, end-to-end encrypted. A [Tunnel] is a loopback port the
 /// app's WebSocket connects to exactly as it would to the backend itself.
 abstract interface class Tunnels {
-  /// A tunnel to the backend [endpointId] (through [relays], from its
-  /// pairing code), as the device [deviceKey].
+  /// A tunnel to the backend [endpointId] (through [relays], or straight
+  /// to its direct [addresses], from its pairing code), as the device
+  /// [deviceKey].
   Future<Tunnel> open({
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
+    List<String> addresses = const [],
   });
 }
 
@@ -27,6 +29,10 @@ abstract interface class Tunnel {
   int get port;
 
   TunnelStatus get status;
+
+  /// After the app comes back from the background, or the network changed:
+  /// the next socket dials a new connection, and nothing counts as failed.
+  Future<void> reconnect();
 
   Future<void> close();
 }
@@ -44,12 +50,14 @@ class RustTunnels implements Tunnels {
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
+    List<String> addresses = const [],
   }) async {
     await _load();
     final handle = await rust.openTunnel(
       deviceKey: deviceKey,
       endpointId: endpointId,
       relays: relays,
+      addresses: addresses,
     );
     return _RustTunnel(handle);
   }
@@ -67,28 +75,34 @@ class _RustTunnel implements Tunnel {
   TunnelStatus get status => _handle.status();
 
   @override
+  Future<void> reconnect() => _handle.reconnect();
+
+  @override
   Future<void> close() async {
     await _handle.close();
     _handle.dispose();
   }
 }
 
-/// What the person should do about [status], for a backend on [machine];
-/// empty when there's nothing to do.
-String tunnelAdvice(TunnelStatus status, String machine) =>
-    switch (status.failure) {
-      TunnelFailure.unreachable =>
-        'Check that $machine is on and awake, has a network connection, '
-            'and runs Claktory with remote access on. This Mac keeps trying.',
-      TunnelFailure.offline =>
-        "Check this Mac's network connection. It keeps trying.",
-      TunnelFailure.refused =>
-        "$machine doesn't accept this device. Pair it again: on $machine, "
-            'open Settings → Devices → Pair a device…, then paste the code '
-            'here under "Connect to another Claktory".',
-      TunnelFailure.other => 'This Mac keeps trying.',
-      TunnelFailure.none => '',
-    };
+/// What the person should do about [status], for a Claktory on
+/// [machine], from this [device] ("Mac", "iPhone"); empty when there's
+/// nothing to do.
+String tunnelAdvice(
+  TunnelStatus status,
+  String machine, {
+  String device = 'Mac',
+}) => switch (status.failure) {
+  TunnelFailure.unreachable =>
+    'Make sure $machine is on, awake and online, with Claktory open. '
+        'Trying again…',
+  TunnelFailure.offline =>
+    'This $device is offline. Check your internet connection.',
+  TunnelFailure.refused =>
+    '$machine no longer allows this device. Add it again on $machine in '
+        'Settings → Devices.',
+  TunnelFailure.other => 'Trying again…',
+  TunnelFailure.none => '',
+};
 
 /// A tunnel's status while nothing's known yet.
 const idleTunnel = TunnelStatus(
@@ -98,14 +112,6 @@ const idleTunnel = TunnelStatus(
   failure: TunnelFailure.none,
   relayConnected: false,
 );
-
-/// How a connection travels, for the person: "direct", "through a relay",
-/// or empty while there's none.
-String tunnelPathLabel(TunnelPath path) => switch (path) {
-  TunnelPath.direct => 'direct',
-  TunnelPath.relayed => 'through a relay',
-  TunnelPath.none => '',
-};
 
 /// A new device key: an iroh secret key is any 32 bytes, so 32 random ones
 /// as lowercase hex, made on this device and kept with its pairing.

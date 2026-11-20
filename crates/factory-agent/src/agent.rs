@@ -12,6 +12,7 @@ use crate::errors::Error;
 use crate::guard::{ResponsePolicy, guard_responses, recoverable_response};
 use crate::reasoning::{coalesce_history, coalesce_reasoning};
 use crate::schema::validate_tool_arguments;
+use crate::secrets::Secrets;
 use crate::stream::{BoxFuture, LlmContext, StreamFn, StreamOptions, ThinkingLevel};
 use crate::tools::Tool;
 use crate::types::{
@@ -88,6 +89,9 @@ pub struct AgentOptions {
     /// Checked after every step; what it returns joins the run.
     pub inbox: Option<Inbox>,
     pub after_compaction: Option<AfterCompaction>,
+    /// Secrets for bash's commands, and what hides their values: every
+    /// tool result, streamed or final, goes through its redaction.
+    pub secrets: Option<Secrets>,
 }
 
 pub struct AgentState {
@@ -122,6 +126,26 @@ impl AbortHandle {
     }
 }
 
+/// Moves the tool call in progress to the background, for a tool that can
+/// (bash: its command runs on as a background task, as at its timeout), so
+/// the agent's next step comes sooner. Other tools ignore it.
+#[derive(Clone, Default)]
+pub struct DetachHandle(Arc<Mutex<Option<CancellationToken>>>);
+
+impl DetachHandle {
+    pub fn detach(&self) {
+        if let Some(token) = self.0.lock().as_ref() {
+            token.cancel();
+        }
+    }
+
+    /// A handle to the tool call in progress only: detaching it later does
+    /// nothing once that call has ended.
+    pub fn this_call(&self) -> DetachHandle {
+        DetachHandle(Arc::new(Mutex::new(self.0.lock().clone())))
+    }
+}
+
 /// Stateful wrapper around the loop: owns the transcript, emits lifecycle events, runs tools one at a time.
 pub struct Agent {
     pub state: AgentState,
@@ -132,8 +156,10 @@ pub struct Agent {
     before_tool_call: Option<BeforeToolCall>,
     inbox: Option<Inbox>,
     after_compaction: Option<AfterCompaction>,
+    secrets: Option<Secrets>,
     listeners: Vec<Listener>,
     active: AbortHandle,
+    detaching: DetachHandle,
     policy: ResponsePolicy,
 }
 
@@ -174,8 +200,10 @@ impl Agent {
             before_tool_call: options.before_tool_call,
             inbox: options.inbox,
             after_compaction: options.after_compaction,
+            secrets: options.secrets,
             listeners: Vec::new(),
             active: AbortHandle::default(),
+            detaching: DetachHandle::default(),
             policy,
         }
     }
@@ -190,6 +218,10 @@ impl Agent {
 
     pub fn abort(&self) {
         self.active.abort();
+    }
+
+    pub fn detach_handle(&self) -> DetachHandle {
+        self.detaching.clone()
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -569,8 +601,12 @@ impl Agent {
     async fn run_tool_calls(&mut self, calls: &[Call], token: &CancellationToken, truncated: bool) -> Result<(Vec<Message>, bool), Error> {
         let mut messages = Vec::new();
         let mut terminates = Vec::new();
-        for (id, name, arguments) in calls {
+        for call in calls {
+            let (id, name, arguments) = call;
             let started = now_ms();
+            // Set before the call shows as started, so whoever sees it start can detach it.
+            let detach = CancellationToken::new();
+            *self.detaching.0.lock() = Some(detach.clone());
             self.emit(AgentEvent::ToolExecutionStart { tool_call_id: id.clone(), tool_name: name.clone(), args: arguments.clone() })
                 .await?;
             let (result, is_error) = if truncated {
@@ -578,9 +614,10 @@ impl Agent {
             } else {
                 match self.prepare(name, arguments, token).await {
                     Prepared::Immediate(result) => (result, true),
-                    Prepared::Ready(index, validated) => self.execute(index, id, name, arguments, &validated, token).await?,
+                    Prepared::Ready(index, validated) => self.execute(index, call, &validated, token, &detach).await?,
                 }
             };
+            self.detaching.0.lock().take();
             if !truncated {
                 terminates.push(result.terminate == Some(true));
             }
@@ -618,26 +655,30 @@ impl Agent {
     async fn execute(
         &mut self,
         index: usize,
-        id: &str,
-        name: &str,
-        arguments: &Value,
+        (id, name, arguments): &Call,
         validated: &Value,
         token: &CancellationToken,
+        detach: &CancellationToken,
     ) -> Result<(ToolResult, bool), Error> {
         let tool = self.state.tools[index].clone();
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolResult>();
         let update = move |partial: ToolResult| {
             let _ = tx.send(partial);
         };
-        let execution = tool.execute(validated, token, &update);
+        let secrets = self.secrets.clone();
+        let execution = tool.execute_with(validated, token, detach, &update, secrets.as_ref());
         tokio::pin!(execution);
         let outcome = loop {
             tokio::select! {
                 outcome = &mut execution => break outcome,
-                Some(partial) = rx.recv() => self.emit(AgentEvent::ToolExecutionUpdate { tool_call_id: id.to_owned(), tool_name: name.to_owned(), args: arguments.clone(), partial_result: partial }).await?,
+                Some(mut partial) = rx.recv() => {
+                    self.redact(&mut partial);
+                    self.emit(AgentEvent::ToolExecutionUpdate { tool_call_id: id.to_owned(), tool_name: name.to_owned(), args: arguments.clone(), partial_result: partial }).await?;
+                }
             }
         };
-        while let Ok(partial) = rx.try_recv() {
+        while let Ok(mut partial) = rx.try_recv() {
+            self.redact(&mut partial);
             self.emit(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: id.to_owned(),
                 tool_name: name.to_owned(),
@@ -652,7 +693,15 @@ impl Agent {
         })
     }
 
-    async fn finish_tool_call(&mut self, finalized: Finalized) -> Result<Message, Error> {
+    /// Hides secret values in a tool's result.
+    fn redact(&self, result: &mut ToolResult) {
+        if let Some(secrets) = &self.secrets {
+            secrets.redaction.current().redact_result(result);
+        }
+    }
+
+    async fn finish_tool_call(&mut self, mut finalized: Finalized) -> Result<Message, Error> {
+        self.redact(&mut finalized.result);
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: finalized.id.clone(),
             tool_name: finalized.name.clone(),

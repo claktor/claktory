@@ -1,6 +1,5 @@
 //! One task per client: handshake, then requests in and events out.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::{self, Message};
 
-use crate::factory::{AgentChange, Event, Factory};
+use crate::factory::{AgentChange, Event, Factory, RequestError};
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -66,7 +65,7 @@ pub async fn serve(listener: TcpListener, factory: Arc<Factory>) {
 fn refuse_web_pages(request: &Request, response: Response) -> Result<Response, ErrorResponse> {
     let Some(origin) = request.headers().get(http::header::ORIGIN) else { return Ok(response) };
     tracing::warn!(?origin, "refused a WebSocket connection from a web page");
-    let mut refusal = ErrorResponse::new(Some("Factory doesn't accept connections from web pages.".into()));
+    let mut refusal = ErrorResponse::new(Some("Claktory doesn't accept connections from web pages.".into()));
     *refusal.status_mut() = http::StatusCode::FORBIDDEN;
     Err(refusal)
 }
@@ -84,9 +83,13 @@ async fn serve_connection(stream: TcpStream, factory: Arc<Factory>) -> Result<()
     serve_stream(stream, factory, None).await
 }
 
-/// Serves one client: this machine's app, or a device at `remote` (on the
-/// remote listener), which must give a paired device's token.
-pub(crate) async fn serve_stream<S: Stream>(stream: S, factory: Arc<Factory>, remote: Option<SocketAddr>) -> Result<(), ConnectionError> {
+/// Serves one client: on the loopback port, or a device through the
+/// private tunnel (`peer`), which must give a paired device's token.
+pub(crate) async fn serve_stream<S: Stream>(
+    stream: S,
+    factory: Arc<Factory>,
+    peer: Option<crate::remote::Peer>,
+) -> Result<(), ConnectionError> {
     let mut socket = match tokio_tungstenite::accept_hdr_async(stream, refuse_web_pages).await {
         Ok(socket) => socket,
         // Port checks and stray connections that never speak WebSocket.
@@ -112,12 +115,26 @@ pub(crate) async fn serve_stream<S: Stream>(stream: S, factory: Arc<Factory>, re
             let reason = format!("server speaks protocol {PROTOCOL_VERSION}, client sent {}", hello.protocol_version);
             return reject(socket, message.id, ErrorCode::UnsupportedProtocolVersion, reason).await;
         }
-        if let Some(peer) = remote {
+        if let Some(peer) = &peer {
             let Some(connected) = factory.authorize(&hello.token, peer).await else {
-                let reason = "This device isn't paired with this Factory, or was unpaired. Pair it again with a new pairing code from Settings → Devices on the Factory's machine.";
+                let reason =
+                    "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
             };
-            tracing::info!(client_version = %hello.client_version, device = %connected.device.id, %peer, "device connected");
+            tracing::info!(client_version = %hello.client_version, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
+            device = Some(connected);
+        } else if !hello.token.is_empty() || !factory.loopback_open() {
+            // The loopback port: this machine's app's token (from its local
+            // pairing code), or nothing once that app uses the tunnel.
+            let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
+            let Some(connected) = factory.authorize(&hello.token, &local).await else {
+                let reason = format!(
+                    "This port wants a token: connect with the pairing code in {}.",
+                    factory.home.root().join("remote/local-pairing").display()
+                );
+                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+            };
+            tracing::info!(client_version = %hello.client_version, "client connected with this machine's token");
             device = Some(connected);
         } else {
             tracing::info!(client_version = %hello.client_version, "client connected");
@@ -127,19 +144,25 @@ pub(crate) async fn serve_stream<S: Stream>(stream: S, factory: Arc<Factory>, re
     let device_id = device.as_ref().map(|connected| connected.device.id.clone()).unwrap_or_default();
     let welcome = Welcome { protocol_version: PROTOCOL_VERSION, server_version: SERVER_VERSION.to_owned(), device_id };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
-    session(&mut socket, &factory, device.as_ref().map(|connected| connected.closed.clone())).await?;
+    // This machine's own app may do what the loopback port's may.
+    let remote = device.as_ref().is_some_and(|connected| !connected.device.local);
+    let name = device.as_ref().map_or_else(|| "this computer".to_owned(), |connected| connected.device.name.clone());
+    session(&mut socket, &factory, remote, device.as_ref().map(|connected| connected.closed.clone()), name).await?;
     tracing::info!("client disconnected");
     Ok(())
 }
 
-/// Requests in, events out, until the client leaves.
-/// `unpaired` is a remote device's: notified, the connection closes.
+/// Requests in, events out, until the client leaves. `remote`: a device on
+/// another machine. `unpaired` is a paired device's: notified, the
+/// connection closes.
 async fn session<S: Stream>(
     socket: &mut Socket<S>,
     factory: &Arc<Factory>,
+    remote: bool,
     unpaired: Option<Arc<tokio::sync::Notify>>,
+    device: String,
 ) -> Result<(), ConnectionError> {
-    let remote = unpaired.is_some();
+    let mut vault_session = crate::vault::requests::Session::new(device);
     let mut events = sync(socket, factory).await?;
     factory.health.served();
 
@@ -156,7 +179,7 @@ async fn session<S: Stream>(
                     Frame::Skip => continue,
                     Frame::Closed => return Ok(()),
                 };
-                let reply = handle(factory, message.body, remote).await;
+                let reply = handle(factory, message.body, remote, &mut vault_session).await;
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
                 flush(socket, &mut events, factory).await?;
@@ -209,7 +232,13 @@ async fn flush<S: Stream>(socket: &mut Socket<S>, events: &mut Receiver<Event>, 
 
 /// Answers a request. A `remote` device's requests are the same, except that
 /// it can't have an app bundle on this machine replaced.
-async fn handle(factory: &Arc<Factory>, body: Option<client_message::Body>, remote: bool) -> Body {
+async fn handle(
+    factory: &Arc<Factory>,
+    body: Option<client_message::Body>,
+    remote: bool,
+    vault_session: &mut crate::vault::requests::Session,
+) -> Body {
+    use crate::vault::requests as vault;
     use client_message::Body as Request;
     let result = match body {
         Some(Request::Hello(_)) => return error(ErrorCode::InvalidRequest, "already connected"),
@@ -283,15 +312,19 @@ async fn handle(factory: &Arc<Factory>, body: Option<client_message::Body>, remo
             factory.set_folder_collapsed(&request.project_id, &request.folder_id, request.collapsed)
         }
         Some(Request::RunCommand(request)) => factory.run_command(&request.agent_id, &request.name, &request.args).await,
-        Some(Request::StartLogin(request)) => factory.start_login(&request.provider_id, &request.method_id).await,
+        Some(Request::StartLogin(request)) => factory.start_login(&request.provider_id, &request.method_id, request.add_account).await,
         Some(Request::AnswerLogin(request)) => factory.answer_login(&request.text),
         Some(Request::CancelLogin(_)) => {
             factory.cancel_login();
             Ok(())
         }
-        Some(Request::SignOut(request)) => factory.sign_out(&request.provider_id).await,
+        Some(Request::SignOut(request)) => factory.sign_out(&request.provider_id, &request.account_id).await,
+        Some(Request::MoveAccount(request)) => factory.move_account(&request.provider_id, &request.account_id, request.position).await,
+        Some(Request::UpdateAccount(request)) => {
+            factory.update_account(&request.provider_id, &request.account_id, request.label.as_deref(), request.retry).await
+        }
         Some(Request::CreatePairing(request)) => {
-            return match factory.create_pairing(&request.name, &request.host).await {
+            return match factory.create_pairing(&request.name).await {
                 Ok(code) => Body::PairingCode(code),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
@@ -308,11 +341,57 @@ async fn handle(factory: &Arc<Factory>, body: Option<client_message::Body>, remo
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
+        Some(Request::CreateVault(request)) => {
+            return answer(vault::create_vault_in(factory, vault_session, &request), Body::RecoveryKey);
+        }
+        Some(Request::UnlockVault(request)) => {
+            return answer(vault::unlock_in(factory, vault_session, &request.passphrase).await, Body::VaultSession);
+        }
+        // Nothing to lock: requests need no proof.
+        Some(Request::LockVaultSession(_)) => return Body::VaultSession(vault_session.answer()),
+        Some(Request::ChangePassphrase(request)) => {
+            return answer(vault::change_passphrase_in(factory, vault_session, &request).await, Body::VaultSession);
+        }
+        Some(Request::CreateSecret(request)) => vault::create_secret(factory, &request),
+        Some(Request::UpdateSecret(request)) => vault::update_secret(factory, &request),
+        Some(Request::RevokeSecret(request)) => vault::revoke_secret(factory, &request),
+        Some(Request::ImportEnv(request)) => vault::import_env(factory, &request),
+        Some(Request::PreviewEnv(request)) => return Body::EnvPreview(vault::preview_env(&request.text)),
+        Some(Request::ListSecretUses(request)) => return answer(vault::list_uses(factory, &request), Body::SecretUses),
+        Some(Request::DeleteSecret(request)) => {
+            return answer(vault::delete_secret(factory, vault_session, &request).await, Body::VaultSession);
+        }
+        Some(Request::GrantSecret(request)) => {
+            return answer(vault::grant_secret(factory, vault_session, &request).await, Body::VaultSession);
+        }
+        Some(Request::RevealSecret(request)) => {
+            return answer(vault::reveal_secret(factory, vault_session, &request).await, Body::SecretValue);
+        }
+        Some(Request::NewRecoveryKey(request)) => {
+            return answer(vault::new_recovery_key(factory, vault_session, &request).await, Body::RecoveryKey);
+        }
+        Some(Request::SetVaultLockedMode(request)) => {
+            return answer(vault::set_locked_mode(factory, vault_session, &request).await, Body::VaultSession);
+        }
+        Some(Request::DecideSecretRequest(_)) => return error(ErrorCode::UnknownMessage, "This needs a newer Claktory."),
         Some(Request::DecideProposal(request)) => {
             crate::proposals::decide(factory, &request.agent_id, &request.proposal_id, request.approve, &request.comment)
         }
+        Some(Request::ClearBuildCache(request)) => {
+            crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)
+        }
+        Some(Request::ReadFile(request)) => {
+            let content = tokio::task::spawn_blocking(move || crate::extensions::viewer::read_file(&request.path, request.max_bytes)).await;
+            return match content {
+                Ok(content) => Body::FileContent(content),
+                Err(problem) => error(ErrorCode::Internal, problem.to_string()),
+            };
+        }
+        Some(Request::SetLayout(request)) => crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
-        Some(Request::SetRemoteAccess(request)) => factory.set_remote_access(request.on, request.port, request.listen.as_deref()).await,
+        // Remote access is on while devices are paired: only the relays are set here.
+        Some(Request::SetRemoteAccess(request)) if request.set_relays => factory.set_relays(&request.relays).await,
+        Some(Request::SetRemoteAccess(_)) => Ok(()),
         // Empty, or from a newer client that this server doesn't know.
         None => return error(ErrorCode::UnknownMessage, "unknown message"),
     };
@@ -372,6 +451,14 @@ async fn reject<S: Stream>(
     send(&mut socket, reply_to, error(code, reason)).await?;
     socket.close(None).await?;
     Ok(())
+}
+
+/// A request's answer, or why it failed.
+fn answer<T>(result: Result<T, RequestError>, body: impl FnOnce(T) -> Body) -> Body {
+    match result {
+        Ok(value) => body(value),
+        Err(problem) => error(problem.code(), problem.to_string()),
+    }
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Body {

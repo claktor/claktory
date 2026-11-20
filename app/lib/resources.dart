@@ -4,6 +4,7 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 
 import 'characters/character.dart';
+import 'backend.dart';
 import 'controls.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
@@ -11,6 +12,7 @@ import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
+import 'tell_rivet.dart';
 
 /// How the machine and Factory use its resources, read-only: the alerts in
 /// effect, the machine's gauges (processors, memory, swap, each volume's free
@@ -54,7 +56,7 @@ class ResourcesView extends StatelessWidget {
                   0,
                 ),
                 child: Text(
-                  'Sampled at ${_at(resources.sampled)}, every minute',
+                  'Updated at ${_at(resources.sampled)}, every minute',
                   style: caption,
                 ),
               ),
@@ -136,7 +138,7 @@ class ResourcesView extends StatelessWidget {
             ),
             if (measured == 0)
               const _Empty(
-                'Not measured yet; it takes a moment after Claktory starts.',
+                'Measuring… This takes a minute after Claktory starts.',
               )
             else
               for (final usage in resources.disk)
@@ -590,6 +592,24 @@ class _DiskRow extends StatefulWidget {
 class _DiskRowState extends State<_DiskRow> {
   var _open = false;
 
+  /// Build caches being cleaned, by path, and why one couldn't be.
+  final _cleaning = <String>{};
+  final _failures = <String, String>{};
+
+  Future<void> _clean(String path) async {
+    setState(() {
+      _cleaning.add(path);
+      _failures.remove(path);
+    });
+    try {
+      await AppScope.of(context).clearBuildCache(path);
+    } on RequestFailure catch (error) {
+      if (mounted) setState(() => _failures[path] = error.message);
+    } finally {
+      if (mounted) setState(() => _cleaning.remove(path));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -625,8 +645,8 @@ class _DiskRowState extends State<_DiskRow> {
                 ),
                 if (copyOnWrite)
                   Text(
-                    'Shares most of its blocks with the checkout it was '
-                    'made from, so it takes less than this.',
+                    'Shares most of its space with the folder it was copied '
+                    'from, so it really takes less.',
                     style: TextStyles.caption.copyWith(
                       color: palette.textFaint,
                     ),
@@ -653,6 +673,16 @@ class _DiskRowState extends State<_DiskRow> {
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
+          // A build cache can be cleared now; builds fill it again.
+          if (part && usage.kind == 'build_cache') ...[
+            const SizedBox(width: Space.s),
+            Button(
+              label: _cleaning.contains(usage.path) ? 'Cleaning…' : 'Clean',
+              onPressed: _cleaning.contains(usage.path)
+                  ? null
+                  : () => _clean(usage.path),
+            ),
+          ],
         ],
       );
     }
@@ -688,7 +718,17 @@ class _DiskRowState extends State<_DiskRow> {
                   left: 14 + Space.xs,
                   top: Space.xs,
                 ),
-                child: line(part, part: true),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    line(part, part: true),
+                    if (_failures[part.path] case final failure?)
+                      ErrorLine(
+                        failure,
+                        about: 'Cleaning the build cache ${part.path}:',
+                      ),
+                  ],
+                ),
               ),
         ],
       ),

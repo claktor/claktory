@@ -28,7 +28,7 @@ impl Default for ResponsePolicy {
 }
 
 static TERMINAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)quota|usage limit|out of budget|billing|insufficient|unauthori[sz]ed|invalid api key|authentication")
+    Regex::new(r"(?i)quota|usage limit|out of credit|out of budget|billing|insufficient|unauthori[sz]ed|invalid api key|authentication")
         .unwrap_or_else(|_| unreachable!())
 });
 static RECOVERABLE: LazyLock<Regex> = LazyLock::new(|| {

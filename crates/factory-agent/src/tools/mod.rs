@@ -1,4 +1,5 @@
 pub mod bash;
+pub mod checks;
 pub mod diff;
 pub mod fs;
 
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::errors::{AgentError, AgentFailure, Error};
 use crate::schema;
+use crate::secrets::Secrets;
 use crate::stream::BoxFuture;
 use crate::text::{utf16_head, utf16_len};
 use crate::types::ToolResult;
@@ -116,6 +118,32 @@ impl Tool {
     }
 
     pub async fn execute(&self, args: &Value, cancel: &CancellationToken, update: Update<'_>) -> Result<ToolResult, Error> {
+        self.execute_detachable(args, cancel, &CancellationToken::new(), update).await
+    }
+
+    /// Runs the tool; `detach` moves a bash command still running to the
+    /// background, as its timeout does. Other tools ignore it.
+    pub async fn execute_detachable(
+        &self,
+        args: &Value,
+        cancel: &CancellationToken,
+        detach: &CancellationToken,
+        update: Update<'_>,
+    ) -> Result<ToolResult, Error> {
+        self.execute_with(args, cancel, detach, update, None).await
+    }
+
+    /// Runs the tool, as `execute_detachable`; with `secrets`, bash can set
+    /// the secrets a call names in its command's environment, and hides
+    /// their values (all values `secrets` knows) in its output.
+    pub async fn execute_with(
+        &self,
+        args: &Value,
+        cancel: &CancellationToken,
+        detach: &CancellationToken,
+        update: Update<'_>,
+        secrets: Option<&Secrets>,
+    ) -> Result<ToolResult, Error> {
         let mut cwd = &self.cwd;
         let file = matches!(self.kind, ToolKind::ReadFile | ToolKind::WriteFile | ToolKind::EditFile);
         if file && !(self.extra_dirs.is_empty() && self.read_only.is_empty()) {
@@ -142,7 +170,11 @@ impl Tool {
             ToolKind::ReadFile => fs::read_file(cwd, args, cancel).await,
             ToolKind::WriteFile => fs::write_file(cwd, args, cancel).await,
             ToolKind::EditFile => fs::edit_file(cwd, args, cancel).await,
-            ToolKind::Bash => bash::run(&self.cwd, args, cancel, update, self.background.as_ref()).await,
+            ToolKind::Bash => {
+                let folders: Vec<&Path> =
+                    std::iter::once(&self.cwd).chain(&self.extra_dirs).chain(&self.read_only).map(PathBuf::as_path).collect();
+                bash::run(&self.cwd, &folders, args, cancel, detach, update, self.background.as_ref(), secrets).await
+            }
             ToolKind::Custom => match &self.handler {
                 Some(handler) => handler(args.clone()).await,
                 None => Err(Error::Other(format!("{} has no handler", self.spec.name))),
@@ -154,7 +186,7 @@ impl Tool {
 /// The coding agent's system prompt. `extra_dirs` are the directories given to `coding_tools`.
 pub fn coding_prompt(cwd: &Path, extra_dirs: &[PathBuf]) -> String {
     let mut prompt = format!(
-        "You are a coding agent working in {}. Your shell starts there; don't cd there first. Use relative paths. Messages wrapped in <event> weren't written by the person: they're from the program running you, another agent, or a background task that finished. Never make a git worktree, clone or copy of the repository you work in; when you need a checkout of your own, ask for Factory's Own checkout extension.",
+        "You are a coding agent working in {}. Your shell starts there; don't cd there first. Use relative paths. Messages wrapped in <event> weren't written by the person: they're from the program running you, another agent, or a background task that finished. Never make a git worktree, clone or copy of the repository you work in; when you need a checkout of your own, ask for Claktory's Own checkout extension.",
         cwd.display()
     );
     if !extra_dirs.is_empty() {
@@ -203,6 +235,23 @@ pub fn coding_tools(cwd: &Path, extra_dirs: &[PathBuf], background: Option<bash:
     }
     tools
 }
+
+/// Gives bash its `secrets` parameter, for an agent that can be given
+/// secrets: it names secrets granted to the agent, whose variables are set
+/// in that command's environment only (see `Tool::execute_with`). Without
+/// it, bash's schema is as it always was.
+pub fn secrets(tools: &mut [Tool]) {
+    for tool in tools.iter_mut().filter(|tool| tool.kind == ToolKind::Bash) {
+        if let Some(properties) = tool.spec.parameters.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert("secrets".into(), json!({"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}));
+        }
+        if !tool.spec.description.contains(SECRETS_HINT) {
+            tool.spec.description = format!("{} {SECRETS_HINT}", tool.spec.description).into();
+        }
+    }
+}
+
+const SECRETS_HINT: &str = "secrets names secrets granted to you: their variables are set for that command only, and their values are hidden in all output; never print or save a value yourself.";
 
 /// Lets read_file also read the absolute directories `dirs`, and keeps write_file and edit_file
 /// from changing anything in them, even where they're inside the tools' working folder. The

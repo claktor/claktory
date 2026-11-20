@@ -1,21 +1,41 @@
 # Changelog
 
-What each version of Factory added and fixed, newest first. Factory shows it in the app, and the Update banner shows what a new version brings.
+What each version of Claktory added and fixed, newest first. Claktory shows it in the app, and the Update banner shows what a new version brings.
 
-Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Changed …", written for the person using Factory. `scripts/changelog.sh stamp` turns Unreleased into the next version before a release, and `scripts/release.sh` refuses to release without it.
+Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Changed …", written for the person using Claktory. `scripts/changelog.sh stamp` turns Unreleased into the next version before a release, and `scripts/release.sh` refuses to release without it.
 
 ## Unreleased
 
+## v0.1.1
+Released 2026-11-20 01:14 UTC.
+- Added: Use several Claktories at once, such as this Mac's and a server's. A thin rail at the left of the window shows each one, and when its agents are working or have something new; click one to switch. Click + to add one with its code, and right-click one to rename or remove it. On iPhone, they're a list.
+- Changed: Your iPhone and other computers connect to Claktory from any network, private and encrypted, with nothing to set up: no port, address or VPN. In Settings → Devices, click Add a device…, give it a name and scan the code; a code works once, for 10 minutes. Devices you added before need adding again, and other programs on your Mac can no longer control Claktory.
+- Added: Give your agents the keys and passwords they need, such as an AWS key or a Cloudflare token, without them ever seeing the values. Add them in Settings → Secrets, then click Give to… to give one to an agent, or ask Rivet to.
+- Added: See files beside the conversation. Click a file in the explorer, or let an agent show you one, and it opens next to the conversation: text with line numbers, Markdown formatted, and images you can zoom. Drag a pane by its header to put it beside or below another, and drag the line between two to resize them.
+- Added: Use several Claude or ChatGPT subscriptions, and API keys, for one provider. In Settings → Providers, click Add another Claude subscription or Add an API key, and drag them into the order you want. When one reaches its limit or runs out of credit, Claktory switches to the next. The sidebar shows a usage circle for each.
+- Added: Claktory for iPhone, a first look. It runs in Xcode's Simulator for now. Connect it by scanning the code your Mac shows in Settings → Devices, then tap an agent to talk to it. It reconnects as soon as you come back to it, and works on its side too.
+- Changed: See at a glance what your agents did. Messages, checklist items, notes, monitors, background tasks, files shown, web searches, database queries and secrets Rivet gives or takes back each show as a short line with the details under it. Click a message's recipient to open their conversation, or a search result to open it in your browser.
+- Added: Claktory asks your first name the first time it opens, so your agents know who they're working with. Change it in Settings → General.
+- Added: Drag the edge of the sidebar or of the panel on the right to resize it, and double-click the edge to reset it. The widths are the same on all your devices.
+- Changed: Stop no longer throws away messages waiting for the agent. It stops what the agent is doing, then the agent reads them. /clear still drops them.
+- Changed: Agents read your messages sooner. If one is busy with a long command, the command keeps running in the background while the agent reads what you sent.
+- Changed: Agents no longer get stuck on a long wait or by copying a huge folder. They're told what to do instead.
+- Added: Build files no longer fill your disk. When a project's or agent's build files grow past 25 GB, Claktory clears them while nothing is using them. Change the limit in Settings → Resources → Build caches, or click Clean in the Resources panel to free the space now.
+- Changed: Claktory uses less power while your agents work.
+- Changed: Your agents know Claktory by its name too: their instructions, the manual and Claktory's messages to them say Claktory. Your folders, files and settings stay where they are.
+- Changed: Clearer words across the app: updates, errors, agent settings, extensions, the Marketplace and the Resources panel. Errors offer Ask Rivet to fix.
+- Fixed: An agent's settings show Admin as its place as soon as it becomes an admin agent, even while they're open.
+
 ## v0.1.0
 Released 2026-11-19 22:42 UTC.
-- Changed: an agent's command that runs past 2 minutes no longer blocks it: it moves to the background and keeps running, and the agent hears when it ends, with a note to make it faster. Background commands stop after 30 minutes unless they ask for up to 2 hours, every result says how long the command took, and long output is kept in a file instead of cut off.
-- Fixed: the right-click Copy menu stretched across the whole window; it's a compact menu at the pointer again.
-- Changed: Rivet stays at the top of the sidebar while a project is focused, so it's always a click away.
-- Added: Claktory's source code is public at github.com/claktor/claktory under its license (PolyForm Shield), pushed with every published release after a check that no secret is anywhere in its history.
-- Added: the sidebar's and the right panel's widths are kept by Claktory, the same on every device you use it from.
-- Added: agents can propose a message to Rivet, which only you can message. The proposal shows in the agent's conversation as a card in Rivet's color; approve it, with a comment, and Rivet gets it as your message, or dismiss it. The agent hears which.
-- Changed: versions are numbered like game builds, v0.1.0, v0.1.1, v0.1.2…, instead of by date; What's new shows each one's date.
-- Fixed: a Claktory installed before the fix that stops macOS throttling it now gets that fix too, with its first update: about a minute after starting, the backend updates its launch settings and restarts once.
+- Added: Claktory's source code is public at github.com/claktor/claktory.
+- Added: Agents can suggest a message for Rivet. Approve it, with a comment if you like, and Rivet gets it from you, or dismiss it.
+- Added: The sidebar and the right panel keep their widths, the same on all your devices.
+- Changed: An agent's long command no longer holds it up. After 2 minutes it keeps running in the background, and the agent hears when it finishes.
+- Changed: Rivet stays at the top of the sidebar while you focus on a project.
+- Changed: Versions are numbered v0.1.0, v0.1.1 and so on, and What's new shows when each came out.
+- Fixed: The right-click Copy menu appears small, at the pointer, instead of stretching across the window.
+- Fixed: On older installs, macOS could slow Claktory down. The first update fixes it, and Claktory restarts once, about a minute after it starts.
 
 ## 2026.11.19-2200
 - Fixed: buttons' labels were taken into a text selection (a drag across a page, or ⌘A); now they're left out, as intended.

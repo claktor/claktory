@@ -44,17 +44,23 @@ ProviderUsage weekly(double percent, {String error = ''}) => ProviderUsage(
   ],
 );
 
-Finder circle(String provider) => find.byWidgetPredicate(
+Finder circle(String provider, [String who = '']) => find.byWidgetPredicate(
   (widget) =>
-      widget is Semantics && widget.properties.label == '$provider usage',
+      widget is Semantics &&
+      widget.properties.label ==
+          (who.isEmpty ? '$provider usage' : '$provider usage, $who'),
 );
 
 /// Hovers over [provider]'s circle until its card shows.
-Future<void> hover(WidgetTester tester, String provider) async {
+Future<void> hover(
+  WidgetTester tester,
+  String provider, [
+  String who = '',
+]) async {
   final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
   addTearDown(mouse.removePointer);
   await mouse.addPointer(location: Offset.zero);
-  await mouse.moveTo(tester.getCenter(circle(provider)));
+  await mouse.moveTo(tester.getCenter(circle(provider, who)));
   await tester.pump(const Duration(milliseconds: 400));
   await tester.pump(const Duration(milliseconds: 200));
 }
@@ -89,31 +95,24 @@ void main() {
 
   test('the circle fills with the weekly limit', () {
     for (final percent in [0.0, 50.0, 100.0]) {
-      expect(usageMark(subscription(usage: weekly(percent))), (
-        UsageMark.meter,
-        percent / 100,
-      ));
+      expect(usageMark(weekly(percent)), (UsageMark.meter, percent / 100));
     }
-    expect(
-      usageMark(subscription(usage: weekly(140))).$2,
-      1,
-      reason: 'never more than full',
-    );
+    expect(usageMark(weekly(140)).$2, 1, reason: 'never more than full');
   });
 
   test('no numbers is never drawn as an empty meter', () {
     expect(
-      usageMark(subscription(usage: ProviderUsage())).$1,
+      usageMark(ProviderUsage()).$1,
       UsageMark.unknown,
       reason: 'never read',
     );
     expect(
-      usageMark(subscription(usage: ProviderUsage(error: 'HTTP 500'))).$1,
+      usageMark(ProviderUsage(error: 'HTTP 500')).$1,
       UsageMark.unknown,
       reason: 'failed before any read',
     );
     expect(
-      usageMark(Provider(id: 'openai', signedInWith: 'OPENAI_API_KEY')).$1,
+      usageMark(null).$1,
       UsageMark.noLimits,
       reason: 'an API key has no limits',
     );
@@ -132,7 +131,7 @@ void main() {
       expect(find.text('12%'), findsOneWidget);
       expect(find.textContaining('resets in 2 h '), findsOneWidget);
       expect(find.textContaining('resets in 2 days, '), findsOneWidget);
-      expect(find.text('Read 3 min ago'), findsOneWidget);
+      expect(find.text('Checked 3 min ago'), findsOneWidget);
       // The weekly limit leads.
       expect(
         tester.getTopLeft(find.text('Weekly')).dy,
@@ -148,15 +147,15 @@ void main() {
       subscription(usage: weekly(63, error: 'HTTP 429')),
     ]);
     await hover(tester, 'Anthropic');
-    expect(find.text("Couldn't read usage: HTTP 429"), findsOneWidget);
+    expect(find.text("Couldn't check usage: HTTP 429"), findsOneWidget);
     expect(find.text('63%'), findsOneWidget);
-    expect(find.text('Last read 3 min ago'), findsOneWidget);
+    expect(find.text('Last checked 3 min ago'), findsOneWidget);
   });
 
   testWidgets('usage never read says so, with no numbers', (tester) async {
     await showProviders(tester, [subscription(usage: ProviderUsage())]);
     await hover(tester, 'Anthropic');
-    expect(find.text('Usage not read yet.'), findsOneWidget);
+    expect(find.text('Usage not checked yet.'), findsOneWidget);
     expect(find.textContaining('%'), findsNothing);
     expect(find.textContaining('Read'), findsNothing);
   });
@@ -258,5 +257,87 @@ void main() {
       }
     }
     expect(rects.last.top, greaterThan(rects.first.top), reason: 'wrapped');
+  });
+
+  group('several accounts', () {
+    Provider claude() => subscription(usage: weekly(40))
+      ..plan = 'Claude Max 20x'
+      ..accounts.addAll([
+        Account(
+          id: 'a1',
+          label: 'matt@work.test',
+          plan: 'Claude Max 20x',
+          usage: weekly(100),
+          canSignOut: true,
+          exhaustedUntil: later(const Duration(hours: 3)),
+        ),
+        Account(
+          id: 'a2',
+          label: 'matt@home.test',
+          plan: 'Claude Pro',
+          usage: weekly(25),
+          canSignOut: true,
+          inUse: true,
+        ),
+        Account(id: 'k1', label: 'sk-ant-…a1b2', canSignOut: true),
+      ]);
+
+    testWidgets('each account gets its own circle, in failover order', (
+      tester,
+    ) async {
+      await showProviders(tester, [claude()]);
+      expect(circle('Anthropic'), findsNothing);
+      final work = tester.getRect(circle('Anthropic', 'matt@work.test'));
+      final home = tester.getRect(circle('Anthropic', 'matt@home.test'));
+      final key = tester.getRect(circle('Anthropic', 'sk-ant-…a1b2'));
+      expect(work.left, lessThan(home.left));
+      expect(home.left, lessThan(key.left));
+    });
+
+    test('a key has no ring; a subscription meters its own week', () {
+      final meters = usageMeters([claude()]);
+      expect(
+        [for (final m in meters) usageMark(m.usage)],
+        [
+          (UsageMark.meter, 1.0),
+          (UsageMark.meter, 0.25),
+          (UsageMark.noLimits, 0.0),
+        ],
+      );
+    });
+
+    testWidgets('hovering names the account, its plan and its state', (
+      tester,
+    ) async {
+      await showProviders(tester, [claude()]);
+      await hover(tester, 'Anthropic', 'matt@home.test');
+      expect(find.text('matt@home.test'), findsOneWidget);
+      expect(find.text('Claude Pro'), findsOneWidget);
+      expect(find.text('In use'), findsOneWidget);
+      expect(find.text('25%'), findsOneWidget);
+      expect(find.textContaining('Signed in with'), findsNothing);
+    });
+
+    testWidgets('an account at its limit says until when', (tester) async {
+      await showProviders(tester, [claude()]);
+      await hover(tester, 'Anthropic', 'matt@work.test');
+      expect(find.textContaining('Limit reached, back at '), findsOneWidget);
+      expect(find.text('100%'), findsOneWidget);
+    });
+
+    testWidgets('a key has no limits to show', (tester) async {
+      await showProviders(tester, [claude()]);
+      await hover(tester, 'Anthropic', 'sk-ant-…a1b2');
+      expect(find.text('sk-ant-…a1b2'), findsOneWidget);
+      expect(find.text('No usage limits to show.'), findsOneWidget);
+    });
+  });
+
+  test('times to come read as a clock, a weekday or a date', () {
+    final at = DateTime(2026, 11, 18, 12);
+    int plus(Duration d) => at.add(d).millisecondsSinceEpoch;
+    expect(formatUntil(plus(const Duration(hours: 2)), at), '14:00');
+    expect(formatUntil(plus(const Duration(days: 1)), at), 'Thu 12:00');
+    expect(formatUntil(plus(const Duration(days: 9)), at), '27 Nov 12:00');
   });
 }

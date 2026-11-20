@@ -127,7 +127,7 @@ pub(crate) fn measure(plan: &Plan, deadline: Instant) -> Vec<v1::DiskUsage> {
             part(&mut walker, "Monitor logs", "logs", vec![&monitors]),
             part(&mut walker, "Database", "database", database),
         ];
-        parts.push(usage("Checkout (copy-on-write)", "checkout", id, &checkout, walker.size(&checkout)));
+        parts.push(usage("Checkout", "checkout", id, &checkout, walker.size(&checkout)));
         parts.retain(|part| part.bytes > 0);
         largest_first(&mut parts);
         let total = walker.sum([folder.as_path(), checkout.as_path()]);
@@ -145,8 +145,8 @@ pub(crate) fn measure(plan: &Plan, deadline: Instant) -> Vec<v1::DiskUsage> {
     let mut parts = vec![
         usage("Releases", "releases", "", &releases, walker.size(&releases)),
         usage("Agents' conversations, logs and databases", "agents", "", &agents_dir, walker.size(&agents_dir)),
-        usage("Checkouts (copy-on-write)", "checkout", "", &trees, walker.size(&trees)),
-        usage("Factory's records (factory.db)", "records", "", home, walker.sum(records.iter().map(PathBuf::as_path))),
+        usage("Checkouts", "checkout", "", &trees, walker.size(&trees)),
+        usage("Claktory's records", "records", "", home, walker.sum(records.iter().map(PathBuf::as_path))),
         usage("Workspace", "workspace", "", &workspace, walker.sum(children(&workspace).iter().map(PathBuf::as_path))),
     ];
     let (all, partial) = walker.sum(children(home).iter().map(PathBuf::as_path));
@@ -154,7 +154,7 @@ pub(crate) fn measure(plan: &Plan, deadline: Instant) -> Vec<v1::DiskUsage> {
     parts.push(usage("Everything else", "other", "", home, (all.saturating_sub(counted), false)));
     parts.retain(|part| part.bytes > 0);
     largest_first(&mut parts);
-    let mut rows = vec![v1::DiskUsage { parts, ..usage("Factory's data", "home", "", home, (all, partial)) }];
+    let mut rows = vec![v1::DiskUsage { parts, ..usage("Claktory's data", "home", "", home, (all, partial)) }];
     rows.push(usage("Releases", "releases", "", &releases, walker.size(&releases)));
     rows.extend(agents);
 
@@ -198,15 +198,12 @@ mod tests {
         };
         let rows = measure(&plan, Instant::now() + std::time::Duration::from_secs(10));
         let kinds: Vec<(&str, &str)> = rows.iter().map(|row| (row.kind.as_str(), row.label.as_str())).collect();
-        assert_eq!(kinds, [("home", "Factory's data"), ("releases", "Releases"), ("agent", "Scout"), ("project", "Site")]);
+        assert_eq!(kinds, [("home", "Claktory's data"), ("releases", "Releases"), ("agent", "Scout"), ("project", "Site")]);
         let parts: Vec<&str> = rows[0].parts.iter().map(|part| part.label.as_str()).collect();
         assert_eq!(parts[0], "Agents' conversations, logs and databases");
-        assert!(
-            parts.contains(&"Releases") && parts.contains(&"Factory's records (factory.db)") && parts.contains(&"Workspace"),
-            "{parts:?}"
-        );
+        assert!(parts.contains(&"Releases") && parts.contains(&"Claktory's records") && parts.contains(&"Workspace"), "{parts:?}");
         let scout: Vec<&str> = rows[2].parts.iter().map(|part| part.label.as_str()).collect();
-        assert_eq!(scout, ["Task logs", "Database", "Conversations", "Checkout (copy-on-write)"]);
+        assert_eq!(scout, ["Task logs", "Database", "Conversations", "Checkout"]);
         assert!(rows[2].bytes >= 350_000 && rows[0].bytes >= rows[2].bytes + 300_000, "{rows:?}");
         assert!(rows.iter().all(|row| !row.partial));
         // Out of time: what it got so far, marked.

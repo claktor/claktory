@@ -5,10 +5,12 @@ import 'package:factory_app/drafts.dart';
 import 'package:factory_app/history.dart';
 import 'package:factory_app/login.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/update.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,7 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// A backend that records requests instead of sending them, and accepts them
 /// all unless [refuse] is set.
 class RecordingBackend extends Backend {
-  RecordingBackend()
+  RecordingBackend({super.localBackend})
     : super(
         workspace: WorkspaceStore(),
         transcript: TranscriptStore(),
@@ -153,6 +155,26 @@ class RecordingBackend extends Backend {
     return list;
   }
 
+  /// What [readFile] answers, by path; any other path can't be read.
+  final files = <String, FileContent>{};
+
+  @override
+  Future<FileContent> readFile(String path, {int maxBytes = 0}) async {
+    await _record(
+      ClientMessage(
+        readFile: ReadFile(path: path, maxBytes: Int64(maxBytes)),
+      ),
+    );
+    return files[path] ?? FileContent(path: path, error: 'No such file: $path');
+  }
+
+  @override
+  Future<void> setLayout(String agentId, ViewNode? root) => _record(
+    ClientMessage(
+      setLayout: SetLayout(agentId: agentId, root: root),
+    ),
+  );
+
   /// The code [createPairing] answers.
   var pairingCode = PairingCode(
     code:
@@ -199,8 +221,31 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(cancelLogin: CancelLogin()));
 
   @override
-  Future<void> signOut(String providerId) =>
-      _record(ClientMessage(signOut: SignOut(providerId: providerId)));
+  Future<void> signOut(String providerId, {String accountId = ''}) => _record(
+    ClientMessage(
+      signOut: SignOut(providerId: providerId, accountId: accountId),
+    ),
+  );
+
+  @override
+  Future<void> moveAccount(String providerId, String accountId, int position) =>
+      _record(
+        ClientMessage(
+          moveAccount: MoveAccount(
+            providerId: providerId,
+            accountId: accountId,
+            position: position,
+          ),
+        ),
+      );
+
+  @override
+  Future<void> updateAccount(UpdateAccount update) =>
+      _record(ClientMessage(updateAccount: update));
+
+  @override
+  Future<void> clearBuildCache(String path) =>
+      _record(ClientMessage(clearBuildCache: ClearBuildCache(path: path)));
 
   @override
   Future<void> installUpdate(String appPath) =>
@@ -297,6 +342,133 @@ class RecordingBackend extends Backend {
       showAllFiles: ShowAllFiles(projectId: projectId, showAll: showAll),
     ),
   );
+
+  // The vault, as the backend keeps it.
+
+  /// What [revealSecret] answers, by secret id.
+  final secretValues = <String, List<SecretEntry>>{};
+
+  /// What [previewEnv] answers.
+  var envPreview = EnvPreview();
+
+  @override
+  Future<void> createSecret(
+    String name,
+    String description,
+    List<SecretEntry> entries,
+  ) => _record(
+    ClientMessage(
+      createSecret: CreateSecret(
+        name: name,
+        description: description,
+        entries: entries,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> updateSecret(
+    String id,
+    String name,
+    String description, [
+    List<SecretEntry> entries = const [],
+  ]) => _record(
+    ClientMessage(
+      updateSecret: UpdateSecret(
+        id: id,
+        name: name,
+        description: description,
+        entries: entries,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> deleteSecret(String id) =>
+      _record(ClientMessage(deleteSecret: DeleteSecret(id: id)));
+
+  @override
+  Future<void> grantSecret(String id, String agentId) => _record(
+    ClientMessage(
+      grantSecret: GrantSecret(id: id, agentId: agentId),
+    ),
+  );
+
+  @override
+  Future<void> revokeSecret(
+    String id,
+    String agentId, {
+    bool stopRunningTasks = false,
+  }) => _record(
+    ClientMessage(
+      revokeSecret: RevokeSecret(
+        id: id,
+        agentId: agentId,
+        stopRunningTasks: stopRunningTasks,
+      ),
+    ),
+  );
+
+  @override
+  Future<List<SecretEntry>> revealSecret(String id) async {
+    await _record(ClientMessage(revealSecret: RevealSecret(id: id)));
+    return secretValues[id] ?? const [];
+  }
+
+  @override
+  Future<EnvPreview> previewEnv(String text) async {
+    await _record(ClientMessage(previewEnv: PreviewEnv(text: text)));
+    return envPreview;
+  }
+
+  @override
+  Future<void> importEnv(
+    String text,
+    String name,
+    String description, {
+    bool onePerVariable = false,
+  }) => _record(
+    ClientMessage(
+      importEnv: ImportEnv(
+        text: text,
+        name: name,
+        description: description,
+        onePerVariable: onePerVariable,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> decideSecretRequest(
+    String agentId,
+    String requestId, {
+    required bool approve,
+    List<SecretEntry> entries = const [],
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decideSecretRequest: DecideSecretRequest(
+        agentId: agentId,
+        requestId: requestId,
+        approve: approve,
+        entries: entries,
+        comment: comment,
+      ),
+    ),
+  );
+
+  /// What [listSecretUses] answers.
+  var secretUses = <SecretUse>[];
+
+  @override
+  Future<List<SecretUse>> listSecretUses(String id, {int limit = 0}) async {
+    await _record(
+      ClientMessage(
+        listSecretUses: ListSecretUses(id: id, limit: limit),
+      ),
+    );
+    return secretUses;
+  }
 }
 
 /// Updates this app from another machine without touching the disk: it
@@ -345,10 +517,39 @@ class FakeUpdater extends AppUpdater {
 /// The app's window around a [RecordingBackend], with browser opening
 /// recorded in [opened].
 class Harness {
-  Harness(Workspace snapshot, {Drafts? drafts})
-    : drafts = drafts ?? Drafts(MemoryDraftStorage()) {
+  /// The person has a name ([named]) unless the test says otherwise, so
+  /// the first launch's question (NameStep) doesn't cover every test.
+  Harness(
+    Workspace snapshot, {
+    Drafts? drafts,
+    bool localBackend = true,
+    bool named = true,
+  }) : drafts = drafts ?? Drafts(MemoryDraftStorage()),
+       backend = RecordingBackend(localBackend: localBackend) {
+    // Whatever a test or the backend applies later gets the name too.
+    if (named) {
+      backend.workspace.addListener(() {
+        final now = backend.workspace.workspace;
+        if (now.settings.userName.isNotEmpty) return;
+        if (now.isFrozen) {
+          backend.workspace.apply(
+            now.deepCopy()..ensureSettings().userName = 'Matt',
+          );
+        } else {
+          // In place, so a test that changes its snapshot and applies it
+          // again still sees the same object.
+          now.ensureSettings().userName = 'Matt';
+        }
+      });
+    }
     backend.workspace.apply(snapshot);
     this.drafts.watch(backend.workspace);
+    // As the app's Claktories do (rail.dart), the window shows the
+    // Claktory chosen: here the one backend connects to it instead.
+    connections.addListener(() {
+      final chosen = connections.current;
+      if (chosen?.code != backend.target?.code) backend.connectTo(chosen);
+    });
     login = LoginLauncher(
       workspace: backend.workspace,
       send: backend.startLogin,
@@ -359,7 +560,7 @@ class Harness {
     );
   }
 
-  final backend = RecordingBackend();
+  final RecordingBackend backend;
   final opened = <String>[];
   final page = ValueNotifier(AppPage.agent);
   late final history = AgentHistory(
@@ -381,8 +582,15 @@ class Harness {
   var quits = 0;
   final updater = FakeUpdater();
 
-  Future<void> show(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1200, 900);
+  /// The phone's camera: none unless a test gives it one.
+  final camera = FakeCamera();
+
+  /// A Mac window; a phone's screen is `Size(390, 844)`.
+  Future<void> show(
+    WidgetTester tester, {
+    Size size = const Size(1200, 900),
+  }) async {
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
@@ -401,6 +609,7 @@ class Harness {
           drafts: drafts,
           history: history,
           connections: connections,
+          camera: camera,
           child: const Shell(),
         ),
       ),
@@ -471,3 +680,34 @@ Finder askRivetButtons() => find.byWidgetPredicate(
       widget is Semantics &&
       widget.properties.label == 'Ask Rivet to set it up',
 );
+
+/// A camera for tests: [access] is what it answers, [granting] what asking
+/// for it gets; [scan] reads a code as if the camera saw it.
+class FakeCamera implements Camera {
+  CameraAccess state = CameraAccess.unavailable;
+  bool granting = true;
+  var asked = 0;
+  var settingsOpened = 0;
+  ValueChanged<String>? _onCode;
+
+  @override
+  Future<CameraAccess> access() async => state;
+
+  @override
+  Future<bool> request() async {
+    asked++;
+    state = granting ? CameraAccess.granted : CameraAccess.denied;
+    return granting;
+  }
+
+  @override
+  Future<void> openSettings() async => settingsOpened++;
+
+  @override
+  Widget preview(ValueChanged<String> onCode) {
+    _onCode = onCode;
+    return const SizedBox.expand(key: ValueKey('camera'));
+  }
+
+  void scan(String code) => _onCode?.call(code);
+}

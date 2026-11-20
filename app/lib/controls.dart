@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -75,8 +76,10 @@ class TitleSpace extends StatelessWidget {
   const TitleSpace({super.key});
 
   @override
-  Widget build(BuildContext context) =>
-      const WindowDrag(child: SizedBox(height: titleBarHeight));
+  Widget build(BuildContext context) => isPhoneLayout(context)
+      // A phone has no window to drag, and its status bar is room enough.
+      ? const SizedBox(height: Space.s)
+      : const WindowDrag(child: SizedBox(height: titleBarHeight));
 }
 
 /// A clickable region that tells its builder whether the pointer is over it.
@@ -404,14 +407,31 @@ class RotatingText extends StatefulWidget {
 }
 
 class _RotatingTextState extends State<RotatingText>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   var _index = 0;
   Timer? _timer;
   late final _slide = AnimationController(vsync: this, duration: rotateSlide);
 
+  /// The window is in front: a window in the background doesn't rotate.
+  var _focused = true;
+
+  /// The next line is sliding in.
+  var _sliding = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    final state = WidgetsBinding.instance.lifecycleState;
+    _focused = state == null || state == AppLifecycleState.resumed;
+    _schedule();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final focused = state == AppLifecycleState.resumed;
+    if (focused == _focused) return;
+    _focused = focused;
     _schedule();
   }
 
@@ -424,6 +444,7 @@ class _RotatingTextState extends State<RotatingText>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _slide.dispose();
     super.dispose();
@@ -433,7 +454,10 @@ class _RotatingTextState extends State<RotatingText>
     _timer?.cancel();
     _timer = null;
     // A slide under way finishes and schedules the next itself.
-    if (widget.paused || widget.lines.length < 2 || _slide.isAnimating) {
+    if (widget.paused ||
+        !_focused ||
+        widget.lines.length < 2 ||
+        _slide.isAnimating) {
       return;
     }
     _timer = Timer(rotateEvery, _next);
@@ -445,10 +469,12 @@ class _RotatingTextState extends State<RotatingText>
       setState(() => _index = (_index + 1) % lines);
       return _schedule();
     }
+    setState(() => _sliding = true);
     _slide.forward(from: 0).whenCompleteOrCancel(() {
       if (!mounted) return;
       setState(() {
         _index = (_index + 1) % widget.lines.length;
+        _sliding = false;
         _slide.value = 0;
       });
       _schedule();
@@ -463,30 +489,69 @@ class _RotatingTextState extends State<RotatingText>
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
     );
-    return ClipRect(
-      child: AnimatedBuilder(
-        animation: _slide,
-        builder: (context, _) {
-          final t = Curves.easeInOutCubic.transform(_slide.value);
-          if (t == 0) return line(_index);
-          return Stack(
-            children: [
-              FractionalTranslation(
-                translation: Offset(0, -t),
-                child: Opacity(opacity: 1 - t, child: line(_index)),
+    // The slide moves the two lines in paint only (a Flow), never
+    // rebuilding or laying out: a rebuild under a LayoutBuilder (the
+    // message box's) would lay out and repaint the window every frame. It
+    // rebuilds only as a slide starts and ends.
+    return RepaintBoundary(
+      child: ClipRect(
+        child: Stack(
+          children: [
+            // As tall as a line, as wide as there's room for.
+            SizedBox(
+              width: double.infinity,
+              child: Text(' ', style: widget.style, maxLines: 1),
+            ),
+            Positioned.fill(
+              child: Flow(
+                delegate: _SlideFlow(_slide),
+                children: [
+                  line(_index),
+                  // The next only while it slides in.
+                  if (_sliding) line(_index + 1),
+                ],
               ),
-              Positioned.fill(
-                child: FractionalTranslation(
-                  translation: Offset(0, 1 - t),
-                  child: Opacity(opacity: t, child: line(_index + 1)),
-                ),
-              ),
-            ],
-          );
-        },
+            ),
+          ],
+        ),
       ),
     );
   }
+}
+
+/// Paints the line showing sliding up and out, and the next one in after
+/// it, as [slide] runs.
+class _SlideFlow extends FlowDelegate {
+  _SlideFlow(this.slide) : super(repaint: slide);
+
+  final Animation<double> slide;
+
+  @override
+  void paintChildren(FlowPaintingContext context) {
+    final t = Curves.easeInOutCubic.transform(slide.value);
+    final height = context.size.height;
+    if (t == 0 || context.childCount < 2) {
+      context.paintChild(0);
+      return;
+    }
+    context.paintChild(
+      0,
+      transform: Matrix4.translationValues(0, -t * height, 0),
+      opacity: 1 - t,
+    );
+    context.paintChild(
+      1,
+      transform: Matrix4.translationValues(0, (1 - t) * height, 0),
+      opacity: t,
+    );
+  }
+
+  @override
+  BoxConstraints getConstraintsForChild(int i, BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  bool shouldRepaint(_SlideFlow old) => old.slide != slide;
 }
 
 class SelectOption<T> {
@@ -1122,40 +1187,173 @@ class MoreGlyph extends StatelessWidget {
   }
 }
 
-/// A signal dot that pulses while something is live.
+/// A signal dot that pulses while something is live: from 35% to full and
+/// back every 1.8s, eased, moved by [LiveClock] at about 12 fps.
 class LiveDot extends StatefulWidget {
   const LiveDot({super.key, this.color});
 
   /// Signal orange unless given.
   final Color? color;
 
+  /// One way of the pulse; it eases there and back.
+  static const half = Duration(milliseconds: 900);
+
+  /// The dot's opacity at [now].
+  static double opacityAt(DateTime now) {
+    final period = half.inMilliseconds * 2;
+    final phase = (now.millisecondsSinceEpoch % period) / period;
+    final there = phase < 0.5 ? phase * 2 : 2 - phase * 2;
+    return 0.35 + 0.65 * Curves.easeInOut.transform(there);
+  }
+
   @override
   State<LiveDot> createState() => _LiveDotState();
 }
 
-class _LiveDotState extends State<LiveDot> with SingleTickerProviderStateMixin {
-  late final _pulse = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  )..repeat(reverse: true);
-
+class _LiveDotState extends State<LiveDot> with LiveClockSubscriber {
   @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
+  LiveBeat get beat => LiveBeat.dots;
 
   @override
   Widget build(BuildContext context) {
+    final color = widget.color ?? Palette.of(context).signal;
     return RepaintBoundary(
-      child: FadeTransition(
-        opacity: Tween<double>(
-          begin: 0.35,
-          end: 1,
-        ).animate(CurvedAnimation(parent: _pulse, curve: Curves.easeInOut)),
-        child: Dot(color: widget.color ?? Palette.of(context).signal),
+      child: CustomPaint(
+        size: const Size.square(6),
+        painter: _LiveDotPainter(color: color, still: still),
       ),
     );
+  }
+}
+
+class _LiveDotPainter extends CustomPainter {
+  _LiveDotPainter({required this.color, required this.still})
+    : super(repaint: still ? null : LiveClock.instance.dots);
+
+  final Color color;
+  final bool still;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final opacity = still ? 1.0 : LiveDot.opacityAt(LiveClock.instance.now);
+    canvas.drawCircle(
+      size.center(Offset.zero),
+      size.shortestSide / 2,
+      Paint()..color = color.withValues(alpha: color.a * opacity),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_LiveDotPainter old) =>
+      old.color != color || old.still != still;
+}
+
+/// Which of [LiveClock]'s beats something moves by.
+enum LiveBeat { waves, dots }
+
+/// The window's one clock for live indicators: working waves at
+/// [waveFps] and live dots at half that, from one timer, so every wave and
+/// dot on screen repaints in the same frame and nothing asks for a frame
+/// at the display's full rate. It runs only while something subscribes
+/// and the app is showing; [now] is the time of its last tick, which every
+/// painter reads so they stay in step.
+class LiveClock with WidgetsBindingObserver {
+  LiveClock._();
+
+  static final instance = LiveClock._();
+
+  /// How often waves move; dots move every other tick.
+  static const waveFps = 25;
+
+  /// Ticks for waves, and every other one for dots.
+  final waves = _Beat();
+  final dots = _Beat();
+
+  /// When the last tick was.
+  DateTime get now => _now ?? DateTime.now();
+  DateTime? _now;
+
+  final _counts = {LiveBeat.waves: 0, LiveBeat.dots: 0};
+  Timer? _timer;
+  var _tick = 0;
+  var _observing = false;
+  var _hidden = false;
+
+  /// How many ticks it has made: for tests and profiling.
+  int get ticks => _tick;
+
+  void _subscribe(LiveBeat beat) {
+    _counts[beat] = _counts[beat]! + 1;
+    if (!_observing) {
+      WidgetsBinding.instance.addObserver(this);
+      _observing = true;
+    }
+    _schedule();
+  }
+
+  void _unsubscribe(LiveBeat beat) {
+    _counts[beat] = _counts[beat]! - 1;
+    _schedule();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Losing focus (inactive) isn't hidden: the window still shows.
+    _hidden =
+        state == AppLifecycleState.hidden || state == AppLifecycleState.paused;
+    _schedule();
+  }
+
+  void _schedule() {
+    final wanted = !_hidden && _counts.values.any((count) => count > 0);
+    if (!wanted) {
+      _timer?.cancel();
+      _timer = null;
+      return;
+    }
+    _timer ??= Timer.periodic(
+      const Duration(microseconds: 1000000 ~/ waveFps),
+      (_) => _beat(),
+    );
+  }
+
+  void _beat() {
+    _tick++;
+    _now = DateTime.now();
+    if (_counts[LiveBeat.waves]! > 0) waves._notify();
+    if (_tick.isEven && _counts[LiveBeat.dots]! > 0) dots._notify();
+  }
+}
+
+class _Beat extends ChangeNotifier {
+  void _notify() => notifyListeners();
+}
+
+/// Subscribes a live indicator to [LiveClock] while it's mounted, moving
+/// (not muted by [TickerMode]) and motion isn't reduced, in which case
+/// it's [still].
+mixin LiveClockSubscriber<T extends StatefulWidget> on State<T> {
+  LiveBeat get beat;
+
+  /// Reduced motion: drawn at rest, off the clock.
+  var still = false;
+  var _subscribed = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    still = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final moving = !still && TickerMode.valuesOf(context).enabled;
+    if (moving && !_subscribed) LiveClock.instance._subscribe(beat);
+    if (!moving && _subscribed) LiveClock.instance._unsubscribe(beat);
+    _subscribed = moving;
+  }
+
+  @override
+  void dispose() {
+    if (_subscribed) LiveClock.instance._unsubscribe(beat);
+    _subscribed = false;
+    super.dispose();
   }
 }
 
@@ -1245,35 +1443,12 @@ class WorkingWave extends StatefulWidget {
   State<WorkingWave> createState() => _WorkingWaveState();
 }
 
-class _WorkingWaveState extends State<WorkingWave>
-    with SingleTickerProviderStateMixin {
-  final _phase = ValueNotifier(0.0);
-  late final _ticker = createTicker((_) => _phase.value = _now());
-
-  /// Where the shared clock is in the period, 0 to 1.
-  static double _now() {
-    final period = WorkingWave.period.inMilliseconds;
-    return (DateTime.now().millisecondsSinceEpoch % period) / period;
-  }
-
+class _WorkingWaveState extends State<WorkingWave> with LiveClockSubscriber {
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final still = MediaQuery.disableAnimationsOf(context);
-    if (still && _ticker.isActive) _ticker.stop();
-    if (!still && !_ticker.isActive) _ticker.start();
-  }
-
-  @override
-  void dispose() {
-    _ticker.dispose();
-    _phase.dispose();
-    super.dispose();
-  }
+  LiveBeat get beat => LiveBeat.waves;
 
   @override
   Widget build(BuildContext context) {
-    final still = MediaQuery.disableAnimationsOf(context);
     return IgnorePointer(
       child: RepaintBoundary(
         child: ClipRRect(
@@ -1283,17 +1458,20 @@ class _WorkingWaveState extends State<WorkingWave>
                   color: widget.color.withValues(alpha: widget.peak * 0.6),
                 )
               : CustomPaint(
-                  painter: _WavePainter(
-                    phase: _phase,
-                    color: widget.color,
-                    peak: widget.peak,
-                  ),
+                  painter: _WavePainter(color: widget.color, peak: widget.peak),
                   child: const SizedBox.expand(),
                 ),
         ),
       ),
     );
   }
+}
+
+/// Where every wave is in [WorkingWave.period] at [now], 0 to 1: one
+/// shared clock, so all waves move together.
+double wavePhase(DateTime now) {
+  final period = WorkingWave.period.inMilliseconds;
+  return (now.millisecondsSinceEpoch % period) / period;
 }
 
 /// How wide the wave's band is across an area [width] wide.
@@ -1309,17 +1487,17 @@ double waveCenter(double phase, double width) {
 }
 
 class _WavePainter extends CustomPainter {
-  _WavePainter({required this.phase, required this.color, required this.peak})
-    : super(repaint: phase);
+  _WavePainter({required this.color, required this.peak})
+    : super(repaint: LiveClock.instance.waves);
 
-  final ValueNotifier<double> phase;
   final Color color;
   final double peak;
 
   @override
   void paint(Canvas canvas, Size size) {
     final band = waveBand(size.width);
-    final left = waveCenter(phase.value, size.width) - band / 2;
+    final phase = wavePhase(LiveClock.instance.now);
+    final left = waveCenter(phase, size.width) - band / 2;
     final clear = color.withValues(alpha: 0);
     canvas.drawRect(
       Rect.fromLTWH(left, 0, band, size.height),
@@ -1336,7 +1514,7 @@ class _WavePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_WavePainter old) =>
-      old.color != color || old.peak != peak || old.phase != phase;
+      old.color != color || old.peak != peak;
 }
 
 /// A 28px square button holding a 16px glyph, tinted on hover and while
@@ -1694,6 +1872,11 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'brain': _drawBrain,
   'arrow-down': _drawArrowDown,
   'arrow-left': _drawArrowLeft,
+  'chevron-left': _drawChevronLeft,
+  'image': _drawImage,
+  'minus': _drawMinus,
+  'rotate-cw': _drawRotateCw,
+  'ellipsis': _drawEllipsis,
   'plus': _drawPlus,
   'terminal': _drawTerminal,
   'sparkles': _drawSparkles,
@@ -1704,7 +1887,50 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'database': _drawDatabase,
   'globe': _drawGlobe,
   'gauge': _drawGauge,
+  'send': _drawSend,
+  'panels-top-left': _drawPanelsTopLeft,
+  'key-round': _drawKeyRound,
 };
+
+final _drawEllipsis = _paths(const [
+  'M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
+  'M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
+  'M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
+]);
+
+final _drawChevronLeft = _paths(const ['m15 18-6-6 6-6']);
+
+final _drawImage = _paths(const [
+  'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+  'M7 9a2 2 0 1 0 4 0a2 2 0 1 0-4 0',
+  'm21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21',
+]);
+
+final _drawMinus = _paths(const ['M5 12h14']);
+
+final _drawRotateCw = _paths(const [
+  'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8',
+  'M21 3v5h-5',
+]);
+
+final _drawSend = _paths(const [
+  'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635'
+      'l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z',
+  'm21.854 2.147-10.94 10.939',
+]);
+
+final _drawKeyRound = _paths(const [
+  'M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1'
+      'a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172'
+      'a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z',
+  'M16 7.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0',
+]);
+
+final _drawPanelsTopLeft = _paths(const [
+  'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+  'M3 9h18',
+  'M9 21V9',
+]);
 
 final _drawGauge = _paths(const ['m12 14 4-4', 'M3.34 19a10 10 0 1 1 17.32 0']);
 
@@ -1939,4 +2165,106 @@ class Arrival extends StatelessWidget {
     ),
     child: child,
   );
+}
+
+/// An edge the person drags to resize what's beside it, laid over its
+/// hairline: a thin hit area with the resize cursor that shows a subtle
+/// line while hovered or dragged. [onDrag] gets how far the pointer has
+/// moved since the drag started; a double click resets it ([onReset]).
+class ResizeHandle extends StatefulWidget {
+  const ResizeHandle({
+    super.key,
+    required this.onDragStart,
+    required this.onDrag,
+    required this.onDragEnd,
+    required this.onReset,
+    this.axis = Axis.horizontal,
+  });
+
+  /// How wide the area that takes the drag is, centered on the edge.
+  static const width = 8.0;
+
+  final VoidCallback onDragStart;
+  final ValueChanged<double> onDrag;
+  final VoidCallback onDragEnd;
+  final VoidCallback onReset;
+
+  /// Which way it drags: sideways for an edge between columns, up and down
+  /// for one between rows.
+  final Axis axis;
+
+  @override
+  State<ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<ResizeHandle> {
+  var _hovered = false;
+  var _dragging = false;
+  var _moved = 0.0;
+
+  void _start() {
+    setState(() {
+      _dragging = true;
+      _moved = 0;
+    });
+    widget.onDragStart();
+  }
+
+  void _update(double delta) {
+    _moved += delta;
+    widget.onDrag(_moved);
+  }
+
+  void _end() {
+    if (!_dragging) return;
+    setState(() => _dragging = false);
+    widget.onDragEnd();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final shown = _hovered || _dragging;
+    final across = widget.axis == Axis.horizontal;
+    final line = AnimatedContainer(
+      duration: Motion.fast,
+      curve: Curves.easeOut,
+      width: across ? 2 : null,
+      height: across ? null : 2,
+      color: shown
+          ? palette.textFaint.withValues(alpha: 0.5)
+          : const Color(0x00000000),
+    );
+    return MouseRegion(
+      cursor: across
+          ? SystemMouseCursors.resizeColumn
+          : SystemMouseCursors.resizeRow,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        // Counted from where the pointer went down, so the edge stays under
+        // it once the drag starts.
+        dragStartBehavior: DragStartBehavior.down,
+        onHorizontalDragStart: across ? (_) => _start() : null,
+        onHorizontalDragUpdate: across
+            ? (details) => _update(details.delta.dx)
+            : null,
+        onHorizontalDragEnd: across ? (_) => _end() : null,
+        onHorizontalDragCancel: across ? _end : null,
+        onVerticalDragStart: across ? null : (_) => _start(),
+        onVerticalDragUpdate: across
+            ? null
+            : (details) => _update(details.delta.dy),
+        onVerticalDragEnd: across ? null : (_) => _end(),
+        onVerticalDragCancel: across ? null : _end,
+        onDoubleTap: widget.onReset,
+        child: SizedBox(
+          width: across ? ResizeHandle.width : null,
+          height: across ? null : ResizeHandle.width,
+          child: Center(child: line),
+        ),
+      ),
+    );
+  }
 }

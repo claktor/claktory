@@ -637,6 +637,9 @@ async fn request(
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let body = response_text(response).await;
+        if crate::accounts::credit_error(status, &body) {
+            crate::accounts::mark_out_of_credit(&mut parser.output);
+        }
         return Err(completion_error(status_error(status, &body)));
     }
     sink.push(StreamEvent::Start { partial: parser.output.clone() });

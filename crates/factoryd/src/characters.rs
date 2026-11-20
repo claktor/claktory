@@ -54,10 +54,7 @@ pub(crate) struct Identity {
 pub(crate) fn identity(agent: &AgentConfig) -> Identity {
     let seed = seed(&agent.id);
     let chosen = |catalog: &[&'static str], choice: &str| catalog.iter().copied().find(|known| *known == choice);
-    Identity {
-        shape: chosen(&SHAPES, &agent.avatar.shape).unwrap_or(SHAPES[seed as usize % SHAPES.len()]),
-        seed,
-    }
+    Identity { shape: chosen(&SHAPES, &agent.avatar.shape).unwrap_or(SHAPES[seed as usize % SHAPES.len()]), seed }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

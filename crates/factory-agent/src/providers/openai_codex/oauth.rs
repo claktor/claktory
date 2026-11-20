@@ -48,6 +48,24 @@ pub fn account_id(token: &str) -> Option<String> {
     auth_claim(token, "chatgpt_account_id")
 }
 
+/// Who the access token is: its user and ChatGPT account, and the email of
+/// its `https://api.openai.com/profile` claim.
+pub fn identity(token: &str) -> crate::limits::Identity {
+    let claims = token.split('.').nth(1).and_then(decode_base64_lenient).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let email = claims
+        .as_ref()
+        .and_then(|claims| claims["https://api.openai.com/profile"]["email"].as_str().or_else(|| claims["email"].as_str()))
+        .unwrap_or_default()
+        .to_owned();
+    let user = auth_claim(token, "chatgpt_user_id").or_else(|| auth_claim(token, "user_id")).unwrap_or_else(|| email.clone());
+    let key = match account_id(token) {
+        Some(account) if !user.is_empty() => format!("{user}/{account}"),
+        Some(account) => account,
+        None => user,
+    };
+    crate::limits::Identity { key, label: email }
+}
+
 /// The ChatGPT plan ("plus", "pro", ...) in the access token's `chatgpt_plan_type` claim.
 pub fn plan_type(token: &str) -> Option<String> {
     auth_claim(token, "chatgpt_plan_type")

@@ -15,11 +15,11 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use factory_agent::Tool;
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1;
 use rusqlite::{Connection, params};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{Extension, InstanceDefault, InstanceSpec, Manifest, PromptKind, PromptSection, enabled, factory_tool};
 use crate::config::AgentConfig;
@@ -87,7 +87,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Memory",
     icon: "brain",
-    description: "The agent's own memory: the person's preferences it learns, each with why, and notes on how things work. Only this agent reads and writes it.",
+    description: "Remembers your preferences, and why, and what it learns about how things work. Only this agent can see it.",
     default_enabled: false,
     options: &[],
 };
@@ -95,16 +95,16 @@ static MANIFEST: Manifest = Manifest {
 static INSTANCES: [InstanceSpec; 1] = [InstanceSpec {
     key: "memory:factory",
     name: "factory",
-    label: "Factory manual",
+    label: "Claktory manual",
     icon: "book-open",
-    description: "Factory's own manual as a read-only memory: the app screen by screen, every extension, the settings file and how to change anything. Admin agents like Rivet have it; turn it on for agents that set Factory up or explain it.",
+    description: "Claktory's manual, so it can explain Claktory and set it up for you. Rivet has it; turn it on for agents that do the same.",
     default: InstanceDefault::Admin,
 }];
 const FACTORY: &InstanceSpec = &INSTANCES[0];
 
-const MANUAL_PROMPT: &str = "## The Factory manual
+const MANUAL_PROMPT: &str = "## The Claktory manual
 
-The manual above is Factory's core. The rest is your Factory manual, a read-only memory of notes that ship with Factory: the app screen by screen, every extension and its options, the settings file and how to change anything in it, signing in, and where Factory keeps things. Its notes are listed under \"Factory manual notes\". Before you answer a question about Factory or change its settings, open the notes it touches with memory_read (`note`: a slug{instance}), or search them with `q`. They're always the running version's: after Factory updates, read them again rather than relying on what you read before.
+The manual above is Claktory's core. The rest is your Claktory manual, a read-only memory of notes that ship with Claktory: the app screen by screen, every extension and its options, the settings file and how to change anything in it, signing in, and where Claktory keeps things. Its notes are listed under \"Claktory manual notes\". Before you answer a question about Claktory or change its settings, open the notes it touches with memory_read (`note`: a slug{instance}), or search them with `q`. They're always the running version's: after Claktory updates, read them again rather than relying on what you read before.
 ";
 
 const PROMPT: &str = "## Memory
@@ -119,8 +119,9 @@ You have a memory of your own that lasts across compactions: preferences (what t
 
 const UPDATE: &str = "Change your memory: several ops at once, all applied or none. Ops: pref_add{rule, why}, pref_replace{id, rule?, why?}, pref_remove{id}, note_write{slug, summary, body} (creates or replaces), note_edit{slug, old, new, summary?} (old must appear once), note_remove{slug}. Slugs use a-z, 0-9 and -; a summary is one line.";
 const READ: &str = "Read your memory: `note` opens a knowledge note; `q` searches preferences and notes (up to 20 lines). With neither, your preferences and notes index as they are now.";
-const READ_BOTH: &str = "Read your memory, or with instance \"factory\" the Factory manual: `note` opens a note; `q` searches (up to 20 lines). With neither, the index as it is now.";
-const READ_MANUAL: &str = "Read the Factory manual: `note` opens a note by slug; `q` searches every note (up to 20 lines). With neither, the notes' index.";
+const READ_BOTH: &str = "Read your memory, or with instance \"factory\" the Claktory manual: `note` opens a note; `q` searches (up to 20 lines). With neither, the index as it is now.";
+const READ_MANUAL: &str =
+    "Read the Claktory manual: `note` opens a note by slug; `q` searches every note (up to 20 lines). With neither, the notes' index.";
 
 pub(crate) struct Memory;
 
@@ -342,7 +343,10 @@ pub(crate) enum UpdateError {
 }
 
 /// Applies `ops` in order, all or none; says what changed, op by op.
-pub(crate) fn update(store: &Store, agent: &str, actor: &str, ops: &[Op]) -> Result<Vec<String>, UpdateError> {
+/// Applies `ops`, all or none. Says what changed, one phrase per op, and
+/// each change's details for the app: what kind of entry, what happened to
+/// it, its id or slug, and its title (a preference's rule, a note's summary).
+pub(crate) fn update(store: &Store, agent: &str, actor: &str, ops: &[Op]) -> Result<(Vec<String>, Vec<Value>), UpdateError> {
     let mut db = store.db();
     let transaction = db.transaction()?;
     let mut contents = read(&transaction, &Query { agent, bodies: true, changes: 0 })?;
@@ -354,6 +358,7 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, ops: &[Op]) -> Res
     let now = now_ms();
     let mut events = Vec::new();
     let mut said = Vec::new();
+    let mut changes = Vec::new();
     for (index, op) in ops.iter().enumerate() {
         let refused = |why: String| UpdateError::Refused(format!("Nothing was changed: op {} ({}): {why}", index + 1, op.name()));
         let (kind, subject, before, after) = apply(&mut contents, op, &mut next_id, now).map_err(refused)?;
@@ -366,6 +371,7 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, ops: &[Op]) -> Res
             Kind::NoteEdited => format!("note {subject} edited"),
             Kind::NoteRemoved => format!("note {subject} removed"),
         });
+        changes.push(change_details(kind, &subject, &before, &after));
         events.push((kind, subject, before, after));
     }
     check_caps(&contents)?;
@@ -393,7 +399,27 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, ops: &[Op]) -> Res
         }
     }
     transaction.commit()?;
-    Ok(said)
+    Ok((said, changes))
+}
+
+/// One change for the app: {kind, change, id or slug, title}.
+fn change_details(kind: Kind, subject: &str, before: &str, after: &str) -> Value {
+    let entry = if kind == Kind::NoteRemoved || kind == Kind::PrefRemoved { before } else { after };
+    let entry: Value = serde_json::from_str(entry).unwrap_or_default();
+    let change = match kind {
+        Kind::PrefAdded => "added",
+        Kind::PrefReplaced => "replaced",
+        Kind::PrefRemoved | Kind::NoteRemoved => "removed",
+        Kind::NoteWritten if before.is_empty() => "written",
+        Kind::NoteWritten => "rewritten",
+        Kind::NoteEdited => "edited",
+    };
+    if kind.is_preference() {
+        let id: u32 = subject.parse().unwrap_or_default();
+        json!({"kind": "preference", "change": change, "id": id, "title": entry["rule"]})
+    } else {
+        json!({"kind": "note", "change": change, "slug": subject, "title": entry["summary"]})
+    }
 }
 
 type Applied = (Kind, String, String, String);
@@ -616,7 +642,8 @@ impl Extension for Memory {
         if enabled(agent, FACTORY.key) {
             let instance = if own { ", and instance: \"factory\"" } else { "" };
             sections.push(PromptSection { kind: PromptKind::Static, text: MANUAL_PROMPT.replace("{instance}", instance) });
-            sections.push(PromptSection { kind: PromptKind::InstancePinned(FACTORY.key), text: manual_index("## Factory manual notes\n\n") });
+            sections
+                .push(PromptSection { kind: PromptKind::InstancePinned(FACTORY.key), text: manual_index("## Claktory manual notes\n\n") });
         }
         if !own {
             return sections;
@@ -688,14 +715,15 @@ impl Extension for Memory {
         &INSTANCES
     }
 
-    fn instance_view(&self, factory: &Factory, _inner: &Inner, agent: &str, instance: &'static InstanceSpec) -> Option<v1::ExtensionView> {
+    fn instance_view(&self, factory: &Factory, inner: &Inner, agent: &str, instance: &'static InstanceSpec) -> Option<v1::ExtensionView> {
+        let user = inner.config.user_name();
         let notes = crate::manual::manual()
             .notes
             .iter()
             .map(|note| v1::MemoryNote {
                 slug: note.slug.clone(),
                 summary: note.summary.clone(),
-                body: crate::manual::render(&note.body, &factory.home),
+                body: crate::manual::render(&note.body, &factory.home, user),
                 created: 0,
                 updated: 0,
             })
@@ -769,11 +797,11 @@ struct UpdateArgs {
     ops: Vec<Op>,
 }
 
-fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: UpdateArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
-    let said = update(&factory.store, agent, agent, &args.ops).map_err(|error| error.to_string())?;
+    let (said, changes) = update(&factory.store, agent, agent, &args.ops).map_err(|error| error.to_string())?;
     factory.refresh_view(agent);
-    Ok(format!("ok: {}", said.join("; ")))
+    Ok(ToolResult::text(format!("ok: {}", said.join("; ")), json!({"changes": changes})))
 }
 
 #[derive(Deserialize)]
@@ -786,7 +814,7 @@ struct ReadArgs {
     instance: Option<String>,
 }
 
-fn run_read(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_read(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: ReadArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let note = args.note.as_deref().map(str::trim).filter(|note| !note.is_empty());
     let q = args.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
@@ -797,8 +825,13 @@ fn run_read(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<S
     };
     match args.instance.as_deref().map(str::trim).filter(|instance| !instance.is_empty()) {
         Some(instance) if instance == FACTORY.name && manual => return read_manual(factory, note, q),
-        Some(instance) if instance == FACTORY.name => return Err("The Factory manual isn't on for you.".to_owned()),
-        Some(other) => return Err(format!("instance is \"{}\" for the Factory manual, or left out for your own memory; got \"{other}\".", FACTORY.name)),
+        Some(instance) if instance == FACTORY.name => return Err("The Claktory manual isn't on for you.".to_owned()),
+        Some(other) => {
+            return Err(format!(
+                "instance is \"{}\" for the Claktory manual, or left out for your own memory; got \"{other}\".",
+                FACTORY.name
+            ));
+        }
         None if !own && manual => return read_manual(factory, note, q),
         None => {}
     }
@@ -812,18 +845,27 @@ fn run_read(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<S
                 if slugs.is_empty() { "none".to_owned() } else { slugs.join(", ") }
             ));
         };
-        return Ok(format!("{}: {} (updated {})\n\n{}", note.slug, note.summary, note.day, note.body));
+        let text = format!("{}: {} (updated {})\n\n{}", note.slug, note.summary, note.day, note.body);
+        return Ok(ToolResult::text(text, json!({"instance": "", "slug": note.slug, "title": note.summary})));
     }
-    let Some(q) = q else { return Ok(overview(&contents, false)) };
+    let Some(q) = q else {
+        let details = json!({"instance": "", "preferences": contents.preferences.len(), "notes": contents.notes.len()});
+        return Ok(ToolResult::text(overview(&contents, false), details));
+    };
     let hits = search(&contents, q);
+    Ok(ToolResult::text(search_text(&hits, q, "your memory"), json!({"instance": "", "query": q, "hits": hits.len()})))
+}
+
+/// Up to SEARCH_HITS of a search's `hits`, and how many more there are.
+fn search_text(hits: &[String], q: &str, searched: &str) -> String {
     if hits.is_empty() {
-        return Ok(format!("Nothing in your memory mentions \"{q}\"."));
+        return format!("Nothing in {searched} mentions \"{q}\".");
     }
     let mut lines: Vec<String> = hits.iter().take(SEARCH_HITS).cloned().collect();
     if hits.len() > SEARCH_HITS {
         lines.push(format!("+{} more; narrow q.", hits.len() - SEARCH_HITS));
     }
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
 /// The Factory manual's notes' index, one line each, after `heading`.
@@ -836,16 +878,20 @@ fn manual_index(heading: &str) -> String {
 }
 
 /// memory_read on the Factory manual: a note, a search, or the index.
-fn read_manual(factory: &Factory, note: Option<&str>, q: Option<&str>) -> Result<String, String> {
+fn read_manual(factory: &Factory, note: Option<&str>, q: Option<&str>) -> Result<ToolResult, String> {
     let notes = &crate::manual::manual().notes;
+    let user = factory.lock().config.user_name().map(str::to_owned);
     if let Some(slug) = note {
         let Some(note) = notes.iter().find(|note| note.slug == slug) else {
             let slugs: Vec<&str> = notes.iter().map(|note| note.slug.as_str()).collect();
-            return Err(format!("The Factory manual has no note \"{slug}\". Notes: {}.", slugs.join(", ")));
+            return Err(format!("The Claktory manual has no note \"{slug}\". Notes: {}.", slugs.join(", ")));
         };
-        return Ok(format!("{}: {}\n\n{}", note.slug, note.summary, crate::manual::render(&note.body, &factory.home)));
+        let text = format!("{}: {}\n\n{}", note.slug, note.summary, crate::manual::render(&note.body, &factory.home, user.as_deref()));
+        return Ok(ToolResult::text(text, json!({"instance": FACTORY.name, "slug": note.slug, "title": note.summary})));
     }
-    let Some(q) = q else { return Ok(manual_index("Factory manual notes:\n")) };
+    let Some(q) = q else {
+        return Ok(ToolResult::text(manual_index("Claktory manual notes:\n"), json!({"instance": FACTORY.name, "notes": notes.len()})));
+    };
     let lower = q.to_lowercase();
     let mentions = |text: &str| text.to_lowercase().contains(&lower);
     let mut hits = Vec::new();
@@ -853,20 +899,16 @@ fn read_manual(factory: &Factory, note: Option<&str>, q: Option<&str>) -> Result
         if mentions(&note.slug) || mentions(&note.summary) {
             hits.push(format!("{}: {}", note.slug, note.summary));
         }
-        for (number, line) in note.body.lines().enumerate() {
+        // As it reads: this Factory's paths, the user's name.
+        let body = crate::manual::render(&note.body, &factory.home, user.as_deref());
+        for (number, line) in body.lines().enumerate() {
             if mentions(line) {
                 hits.push(format!("{}:{}: {}", note.slug, number + 1, clip(line.trim(), 200)));
             }
         }
     }
-    if hits.is_empty() {
-        return Ok(format!("Nothing in the Factory manual mentions \"{q}\"."));
-    }
-    let mut lines: Vec<String> = hits.iter().take(SEARCH_HITS).cloned().collect();
-    if hits.len() > SEARCH_HITS {
-        lines.push(format!("+{} more; narrow q.", hits.len() - SEARCH_HITS));
-    }
-    Ok(lines.join("\n"))
+    let details = json!({"instance": FACTORY.name, "query": q, "hits": hits.len()});
+    Ok(ToolResult::text(search_text(&hits, q, "the Claktory manual"), details))
 }
 
 /// Lines that mention `q`, ignoring case: "pref #3: …", "note deploy: …"
@@ -916,7 +958,7 @@ mod tests {
         serde_json::from_value(value).expect("ops")
     }
 
-    fn refused(result: Result<Vec<String>, UpdateError>) -> String {
+    fn refused(result: Result<(Vec<String>, Vec<Value>), UpdateError>) -> String {
         match result {
             Err(UpdateError::Refused(text)) => text,
             other => panic!("expected a refusal, got {other:?}"),
@@ -935,10 +977,11 @@ mod tests {
                 {"op": "pref_add", "rule": "Answer  in\nGerman", "why": "he reads faster in it"},
             ])),
         )
-        .expect("add");
+        .expect("add")
+        .0;
         assert_eq!(said, ["pref #1 added", "pref #2 added"]);
         assert_eq!(
-            update(&store, "other", "other", &ops(json!([{"op": "pref_add", "rule": "R", "why": "W"}]))).expect("add"),
+            update(&store, "other", "other", &ops(json!([{"op": "pref_add", "rule": "R", "why": "W"}]))).expect("add").0,
             ["pref #1 added"]
         );
 
@@ -948,7 +991,8 @@ mod tests {
             "ops",
             &ops(json!([{"op": "pref_replace", "id": 2, "rule": "Answer in English"}, {"op": "pref_remove", "id": 1}])),
         )
-        .expect("change");
+        .expect("change")
+        .0;
         assert_eq!(said, ["pref #2 replaced", "pref #1 removed"]);
         let contents = query(&store, &Query { agent: "ops", changes: 10, ..Query::default() }).expect("query");
         assert_eq!(contents.preferences.len(), 1);
@@ -961,7 +1005,7 @@ mod tests {
         // Ids aren't reused, even for the latest one removed.
         update(&store, "ops", "ops", &ops(json!([{"op": "pref_remove", "id": 2}]))).expect("remove");
         assert_eq!(
-            update(&store, "ops", "ops", &ops(json!([{"op": "pref_add", "rule": "R", "why": "W"}]))).expect("add"),
+            update(&store, "ops", "ops", &ops(json!([{"op": "pref_add", "rule": "R", "why": "W"}]))).expect("add").0,
             ["pref #3 added"]
         );
 
@@ -1002,7 +1046,7 @@ mod tests {
     #[test]
     fn notes_are_written_edited_searched_and_removed() {
         let store = store();
-        let body = "Deploys go through scripts/release.sh.\nThe dev Factory uses port 7421.";
+        let body = "Deploys go through scripts/release.sh.\nThe dev Claktory uses port 7421.";
         let said = update(
             &store,
             "b",
@@ -1012,7 +1056,8 @@ mod tests {
                 {"op": "note_write", "slug": "auth", "summary": "Sign-in quirks", "body": "Codex needs a device code."},
             ])),
         )
-        .expect("write");
+        .expect("write")
+        .0;
         assert_eq!(said, ["note deploy written", "note auth written"]);
         let said = update(
             &store,
@@ -1020,7 +1065,8 @@ mod tests {
             "b",
             &ops(json!([{"op": "note_edit", "slug": "deploy", "old": "7421", "new": "7421 (7420 is the real one)"}])),
         )
-        .expect("edit");
+        .expect("edit")
+        .0;
         assert_eq!(said, ["note deploy edited"]);
         let duplicate = ops(json!([{"op": "note_edit", "slug": "deploy", "old": "742", "new": "x"}]));
         assert!(
@@ -1029,7 +1075,7 @@ mod tests {
         let bad = ops(json!([{"op": "note_write", "slug": "Deploy Notes", "summary": "s", "body": "b"}]));
         assert!(refused(update(&store, "b", "b", &bad)).contains("isn't a slug"));
         let rewrite = ops(json!([{"op": "note_write", "slug": "auth", "summary": "Sign-in", "body": "Codex: device code."}]));
-        assert_eq!(update(&store, "b", "b", &rewrite).expect("rewrite"), ["note auth rewritten"]);
+        assert_eq!(update(&store, "b", "b", &rewrite).expect("rewrite").0, ["note auth rewritten"]);
 
         let contents = query(&store, &Query { agent: "b", bodies: true, ..Query::default() }).expect("query");
         let slugs: Vec<&str> = contents.notes.iter().map(|note| note.slug.as_str()).collect();
@@ -1037,7 +1083,7 @@ mod tests {
         assert!(contents.notes[1].body.ends_with("port 7421 (7420 is the real one)."));
         assert_eq!(
             search(&contents, "PORT"),
-            ["note deploy:2: The dev Factory uses port 7421 (7420 is the real one)."],
+            ["note deploy:2: The dev Claktory uses port 7421 (7420 is the real one)."],
             "search ignores case and gives the line"
         );
         assert_eq!(search(&contents, "sign"), ["note auth: Sign-in"]);

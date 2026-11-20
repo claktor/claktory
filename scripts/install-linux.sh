@@ -12,8 +12,8 @@
 #   install-linux.sh RELEASE_DIR
 #
 # A Linux Factory has no app of its own: Factory on a Mac connects to it over
-# remote access. The first install turns remote access on (port 7443) and
-# prints a pairing code for the first device. Installing again restarts the
+# its private tunnel. The first install prints a pairing code for the first
+# device. Installing again restarts the
 # backend, which interrupts every agent mid-run.
 set -euo pipefail
 
@@ -24,13 +24,13 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/factoryd.service"
 
 fail() {
-  echo "Factory can't be installed: $*" >&2
+  echo "Claktory can't be installed: $*" >&2
   exit 1
 }
 
 [[ "$(uname -s)" == Linux ]] || fail "this installer is for Linux."
-[[ -f "$RELEASE/factoryd" ]] || fail "$RELEASE isn't a Factory release: it needs factoryd."
-command -v systemctl >/dev/null || fail "it needs systemd, to keep Factory running."
+[[ -f "$RELEASE/factoryd" ]] || fail "$RELEASE isn't a Claktory release: it needs factoryd."
+command -v systemctl >/dev/null || fail "it needs systemd, to keep Claktory running."
 # systemctl --user needs the user's session; a login over ssh has one.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user show-environment >/dev/null 2>&1 ||
@@ -50,17 +50,27 @@ mv -f "$BIN-supervisor.new" "$BIN-supervisor"
 rm -f "$HOME_DIR/bin/trial.json"
 
 # Agents run shell commands through factoryd, so it needs this shell's PATH,
-# not systemd's minimal one. KillMode=process: stopping the service stops
+# not systemd's minimal one; on NixOS, without the /nix/store folders a
+# nix-shell adds, which go away (its profiles' bin folders stay).
+UNIT_PATH="$(tr ':' '\n' <<<"$PATH" | grep -v '^/nix/store/' | paste -sd: -)"
+nixos=false
+[[ -f /etc/NIXOS ]] && nixos=true
+
+# Agents need git; a minimal system (NixOS's, say) may not have it.
+command -v git >/dev/null ||
+  echo "Your agents will need git, which this machine doesn't have yet. Install it (on NixOS, add git to environment.systemPackages or your user's packages)." >&2
+
+# Agents run shell commands through factoryd (above). KillMode=process: stopping the service stops
 # only the supervisor, which stops the backend itself; agents' background
 # tasks keep running, as they do through updates.
 cat >"$UNIT" <<UNIT
 [Unit]
-Description=Factory
+Description=Claktory
 After=network.target
 
 [Service]
 ExecStart=$BIN-supervisor supervise
-Environment=PATH=$PATH
+Environment=PATH=$UNIT_PATH
 WorkingDirectory=$HOME
 Restart=always
 RestartSec=2
@@ -73,14 +83,22 @@ WantedBy=default.target
 UNIT
 
 # Without lingering, systemd stops the user's services when they log out.
+# Turning it on for yourself takes polkit's leave, which a login over ssh
+# may not have; then it takes root. NixOS leaves lingering to loginctl
+# unless the configuration sets users.users.<name>.linger, which then wins.
 if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
-  loginctl enable-linger "$(id -un)" 2>/dev/null ||
-    echo "Factory stops when you log out until lingering is on for you: sudo loginctl enable-linger $(id -un)" >&2
+  if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
+    if $nixos; then
+      echo "Claktory stops when you log out until lingering is on for you: add  users.users.$(id -un).linger = true;  to your NixOS configuration and run nixos-rebuild switch (or, until then: sudo loginctl enable-linger $(id -un))." >&2
+    else
+      echo "Claktory stops when you log out until lingering is on for you: sudo loginctl enable-linger $(id -un)" >&2
+    fi
+  fi
 fi
 systemctl --user daemon-reload
 systemctl --user enable factoryd.service >/dev/null 2>&1
 systemctl --user restart factoryd.service
-echo "Factory installed. Backend log: $HOME_DIR/factoryd.log"
+echo "Claktory installed. Its log: $HOME_DIR/factoryd.log"
 
 if $first; then
   # The backend writes its settings when it first starts.
@@ -89,10 +107,15 @@ if $first; then
     sleep 0.2
   done
   [[ -f "$HOME_DIR/config.json" ]] || fail "the backend didn't start; see $HOME_DIR/factoryd.log"
-  "$BIN" remote on
+  echo
+  if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
+    echo "Claktory is running on this machine and starts with it."
+  else
+    echo "Claktory is running on this machine while you're logged in (see above to keep it running)."
+  fi
   echo
   "$BIN" pair "First device"
   echo
-  echo "In Factory on your Mac, click the Factory name at the bottom of the sidebar, paste the code under Connect to another Factory and click Connect."
-  echo "Pair more devices with: $BIN pair NAME (add --host ADDRESS if they reach this machine by another address)"
+  echo "To connect: on your iPhone, open Claktory and tap Scan code. On your Mac, click Add a Claktory (+) at the far left of the window and paste the code. It works for 10 minutes."
+  echo "To connect another device later, run: ~/.factory/bin/factoryd pair \"Device name\""
 fi

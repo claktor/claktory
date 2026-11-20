@@ -12,6 +12,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
 import 'tell_rivet.dart';
+import 'usage.dart';
 
 /// Opens a sign-in page in the browser for flows this window started.
 ///
@@ -40,9 +41,29 @@ class LoginLauncher {
   var _stale = '';
   final _opened = <String>{};
 
-  /// Starts signing in and opens the browser when the address arrives.
-  Future<void> start(String providerId, String methodId) async {
-    final start = StartLogin(providerId: providerId, methodId: methodId);
+  /// Whether the last sign-in this window started for a provider and method
+  /// added an account, so trying it again adds one too.
+  final _adding = <String, bool>{};
+
+  /// Whether this window's last sign-in with [providerId]'s [methodId] was
+  /// adding an account rather than replacing the first.
+  bool adding(String providerId, String methodId) =>
+      _adding['$providerId/$methodId'] ?? false;
+
+  /// Starts signing in and opens the browser when the address arrives. With
+  /// [addAccount], the account is added to the provider's, keeping the ones
+  /// signed in.
+  Future<void> start(
+    String providerId,
+    String methodId, {
+    bool addAccount = false,
+  }) async {
+    final start = StartLogin(
+      providerId: providerId,
+      methodId: methodId,
+      addAccount: addAccount,
+    );
+    _adding['$providerId/$methodId'] = addAccount;
     final current = workspace.workspace;
     _stale = current.hasLogin() ? current.login.url : '';
     _waiting = start;
@@ -161,7 +182,7 @@ class _LoginPanelState extends State<LoginPanel> {
             child: Text(
               failed
                   ? "Couldn't sign in with ${widget.method}"
-                  : 'Signing in with ${widget.method}',
+                  : 'Signing in with ${widget.method}…',
               style: TextStyles.label.copyWith(color: palette.text),
             ),
           ),
@@ -190,8 +211,16 @@ class _LoginPanelState extends State<LoginPanel> {
             Button(
               label: 'Try again',
               primary: true,
-              onPressed: () =>
-                  _run(() => scope.login.start(flow.providerId, flow.methodId)),
+              onPressed: () => _run(
+                () => scope.login.start(
+                  flow.providerId,
+                  flow.methodId,
+                  addAccount: scope.login.adding(
+                    flow.providerId,
+                    flow.methodId,
+                  ),
+                ),
+              ),
             ),
             const SizedBox(width: Space.s),
             Button(label: 'Close', onPressed: _cancel),
@@ -278,11 +307,14 @@ class _LoginPanelState extends State<LoginPanel> {
   }
 
   Widget _deviceCode(Palette palette, AppScope scope, LoginFlow flow) {
+    final host = flow.verificationUrl.isEmpty
+        ? ''
+        : Uri.tryParse(flow.verificationUrl)?.host ?? flow.verificationUrl;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Enter this code',
+          host.isEmpty ? 'Enter this code' : 'Enter this code at $host',
           style: TextStyles.caption.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.xs),
@@ -300,8 +332,7 @@ class _LoginPanelState extends State<LoginPanel> {
           children: [
             if (flow.verificationUrl.isNotEmpty) ...[
               Button(
-                label:
-                    'Open ${Uri.tryParse(flow.verificationUrl)?.host ?? flow.verificationUrl}',
+                label: 'Open $host',
                 onPressed: () => scope.login.open(flow.verificationUrl),
               ),
               const SizedBox(width: Space.xs),
@@ -378,8 +409,8 @@ class _PromptViewState extends State<_PromptView> {
     final String message;
     if (code) {
       message =
-          'Browser on another computer? Paste the address it ended '
-          'up on, or the code.';
+          'Signing in on another computer? Paste the address your browser '
+          'ended up on, or the code.';
     } else {
       message = prompt.message;
     }
@@ -404,6 +435,8 @@ class _PromptViewState extends State<_PromptView> {
                     ? prompt.placeholder
                     : code
                     ? 'Address or code'
+                    : prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET
+                    ? 'Paste your API key'
                     : '',
                 obscureText:
                     prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET,
@@ -425,4 +458,505 @@ class _PromptViewState extends State<_PromptView> {
       ],
     );
   }
+}
+
+/// A provider in Settings → Providers: the accounts signed in to it, in the
+/// order requests try them (drag to reorder, or Use first), each with who
+/// it is, its plan, how much of its limits it used, whether requests go to
+/// it now and Sign out; then the ways to sign in, or once it has an account
+/// to add another without replacing any; and the sign-in in progress.
+class ProviderCard extends StatefulWidget {
+  const ProviderCard({super.key, required this.provider, required this.flow});
+
+  final Provider provider;
+
+  /// The sign-in in progress for this provider, if any.
+  final LoginFlow? flow;
+
+  @override
+  State<ProviderCard> createState() => _ProviderCardState();
+}
+
+class _ProviderCardState extends State<ProviderCard> {
+  String? _failure;
+
+  Future<void> _run(Future<void> Function() request) async {
+    setState(() => _failure = null);
+    try {
+      await request();
+    } on RequestFailure catch (error) {
+      if (mounted) setState(() => _failure = error.message);
+    }
+  }
+
+  /// "Add another Claude subscription", "Add an API key": what adding an
+  /// account with [method] adds.
+  String _addLabel(LoginMethod method) {
+    if (method.id == 'api_key') return 'Add an API key';
+    final product = switch (widget.provider.id) {
+      'anthropic' => 'Claude ',
+      'openai-codex' => 'ChatGPT ',
+      _ => '',
+    };
+    return 'Add another ${product}subscription';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
+    final provider = widget.provider;
+    final flow = widget.flow;
+    final accounts = provider.accounts;
+    // A backend from before several accounts lists none, and replaces the
+    // one credential on every sign-in.
+    final listsAccounts = accounts.isNotEmpty;
+    final signedIn = listsAccounts || provider.signedInWith.isNotEmpty;
+    var methodLabel = flow?.methodId ?? '';
+    for (final method in provider.methods) {
+      if (method.id == flow?.methodId) methodLabel = method.label;
+    }
+    return Container(
+      padding: const EdgeInsets.all(Space.l),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(Radii.panel),
+        border: Border.all(color: palette.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      provider.name,
+                      style: TextStyles.label.copyWith(color: palette.text),
+                    ),
+                    if (!listsAccounts) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        signedIn
+                            ? 'Signed in with ${provider.signedInWith}'
+                            : 'Not signed in',
+                        style: TextStyles.caption.copyWith(
+                          color: signedIn
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (!listsAccounts && provider.canSignOut)
+                Button(
+                  label: 'Sign out',
+                  onPressed: () =>
+                      _run(() => scope.backend.signOut(provider.id)),
+                ),
+            ],
+          ),
+          if (listsAccounts) ...[
+            const SizedBox(height: Space.s),
+            _AccountList(
+              provider: provider,
+              onMove: (account, position) => _run(
+                () => scope.backend.moveAccount(
+                  provider.id,
+                  account.id,
+                  position,
+                ),
+              ),
+              onSignOut: (account) => _run(
+                () => scope.backend.signOut(provider.id, accountId: account.id),
+              ),
+              onUpdate: (update) =>
+                  _run(() => scope.backend.updateAccount(update)),
+            ),
+            if (accounts.length > 1) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                'When one account reaches its limit, Claktory switches to '
+                'the next.',
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+            ],
+          ],
+          if (flow != null) ...[
+            const SizedBox(height: Space.l),
+            Container(height: 1, color: palette.hairline),
+            const SizedBox(height: Space.l),
+            LoginPanel(flow: flow, method: methodLabel),
+          ] else if (provider.methods.isNotEmpty) ...[
+            const SizedBox(height: Space.m),
+            Wrap(
+              spacing: Space.xs,
+              runSpacing: Space.xs,
+              children: [
+                for (var i = 0; i < provider.methods.length; i++)
+                  Button(
+                    label: listsAccounts
+                        ? _addLabel(provider.methods[i])
+                        : 'Sign in with ${provider.methods[i].label}',
+                    primary: !signedIn && i == 0,
+                    onPressed: () => _run(
+                      () => scope.login.start(
+                        provider.id,
+                        provider.methods[i].id,
+                        addAccount: listsAccounts,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          if (_failure != null)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: ErrorLine(_failure!, about: 'In Settings:'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A provider's accounts, one row each with hairlines between, in the order
+/// requests try them. With more than one, each row Claktory keeps has a grip
+/// to drag it to another place, and Use first; a key from the environment
+/// stays last, as the backend keeps it.
+class _AccountList extends StatelessWidget {
+  const _AccountList({
+    required this.provider,
+    required this.onMove,
+    required this.onSignOut,
+    required this.onUpdate,
+  });
+
+  final Provider provider;
+  final void Function(Account account, int position) onMove;
+  final void Function(Account account) onSignOut;
+  final Future<void> Function(UpdateAccount update) onUpdate;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final accounts = provider.accounts;
+    // The accounts that can move: all but one from the environment.
+    final movable = accounts.where((a) => a.canSignOut).length;
+    return ReorderableList(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: accounts.length,
+      onReorderItem: (from, to) {
+        final position = to.clamp(0, movable - 1);
+        if (position != from) onMove(accounts[from], position);
+      },
+      proxyDecorator: (child, index, animation) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          borderRadius: BorderRadius.circular(Radii.control),
+          border: Border.all(color: palette.hairline),
+          boxShadow: floatingShadow,
+        ),
+        child: child,
+      ),
+      itemBuilder: (context, index) {
+        final account = accounts[index];
+        // Claktory keeps it (not a key from the environment).
+        final kept = account.canSignOut;
+        return KeyedSubtree(
+          key: ValueKey(account.id),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: index == 0
+                  ? null
+                  : Border(top: BorderSide(color: palette.hairline)),
+            ),
+            child: _AccountRow(
+              provider: provider,
+              account: account,
+              index: index,
+              grip: movable > 1 && kept,
+              gripSpace: movable > 1,
+              onUseFirst: index == 0 || !kept ? null : () => onMove(account, 0),
+              onSignOut: kept ? () => onSignOut(account) : null,
+              onUpdate: onUpdate,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Where a provider's API keys get more credit.
+String? _billingUrl(String providerId) => switch (providerId) {
+  'anthropic' => 'https://console.anthropic.com/settings/billing',
+  'openai' => 'https://platform.openai.com/settings/organization/billing',
+  'openrouter' => 'https://openrouter.ai/settings/credits',
+  _ => null,
+};
+
+class _AccountRow extends StatefulWidget {
+  const _AccountRow({
+    required this.provider,
+    required this.account,
+    required this.index,
+    required this.grip,
+    required this.gripSpace,
+    required this.onUseFirst,
+    required this.onSignOut,
+    required this.onUpdate,
+  });
+
+  final Provider provider;
+  final Account account;
+  final int index;
+
+  /// It has a grip to drag it by; [gripSpace] keeps the room for one when
+  /// it doesn't, so the rows line up.
+  final bool grip;
+  final bool gripSpace;
+  final VoidCallback? onUseFirst;
+  final VoidCallback? onSignOut;
+  final Future<void> Function(UpdateAccount update) onUpdate;
+
+  @override
+  State<_AccountRow> createState() => _AccountRowState();
+}
+
+class _AccountRowState extends State<_AccountRow> {
+  /// The name being typed while renaming a key; null when not renaming.
+  TextEditingController? _name;
+
+  @override
+  void dispose() {
+    _name?.dispose();
+    super.dispose();
+  }
+
+  void _rename() =>
+      setState(() => _name = TextEditingController(text: widget.account.label));
+
+  void _stopRenaming() {
+    final name = _name;
+    setState(() => _name = null);
+    // After the frame, so the field is gone before its controller.
+    WidgetsBinding.instance.addPostFrameCallback((_) => name?.dispose());
+  }
+
+  void _saveName() {
+    final label = _name?.text.trim() ?? '';
+    _stopRenaming();
+    if (label == widget.account.label) return;
+    // Empty goes back to the name Claktory gives it.
+    widget.onUpdate(
+      UpdateAccount(
+        providerId: widget.provider.id,
+        accountId: widget.account.id,
+        label: label,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
+    final provider = widget.provider;
+    final account = widget.account;
+    final key = account.methodId == 'api_key';
+    final meter = UsageMeter(provider, account);
+    final usage = meter.usage;
+    final weekly = usage?.windows
+        .where((w) => w.id == headlineWindow)
+        .firstOrNull;
+    final name = _name;
+    return Ticking(
+      // Its state changes on its own when a limit's time comes.
+      active: account.exhaustedUntil > 0,
+      builder: (context, now) {
+        final state = accountState(provider, account, now);
+        final caption = TextStyles.caption.copyWith(
+          color: palette.textMuted,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        );
+        final details = [
+          if (account.plan.isNotEmpty) account.plan,
+          if (!account.outOfCredit) state.text,
+          if (weekly != null)
+            '${formatPercent(weekly.usedPercent)} of the weekly limit used',
+        ];
+        final billing = _billingUrl(provider.id);
+        final danger = TextStyles.caption.copyWith(color: palette.danger);
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: Space.s),
+          child: Row(
+            children: [
+              if (widget.grip)
+                Semantics(
+                  label: 'Drag to reorder',
+                  child: ReorderableDragStartListener(
+                    index: widget.index,
+                    child: const MouseRegion(
+                      cursor: SystemMouseCursors.grab,
+                      child: _Grip(),
+                    ),
+                  ),
+                )
+              else if (widget.gripSpace)
+                const SizedBox(width: 16),
+              if (widget.gripSpace) const SizedBox(width: Space.s),
+              UsageCircle(meter: meter),
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (name != null)
+                      SizedBox(
+                        width: 240,
+                        child: CallbackShortcuts(
+                          bindings: {
+                            const SingleActivator(LogicalKeyboardKey.escape):
+                                _stopRenaming,
+                          },
+                          child: TextField(
+                            controller: name,
+                            placeholder: 'Name',
+                            autofocus: true,
+                            onSubmitted: (_) => _saveName(),
+                          ),
+                        ),
+                      )
+                    else
+                      Text(
+                        account.label.isEmpty
+                            ? 'Account ${widget.index + 1}'
+                            : account.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.body.copyWith(color: palette.text),
+                      ),
+                    Text(details.join(' · '), style: caption),
+                    if (account.outOfCredit)
+                      Wrap(
+                        children: [
+                          Text('Out of credit. Add credit at ', style: danger),
+                          if (billing == null)
+                            Text(provider.name, style: danger)
+                          else
+                            Pressable(
+                              onTap: () => scope.login.open(billing),
+                              builder: (context, hovered) => Text(
+                                provider.name,
+                                style: danger.copyWith(
+                                  decoration: TextDecoration.underline,
+                                  decorationColor: palette.danger,
+                                ),
+                              ),
+                            ),
+                          Text('.', style: danger),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: Space.s),
+              // Its actions, wrapping under each other when there's no
+              // room in a row.
+              Flexible(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: Space.xs,
+                  runSpacing: Space.xs,
+                  children: [
+                    if (name != null) ...[
+                      Button(
+                        label: 'Save',
+                        primary: true,
+                        onPressed: _saveName,
+                      ),
+                      Button(label: 'Cancel', onPressed: _stopRenaming),
+                    ] else ...[
+                      if (account.outOfCredit)
+                        Button(
+                          label: 'Try again',
+                          onPressed: () => widget.onUpdate(
+                            UpdateAccount(
+                              providerId: provider.id,
+                              accountId: account.id,
+                              retry: true,
+                            ),
+                          ),
+                        ),
+                      if (key && account.canSignOut)
+                        Button(label: 'Rename', onPressed: _rename),
+                      if (widget.onUseFirst != null)
+                        Button(
+                          label: 'Use first',
+                          onPressed: widget.onUseFirst,
+                        ),
+                      if (widget.onSignOut != null)
+                        Button(label: 'Sign out', onPressed: widget.onSignOut),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Lucide's grip-vertical: two columns of three dots, 16px, faint until
+/// hovered.
+class _Grip extends StatefulWidget {
+  const _Grip();
+
+  @override
+  State<_Grip> createState() => _GripState();
+}
+
+class _GripState extends State<_Grip> {
+  var _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: CustomPaint(
+        size: const Size.square(16),
+        painter: _GripPainter(_hovered ? palette.text : palette.textMuted),
+      ),
+    );
+  }
+}
+
+class _GripPainter extends CustomPainter {
+  const _GripPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.width / 24;
+    final paint = Paint()..color = color;
+    for (final x in [9.0, 15.0]) {
+      for (final y in [5.0, 12.0, 19.0]) {
+        canvas.drawCircle(Offset(x * scale, y * scale), 1.25 * scale, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GripPainter old) => old.color != color;
 }

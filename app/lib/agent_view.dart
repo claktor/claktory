@@ -8,6 +8,7 @@ import 'controls.dart';
 import 'drafts.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'panes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart';
@@ -21,9 +22,14 @@ Color conversationTint(Agent agent) =>
 /// The selected agent: its header, transcript and composer. Esc stops the
 /// agent while it works.
 class AgentView extends StatefulWidget {
-  const AgentView({super.key, required this.agent});
+  const AgentView({super.key, required this.agent, this.onBack, this.onMore});
 
   final Agent agent;
+
+  /// On a phone: back to the list of agents, and the agent's extensions.
+  /// Its header then leads with a back button and ends with "…".
+  final VoidCallback? onBack;
+  final VoidCallback? onMore;
 
   @override
   State<AgentView> createState() => _AgentViewState();
@@ -49,42 +55,54 @@ class _AgentViewState extends State<AgentView> {
     final backend = AppScope.of(context);
     final transcript = backend.transcript;
     final agent = widget.agent;
+    // The conversation: one of the agent's panes.
+    final chat = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: AgentTints(
+            own: agentColor(agent.color),
+            byId: {
+              for (final other in backend.workspace.workspace.agents)
+                other.id: agentColor(other.color),
+            },
+            agents: {
+              for (final other in backend.workspace.workspace.agents)
+                other.id: identityOf(other),
+            },
+            // Following a message to its sender can be undone with Back.
+            open: (id) => AppScope.scope(context).history.follow(agent.id, id),
+            child: ListenableBuilder(
+              listenable: transcript,
+              builder: (context, _) => transcript.agentId == agent.id
+                  ? TranscriptView(
+                      key: ValueKey(transcript.loads),
+                      transcript: transcript,
+                      working: _working,
+                      follow: _follow,
+                      queued: backend.queued,
+                      agentId: agent.id,
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
+        ),
+        _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
+      ],
+    );
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): _stop},
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Header(agent: agent),
+          _Header(agent: agent, onBack: widget.onBack, onMore: widget.onMore),
+          // A phone shows one pane at a time: the conversation is the
+          // screen, and its viewers open from "…".
           Expanded(
-            child: AgentTints(
-              own: agentColor(agent.color),
-              byId: {
-                for (final other in backend.workspace.workspace.agents)
-                  other.id: agentColor(other.color),
-              },
-              agents: {
-                for (final other in backend.workspace.workspace.agents)
-                  other.id: identityOf(other),
-              },
-              // Following a message to its sender can be undone with Back.
-              open: (id) =>
-                  AppScope.scope(context).history.follow(agent.id, id),
-              child: ListenableBuilder(
-                listenable: transcript,
-                builder: (context, _) => transcript.agentId == agent.id
-                    ? TranscriptView(
-                        key: ValueKey(transcript.loads),
-                        transcript: transcript,
-                        working: _working,
-                        follow: _follow,
-                        queued: backend.queued,
-                        agentId: agent.id,
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ),
+            child: widget.onBack != null
+                ? chat
+                : PaneLayout(agent: agent, chat: chat),
           ),
-          _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
         ],
       ),
     );
@@ -95,9 +113,13 @@ class _AgentViewState extends State<AgentView> {
 /// context use. Opens the agent's settings. It's the top of the window, so
 /// it also drags it.
 class _Header extends StatelessWidget {
-  const _Header({required this.agent});
+  const _Header({required this.agent, this.onBack, this.onMore});
 
   final Agent agent;
+  final VoidCallback? onBack;
+  final VoidCallback? onMore;
+
+  bool get _phone => onBack != null;
 
   @override
   Widget build(BuildContext context) {
@@ -130,11 +152,26 @@ class _Header extends StatelessWidget {
           ),
           builder: (context, hovered) => Container(
             height: titleBarHeight,
-            padding: const EdgeInsets.symmetric(horizontal: Space.xl),
+            padding: EdgeInsets.symmetric(
+              horizontal: _phone ? Space.xs : Space.xl,
+            ),
             color: hovered ? palette.hover : null,
             child: Row(
               children: [
-                _BackChip(current: agent.id),
+                if (_phone) ...[
+                  GlyphButton(
+                    label: 'Back',
+                    active: false,
+                    onTap: onBack!,
+                    glyph: (color) => ExtensionGlyph(
+                      icon: 'chevron-left',
+                      name: 'Back',
+                      color: color,
+                    ),
+                  ),
+                  const SizedBox(width: Space.xs),
+                ] else
+                  _BackChip(current: agent.id),
                 AgentCharacter(agent: agent, size: 34, live: true),
                 const SizedBox(width: Space.s + 2),
                 Expanded(
@@ -151,17 +188,20 @@ class _Header extends StatelessWidget {
                           roleColor: palette.textMuted,
                         ),
                       ),
-                      const SizedBox(width: Space.m),
-                      Flexible(
-                        child: Text(
-                          details,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyles.body.copyWith(
-                            color: palette.textMuted,
+                      // A phone has room for the name alone.
+                      if (!_phone) ...[
+                        const SizedBox(width: Space.m),
+                        Flexible(
+                          child: Text(
+                            details,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyles.body.copyWith(
+                              color: palette.textMuted,
+                            ),
                           ),
                         ),
-                      ),
+                      ],
                       if (!agent.modelAvailable) ...[
                         const SizedBox(width: Space.s),
                         Button(
@@ -172,15 +212,29 @@ class _Header extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(width: Space.l),
-                _ContextMeter(
-                  used: agent.contextTokens.toInt(),
-                  limit: agent.compactAtTokens.toInt(),
-                  label: agent.compactAtTokens.isZero
-                      ? formatTokens(agent.contextTokens)
-                      : '${formatTokens(agent.contextTokens)} / '
-                            '${formatTokens(agent.compactAtTokens)}',
-                ),
+                if (_phone) ...[
+                  const SizedBox(width: Space.s),
+                  GlyphButton(
+                    label: 'Extensions',
+                    active: false,
+                    onTap: onMore!,
+                    glyph: (color) => ExtensionGlyph(
+                      icon: 'ellipsis',
+                      name: 'Extensions',
+                      color: color,
+                    ),
+                  ),
+                ] else ...[
+                  const SizedBox(width: Space.l),
+                  _ContextMeter(
+                    used: agent.contextTokens.toInt(),
+                    limit: agent.compactAtTokens.toInt(),
+                    label: agent.compactAtTokens.isZero
+                        ? formatTokens(agent.contextTokens)
+                        : '${formatTokens(agent.contextTokens)} / '
+                              '${formatTokens(agent.compactAtTokens)}',
+                  ),
+                ],
               ],
             ),
           ),
@@ -641,16 +695,18 @@ class _ComposerState extends State<_Composer> {
         .isNotEmpty;
     // What's queued shows in the conversation itself, faded.
     final status = working ? 'Working' : '';
+    // A phone has no Enter key to send with, nor room to spare.
+    final phone = isPhoneLayout(context);
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: contentMaxWidth),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Space.xl,
+          padding: EdgeInsets.fromLTRB(
+            phone ? Space.s : Space.xl,
             Space.s,
-            Space.xl,
-            Space.l,
+            phone ? Space.s : Space.xl,
+            phone ? Space.s : Space.l,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -701,7 +757,9 @@ class _ComposerState extends State<_Composer> {
                                         placeholder: agent.placeholder.isEmpty
                                             ? 'Message ${agent.name}'
                                             : agent.placeholder,
-                                        autofocus: true,
+                                        // On a phone the keyboard would
+                                        // cover the conversation at once.
+                                        autofocus: !phone,
                                         minLines: 1,
                                         maxLines: 12,
                                         bordered: false,
@@ -743,8 +801,21 @@ class _ComposerState extends State<_Composer> {
                                     ),
                                     const SizedBox(width: Space.s),
                                     Button(
-                                      label: 'Stop  esc',
+                                      label: phone ? 'Stop' : 'Stop  esc',
                                       onPressed: widget.onStop,
+                                    ),
+                                  ],
+                                  if (phone && agent.modelAvailable) ...[
+                                    const SizedBox(width: Space.s),
+                                    ListenableBuilder(
+                                      listenable: _text,
+                                      builder: (context, _) => Button(
+                                        label: 'Send',
+                                        primary: true,
+                                        onPressed: _text.text.trim().isEmpty
+                                            ? null
+                                            : _send,
+                                      ),
                                     ),
                                   ],
                                   if (!agent.modelAvailable) ...[

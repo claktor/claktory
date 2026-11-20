@@ -14,6 +14,35 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
+/// How a device's connection travels.
+class DevicePath extends $pb.ProtobufEnum {
+  /// Not connected.
+  static const DevicePath DEVICE_PATH_NONE =
+      DevicePath._(0, _omitEnumNames ? '' : 'DEVICE_PATH_NONE');
+
+  /// Straight between the two machines (the same machine, a LAN, or a hole
+  /// punched through the NATs).
+  static const DevicePath DEVICE_PATH_DIRECT =
+      DevicePath._(1, _omitEnumNames ? '' : 'DEVICE_PATH_DIRECT');
+
+  /// Through a relay, end-to-end encrypted.
+  static const DevicePath DEVICE_PATH_RELAYED =
+      DevicePath._(2, _omitEnumNames ? '' : 'DEVICE_PATH_RELAYED');
+
+  static const $core.List<DevicePath> values = <DevicePath>[
+    DEVICE_PATH_NONE,
+    DEVICE_PATH_DIRECT,
+    DEVICE_PATH_RELAYED,
+  ];
+
+  static final $core.List<DevicePath?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static DevicePath? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DevicePath._(super.value, super.name);
+}
+
 class MonitorAction extends $pb.ProtobufEnum {
   static const MonitorAction MONITOR_ACTION_UNSPECIFIED =
       MonitorAction._(0, _omitEnumNames ? '' : 'MONITOR_ACTION_UNSPECIFIED');
@@ -37,6 +66,29 @@ class MonitorAction extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MonitorAction._(super.value, super.name);
+}
+
+/// ROW: children side by side, left to right; COLUMN: top to bottom.
+class ViewAxis extends $pb.ProtobufEnum {
+  static const ViewAxis VIEW_AXIS_UNSPECIFIED =
+      ViewAxis._(0, _omitEnumNames ? '' : 'VIEW_AXIS_UNSPECIFIED');
+  static const ViewAxis VIEW_AXIS_ROW =
+      ViewAxis._(1, _omitEnumNames ? '' : 'VIEW_AXIS_ROW');
+  static const ViewAxis VIEW_AXIS_COLUMN =
+      ViewAxis._(2, _omitEnumNames ? '' : 'VIEW_AXIS_COLUMN');
+
+  static const $core.List<ViewAxis> values = <ViewAxis>[
+    VIEW_AXIS_UNSPECIFIED,
+    VIEW_AXIS_ROW,
+    VIEW_AXIS_COLUMN,
+  ];
+
+  static final $core.List<ViewAxis?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ViewAxis? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ViewAxis._(super.value, super.name);
 }
 
 class ErrorCode extends $pb.ProtobufEnum {
@@ -76,6 +128,24 @@ class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_UNAUTHORIZED =
       ErrorCode._(8, _omitEnumNames ? '' : 'ERROR_CODE_UNAUTHORIZED');
 
+  /// The vault is locked (locked mode, after the backend restarted; only a
+  /// vault the person gave a key of their own can be): UnlockVault first.
+  static const ErrorCode ERROR_CODE_VAULT_LOCKED =
+      ErrorCode._(9, _omitEnumNames ? '' : 'ERROR_CODE_VAULT_LOCKED');
+
+  /// No longer sent: requests need no vault passphrase.
+  static const ErrorCode ERROR_CODE_PROOF_REQUIRED =
+      ErrorCode._(10, _omitEnumNames ? '' : 'ERROR_CODE_PROOF_REQUIRED');
+
+  /// The passphrase (or recovery key) is wrong. Answered after a second's
+  /// delay.
+  static const ErrorCode ERROR_CODE_WRONG_PROOF =
+      ErrorCode._(11, _omitEnumNames ? '' : 'ERROR_CODE_WRONG_PROOF');
+
+  /// The secret isn't granted to that agent (RevokeSecret).
+  static const ErrorCode ERROR_CODE_NOT_GRANTED =
+      ErrorCode._(12, _omitEnumNames ? '' : 'ERROR_CODE_NOT_GRANTED');
+
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
     ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
@@ -86,10 +156,14 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_INVALID_REQUEST,
     ERROR_CODE_INTERNAL,
     ERROR_CODE_UNAUTHORIZED,
+    ERROR_CODE_VAULT_LOCKED,
+    ERROR_CODE_PROOF_REQUIRED,
+    ERROR_CODE_WRONG_PROOF,
+    ERROR_CODE_NOT_GRANTED,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 8);
+      $pb.ProtobufEnum.$_initByValueList(values, 12);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -511,6 +585,35 @@ class NoticeLevel extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const NoticeLevel._(super.value, super.name);
+}
+
+class SecretRequestState extends $pb.ProtobufEnum {
+  static const SecretRequestState SECRET_REQUEST_STATE_UNSPECIFIED =
+      SecretRequestState._(
+          0, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_UNSPECIFIED');
+  static const SecretRequestState SECRET_REQUEST_STATE_PENDING =
+      SecretRequestState._(
+          1, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_PENDING');
+  static const SecretRequestState SECRET_REQUEST_STATE_GRANTED =
+      SecretRequestState._(
+          2, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_GRANTED');
+  static const SecretRequestState SECRET_REQUEST_STATE_DISMISSED =
+      SecretRequestState._(
+          3, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_DISMISSED');
+
+  static const $core.List<SecretRequestState> values = <SecretRequestState>[
+    SECRET_REQUEST_STATE_UNSPECIFIED,
+    SECRET_REQUEST_STATE_PENDING,
+    SECRET_REQUEST_STATE_GRANTED,
+    SECRET_REQUEST_STATE_DISMISSED,
+  ];
+
+  static final $core.List<SecretRequestState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static SecretRequestState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SecretRequestState._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

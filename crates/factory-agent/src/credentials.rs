@@ -78,7 +78,114 @@ pub struct CredentialInfo {
     pub kind: String,
 }
 
-/// Credentials on disk, one per provider id; writes are serialized because a provider refreshes tokens inside `modify`.
+// Factory's own fields on a stored credential. A provider's first account is
+// stored where its one credential always was, so a Factory from before
+// several accounts (rolled back to, say) still reads and refreshes it, and
+// keeps these fields, the rest of the accounts included, as ones it doesn't
+// model; the others follow it in `factoryAccounts`.
+const ACCOUNT_ID: &str = "factoryAccount";
+const ACCOUNT_LABEL: &str = "factoryLabel";
+const ACCOUNT_IDENTITY: &str = "factoryIdentity";
+const EXHAUSTED_UNTIL: &str = "factoryExhaustedUntil";
+const OUT_OF_CREDIT: &str = "factoryOutOfCredit";
+const MORE_ACCOUNTS: &str = "factoryAccounts";
+
+/// One account signed in to a provider: its credential and what Factory
+/// knows of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Account {
+    /// Made by Factory, stable while it's signed in. A credential stored
+    /// before accounts had ids is the provider's first, "1".
+    pub id: String,
+    /// Who it is, as the provider says (an email); empty until known.
+    pub label: String,
+    /// What tells it apart from the provider's other accounts (the
+    /// provider's user id, say), so signing in to it again replaces it;
+    /// empty when unknown.
+    pub identity: String,
+    /// It reached a usage limit: skipped until then, in ms since 1970; 0
+    /// when it has capacity.
+    pub exhausted_until: u64,
+    /// An API key that ran out of credit: since when, in ms since 1970; 0
+    /// when it has credit as far as Factory knows.
+    pub out_of_credit_since: u64,
+    pub credential: Credential,
+}
+
+impl Account {
+    /// A newly signed-in account, with an id of its own.
+    pub fn new(credential: Credential) -> Account {
+        let mut id = uuid::Uuid::new_v4().simple().to_string();
+        id.truncate(8);
+        Account { id, label: String::new(), identity: String::new(), exhausted_until: 0, out_of_credit_since: 0, credential }
+    }
+}
+
+fn account_from(value: &Value, position: usize) -> Result<Account, Error> {
+    let mut object = value.as_object().cloned().unwrap_or_default();
+    object.remove(MORE_ACCOUNTS);
+    let mut text = |key: &str| object.remove(key).and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+    let (id, label, identity) = (text(ACCOUNT_ID), text(ACCOUNT_LABEL), text(ACCOUNT_IDENTITY));
+    let exhausted_until = object.remove(EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
+    let out_of_credit_since = object.remove(OUT_OF_CREDIT).and_then(|value| value.as_u64()).unwrap_or(0);
+    let credential =
+        if value.is_object() { serde_json::from_value(Value::Object(object))? } else { serde_json::from_value(value.clone())? };
+    let id = if id.is_empty() { (position + 1).to_string() } else { id };
+    Ok(Account { id, label, identity, exhausted_until, out_of_credit_since, credential })
+}
+
+fn account_value(account: &Account) -> Result<Value, Error> {
+    let mut value = serde_json::to_value(&account.credential)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(ACCOUNT_ID.into(), Value::from(account.id.clone()));
+        if !account.label.is_empty() {
+            object.insert(ACCOUNT_LABEL.into(), Value::from(account.label.clone()));
+        }
+        if !account.identity.is_empty() {
+            object.insert(ACCOUNT_IDENTITY.into(), Value::from(account.identity.clone()));
+        }
+        if account.exhausted_until != 0 {
+            object.insert(EXHAUSTED_UNTIL.into(), Value::from(account.exhausted_until));
+        }
+        if account.out_of_credit_since != 0 {
+            object.insert(OUT_OF_CREDIT.into(), Value::from(account.out_of_credit_since));
+        }
+    }
+    Ok(value)
+}
+
+/// A provider's accounts as stored: the first, then its `factoryAccounts`.
+fn parse_accounts(value: Option<&Value>) -> Result<Vec<Account>, Error> {
+    let Some(value) = value else { return Ok(Vec::new()) };
+    let mut accounts = vec![account_from(value, 0)?];
+    for (position, more) in value.get(MORE_ACCOUNTS).and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let account = account_from(more, position + 1)?;
+        // Ids are unique; one that isn't (written by hand) gets a new one.
+        if accounts.iter().any(|known| known.id == account.id) {
+            accounts.push(Account { id: Account::new(account.credential.clone()).id, ..account });
+        } else {
+            accounts.push(account);
+        }
+    }
+    Ok(accounts)
+}
+
+/// How `accounts` are stored; None when there are none.
+fn accounts_value(accounts: &[Account]) -> Result<Option<Value>, Error> {
+    let Some((first, rest)) = accounts.split_first() else { return Ok(None) };
+    let mut value = account_value(first)?;
+    if !rest.is_empty()
+        && let Some(object) = value.as_object_mut()
+    {
+        let rest = rest.iter().map(account_value).collect::<Result<Vec<_>, _>>()?;
+        object.insert(MORE_ACCOUNTS.into(), Value::Array(rest));
+    }
+    Ok(Some(value))
+}
+
+/// Credentials on disk, by provider id, each provider's accounts in the
+/// order requests try them; writes are serialized because a provider
+/// refreshes tokens inside `modify`.
 pub struct FileCredentialStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -93,12 +200,27 @@ impl FileCredentialStore {
         Ok(read_json(&self.path)?.and_then(|value| value.as_object().cloned()).unwrap_or_default())
     }
 
-    fn parse(value: Option<&Value>) -> Result<Option<Credential>, Error> {
-        value.map(|value| serde_json::from_value(value.clone())).transpose().map_err(Into::into)
+    /// Writes a provider's accounts into `all`; none removes the provider.
+    fn write_accounts(&self, mut all: Map<String, Value>, provider_id: &str, accounts: &[Account]) -> Result<(), Error> {
+        match accounts_value(accounts)? {
+            Some(value) => {
+                all.insert(provider_id.to_owned(), value);
+            }
+            None => {
+                all.remove(provider_id);
+            }
+        }
+        write_json(&self.path, &Value::Object(all))
     }
 
+    /// The credential of the provider's first account.
     pub async fn read(&self, provider_id: &str) -> Result<Option<Credential>, Error> {
-        FileCredentialStore::parse(self.read_all()?.get(provider_id))
+        Ok(self.accounts(provider_id).await?.into_iter().next().map(|account| account.credential))
+    }
+
+    /// The provider's accounts, in the order requests try them.
+    pub async fn accounts(&self, provider_id: &str) -> Result<Vec<Account>, Error> {
+        parse_accounts(self.read_all()?.get(provider_id))
     }
 
     pub async fn list(&self) -> Result<Vec<CredentialInfo>, Error> {
@@ -112,20 +234,62 @@ impl FileCredentialStore {
             .collect())
     }
 
+    /// Changes the credential of the provider's first account (making one
+    /// when it has none): `f` gets it and returns the new one, or None to
+    /// leave it. Returns the credential it ends with.
     pub async fn modify<F, Fut>(&self, provider_id: &str, f: F) -> Result<Option<Credential>, Error>
     where
         F: FnOnce(Option<Credential>) -> Fut,
         Fut: Future<Output = Result<Option<Credential>, Error>>,
     {
         let _guard = self.lock.lock().await;
-        let mut all = self.read_all()?;
-        let current = FileCredentialStore::parse(all.get(provider_id))?;
+        let all = self.read_all()?;
+        let mut accounts = parse_accounts(all.get(provider_id))?;
+        let current = accounts.first().map(|account| account.credential.clone());
         let Some(next) = f(current.clone()).await? else { return Ok(current) };
-        all.insert(provider_id.to_owned(), serde_json::to_value(&next)?);
-        write_json(&self.path, &Value::Object(all))?;
+        match accounts.first_mut() {
+            Some(first) => first.credential = next.clone(),
+            None => accounts.push(Account::new(next.clone())),
+        }
+        self.write_accounts(all, provider_id, &accounts)?;
         Ok(Some(next))
     }
 
+    /// Changes the credential of one of the provider's accounts, as `modify`;
+    /// None when it has no such account.
+    pub async fn modify_account<F, Fut>(&self, provider_id: &str, account_id: &str, f: F) -> Result<Option<Credential>, Error>
+    where
+        F: FnOnce(Option<Credential>) -> Fut,
+        Fut: Future<Output = Result<Option<Credential>, Error>>,
+    {
+        let _guard = self.lock.lock().await;
+        let all = self.read_all()?;
+        let mut accounts = parse_accounts(all.get(provider_id))?;
+        let Some(position) = accounts.iter().position(|account| account.id == account_id) else { return Ok(None) };
+        let current = accounts[position].credential.clone();
+        let Some(next) = f(Some(current.clone())).await? else { return Ok(Some(current)) };
+        accounts[position].credential = next.clone();
+        self.write_accounts(all, provider_id, &accounts)?;
+        Ok(Some(next))
+    }
+
+    /// Changes the provider's accounts: `f` gets them and returns them
+    /// changed (added, removed, reordered), or None to leave them. Returns
+    /// the accounts it ends with.
+    pub async fn modify_accounts<F, Fut>(&self, provider_id: &str, f: F) -> Result<Vec<Account>, Error>
+    where
+        F: FnOnce(Vec<Account>) -> Fut,
+        Fut: Future<Output = Result<Option<Vec<Account>>, Error>>,
+    {
+        let _guard = self.lock.lock().await;
+        let all = self.read_all()?;
+        let accounts = parse_accounts(all.get(provider_id))?;
+        let Some(next) = f(accounts.clone()).await? else { return Ok(accounts) };
+        self.write_accounts(all, provider_id, &next)?;
+        Ok(next)
+    }
+
+    /// Removes all of the provider's accounts.
     pub async fn delete(&self, provider_id: &str) -> Result<(), Error> {
         let _guard = self.lock.lock().await;
         let mut all = self.read_all()?;

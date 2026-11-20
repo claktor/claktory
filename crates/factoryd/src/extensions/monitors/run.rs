@@ -249,10 +249,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
             factory,
             monitor,
             "paused",
-            format!(
-                "Monitor m{} \"{}\" paused: {reason}. Resume it with monitors_change when it's fixed.",
-                monitor.id, monitor.name
-            ),
+            format!("Monitor m{} \"{}\" paused: {reason}. Resume it with monitors_change when it's fixed.", monitor.id, monitor.name),
         );
         return Ok(());
     }
@@ -260,7 +257,8 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
     let last = trigger.last || monitor.max_fires.is_some_and(|max| monitor.fires >= max);
     let text = fire_text(factory, monitor, &trigger, last);
     let summary = format!("m{} {} fired", monitor.id, monitor.name);
-    let event = Event { source: EventSource::Monitor, from: monitor.name.clone(), id: format!("m{}", monitor.id), summary, transient: false };
+    let event =
+        Event { source: EventSource::Monitor, from: monitor.name.clone(), id: format!("m{}", monitor.id), summary, transient: false };
     factory.deliver_event(&monitor.agent, text, event);
     monitor.last_fired = Some(now);
     monitor.carry.clear();
@@ -285,10 +283,13 @@ fn fire_text(factory: &Factory, monitor: &Monitor, trigger: &Trigger, last: bool
     let done = if last { ", now done" } else { "" };
     let mut text = format!("Monitor m{} \"{}\" fired ({}; fire {}{done}).", monitor.id, monitor.name, trigger.cause, monitor.fires);
     if monitor.created_by != monitor.agent {
-        let by = if monitor.created_by.is_empty() {
-            "the person".to_owned()
-        } else {
-            factory.lock().config.agent(&monitor.created_by).map_or_else(|| monitor.created_by.clone(), |agent| agent.name.clone())
+        let by = {
+            let inner = factory.lock();
+            match inner.config.agent(&monitor.created_by) {
+                _ if monitor.created_by.is_empty() => inner.config.person().to_owned(),
+                Some(agent) => agent.name.clone(),
+                None => monitor.created_by.clone(),
+            }
         };
         let _ = write!(text, " Set by {by}.");
     }
@@ -305,7 +306,7 @@ fn fire_text(factory: &Factory, monitor: &Monitor, trigger: &Trigger, last: bool
 /// One Factory note to the agent about its monitor, such as why it stopped.
 fn notice(factory: &Arc<Factory>, monitor: &Monitor, what: &str, text: String) {
     let summary = format!("m{} {} {what}", monitor.id, monitor.name);
-    let event = Event { source: EventSource::Host, from: "Factory".to_owned(), id: String::new(), summary, transient: false };
+    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
     factory.deliver_event(&monitor.agent, text, event);
 }
 
@@ -353,7 +354,7 @@ fn time(factory: &Arc<Factory>, monitor: &mut Monitor, agent: &Agent, now: i64) 
     }
     let late = (now - due > LATE).then(|| {
         if due < factory.monitors.started {
-            format!("Was due {}; Factory wasn't running then.", when::local(due, now))
+            format!("Was due {}; Claktory wasn't running then.", when::local(due, now))
         } else {
             format!("Was due {}.", when::local(due, now))
         }
@@ -370,7 +371,10 @@ fn time(factory: &Arc<Factory>, monitor: &mut Monitor, agent: &Agent, now: i64) 
 
 /// The result of running a check's command.
 enum CheckRun {
-    Ran { code: Option<i32>, output: String },
+    Ran {
+        code: Option<i32>,
+        output: String,
+    },
     /// It couldn't run, or timed out.
     Failed(String),
 }
@@ -552,7 +556,10 @@ fn snapshot(paths: &[String], glob: Option<&str>) -> Snapshot {
             }
             let path = entry.path();
             let relative = path.strip_prefix(root_path).unwrap_or(path);
-            if matcher.as_ref().is_some_and(|matcher| !matcher.is_match(relative) && !path.file_name().is_some_and(|name| matcher.is_match(name))) {
+            if matcher
+                .as_ref()
+                .is_some_and(|matcher| !matcher.is_match(relative) && !path.file_name().is_some_and(|name| matcher.is_match(name)))
+            {
                 continue;
             }
             if let Ok(metadata) = entry.metadata() {
@@ -565,7 +572,8 @@ fn snapshot(paths: &[String], glob: Option<&str>) -> Snapshot {
 
 /// "Changed: a, b\nCreated: c\nRemoved: d", at most `PATHS_SHOWN` paths.
 fn differences(before: &Snapshot, after: &Snapshot) -> String {
-    let changed: Vec<&String> = after.iter().filter(|(path, stamp)| before.get(*path).is_some_and(|old| old != *stamp)).map(|(path, _)| path).collect();
+    let changed: Vec<&String> =
+        after.iter().filter(|(path, stamp)| before.get(*path).is_some_and(|old| old != *stamp)).map(|(path, _)| path).collect();
     let created: Vec<&String> = after.keys().filter(|path| !before.contains_key(*path)).collect();
     let removed: Vec<&String> = before.keys().filter(|path| !after.contains_key(*path)).collect();
     let mut shown = 0;
@@ -638,7 +646,14 @@ fn process_ended(pid: u32, log: &Path) -> bool {
     log.with_extension("status").exists() || !factory_agent::tools::bash::group_alive(pid)
 }
 
-fn watch(factory: &Arc<Factory>, monitor: &mut Monitor, agent: &Agent, command: &str, pattern: Option<&str>, now: i64) -> rusqlite::Result<()> {
+fn watch(
+    factory: &Arc<Factory>,
+    monitor: &mut Monitor,
+    agent: &Agent,
+    command: &str,
+    pattern: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<()> {
     let log = watch_log(factory, monitor);
     match monitor.cursor.pid {
         Some(pid) if process_ended(pid, &log) => {
@@ -770,7 +785,7 @@ pub(super) fn added(factory: &Factory, agent: &str, id: u32) {
 
 /// Fires the monitor now, as asked (`monitors_change` fire), without ending it.
 pub(super) fn fire_by_hand(factory: &Arc<Factory>, monitor: &mut Monitor, actor: &str, now: i64) -> rusqlite::Result<()> {
-    let by = if actor.is_empty() { "the person".to_owned() } else { actor.to_owned() };
+    let by = if actor.is_empty() { factory.lock().config.person().to_owned() } else { actor.to_owned() };
     trigger(factory, monitor, Trigger { cause: format!("fired by {by}"), what: String::new(), late: None, last: false }, now)
 }
 

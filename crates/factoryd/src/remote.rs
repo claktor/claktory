@@ -1,118 +1,101 @@
-//! Devices on other machines: a second listener, off unless config.json's
-//! `remote` turns it on, that serves the same protocol over TLS to devices
-//! paired with `factoryd pair <name>`.
+//! Devices reach Factory through its private tunnel (iroh): an endpoint with
+//! a key of its own (`<home>/remote/iroh.key`), dialled by that key, end to
+//! end encrypted, directly or through a relay that can't read it. Factory
+//! listens on no port for them. Each app connection is one bidirectional
+//! stream on ALPN `claktory/1`, carrying a WebSocket and then the protocol,
+//! as on the loopback port.
 //!
-//! - The certificate is Factory's own, made once (`<home>/remote/cert.pem`
-//!   and `key.pem`); devices pin its SHA-256, so no CA or domain is needed.
 //! - Each paired device has a token, given once in its pairing code; Factory
 //!   keeps only the token's SHA-256 (`<home>/remote/devices.json`), read
 //!   afresh at every handshake, so `factoryd unpair` applies at once.
-//! - A remote device can't make Factory replace an app bundle on this
-//!   machine (`InstallUpdate.app_path` is ignored for it).
+//! - The first device to connect with a code binds its key to it; from then
+//!   on only that key may use it. A code nobody used expires.
+//! - Right after iroh's handshake, a key that isn't a paired device's is
+//!   turned away, before any of Factory's protocol, unless a code is waiting
+//!   for its device or it connects from this machine.
+//! - This machine's app connects the same way, with the code Factory writes
+//!   to `<home>/remote/local-pairing` (only this user can read it), so the
+//!   endpoint always runs: on 127.0.0.1 only while no other device can
+//!   connect, on every address and with relays while one can (remote access
+//!   is on).
+//! - A device on another machine can't make Factory replace an app bundle on
+//!   this machine (`InstallUpdate.app_path` is ignored for it).
 //!
-//! The local listener (127.0.0.1) stays as it is, with no token.
+//! The loopback port (7420) wants the local pairing code's token too. Without
+//! one it lets a client in only until this machine's app has connected
+//! through the tunnel once: an app from before the tunnel keeps working
+//! through an update, and after that an agent on this machine can't drive
+//! Factory without the token. (It can read the token's file, as it runs as
+//! the same user: a bar, not a boundary.)
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use factory_protocol::v1;
-
+use iroh::endpoint::{AfterHandshakeOutcome, BindOpts, Builder, Connection, EndpointHooks, presets};
+use iroh::{Endpoint, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls;
-use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::config::{Config, RemoteConfig};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::home::Home;
 use crate::transcript::now_ms;
 
-/// How often the listener checks config.json's `remote` for a change.
+/// The backend's protocol on iroh, the same in the app (app/rust).
+pub const ALPN: &[u8] = b"claktory/1";
+/// How often the tunnel checks whether it should change (a device paired or
+/// unpaired, a code expired, the relays changed) and what it shows.
 const CHECK: Duration = Duration::from_secs(1);
 /// A device that gave a wrong token waits at least this long for the answer
 /// to its next try.
 const FAILURE_PAUSE: Duration = Duration::from_secs(1);
-/// A handshake (TLS and WebSocket) gets this long.
-const HANDSHAKE: Duration = Duration::from_secs(10);
+/// A pairing code nobody used stops working after this long.
+pub const CODE_LIFETIME: Duration = Duration::from_secs(10 * 60);
+/// How long making a pairing code waits for the tunnel to reach its relay,
+/// so the code can name it.
+const ONLINE_WAIT: Duration = Duration::from_secs(5);
+/// This machine's own app, in devices.json.
+pub const LOCAL_DEVICE: &str = "local";
+/// What a turned-away connection is closed with.
+const REFUSED: u32 = 1;
+/// What an unpaired device's connection is closed with.
+const UNPAIRED: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
-    #[error("couldn't make the certificate: {0}")]
-    Certificate(#[from] rcgen::Error),
-    #[error("the certificate or key in {0} can't be read")]
-    BadCertificate(PathBuf),
-    #[error("TLS: {0}")]
-    Tls(#[from] rustls::Error),
     #[error("{0} is broken: {1}")]
     Devices(PathBuf, serde_json::Error),
     #[error("couldn't make a token: {0}")]
     Random(#[from] getrandom::Error),
-    #[error(
-        "Factory's remote listener is off. Turn it on first: run factoryd remote on, or add \"remote\": {{\"port\": 7443}} to {0} (and \"listen\": \"<address>\" to listen on one address only, such as the machine's Tailscale address)."
-    )]
-    Off(PathBuf),
-    #[error("{0} isn't there yet: start Factory once first")]
-    NoConfig(PathBuf),
     #[error("{0} isn't valid: {1}")]
     Config(PathBuf, String),
     #[error("no device named \"{0}\" is paired")]
     NoDevice(String),
+    #[error("{0} isn't a key Claktory can read: delete it, and Claktory makes a new one (devices then need pairing again)")]
+    BadKey(PathBuf),
+    #[error("the private tunnel can't start: {0}")]
+    Tunnel(String),
 }
 
-/// Where Factory keeps what remote devices need.
+/// Where Factory keeps what devices need.
 fn dir(home: &Home) -> PathBuf {
     home.root().join("remote")
-}
-
-/// Factory's certificate and its key, made the first time.
-struct Certificate {
-    cert: CertificateDer<'static>,
-    key: PrivateKeyDer<'static>,
-}
-
-impl Certificate {
-    fn load_or_make(home: &Home) -> Result<Certificate, RemoteError> {
-        let dir = dir(home);
-        let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
-        if !cert_path.exists() || !key_path.exists() {
-            let made = rcgen::generate_simple_self_signed(vec!["factory".to_owned()])?;
-            std::fs::create_dir_all(&dir)?;
-            write_private(&key_path, made.signing_key.serialize_pem().as_bytes())?;
-            write_private(&cert_path, made.cert.pem().as_bytes())?;
-        }
-        let cert = CertificateDer::from_pem_file(&cert_path).map_err(|_| RemoteError::BadCertificate(cert_path))?;
-        let key = PrivateKeyDer::from_pem_file(&key_path).map_err(|_| RemoteError::BadCertificate(key_path))?;
-        Ok(Certificate { cert, key })
-    }
-
-    /// What devices pin: the SHA-256 of the certificate, in hex.
-    fn fingerprint(&self) -> String {
-        hex(&Sha256::digest(self.cert.as_ref()))
-    }
-
-    fn acceptor(self) -> Result<TlsAcceptor, RemoteError> {
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(vec![self.cert], self.key)?;
-        Ok(TlsAcceptor::from(Arc::new(config)))
-    }
 }
 
 /// Written so only this user can read it.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let partial = path.with_extension("partial");
+    // Its own name per write, so two writers never rename each other's.
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let partial = path.with_extension(format!("partial-{}-{}", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&partial)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -121,6 +104,33 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
+}
+
+/// Factory's iroh key, made the first time: its public half is the
+/// endpoint id devices dial.
+pub fn secret_key(home: &Home) -> Result<SecretKey, RemoteError> {
+    let path = dir(home).join("iroh.key");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let bytes: [u8; 32] = unhex(&text).and_then(|bytes| bytes.try_into().ok()).ok_or(RemoteError::BadKey(path))?;
+            Ok(SecretKey::from_bytes(&bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = SecretKey::generate();
+            std::fs::create_dir_all(dir(home))?;
+            write_private(&path, format!("{}\n", hex(&key.to_bytes())).as_bytes())?;
+            Ok(key)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// A device paired with this Factory.
@@ -135,9 +145,38 @@ pub struct Device {
     /// When it last connected; None if it never has.
     #[serde(default)]
     pub last_seen: Option<i64>,
-    /// The IP address it last connected from.
+    /// The IP address it last connected from; empty when a relay carried it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_address: String,
+    /// The key it connects with (its iroh endpoint id), bound when it first
+    /// connected; empty until then.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint_id: String,
+    /// Until its code is used: when the code stops working, in ms since 1970.
+    /// A device paired before the tunnel has neither this nor a key, and
+    /// can't connect until it's paired again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_expires: Option<i64>,
+    /// This machine's own app (`LOCAL_DEVICE`), which Devices doesn't list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
+}
+
+impl Device {
+    /// Its code is waiting for its device: not used yet and not expired.
+    fn awaiting(&self, now: i64) -> bool {
+        !self.local && self.endpoint_id.is_empty() && self.code_expires.is_some_and(|expires| expires > now)
+    }
+
+    /// It can connect from another machine.
+    fn usable(&self, now: i64) -> bool {
+        !self.local && (!self.endpoint_id.is_empty() || self.awaiting(now))
+    }
+}
+
+/// Remote access is on while a device on another machine can connect.
+fn remote_on(devices: &[Device], now: i64) -> bool {
+    devices.iter().any(|device| device.usable(now))
 }
 
 fn devices_path(home: &Home) -> PathBuf {
@@ -153,6 +192,13 @@ pub fn devices(home: &Home) -> Result<Vec<Device>, RemoteError> {
     }
 }
 
+/// Held while devices.json is read, changed and written, so changes made at
+/// once (a pairing while the tunnel starts) don't undo each other.
+fn devices_lock() -> std::sync::MutexGuard<'static, ()> {
+    static DEVICES: Mutex<()> = Mutex::new(());
+    lock(&DEVICES)
+}
+
 fn save_devices(home: &Home, devices: &[Device]) -> Result<(), RemoteError> {
     std::fs::create_dir_all(dir(home))?;
     let mut json = serde_json::to_string_pretty(devices).map_err(|error| RemoteError::Devices(devices_path(home), error))?;
@@ -161,94 +207,92 @@ fn save_devices(home: &Home, devices: &[Device]) -> Result<(), RemoteError> {
     Ok(())
 }
 
-/// The port remote access takes when it's first turned on.
-pub(crate) const DEFAULT_PORT: u16 = 7443;
-
-/// The listener's settings in config.json as they are on disk.
-fn remote_config(home: &Home) -> Result<RemoteConfig, RemoteError> {
+/// config.json's `remote` as it is on disk; None when it has none.
+fn remote_config(home: &Home) -> Result<Option<RemoteConfig>, RemoteError> {
     let path = home.config_path();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(RemoteError::Off(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let config = Config::parse(&text).map_err(|error| RemoteError::Config(path.clone(), error.to_string()))?;
-    config.remote.ok_or(RemoteError::Off(path))
-}
-
-/// Turns the remote listener on or off from the command line (`factoryd
-/// remote on [PORT]`, `factoryd remote off`), by writing config.json as the
-/// app's switch does; a running Factory applies it within a second. Turned
-/// on, it keeps the port and address already set unless given a port. Returns
-/// the setting as it is now.
-pub fn set_remote(home: &Home, on: bool, port: Option<u16>) -> Result<Option<RemoteConfig>, RemoteError> {
-    let path = home.config_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(RemoteError::NoConfig(path)),
-        Err(error) => return Err(error.into()),
-    };
-    let invalid = |error: &dyn std::fmt::Display| RemoteError::Config(path.clone(), error.to_string());
-    let mut config = Config::parse(&text).map_err(|error| invalid(&error))?;
-    let current = config.remote.take();
-    config.remote = on.then(|| RemoteConfig {
-        port: port.unwrap_or(current.as_ref().map_or(DEFAULT_PORT, |current| current.port)),
-        listen: current.map(|current| current.listen).unwrap_or_default(),
-    });
-    config.validate().map_err(|error| invalid(&error))?;
-    let text = config.to_json().map_err(|error| invalid(&error))?;
-    let partial = path.with_extension("json.partial");
-    std::fs::write(&partial, text)?;
-    std::fs::rename(&partial, &path)?;
     Ok(config.remote)
 }
 
-/// Pairs a new device: makes its token and returns its pairing code, which
-/// holds the token, so it's shown once and never again:
-/// `factory://<host>:<port>?t=<token>&fp=<certificate sha256>&name=<this machine>`.
-/// `host` is the address the device will reach this machine by; empty for
-/// the best of `addresses`.
-pub fn pair(home: &Home, name: &str, host: &str) -> Result<(String, Device), RemoteError> {
-    let remote = remote_config(home)?;
-    let addr = remote.addr().map_err(|error| RemoteError::Config(home.config_path(), error.to_string()))?;
-    let fingerprint = Certificate::load_or_make(home)?.fingerprint();
+fn new_token() -> Result<String, RemoteError> {
     let mut token = [0_u8; 32];
     getrandom::fill(&mut token)?;
-    let token = hex(&token);
+    Ok(hex(&token))
+}
+
+fn token_hash(token: &str) -> String {
+    hex(&Sha256::digest(token.as_bytes()))
+}
+
+/// Pairs a new device: makes its token, good for `CODE_LIFETIME` until the
+/// device first connects. Returns the token, which its pairing code holds,
+/// so it's shown once and never again, and the device.
+pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
+    let token = new_token()?;
+    let _changing = devices_lock();
     let mut devices = devices(home)?;
     let name = name.trim();
     let base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let base = base.trim_matches('-');
-    let base = if base.is_empty() { "device" } else { base };
+    let base = if base.is_empty() || base == LOCAL_DEVICE { "device" } else { base };
     let mut id = base.to_owned();
     let mut n = 2;
     while devices.iter().any(|device| device.id == id) {
         id = format!("{base}-{n}");
         n += 1;
     }
+    let now = now_ms();
     let device = Device {
         id,
         name: if name.is_empty() { base.to_owned() } else { name.to_owned() },
-        token_sha256: hex(&Sha256::digest(token.as_bytes())),
-        created: now_ms(),
+        token_sha256: token_hash(&token),
+        created: now,
         last_seen: None,
         last_address: String::new(),
+        endpoint_id: String::new(),
+        code_expires: Some(now + CODE_LIFETIME.as_millis() as i64),
+        local: false,
     };
     devices.push(device.clone());
     save_devices(home, &devices)?;
-    let host = match host.trim() {
-        "" => addresses(&remote).into_iter().next().unwrap_or_else(|| machine_name().to_owned()),
-        host => host.to_owned(),
-    };
-    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
-    let code = format!("factory://{host}:{}?t={token}&fp={fingerprint}&name={}", addr.port(), encode(machine_name()));
-    Ok((code, device))
+    Ok((token, device))
+}
+
+/// A pairing code: `factory://?t=<token>&name=<this machine>&e=<endpoint
+/// id>`, then `&r=<relay URL>` for each relay and `&a=<ip:port>` for each
+/// address it can be dialled at directly, percent-encoded.
+pub fn pairing_code(token: &str, endpoint_id: &str, relays: &[String], addresses: &[SocketAddr]) -> String {
+    let mut code = format!("factory://?t={token}&name={}&e={endpoint_id}", encode(machine_name()));
+    for relay in relays {
+        code.push_str(&format!("&r={}", encode(relay)));
+    }
+    for address in addresses {
+        code.push_str(&format!("&a={}", encode(&address.to_string())));
+    }
+    code
+}
+
+/// Pairs a device away from the running Factory (`factoryd pair`): the code
+/// names its key, and config.json's own relays if it has any; a device finds
+/// the rest by the key. The running Factory turns remote access on within a
+/// second.
+pub fn pair_offline(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
+    let endpoint_id = secret_key(home)?.public().to_string();
+    let relays = remote_config(home)?.map(|remote| remote.relays).unwrap_or_default();
+    let (token, device) = pair(home, name)?;
+    Ok((pairing_code(&token, &endpoint_id, &relays, &[]), device))
 }
 
 /// Unpairs the device with this id or name; it can't connect any more.
 pub fn unpair(home: &Home, device: &str) -> Result<Device, RemoteError> {
+    let _changing = devices_lock();
     let mut devices = devices(home)?;
-    let Some(index) = devices.iter().position(|known| known.id == device || known.name == device) else {
+    let Some(index) = devices.iter().position(|known| !known.local && (known.id == device || known.name == device)) else {
         return Err(RemoteError::NoDevice(device.to_owned()));
     };
     let removed = devices.remove(index);
@@ -256,84 +300,80 @@ pub fn unpair(home: &Home, device: &str) -> Result<Device, RemoteError> {
     Ok(removed)
 }
 
+fn local_pairing_path(home: &Home) -> PathBuf {
+    dir(home).join("local-pairing")
+}
+
+/// The values of `name` in a pairing code.
+fn code_values<'a>(code: &'a str, name: &'a str) -> impl Iterator<Item = String> + 'a {
+    code.trim().split(['?', '&']).filter_map(move |part| part.strip_prefix(name)?.strip_prefix('=')).map(decode)
+}
+
+/// The loopback port the last local pairing code named, to bind again so
+/// the code stays the same.
+fn local_port(home: &Home) -> u16 {
+    let code = std::fs::read_to_string(local_pairing_path(home)).unwrap_or_default();
+    code_values(&code, "a")
+        .filter_map(|address| address.parse::<SocketAddr>().ok())
+        .find(|address| address.ip().is_loopback())
+        .map_or(0, |address| address.port())
+}
+
+/// Writes this machine's own pairing code to `<home>/remote/local-pairing`,
+/// which only this user can read: this machine's app connects with it. Its
+/// token stays while the file holds it.
+fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), RemoteError> {
+    let path = local_pairing_path(home);
+    let _changing = devices_lock();
+    let mut devices = devices(home)?;
+    let written = std::fs::read_to_string(&path).unwrap_or_default();
+    let kept = code_values(&written, "t").next();
+    let local = devices.iter().position(|device| device.local);
+    let token = match (kept, local) {
+        (Some(token), Some(index)) if devices[index].token_sha256 == token_hash(&token) => token,
+        _ => {
+            let token = new_token()?;
+            // A new token, but the app having connected through the tunnel
+            // stays known, so a deleted file doesn't open the loopback port.
+            let endpoint_id = local.map(|index| devices[index].endpoint_id.clone()).unwrap_or_default();
+            let device = Device {
+                id: LOCAL_DEVICE.to_owned(),
+                name: machine_name().to_owned(),
+                token_sha256: token_hash(&token),
+                created: now_ms(),
+                last_seen: None,
+                last_address: String::new(),
+                endpoint_id,
+                code_expires: None,
+                local: true,
+            };
+            match local {
+                Some(index) => devices[index] = device,
+                None => devices.push(device),
+            }
+            save_devices(home, &devices)?;
+            token
+        }
+    };
+    let code = pairing_code(&token, endpoint_id, &[], &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))]);
+    write_private(&path, format!("{code}\n").as_bytes())?;
+    Ok(())
+}
+
 /// This machine's name, as devices show it ("mac-mini").
 fn machine_name() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
-        let name = std::process::Command::new("hostname")
-            .output()
-            .ok()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .unwrap_or_default();
+        // The system call, not the `hostname` program, which a minimal
+        // Linux (NixOS, say) may not have.
+        let mut buffer = [0u8; 256];
+        // SAFETY: gethostname writes at most `buffer.len()` bytes into it.
+        let got = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+        let name = if got { String::from_utf8_lossy(&buffer[..end]).trim().to_owned() } else { String::new() };
         let name = name.strip_suffix(".local").unwrap_or(&name).to_owned();
         if name.is_empty() { "factory".to_owned() } else { name }
     })
-}
-
-/// How other machines may reach this one, best first: the address it listens
-/// on only, if it does; else its Tailscale addresses, its name on the local
-/// network (`<name>.local`), then its other addresses; on Linux, its other
-/// addresses, then its name.
-pub(crate) fn addresses(remote: &RemoteConfig) -> Vec<String> {
-    if !remote.listen.is_empty() {
-        return vec![remote.listen.clone()];
-    }
-    let ips = interface_ips();
-    let tailscale = |ip: &IpAddr| match ip {
-        IpAddr::V4(ip) => ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64,
-        IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-    };
-    let other = |ip: &IpAddr| match ip {
-        IpAddr::V4(ip) => !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified(),
-        IpAddr::V6(_) => false,
-    };
-    let mut addresses: Vec<String> = ips.iter().filter(|ip| tailscale(ip)).map(IpAddr::to_string).collect();
-    let others = ips.iter().filter(|ip| !tailscale(ip) && other(ip)).map(IpAddr::to_string);
-    // A Mac answers to <name>.local on its network; elsewhere a bare name
-    // seldom resolves from another machine, so it comes after the addresses.
-    if cfg!(target_os = "macos") {
-        addresses.push(format!("{}.local", machine_name()));
-        addresses.extend(others);
-    } else {
-        addresses.extend(others);
-        addresses.push(machine_name().to_owned());
-    }
-    addresses.dedup();
-    addresses
-}
-
-/// This machine's IP addresses, from its network interfaces.
-fn interface_ips() -> Vec<IpAddr> {
-    let mut ips = Vec::new();
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list` with a linked list that stays valid
-    // until freeifaddrs; each entry's address is checked for null and read
-    // as the family it says it is.
-    unsafe {
-        if libc::getifaddrs(&raw mut list) != 0 {
-            return ips;
-        }
-        let mut cursor = list;
-        while !cursor.is_null() {
-            let addr = (*cursor).ifa_addr;
-            if !addr.is_null() {
-                match i32::from((*addr).sa_family) {
-                    libc::AF_INET => {
-                        let addr = &*addr.cast::<libc::sockaddr_in>();
-                        ips.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr))));
-                    }
-                    libc::AF_INET6 => {
-                        let addr = &*addr.cast::<libc::sockaddr_in6>();
-                        ips.push(IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr)));
-                    }
-                    _ => {}
-                }
-            }
-            cursor = (*cursor).ifa_next;
-        }
-        libc::freeifaddrs(list);
-    }
-    ips
 }
 
 /// Percent-encodes all but letters, digits, '-', '.', '_' and '~'.
@@ -347,33 +387,178 @@ fn encode(text: &str) -> String {
         .collect()
 }
 
+/// Undoes `encode` (and any other percent-encoding).
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match text.get(at + 1..at + 3).filter(|_| bytes[at] == b'%').and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// How a connection travels now, and the address it comes from when it
+/// comes directly.
+fn path_of(connection: &Connection) -> (v1::DevicePath, Option<SocketAddr>) {
+    let paths = connection.paths();
+    let path = paths.iter().find(|path| path.is_selected()).or_else(|| paths.iter().next());
+    match path.map(|path| path.remote_addr().clone()) {
+        Some(TransportAddr::Ip(address)) => (v1::DevicePath::Direct, Some(address)),
+        Some(TransportAddr::Relay(_)) => (v1::DevicePath::Relayed, None),
+        Some(_) => (v1::DevicePath::Direct, None),
+        None => (v1::DevicePath::None, None),
+    }
+}
+
+fn from_this_machine(address: Option<SocketAddr>) -> bool {
+    address.is_some_and(|address| address.ip().to_canonical().is_loopback())
+}
+
+/// Who's at the other end of a tunnel connection.
+#[derive(Clone, Debug)]
+pub(crate) struct Peer {
+    /// Its key (iroh endpoint id), proven by the handshake.
+    pub endpoint_id: String,
+    /// It connects from this machine (over 127.0.0.1).
+    pub loopback: bool,
+    /// The address it connects from; None through a relay.
+    pub address: Option<SocketAddr>,
+}
+
+/// Turns away, right after the handshake, a key that isn't a paired
+/// device's, unless a code is waiting for its device or it comes from this
+/// machine (whose app proves itself with the local pairing code's token).
+#[derive(Debug)]
+struct Gate {
+    home: Home,
+}
+
+impl Gate {
+    fn admits(&self, connection: &Connection) -> bool {
+        if from_this_machine(path_of(connection).1) {
+            return true;
+        }
+        let id = connection.remote_id().to_string();
+        let now = now_ms();
+        match devices(&self.home) {
+            Ok(devices) => {
+                devices.iter().any(|device| (!device.endpoint_id.is_empty() && device.endpoint_id == id) || device.awaiting(now))
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not read the paired devices");
+                false
+            }
+        }
+    }
+}
+
+impl EndpointHooks for Gate {
+    fn after_handshake<'a>(&'a self, connection: &'a Connection) -> impl Future<Output = AfterHandshakeOutcome> + Send + 'a {
+        let admitted = self.admits(connection);
+        if !admitted {
+            tracing::warn!(endpoint = %connection.remote_id(), "turned away a device that isn't paired");
+        }
+        async move {
+            if admitted {
+                AfterHandshakeOutcome::Accept
+            } else {
+                AfterHandshakeOutcome::Reject { error_code: REFUSED.into(), reason: b"this device isn't paired with this machine".to_vec() }
+            }
+        }
+    }
+}
+
+/// What the tunnel should be.
+#[derive(Clone, Debug, PartialEq)]
+struct Wanted {
+    /// Remote access: on every address, with relays; else 127.0.0.1 only.
+    on: bool,
+    /// config.json's relays; empty for the default ones.
+    relays: Vec<String>,
+}
+
+#[derive(Default)]
+struct Tunnel {
+    running: Option<(Wanted, Endpoint, tokio::task::JoinHandle<()>)>,
+    /// What failed to start last, so it isn't tried every second.
+    failed: Option<Wanted>,
+}
+
+/// One of a device's open sessions.
+struct Session {
+    closed: Arc<tokio::sync::Notify>,
+    endpoint_id: String,
+}
+
 /// What Factory keeps of remote access while it runs.
 #[derive(Default)]
 pub(crate) struct State {
     shown: Mutex<Shown>,
-    /// The open connections of each device, each with what closes it.
-    connected: Mutex<HashMap<String, Vec<Arc<tokio::sync::Notify>>>>,
-    /// When each address last gave a wrong token.
-    failures: Mutex<HashMap<IpAddr, Instant>>,
+    /// The open sessions of each device, by its id.
+    connected: Mutex<HashMap<String, Vec<Session>>>,
+    /// When each key last gave a wrong token.
+    failures: Mutex<HashMap<String, Instant>>,
+    /// The open tunnel connections of each key, numbered.
+    links: Mutex<HashMap<String, Vec<(u64, Connection)>>>,
+    next_link: AtomicU64,
+    /// The running endpoint.
+    endpoint: Mutex<Option<Endpoint>>,
+    tunnel: tokio::sync::Mutex<Tunnel>,
+    /// How long making a code waits for the relay; tests make it shorter.
+    online_wait: Mutex<Option<Duration>>,
 }
 
-/// What the Workspace shows of remote access, besides config.json's `remote`.
+impl State {
+    /// Knows Factory's endpoint id from the start, so clients see it with
+    /// the first Workspace rather than in a change just after.
+    pub(crate) fn new(home: &Home) -> State {
+        let state = State::default();
+        match secret_key(home) {
+            Ok(key) => lock(&state.shown).endpoint_id = key.public().to_string(),
+            Err(error) => tracing::error!(%error, "could not read the tunnel's key"),
+        }
+        state
+    }
+}
+
+/// What the Workspace shows of remote access.
 #[derive(Clone, Default, PartialEq)]
 struct Shown {
     devices: Vec<Device>,
+    on: bool,
     error: String,
-    fingerprint: String,
-    addresses: Vec<String>,
+    endpoint_id: String,
+    relays: Vec<String>,
+    custom_relays: bool,
+    home_relay: String,
+    relay_connected: bool,
+    /// How each connected device's connection travels, by its id.
+    paths: HashMap<String, v1::DevicePath>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// One of a device's connections; it counts as connected while this lives.
+/// n0's relays, which the tunnel uses unless config.json names others.
+fn default_relays() -> Vec<String> {
+    RelayMode::Default.relay_map().urls::<Vec<RelayUrl>>().iter().map(ToString::to_string).collect()
+}
+
+/// One of a device's sessions; it counts as connected while this lives.
 pub(crate) struct Connected {
     pub device: Device,
-    /// Notified when the device is unpaired: the connection closes.
+    /// Notified when the device is unpaired: the session closes.
     pub closed: Arc<tokio::sync::Notify>,
     factory: Weak<Factory>,
 }
@@ -383,9 +568,9 @@ impl Drop for Connected {
         let Some(factory) = self.factory.upgrade() else { return };
         {
             let mut connected = lock(&factory.remote.connected);
-            if let Some(connections) = connected.get_mut(&self.device.id) {
-                connections.retain(|closed| !Arc::ptr_eq(closed, &self.closed));
-                if connections.is_empty() {
+            if let Some(sessions) = connected.get_mut(&self.device.id) {
+                sessions.retain(|session| !Arc::ptr_eq(&session.closed, &self.closed));
+                if sessions.is_empty() {
                     connected.remove(&self.device.id);
                 }
             }
@@ -395,12 +580,16 @@ impl Drop for Connected {
 }
 
 impl Factory {
-    /// The paired device whose token this is, connected until the returned
-    /// `Connected` goes. A wrong token is answered no sooner than a second
-    /// after the address's last wrong one.
-    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: SocketAddr) -> Option<Connected> {
-        let digest = hex(&Sha256::digest(token.as_bytes()));
+    /// The paired device whose token this is, if `peer` may use it: the key
+    /// bound to it, or the first key to use its code; for this machine's app,
+    /// any key from this machine. Connected until the returned `Connected`
+    /// goes. A wrong token is answered no sooner than a second after the
+    /// key's last wrong one.
+    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer) -> Option<Connected> {
+        let digest = token_hash(token);
+        let now = now_ms();
         let mut found = None;
+        let changing = devices_lock();
         match devices(&self.home) {
             Ok(mut devices) => {
                 for device in &mut devices {
@@ -408,9 +597,26 @@ impl Factory {
                     let known = device.token_sha256.as_bytes();
                     let same =
                         known.len() == digest.len() && known.iter().zip(digest.as_bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0;
-                    if same && !token.is_empty() {
-                        device.last_seen = Some(now_ms());
-                        device.last_address = peer.ip().to_canonical().to_string();
+                    // On the loopback port only this machine's app's token counts.
+                    if !same || token.is_empty() || (peer.endpoint_id.is_empty() && !device.local) {
+                        continue;
+                    }
+                    let allowed = if device.local {
+                        peer.loopback || device.endpoint_id == peer.endpoint_id
+                    } else if !device.endpoint_id.is_empty() {
+                        device.endpoint_id == peer.endpoint_id
+                    } else if device.awaiting(now) {
+                        device.code_expires = None;
+                        true
+                    } else {
+                        false
+                    };
+                    if allowed {
+                        if !peer.endpoint_id.is_empty() {
+                            device.endpoint_id.clone_from(&peer.endpoint_id);
+                        }
+                        device.last_seen = Some(now);
+                        device.last_address = peer.address.map(|address| address.ip().to_canonical().to_string()).unwrap_or_default();
                         found = Some(device.clone());
                     }
                 }
@@ -422,34 +628,107 @@ impl Factory {
             }
             Err(error) => tracing::error!(%error, "could not read the paired devices"),
         }
+        drop(changing);
         let Some(device) = found else {
             let wait = {
                 let now = Instant::now();
-                let last = lock(&self.remote.failures).insert(peer.ip(), now);
+                let last = lock(&self.remote.failures).insert(peer.endpoint_id.clone(), now);
                 last.map(|last| FAILURE_PAUSE.saturating_sub(now.duration_since(last))).unwrap_or_default()
             };
-            tracing::warn!(%peer, "refused a device that isn't paired");
+            tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
             tokio::time::sleep(wait).await;
             return None;
         };
         let closed = Arc::new(tokio::sync::Notify::new());
-        lock(&self.remote.connected).entry(device.id.clone()).or_default().push(closed.clone());
+        let session = Session { closed: closed.clone(), endpoint_id: peer.endpoint_id.clone() };
+        lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
         self.refresh_remote();
         Some(Connected { device, closed, factory: Arc::downgrade(self) })
     }
 
+    /// The loopback port lets in a client with no token: only while this
+    /// machine's app has never connected through the tunnel.
+    pub(crate) fn loopback_open(&self) -> bool {
+        match devices(&self.home) {
+            Ok(devices) => !devices.iter().any(|device| device.local && !device.endpoint_id.is_empty()),
+            Err(error) => {
+                tracing::error!(%error, "could not read the paired devices");
+                false
+            }
+        }
+    }
+
+    /// Closes a device's sessions and its tunnel connections.
+    fn close_device(&self, id: &str, endpoint_id: &str) {
+        let sessions = lock(&self.remote.connected).remove(id).unwrap_or_default();
+        let mut keys: Vec<&str> = sessions.iter().map(|session| session.endpoint_id.as_str()).collect();
+        keys.push(endpoint_id);
+        keys.retain(|key| !key.is_empty());
+        keys.sort_unstable();
+        keys.dedup();
+        for session in &sessions {
+            session.closed.notify_one();
+        }
+        let links = lock(&self.remote.links);
+        for key in keys {
+            for (_, connection) in links.get(key).into_iter().flatten() {
+                connection.close(UNPAIRED.into(), b"this device was unpaired");
+            }
+        }
+    }
+
     /// Re-reads what the Workspace shows of remote access, and sends it if
-    /// it changed.
-    fn refresh_remote(&self) {
-        let remote = self.lock().config.remote.clone();
+    /// it changed. Devices unpaired meanwhile (by `factoryd unpair`) are
+    /// disconnected.
+    pub(crate) fn refresh_remote(&self) {
+        let now = now_ms();
         let devices = devices(&self.home).unwrap_or_else(|error| {
             tracing::error!(%error, "could not read the paired devices");
             Vec::new()
         });
+        let gone: Vec<String> =
+            lock(&self.remote.connected).keys().filter(|id| !devices.iter().any(|device| &device.id == *id)).cloned().collect();
+        for id in gone {
+            self.close_device(&id, "");
+        }
+        let relays = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
+        let on = remote_on(&devices, now);
+        let endpoint = lock(&self.remote.endpoint).clone();
+        let (home_relay, relay_connected) = match &endpoint {
+            Some(endpoint) if on => {
+                let statuses = endpoint.home_relay_status().get();
+                statuses.first().map(|status| (status.url().to_string(), status.is_connected())).unwrap_or_default()
+            }
+            _ => (String::new(), false),
+        };
+        let paths = {
+            let links = lock(&self.remote.links);
+            devices
+                .iter()
+                .filter(|device| !device.endpoint_id.is_empty())
+                .filter_map(|device| {
+                    let (_, open) = links.get(&device.endpoint_id)?.iter().find(|(_, connection)| connection.close_reason().is_none())?;
+                    Some((device.id.clone(), path_of(open).0))
+                })
+                .collect()
+        };
         let changed = {
             let mut shown = lock(&self.remote.shown);
-            let mut now = Shown { devices, ..shown.clone() };
-            now.addresses = remote.as_ref().map(addresses).unwrap_or_default();
+            let now = Shown {
+                // This machine's app isn't one of the devices shown.
+                devices: devices.into_iter().filter(|device| !device.local).collect(),
+                on,
+                relays: match (on, relays.is_empty()) {
+                    (false, _) => Vec::new(),
+                    (true, true) => default_relays(),
+                    (true, false) => relays.clone(),
+                },
+                custom_relays: !relays.is_empty(),
+                home_relay,
+                relay_connected,
+                paths,
+                ..shown.clone()
+            };
             let changed = now != *shown;
             *shown = now;
             changed
@@ -472,42 +751,77 @@ impl Factory {
     }
 
     /// The Workspace's remote access.
-    pub(crate) fn remote_view(&self, inner: &Inner) -> v1::RemoteAccess {
+    pub(crate) fn remote_view(&self, _inner: &Inner) -> v1::RemoteAccess {
         let shown = lock(&self.remote.shown).clone();
         let connected = lock(&self.remote.connected);
-        let remote = inner.config.remote.as_ref();
         v1::RemoteAccess {
-            on: remote.is_some(),
-            port: remote.map_or(0, |remote| u32::from(remote.port)),
-            listen: remote.map(|remote| remote.listen.clone()).unwrap_or_default(),
-            error: if remote.is_some() { shown.error } else { String::new() },
-            fingerprint: shown.fingerprint,
-            addresses: if remote.is_some() { shown.addresses } else { Vec::new() },
+            on: shown.on,
+            port: 0,
+            listen: String::new(),
+            error: shown.error,
+            fingerprint: String::new(),
+            addresses: Vec::new(),
             devices: shown
                 .devices
                 .into_iter()
-                .map(|device| v1::PairedDevice {
-                    connected: connected.contains_key(&device.id),
-                    id: device.id,
-                    name: device.name,
-                    paired_ms: device.created,
-                    last_seen_ms: device.last_seen.unwrap_or_default(),
-                    last_address: device.last_address,
+                .filter(|device| !device.local)
+                .map(|device| {
+                    let connected = connected.contains_key(&device.id);
+                    let path =
+                        if connected { shown.paths.get(&device.id).copied().unwrap_or(v1::DevicePath::None) } else { v1::DevicePath::None };
+                    v1::PairedDevice {
+                        connected,
+                        path: path.into(),
+                        // A device that never bound a key and has no code
+                        // (paired before the tunnel) shows as expired.
+                        code_expires_ms: if device.endpoint_id.is_empty() { device.code_expires.unwrap_or(device.created) } else { 0 },
+                        id: device.id,
+                        name: device.name,
+                        paired_ms: device.created,
+                        last_seen_ms: device.last_seen.unwrap_or_default(),
+                        last_address: device.last_address,
+                    }
                 })
                 .collect(),
             machine: machine_name().to_owned(),
+            endpoint_id: shown.endpoint_id,
+            relays: shown.relays,
+            custom_relays: shown.custom_relays,
+            home_relay: shown.home_relay,
+            relay_connected: shown.relay_connected,
         }
     }
 
-    /// Pairs a new device, from the app.
-    pub async fn create_pairing(&self, name: &str, host: &str) -> Result<v1::PairingCode, RequestError> {
-        if self.lock().config.remote.is_none() {
-            return Err(RequestError::Remote("Remote access is off: turn it on first.".into()));
-        }
-        let (home, name, host) = (self.home.clone(), name.to_owned(), host.to_owned());
-        let paired = tokio::task::spawn_blocking(move || pair(&home, &name, &host)).await.map_err(std::io::Error::other)?;
-        let (code, device) = paired.map_err(|error| RequestError::Remote(error.to_string()))?;
+    /// How long making a pairing code waits for the tunnel to reach its
+    /// relay (5 s); tests make it shorter.
+    pub fn set_tunnel_online_wait(&self, wait: Duration) {
+        *lock(&self.remote.online_wait) = Some(wait);
+    }
+
+    /// Pairs a new device, from the app: remote access turns on, and the
+    /// code names the relay the tunnel reaches and the addresses it can be
+    /// dialled at.
+    pub async fn create_pairing(self: &Arc<Self>, name: &str) -> Result<v1::PairingCode, RequestError> {
+        let (home, name) = (self.home.clone(), name.to_owned());
+        let paired = tokio::task::spawn_blocking(move || pair(&home, &name)).await.map_err(std::io::Error::other)?;
+        let (token, device) = paired.map_err(|error| RequestError::Remote(error.to_string()))?;
+        sync_tunnel(self).await;
         self.refresh_remote();
+        let Some(endpoint) = lock(&self.remote.endpoint).clone() else {
+            let error = lock(&self.remote.shown).error.clone();
+            return Err(RequestError::Remote(if error.is_empty() { "The private tunnel isn't running.".to_owned() } else { error }));
+        };
+        let wait = lock(&self.remote.online_wait).unwrap_or(ONLINE_WAIT);
+        let _ = tokio::time::timeout(wait, endpoint.online()).await;
+        let addr = endpoint.addr();
+        let mut relays: Vec<String> = addr.relay_urls().map(ToString::to_string).collect();
+        for relay in self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default() {
+            if !relays.iter().any(|known| known.trim_end_matches('/') == relay.trim_end_matches('/')) {
+                relays.push(relay);
+            }
+        }
+        let addresses: Vec<SocketAddr> = addr.ip_addrs().filter(|address| !address.ip().is_loopback()).copied().collect();
+        let code = pairing_code(&token, &endpoint.id().to_string(), &relays, &addresses);
         Ok(v1::PairingCode { code, device_id: device.id })
     }
 
@@ -519,34 +833,27 @@ impl Factory {
         tokio::task::spawn_blocking(move || list_folders(&path)).await.map_err(std::io::Error::other)?.map_err(RequestError::Remote)
     }
 
-    /// Unpairs a device, from the app: its connections close.
+    /// Unpairs a device, from the app: its connections close. Unpairing the
+    /// last one turns remote access off.
     pub async fn unpair_device(&self, id: &str) -> Result<(), RequestError> {
-        match unpair(&self.home, id) {
-            Ok(_) => {}
+        let removed = match unpair(&self.home, id) {
+            Ok(removed) => removed,
             Err(RemoteError::NoDevice(id)) => return Err(RequestError::UnknownDevice(id)),
             Err(error) => return Err(RequestError::Remote(error.to_string())),
-        }
-        for closed in lock(&self.remote.connected).remove(id).unwrap_or_default() {
-            closed.notify_one();
-        }
+        };
+        self.close_device(&removed.id, &removed.endpoint_id);
         self.refresh_remote();
         Ok(())
     }
 
-    /// Turns remote access on or off, from the app.
-    pub async fn set_remote_access(&self, on: bool, port: u32, listen: Option<&str>) -> Result<(), RequestError> {
-        let port = u16::try_from(port).map_err(|_| RequestError::Remote(format!("{port} isn't a port")))?;
+    /// Sets the relays the tunnel uses, in config.json's `remote.relays`;
+    /// none for the default ones.
+    pub async fn set_relays(&self, relays: &[String]) -> Result<(), RequestError> {
+        let relays: Vec<String> = relays.iter().map(|relay| relay.trim().to_owned()).filter(|relay| !relay.is_empty()).collect();
         self.edit_config(|config| {
-            config.remote = on.then(|| {
-                let current = config.remote.clone();
-                RemoteConfig {
-                    port: if port != 0 { port } else { current.as_ref().map_or(DEFAULT_PORT, |current| current.port) },
-                    listen: match listen {
-                        Some(listen) => listen.trim().to_owned(),
-                        None => current.map(|current| current.listen).unwrap_or_default(),
-                    },
-                }
-            });
+            let mut remote = config.remote.take().unwrap_or_default();
+            remote.relays = relays;
+            config.remote = (remote != RemoteConfig::default()).then_some(remote);
             Ok(())
         })
         .await
@@ -604,102 +911,181 @@ fn plain_error(error: &std::io::Error) -> String {
     }
 }
 
-/// Keeps the remote listener as config.json's `remote` says: off, or on its
-/// address, started, moved or stopped within a second of a change. Also
-/// keeps what the Workspace shows of it current: devices paired or unpaired
-/// by `factoryd`, and the machine's addresses.
+/// Keeps the tunnel as it should be: on 127.0.0.1 only, or on every address
+/// with relays while a device on another machine can connect, rebuilt within
+/// a second of a change. Also keeps what the Workspace shows of it current.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
-    let mut serving: Option<(RemoteConfig, tokio::task::JoinHandle<()>)> = None;
-    // What failed last, so it isn't tried every second.
-    let mut failed: Option<RemoteConfig> = None;
-    loop {
-        let wanted = match factory.upgrade() {
-            Some(factory) => {
-                factory.refresh_remote();
-                factory.lock().config.remote.clone()
-            }
-            None => break,
-        };
-        if failed.is_some() && failed != wanted {
-            failed = None;
-        }
-        if serving.as_ref().map(|(config, _)| config) != wanted.as_ref() && failed.is_none() {
-            if let Some((_, task)) = serving.take() {
-                task.abort();
-                tracing::info!("remote listener stopped");
-            }
-            let mut error = String::new();
-            if let Some(config) = wanted {
-                match listen(&factory, &config).await {
-                    Ok((task, fingerprint)) => {
-                        serving = Some((config, task));
-                        if let Some(factory) = factory.upgrade() {
-                            factory.set_remote_shown(|shown| shown.fingerprint = fingerprint);
-                        }
-                    }
-                    Err(problem) => {
-                        tracing::error!(error = %problem, "could not start the remote listener");
-                        error = problem.to_string();
-                        failed = Some(config);
-                    }
-                }
-            }
-            if let Some(factory) = factory.upgrade() {
-                factory.set_remote_shown(|shown| shown.error = error);
-            }
-        }
+    while let Some(strong) = factory.upgrade() {
+        sync_tunnel(&strong).await;
+        strong.refresh_remote();
+        drop(strong);
         tokio::time::sleep(CHECK).await;
     }
-    if let Some((_, task)) = serving {
-        task.abort();
+}
+
+/// Starts the tunnel, or starts it again when it should change. Boxed: a
+/// client the tunnel serves can pair a device, which comes back here.
+fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    Box::pin(async move {
+        let devices = devices(&factory.home).unwrap_or_else(|error| {
+            tracing::error!(%error, "could not read the paired devices");
+            Vec::new()
+        });
+        let relays = factory.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
+        let wanted = Wanted { on: remote_on(&devices, now_ms()), relays };
+        let mut tunnel = factory.remote.tunnel.lock().await;
+        if tunnel.running.as_ref().is_some_and(|(running, ..)| *running == wanted) || tunnel.failed.as_ref() == Some(&wanted) {
+            return;
+        }
+        let mut port = local_port(&factory.home);
+        if let Some((_, endpoint, accept)) = tunnel.running.take() {
+            accept.abort();
+            port = loopback_port(&endpoint).unwrap_or(port);
+            lock(&factory.remote.endpoint).take();
+            endpoint.close().await;
+        }
+        let home = factory.home.clone();
+        let started = async {
+            let key = {
+                let home = home.clone();
+                tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
+            };
+            let endpoint = bind(&home, key, &wanted, port).await?;
+            let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
+            let written =
+                tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
+            if let Err(error) = written {
+                endpoint.close().await;
+                return Err(error);
+            }
+            Ok::<_, RemoteError>(endpoint)
+        }
+        .await;
+        match started {
+            Ok(endpoint) => {
+                tracing::info!(remote_access = wanted.on, endpoint = %endpoint.id(), "private tunnel started");
+                let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
+                *lock(&factory.remote.endpoint) = Some(endpoint.clone());
+                let id = endpoint.id().to_string();
+                tunnel.running = Some((wanted, endpoint, accept));
+                tunnel.failed = None;
+                factory.set_remote_shown(|shown| {
+                    shown.error.clear();
+                    shown.endpoint_id = id;
+                });
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not start the private tunnel");
+                tunnel.failed = Some(wanted);
+                factory.set_remote_shown(|shown| shown.error = error.to_string());
+            }
+        }
+    })
+}
+
+/// The port the endpoint answers on at 127.0.0.1.
+fn loopback_port(endpoint: &Endpoint) -> Option<u16> {
+    endpoint.bound_sockets().into_iter().find(SocketAddr::is_ipv4).map(|address| address.port())
+}
+
+/// An endpoint as `wanted` says, on `port` (the local pairing code's) if it's
+/// free. Without remote access: 127.0.0.1 only, no relays, nothing published.
+/// With it: every address, the relays, and n0's address lookup with the
+/// default relays (with config.json's own relays, nothing goes to n0).
+/// Never a port mapping (no portmapper).
+async fn bind(home: &Home, key: SecretKey, wanted: &Wanted, port: u16) -> Result<Endpoint, RemoteError> {
+    let failed = |error: &dyn std::fmt::Display| RemoteError::Tunnel(error.to_string());
+    let builder = |port: u16| -> Result<Builder, RemoteError> {
+        let builder =
+            if wanted.on && wanted.relays.is_empty() { Endpoint::builder(presets::N0) } else { Endpoint::builder(presets::Minimal) };
+        let relay_mode = if !wanted.on {
+            RelayMode::Disabled
+        } else if wanted.relays.is_empty() {
+            RelayMode::Default
+        } else {
+            let urls = wanted
+                .relays
+                .iter()
+                .map(|relay| relay.parse::<RelayUrl>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| failed(&error))?;
+            RelayMode::Custom(urls.into_iter().collect::<RelayMap>())
+        };
+        let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
+        let mut builder = builder
+            .secret_key(key.clone())
+            .alpns(vec![ALPN.to_vec()])
+            .hooks(Gate { home: home.clone() })
+            .relay_mode(relay_mode)
+            .clear_ip_transports()
+            .bind_addr(SocketAddr::new(ip, port))
+            .map_err(|error| failed(&error))?;
+        if wanted.on {
+            let optional = BindOpts::default().set_is_required(false);
+            builder =
+                builder.bind_addr_with_opts(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)), optional).map_err(|error| failed(&error))?;
+        }
+        Ok(builder)
+    };
+    // The endpoint before may take a moment to let go of the port.
+    let mut tries = 0;
+    loop {
+        match builder(port)?.bind().await {
+            Ok(endpoint) => return Ok(endpoint),
+            Err(_) if port != 0 && tries < 20 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) if port != 0 => {
+                tracing::info!(port, %error, "the tunnel's port is taken; it takes another");
+                return builder(0)?.bind().await.map_err(|error| failed(&error));
+            }
+            Err(error) => return Err(failed(&error)),
+        }
     }
 }
 
-async fn listen(factory: &Weak<Factory>, config: &RemoteConfig) -> Result<(tokio::task::JoinHandle<()>, String), RemoteError> {
-    let Some(strong) = factory.upgrade() else { return Err(std::io::Error::other("Factory is stopping").into()) };
-    let addr = config.addr().map_err(|error| RemoteError::Config(strong.home.config_path(), error.to_string()))?;
-    let home = strong.home.clone();
-    drop(strong);
-    let (acceptor, fingerprint) = tokio::task::spawn_blocking(move || {
-        let certificate = Certificate::load_or_make(&home)?;
-        let fingerprint = certificate.fingerprint();
-        Ok::<_, RemoteError>((certificate.acceptor()?, fingerprint))
-    })
-    .await
-    .map_err(|error| std::io::Error::other(error.to_string()))??;
-    let listener =
-        TcpListener::bind(addr).await.map_err(|error| std::io::Error::new(error.kind(), format!("can't listen on {addr}: {error}")))?;
-    tracing::info!(%addr, "remote listener started");
-    Ok((tokio::spawn(accept(listener, acceptor, factory.clone())), fingerprint))
-}
-
-async fn accept(listener: TcpListener, acceptor: TlsAcceptor, factory: Weak<Factory>) {
-    loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::warn!(%error, "remote accept failed");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-        let Some(factory) = factory.upgrade() else { return };
-        let acceptor = acceptor.clone();
+/// Serves each connection the gate let in until the endpoint closes.
+async fn accept(endpoint: Endpoint, factory: Weak<Factory>) {
+    while let Some(incoming) = endpoint.accept().await {
+        let factory = factory.clone();
         tokio::spawn(async move {
-            if let Err(error) = stream.set_nodelay(true) {
-                tracing::debug!(%peer, %error, "remote connection");
-                return;
-            }
-            let stream = match tokio::time::timeout(HANDSHAKE, acceptor.accept(stream)).await {
-                Ok(Ok(stream)) => stream,
-                // Port scans and clients that don't speak TLS.
-                Ok(Err(error)) => return tracing::debug!(%peer, %error, "not a TLS client"),
-                Err(_) => return tracing::debug!(%peer, "TLS handshake timed out"),
-            };
-            if let Err(error) = crate::connection::serve_stream(stream, factory, Some(peer)).await {
-                tracing::warn!(%peer, %error, "remote connection failed");
+            match incoming.await {
+                Ok(connection) => serve_link(connection, factory).await,
+                Err(error) => tracing::debug!(%error, "a tunnel connection didn't open"),
             }
         });
+    }
+}
+
+/// One device's connection: each stream it opens is a client, served as
+/// the loopback port serves one, until the connection ends.
+async fn serve_link(connection: Connection, factory: Weak<Factory>) {
+    let endpoint_id = connection.remote_id().to_string();
+    let number = {
+        let Some(strong) = factory.upgrade() else { return };
+        let number = strong.remote.next_link.fetch_add(1, Ordering::Relaxed);
+        lock(&strong.remote.links).entry(endpoint_id.clone()).or_default().push((number, connection.clone()));
+        number
+    };
+    while let Ok((send, receive)) = connection.accept_bi().await {
+        let Some(strong) = factory.upgrade() else { break };
+        let address = path_of(&connection).1;
+        let peer = Peer { endpoint_id: endpoint_id.clone(), loopback: from_this_machine(address), address };
+        tokio::spawn(async move {
+            if let Err(error) = crate::connection::serve_stream(tokio::io::join(receive, send), strong, Some(peer)).await {
+                tracing::warn!(%error, "tunnel connection failed");
+            }
+        });
+    }
+    if let Some(strong) = factory.upgrade() {
+        let mut links = lock(&strong.remote.links);
+        if let Some(open) = links.get_mut(&endpoint_id) {
+            open.retain(|(known, _)| *known != number);
+            if open.is_empty() {
+                links.remove(&endpoint_id);
+            }
+        }
     }
 }
 
@@ -708,17 +1094,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_in_pairing_codes_are_percent_encoded() {
+    fn values_in_pairing_codes_are_percent_encoded() {
         assert_eq!(encode("Mac mini/2"), "Mac%20mini%2F2");
         assert_eq!(encode("box-1.lan"), "box-1.lan");
+        assert_eq!(decode("Mac%20mini%2F2"), "Mac mini/2");
+        assert_eq!(decode("100%"), "100%");
+        let code = pairing_code("ab", "id", &["https://relay.example/".into()], &["127.0.0.1:7".parse().unwrap()]);
+        assert_eq!(code_values(&code, "r").collect::<Vec<_>>(), ["https://relay.example/"]);
+        assert_eq!(code_values(&code, "a").collect::<Vec<_>>(), ["127.0.0.1:7"]);
+        assert_eq!(code_values(&code, "t").collect::<Vec<_>>(), ["ab"]);
     }
 
     #[test]
-    fn a_listen_address_is_the_only_one_offered() {
-        let remote = RemoteConfig { port: 7443, listen: "100.101.102.103".into() };
-        assert_eq!(addresses(&remote), ["100.101.102.103"]);
-        let everywhere = addresses(&RemoteConfig { port: 7443, listen: String::new() });
-        assert!(everywhere.iter().any(|address| address.starts_with(machine_name())), "{everywhere:?}");
-        assert!(!everywhere.iter().any(|address| address == "127.0.0.1"), "{everywhere:?}");
+    fn remote_access_is_on_while_a_device_can_connect() {
+        let device = |endpoint_id: &str, code_expires: Option<i64>, local: bool| Device {
+            id: "d".into(),
+            name: "D".into(),
+            token_sha256: String::new(),
+            created: 0,
+            last_seen: None,
+            last_address: String::new(),
+            endpoint_id: endpoint_id.into(),
+            code_expires,
+            local,
+        };
+        assert!(!remote_on(&[], 100));
+        assert!(!remote_on(&[device("k", None, true)], 100), "this machine's app alone");
+        assert!(remote_on(&[device("", Some(200), false)], 100), "a code waiting");
+        assert!(!remote_on(&[device("", Some(50), false)], 100), "a code expired");
+        assert!(!remote_on(&[device("", None, false)], 100), "paired before the tunnel");
+        assert!(remote_on(&[device("k", None, false)], 100), "a device with its key");
     }
 }

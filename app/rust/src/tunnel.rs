@@ -40,14 +40,20 @@ pub fn parse_key(hex: &str) -> anyhow::Result<SecretKey> {
     Ok(SecretKey::from_bytes(&bytes))
 }
 
-/// Where the backend is: its endpoint id and the relays its pairing code
-/// names (none: iroh finds it through its address lookup and n0's relays).
-pub fn backend_addr(endpoint_id: &str, relays: &[String]) -> anyhow::Result<EndpointAddr> {
+/// Where the backend is: its endpoint id, the relays its pairing code
+/// names (none: iroh finds it through its address lookup and n0's relays),
+/// and the direct UDP addresses it names (`a=`: this Mac's own code has
+/// only 127.0.0.1:<port>, and no relay).
+pub fn backend_addr(endpoint_id: &str, relays: &[String], addresses: &[String]) -> anyhow::Result<EndpointAddr> {
     let id: EndpointId = endpoint_id.trim().parse().map_err(|error| anyhow::anyhow!("not an endpoint id: {error}"))?;
     let mut addr = EndpointAddr::new(id);
     for relay in relays {
         let url: RelayUrl = relay.parse().map_err(|error| anyhow::anyhow!("not a relay URL ({relay}): {error}"))?;
         addr = addr.with_relay_url(url);
+    }
+    for address in addresses {
+        let socket: SocketAddr = address.trim().parse().map_err(|error| anyhow::anyhow!("not an address ({address}): {error}"))?;
+        addr = addr.with_ip_addr(socket);
     }
     Ok(addr)
 }
@@ -170,6 +176,24 @@ impl Tunnel {
 
     pub fn status(&self) -> Status {
         self.shared.status.lock().unwrap().clone()
+    }
+
+    /// After the app was suspended, or the network changed under it: the
+    /// connection may be dead without knowing it yet, so it's closed (the
+    /// next socket dials afresh, unless a dial is under way) and iroh looks
+    /// at the network again. A failure from before says nothing about now.
+    pub async fn reconnect(&self) {
+        if let Ok(mut slot) = self.shared.connection.try_lock()
+            && let Some(connection) = slot.take()
+        {
+            connection.close(0u32.into(), b"");
+            let mut status = self.shared.status.lock().unwrap();
+            status.phase = Phase::Idle;
+            status.path = Path::None;
+            status.error.clear();
+            status.failure = Failure::None;
+        }
+        self.shared.endpoint.network_change().await;
     }
 
     /// Stops listening and closes the connection and the endpoint.
@@ -421,6 +445,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_dials_afresh_without_a_failure() {
+        let backend = echo_backend().await;
+        let tunnel = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        socket.write_all(b"one").await.unwrap();
+        let mut got = [0u8; 3];
+        socket.read_exact(&mut got).await.unwrap();
+        assert_eq!(tunnel.status().phase, Phase::Connected);
+
+        // As after the app comes back from the background.
+        tunnel.reconnect().await;
+        let status = tunnel.status();
+        assert_eq!(status.phase, Phase::Idle);
+        assert_eq!(status.failure, Failure::None, "a resume isn't a failure");
+        assert!(status.error.is_empty());
+
+        // The next socket dials a new connection.
+        let mut again = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        again.write_all(b"two").await.unwrap();
+        again.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"two");
+        assert_eq!(tunnel.status().phase, Phase::Connected);
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
     async fn a_backend_that_turns_the_device_away_says_so() {
         let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).alpns(vec![ALPN.to_vec()]).bind().await.unwrap();
         let server = endpoint.clone();
@@ -455,9 +505,13 @@ mod tests {
         let key = generate_key();
         assert_eq!(key.len(), 64);
         let id = parse_key(&key).unwrap().public().to_string();
-        let addr = backend_addr(&id, &["https://relay.example.com".to_owned()]).unwrap();
+        let addr = backend_addr(&id, &["https://relay.example.com".to_owned()], &["127.0.0.1:4919".to_owned(), "[::1]:4919".to_owned()]).unwrap();
         assert_eq!(addr.relay_urls().count(), 1);
-        assert!(backend_addr("nope", &[]).is_err());
+        let ips: Vec<String> = addr.ip_addrs().map(|ip| ip.to_string()).collect();
+        assert_eq!(ips.len(), 2);
+        assert!(ips.contains(&"127.0.0.1:4919".to_owned()));
+        assert!(backend_addr("nope", &[], &[]).is_err());
+        assert!(backend_addr(&id, &[], &["nowhere".to_owned()]).is_err());
         assert!(parse_key("abcd").is_err());
     }
 }

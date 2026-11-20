@@ -102,7 +102,7 @@ class AppSystem {
     '--deep',
     '--strict',
     app,
-  ], "the new app's signature doesn't check out");
+  ], "the new app's signature isn't valid");
 
   /// Starts replacing [app] with [staged.app], on its own, once the process
   /// [pid] has quit (stopping it after 10s), then opens it; Factory Dev in
@@ -212,7 +212,7 @@ class AppUpdater {
     void Function(UpdateProgress progress)? onProgress,
   }) async {
     if (bundlePath.isEmpty) {
-      throw const UpdateFailure("this app isn't in a bundle it can replace");
+      throw const UpdateFailure("this copy of the app can't replace itself");
     }
     final parent = bundlePath.substring(0, bundlePath.lastIndexOf('/'));
     final staging = Directory('$parent/.${_name(bundlePath)}.update');
@@ -221,7 +221,7 @@ class AppUpdater {
       staging.createSync();
     } on FileSystemException catch (error) {
       throw UpdateFailure(
-        "can't write beside the app, in $parent: ${error.osError?.message ?? error.message}",
+        "can't save the update next to the app, in $parent: ${error.osError?.message ?? error.message}",
       );
     }
     try {
@@ -233,12 +233,14 @@ class AppUpdater {
       File(archive).deleteSync();
       final app = '${unpacked.path}/$appName';
       if (!Directory(app).existsSync()) {
-        throw UpdateFailure('the download has no $appName in it');
+        throw UpdateFailure('the download is missing $appName');
       }
       final ours = await system.bundleId(bundlePath);
       final theirs = await system.bundleId(app);
       if (theirs != ours) {
-        throw UpdateFailure('the new app is $theirs, not this app ($ours)');
+        throw UpdateFailure(
+          'the download is a different app ($theirs, not $ours)',
+        );
       }
       await system.verifySignature(app);
       return StagedApp(app: app, staging: staging.path);
@@ -267,10 +269,10 @@ class AppUpdater {
     if (!appName.endsWith('.app') ||
         appName.startsWith('.') ||
         appName.contains('/')) {
-      throw UpdateFailure('the archive holds "$appName", not an app');
+      throw UpdateFailure('the download holds "$appName", not an app');
     }
     if (first.data.isEmpty && size > 0) {
-      throw const UpdateFailure('the first piece of the app came back empty');
+      throw const UpdateFailure('the download came back empty');
     }
     final step = first.data.length;
     var received = first.data.length;
@@ -297,11 +299,11 @@ class AppUpdater {
           piece = await fetch(version, offset);
           if (piece.preparing || piece.size != size || piece.sha256 != sha) {
             throw const UpdateFailure(
-              'the app changed on the other machine while it downloaded',
+              'the update changed on the other machine while it downloaded',
             );
           }
           if (piece.data.length != math.min(step, size - offset)) {
-            throw const UpdateFailure('a piece of the app came back cut short');
+            throw const UpdateFailure('the download was cut short');
           }
           await write(offset, piece.data);
         } catch (_) {
@@ -329,11 +331,13 @@ class AppUpdater {
     onProgress?.call(UpdateProgress(UpdateStage.checking, size: size));
     final length = File(path).lengthSync();
     if (length != size) {
-      throw UpdateFailure('the download is $length bytes, not $size');
+      throw UpdateFailure(
+        'the download is incomplete ($length of $size bytes)',
+      );
     }
     final digest = await sha256.bind(File(path).openRead()).first;
     if (digest.toString() != sha.toLowerCase()) {
-      throw const UpdateFailure("the download's SHA-256 doesn't match");
+      throw const UpdateFailure("the download is damaged");
     }
     return appName;
   }
@@ -351,7 +355,7 @@ class AppUpdater {
       onProgress?.call(const UpdateProgress(UpdateStage.preparing));
       if (DateTime.now().difference(started) > patience) {
         throw const UpdateFailure(
-          'the other machine took too long to pack the app',
+          'the other machine took too long to prepare the update',
         );
       }
       await Future<void>.delayed(pollEvery);

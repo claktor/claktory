@@ -20,12 +20,12 @@ void main() {
   test('the request names where the error showed, then all of it', () {
     expect(
       errorRequest('boom', about: 'The settings file has an error.'),
-      'Claktory shows this error, please fix it:\n\n'
+      'Claktory shows this error. Please fix it:\n\n'
       'The settings file has an error.\nboom',
     );
     expect(
       errorRequest('boom'),
-      'Claktory shows this error, please fix it:\n\nboom',
+      'Claktory shows this error. Please fix it:\n\nboom',
     );
   });
 
@@ -36,7 +36,7 @@ void main() {
     await harness.show(tester);
     await openConfigError(tester);
     expect(find.text('Restore last working settings'), findsOneWidget);
-    await tester.tap(find.text('Tell Rivet'));
+    await tester.tap(find.text('Ask Rivet to fix'));
     await settle(tester);
     expect(harness.last.selectAgent.agentId, 'rivet');
     expect(
@@ -65,7 +65,7 @@ void main() {
       await harness.show(tester);
       await openConfigError(tester);
       expect(find.text('Restore last working settings'), findsOneWidget);
-      expect(find.text('Tell Rivet'), findsNothing);
+      expect(find.text('Ask Rivet to fix'), findsNothing);
       await tester.tap(find.text('Close'));
       await settle(tester);
     }
@@ -94,8 +94,12 @@ void main() {
       ),
     );
     await harness.show(tester);
-    expect(find.text('Tell Rivet'), findsOneWidget, reason: 'errors only');
-    await tester.tap(find.text('Tell Rivet'));
+    expect(
+      find.text('Ask Rivet to fix'),
+      findsOneWidget,
+      reason: 'errors only',
+    );
+    await tester.tap(find.text('Ask Rivet to fix'));
     await settle(tester);
     expect(harness.last.selectAgent.agentId, 'rivet');
     expect(
@@ -116,7 +120,7 @@ void main() {
     );
     harness.appVersion = '2026.11.18-1700';
     await harness.show(tester);
-    await tester.tap(find.text('Tell Rivet'));
+    await tester.tap(find.text('Ask Rivet to fix'));
     await settle(tester);
     expect(
       box(tester).controller.text,

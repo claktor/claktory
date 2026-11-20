@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 // Design tokens from docs/IDENTITY.md. Keep the two in sync.
@@ -145,12 +146,33 @@ abstract final class Motion {
   static const base = Duration(milliseconds: 200);
 }
 
+/// The sidebar's width by default; the person can drag it between
+/// [sidebarMinWidth] and [sidebarMaxWidth] (`Settings.sidebar_width`).
 const sidebarWidth = 248.0;
+const sidebarMinWidth = 200.0;
+const sidebarMaxWidth = 300.0;
 
 /// The band at the top of the window. Over the sidebar it holds only the
 /// window controls (macOS traffic lights, centered in it); over the content
 /// the view's header bar fills it. All of it drags the window.
 const titleBarHeight = 44.0;
+
+/// A phone's screen is narrower than this on its shorter side, and it
+/// takes a phone's layout (docs/IDENTITY.md, "Phone"): the sidebar as its
+/// first screen, an agent's conversation pushed over it, panels as sheets.
+/// A Mac window never gets this narrow.
+const phoneLayoutWidth = 600.0;
+
+/// Whether [context] is laid out as on a phone: a phone's screen, upright
+/// or on its side (a tablet's isn't), or a window narrower than a phone.
+bool isPhoneLayout(BuildContext context) {
+  final size = MediaQuery.sizeOf(context);
+  return switch (defaultTargetPlatform) {
+    TargetPlatform.iOS ||
+    TargetPlatform.android => size.shortestSide < phoneLayoutWidth,
+    _ => size.width < phoneLayoutWidth,
+  };
+}
 
 /// How wide the transcript and composer grow as the window widens.
 const contentMaxWidth = 1520.0;

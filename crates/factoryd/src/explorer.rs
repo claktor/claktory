@@ -25,7 +25,7 @@ pub const IGNORE_FILE: &str = ".factoryignore";
 
 /// Written into new projects, and used for folders without a `.factoryignore`.
 pub const DEFAULT_IGNORE: &str = "\
-# Hidden in Factory's file explorer unless \"Show everything\" is on.
+# Hidden in Claktory's file explorer unless \"Show everything\" is on.
 # Same syntax as .gitignore.
 .git/
 .DS_Store

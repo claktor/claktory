@@ -55,7 +55,7 @@ class MonitorsView extends StatelessWidget {
         children: [
           if (monitors.monitors.isEmpty)
             const _Line(
-              'No monitors. The agent sets them when it needs to '
+              'No monitors yet. The agent adds one when it needs to '
               'come back to something later.',
             ),
           if (active.isNotEmpty) ...[

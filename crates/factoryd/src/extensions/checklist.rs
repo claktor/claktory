@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use factory_agent::Tool;
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1;
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::Deserialize;
@@ -29,12 +29,12 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Checklist",
     icon: "list-checks",
-    description: "Everything the person asks for, kept as a checklist the agent works through over days, so nothing is forgotten.",
+    description: "Keeps a checklist of everything you ask for, so nothing gets forgotten, even days later.",
     default_enabled: false,
     options: &[OptionSpec {
         id: "nudge",
-        label: "Remind it when it stops with work outstanding",
-        description: "When it's idle with open items and nothing running will wake it, Factory reminds it once.",
+        label: "Remind it of unfinished items",
+        description: "If it stops with items still open and nothing will wake it, Claktory reminds it once.",
         kind: OptionKind::Switch,
         default_on: true,
         includes_project: false,
@@ -47,7 +47,7 @@ You keep a checklist of everything the person asks you for, so nothing they said
 - When they ask for things, record each as an item right away. checklist_add takes many at once.
 - Keep items current with checklist_update: in_progress or an owner when work starts, done or dropped with a short note when it ends.
 - in_progress means someone is working on it right now; work waiting its turn stays open, with its owner. Hand each worker one or two items at a time, and the next when one is done.
-- blocked means it waits on the person or something outside; say on what in a note. If you stop with open items and nothing running will wake you, Factory reminds you.
+- blocked means it waits on the person or something outside; say on what in a note. If you stop with open items and nothing running will wake you, Claktory reminds you.
 - checklist_list shows open items; filter by status, day, owner or text. checklist_item shows one item's history. Both take `agent` to read another agent's checklist.
 - Check the list before telling the person work is finished.
 ";
@@ -491,7 +491,7 @@ fn failed(error: impl std::fmt::Display) -> String {
 fn agent_id(factory: &Factory, me: &str, name: &str) -> Result<String, String> {
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(me) = config.agent(me) else { return Err("You're no longer in this Factory.".to_owned()) };
+    let Some(me) = config.agent(me) else { return Err("You're no longer in this Claktory.".to_owned()) };
     let everyone: Vec<&AgentConfig> = config.agents.iter().collect();
     match super::agents::find(config, me, &everyone, name)? {
         Some(agent) => Ok(agent.id.clone()),
@@ -514,7 +514,7 @@ struct AddArgs {
     owner: Option<String>,
 }
 
-fn run_add(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_add(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: AddArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let texts: Vec<String> = args.items.iter().map(|text| text.trim().to_owned()).filter(|text| !text.is_empty()).collect();
     if texts.is_empty() {
@@ -526,11 +526,13 @@ fn run_add(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<St
     };
     let ids = add(&factory.store, agent, agent, &texts, &owner).map_err(failed)?;
     factory.refresh_view(agent);
-    Ok(match ids.as_slice() {
+    let said = match ids.as_slice() {
         [id] => format!("Added #{id}."),
         [first, .., last] => format!("Added #{first}-#{last}."),
         [] => "Added nothing.".to_owned(),
-    })
+    };
+    let items: Vec<_> = ids.iter().zip(&texts).map(|(id, text)| json!({"id": id, "text": text, "owner": owner})).collect();
+    Ok(ToolResult::text(said, json!({"agent": agent, "items": items})))
 }
 
 #[derive(Deserialize)]
@@ -551,7 +553,7 @@ struct UpdateArg {
     note: Option<String>,
 }
 
-fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: UpdateArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let mut updates = Vec::new();
     for arg in args.updates {
@@ -572,7 +574,35 @@ fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result
     }
     let said = update(&factory.store, agent, agent, &updates).map_err(failed)?;
     factory.refresh_view(agent);
-    Ok(format!("{}.", said.join("; ")))
+    // Each item as it is now, with what changed.
+    let (now, _) = query(&factory.store, &Query { agent, ..Query::default() }).map_err(failed)?;
+    let items: Vec<_> = updates
+        .iter()
+        .map(|update| {
+            let changed: Vec<&str> = [
+                (update.status.is_some(), "status"),
+                (update.owner.is_some(), "owner"),
+                (update.text.is_some(), "text"),
+                (update.note.is_some(), "note"),
+            ]
+            .into_iter()
+            .filter_map(|(changed, what)| changed.then_some(what))
+            .collect();
+            match now.iter().find(|item| item.id == update.id) {
+                None => json!({"id": update.id, "problem": "no such item"}),
+                Some(_) if changed.is_empty() => json!({"id": update.id, "problem": "nothing to change"}),
+                Some(item) => {
+                    let mut shown =
+                        json!({"id": item.id, "text": item.text, "status": item.status.name(), "owner": item.owner, "changed": changed});
+                    if let Some(note) = &update.note {
+                        shown["note"] = json!(note);
+                    }
+                    shown
+                }
+            }
+        })
+        .collect();
+    Ok(ToolResult::text(format!("{}.", said.join("; ")), json!({"agent": agent, "items": items})))
 }
 
 #[derive(Deserialize)]
@@ -591,7 +621,7 @@ struct ListArgs {
     limit: Option<usize>,
 }
 
-fn run_list(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_list(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: ListArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let whose = whose(factory, agent, args.agent.as_deref())?;
     let statuses = match args.status.as_deref().map(str::trim).filter(|status| !status.is_empty()) {
@@ -620,14 +650,15 @@ fn run_list(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<S
         with_log: false,
     };
     let (items, total) = query(&factory.store, &request).map_err(failed)?;
+    let details = json!({"agent": whose, "shown": items.len(), "total": total});
     if items.is_empty() {
-        return Ok("No items match.".to_owned());
+        return Ok(ToolResult::text("No items match.", details));
     }
     let mut lines: Vec<String> = items.iter().map(line).collect();
     if total > items.len() {
         lines.push(format!("+{} more; narrow with q, day, owner or status, or raise limit.", total - items.len()));
     }
-    Ok(lines.join("\n"))
+    Ok(ToolResult::text(lines.join("\n"), details))
 }
 
 #[derive(Deserialize)]
@@ -637,7 +668,7 @@ struct ItemArgs {
     agent: Option<String>,
 }
 
-fn run_item(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_item(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: ItemArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let whose = whose(factory, agent, args.agent.as_deref())?;
     let (items, _) = query(&factory.store, &Query { agent: &whose, with_log: true, ..Query::default() }).map_err(failed)?;
@@ -649,7 +680,8 @@ fn run_item(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<S
         let actor = if change.actor.is_empty() { "person" } else { change.actor.as_str() };
         lines.push(format!("{} {actor}: {}", change.when, change.text));
     }
-    Ok(lines.join("\n"))
+    let details = json!({"agent": whose, "id": item.id, "text": item.text, "status": item.status.name(), "owner": item.owner});
+    Ok(ToolResult::text(lines.join("\n"), details))
 }
 
 #[cfg(test)]

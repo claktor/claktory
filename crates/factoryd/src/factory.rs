@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use factory_agent::AbortHandle;
+use factory_agent::{AbortHandle, DetachHandle, EventSource};
 use factory_protocol::v1::{self, server_message::Body};
 use prost::Message as _;
 use serde::Deserialize;
@@ -27,13 +27,16 @@ use crate::transcript::{Change, Transcript, TranscriptError, now_ms};
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 const EVENT_BUFFER: usize = 4096;
+/// How long a bash command runs before another agent's message moves it to
+/// the background (the person's does at once).
+const AGENT_MESSAGE_WAIT: Duration = Duration::from_secs(60);
 
 /// An encoded `ServerMessage` with `reply_to = 0`.
 pub type Event = Bytes;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    #[error("could not prepare the Factory home: {0}")]
+    #[error("could not prepare the Claktory home: {0}")]
     Io(#[from] std::io::Error),
     #[error("could not write the default config: {0}")]
     Json(#[from] serde_json::Error),
@@ -67,6 +70,8 @@ pub enum RequestError {
     UnknownProvider(String),
     #[error("{provider} has no sign-in method \"{method}\"")]
     UnknownLoginMethod { provider: String, method: String },
+    #[error("{provider} has no account \"{account}\"")]
+    UnknownAccount { provider: String, account: String },
     #[error("no sign-in is waiting for an answer")]
     NoLoginQuestion,
     #[error(transparent)]
@@ -75,7 +80,7 @@ pub enum RequestError {
     NoRelease,
     #[error("\"{0}\" isn't a folder inside the project")]
     NotInProject(String),
-    #[error("can't update the app at {0}: it isn't an app on Factory's computer, or the release has no such app")]
+    #[error("can't update the app at {0}: it isn't an app on Claktory's computer, or the release has no such app")]
     NotAnApp(String),
     #[error("no extension with id \"{0}\"")]
     UnknownExtension(String),
@@ -109,6 +114,14 @@ pub enum RequestError {
     /// A proposal to Rivet that can't be decided so, and why.
     #[error("{0}")]
     Proposal(String),
+    /// A build cache that can't be cleared, and why.
+    #[error("{0}")]
+    BuildCache(String),
+    /// A layout that can't be used, and why.
+    #[error("{0}")]
+    Layout(String),
+    #[error(transparent)]
+    Vault(#[from] crate::vault::VaultError),
 }
 
 impl RequestError {
@@ -117,6 +130,7 @@ impl RequestError {
             RequestError::UnknownProject(_)
             | RequestError::UnknownAgent(_)
             | RequestError::UnknownProvider(_)
+            | RequestError::UnknownAccount { .. }
             | RequestError::UnknownExtension(_)
             | RequestError::UnknownFolder { .. }
             | RequestError::UnknownOption { .. }
@@ -138,9 +152,23 @@ impl RequestError {
             | RequestError::Command(_)
             | RequestError::Monitor(_)
             | RequestError::Remote(_)
-            | RequestError::Proposal(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Proposal(_)
+            | RequestError::BuildCache(_)
+            | RequestError::Layout(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
                 v1::ErrorCode::Internal
+            }
+            RequestError::Vault(error) => {
+                use crate::vault::VaultError;
+                match error {
+                    VaultError::Locked => v1::ErrorCode::VaultLocked,
+                    VaultError::ProofRequired => v1::ErrorCode::ProofRequired,
+                    VaultError::WrongProof => v1::ErrorCode::WrongProof,
+                    VaultError::NotGranted { .. } => v1::ErrorCode::NotGranted,
+                    VaultError::NoSecret(_) => v1::ErrorCode::NotFound,
+                    VaultError::NoVault | VaultError::Exists | VaultError::Invalid(_) => v1::ErrorCode::InvalidRequest,
+                    VaultError::Db(_) | VaultError::Io(_) => v1::ErrorCode::Internal,
+                }
             }
         }
     }
@@ -206,6 +234,15 @@ pub struct Factory {
     pub(crate) remote: crate::remote::State,
     /// The machine's resources as last sampled (`extensions::resources`).
     pub(crate) resources: crate::extensions::resources::State,
+    /// Build caches found, and cleared ones agents are to hear of
+    /// (`extensions::tree::caches`).
+    pub(crate) build_caches: crate::extensions::tree::caches::State,
+    /// Agents' layouts (`extensions::viewer`).
+    pub(crate) viewer: crate::extensions::viewer::State,
+    /// The secrets agents use (`crate::vault`).
+    pub(crate) vault: crate::vault::Vault,
+    /// Hides the vault's values in what agents and the app are shown.
+    pub(crate) redaction: factory_agent::Redaction,
 }
 
 pub(crate) struct Inner {
@@ -215,10 +252,10 @@ pub(crate) struct Inner {
     /// Models agents can run on now.
     pub(crate) models: Vec<v1::Model>,
     pub(crate) providers: Vec<v1::Provider>,
-    /// The usage of providers signed in with a subscription, by provider id.
-    pub(crate) usage: HashMap<String, v1::ProviderUsage>,
-    /// The plan of providers signed in with a subscription, by provider id.
-    pub(crate) plans: HashMap<String, String>,
+    /// The usage of accounts signed in with a subscription, by provider and account id.
+    pub(crate) usage: HashMap<crate::usage::AccountKey, v1::ProviderUsage>,
+    /// The plan of accounts signed in with a subscription, by provider and account id.
+    pub(crate) plans: HashMap<crate::usage::AccountKey, String>,
     pub(crate) login: Option<Flow>,
     pub(crate) login_generation: u64,
     pub(crate) agents: HashMap<String, Runtime>,
@@ -295,6 +332,11 @@ pub(crate) struct Runtime {
     pub(crate) taken: std::collections::VecDeque<(Queued, Option<i64>)>,
     /// The tool it's running now.
     pub(crate) doing: Option<String>,
+    /// When the tool it's running now started, in ms since 1970; 0 when none.
+    pub(crate) doing_since: i64,
+    /// Moves the bash command it's running now to the background, so a
+    /// message reaches it sooner.
+    pub(crate) detach: Option<DetachHandle>,
     /// Which conversation runs belong to: /clear starts a new one, and
     /// whatever a run of the old one still reports is dropped.
     pub(crate) epoch: u64,
@@ -307,6 +349,37 @@ pub(crate) struct Runtime {
     /// compaction failed for good, or its folder was unusable); it ends as
     /// "failed" unless a later prompt in it succeeds. Cleared when it ends.
     pub(crate) failed: bool,
+}
+
+impl Runtime {
+    /// Messages wait for a busy agent: a bash command it's running moves to
+    /// the background (as at its timeout) so the agent reads them sooner: at
+    /// once for the person's, once the command has run a minute for another
+    /// agent's. Task and monitor events wait for the step to end. Called when
+    /// a message comes and when a command starts.
+    pub(crate) fn make_way(&self) {
+        let (Some(detach), Some("bash")) = (&self.detach, self.doing.as_deref()) else { return };
+        let person = self.queue.iter().any(|queued| queued.event.is_none());
+        let agent = self.queue.iter().any(|queued| queued.event.as_ref().is_some_and(|event| event.source == EventSource::Agent));
+        let wait = if person {
+            Duration::ZERO
+        } else if agent {
+            let ran = Duration::from_millis(now_ms().saturating_sub(self.doing_since).max(0) as u64);
+            AGENT_MESSAGE_WAIT.saturating_sub(ran)
+        } else {
+            return;
+        };
+        let detach = detach.this_call();
+        if wait.is_zero() {
+            detach.detach();
+            return;
+        }
+        // Only this command: one that ended meanwhile has nothing to move.
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            detach.detach();
+        });
+    }
 }
 
 impl Factory {
@@ -371,6 +444,9 @@ impl Factory {
         };
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let presences = crate::characters::presences(&store.db())?;
+        let viewer = crate::extensions::viewer::State::load(&store);
+        let remote = crate::remote::State::new(&home);
+        let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
         let factory = Arc::new(Factory {
             home,
             models,
@@ -387,8 +463,12 @@ impl Factory {
             monitors: crate::extensions::monitors::State::default(),
             web: crate::extensions::web::State::default(),
             characters: crate::characters::State::new(presences),
-            remote: crate::remote::State::default(),
+            remote,
             resources: crate::extensions::resources::State::default(),
+            build_caches: crate::extensions::tree::caches::State::default(),
+            viewer,
+            redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
+            vault,
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
@@ -409,6 +489,7 @@ impl Factory {
         tokio::spawn(crate::characters::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::remote::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::resources::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         Ok(factory)
     }
 
@@ -621,6 +702,7 @@ impl Factory {
         crate::extensions::memory::forget(&self.store, id)?;
         crate::extensions::monitors::forget(self, id)?;
         crate::proposals::forget(&self.store, id)?;
+        crate::extensions::viewer::forget(self, id)?;
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -637,8 +719,11 @@ impl Factory {
             disk_free_gb,
             disk_free_percent,
             cpu_percent,
+            build_cache_gb,
             sidebar_width,
             panel_width,
+            user_name,
+            vault_unlock_minutes,
         } = request;
         let (model, effort) = (model.as_deref(), effort.as_deref());
         let models = self.lock().models.clone();
@@ -667,6 +752,15 @@ impl Factory {
                 if let Some(value) = value {
                     *setting = value;
                 }
+            }
+            if let Some(budget) = build_cache_gb {
+                config.resources.build_cache_gb = budget;
+            }
+            if let Some(name) = user_name {
+                config.user.name = name.trim().to_owned();
+            }
+            if let Some(minutes) = vault_unlock_minutes {
+                config.vault.unlock_minutes = minutes;
             }
             for (value, setting) in [(sidebar_width, &mut config.display.sidebar_width), (panel_width, &mut config.display.panel_width)] {
                 if let Some(value) = value {
@@ -801,6 +895,15 @@ impl Factory {
     /// Records a message for an existing agent and queues it: a working
     /// agent reads it after its current step, an idle one starts on it.
     fn enqueue(self: &Arc<Self>, inner: &mut Inner, id: &str, mut queued: Queued) -> Result<(), rusqlite::Error> {
+        // No secret's value reaches an agent, or factory.db, in a message:
+        // another agent's, a task's output, a monitor's, or one pasted by the person.
+        let redactor = self.redaction.current();
+        if !redactor.is_empty() {
+            queued.text = redactor.redact(&queued.text).into_owned();
+            if let Some(event) = queued.event.as_mut() {
+                event.summary = redactor.redact(&event.summary).into_owned();
+            }
+        }
         queued.id = self.store.add_message(id, &queued)?;
         let runtime = inner.agents.entry(id.to_owned()).or_default();
         runtime.queue.push(queued);
@@ -808,6 +911,8 @@ impl Factory {
         if !runtime.running {
             runtime.running = true;
             tokio::spawn(self.clone().run(id.to_owned()));
+        } else {
+            runtime.make_way();
         }
         self.broadcast_workspace(inner);
         Ok(())
@@ -819,8 +924,8 @@ impl Factory {
             return Err(RequestError::UnknownAgent(id.to_owned()));
         }
         if let Some(runtime) = inner.agents.get_mut(id) {
-            let dropped = std::mem::take(&mut runtime.queue);
-            self.settle(&dropped, crate::store::Outcome::Dropped);
+            // What's queued stays: it reaches the agent after the stop, as a
+            // new run (/clear drops it).
             runtime.stopped = true;
             if let Some(abort) = runtime.abort.take() {
                 abort.abort();
@@ -946,12 +1051,23 @@ impl Factory {
             // Usage and plan belong to a sign-in; a new one's are read afresh, now.
             for provider in &providers {
                 let before = inner.providers.iter().find(|old| old.id == provider.id);
-                if before.is_none_or(|old| old.signed_in_with != provider.signed_in_with) {
-                    inner.usage.remove(&provider.id);
-                    inner.plans.remove(&provider.id);
-                    self.usage_wake.notify_one();
+                let signed_in_again = before.is_none_or(|old| old.signed_in_with != provider.signed_in_with);
+                let known = before.map(crate::usage::account_ids).unwrap_or_default();
+                for account in crate::usage::account_ids(provider) {
+                    if signed_in_again || !known.contains(&account) {
+                        let key = (provider.id.clone(), account);
+                        inner.usage.remove(&key);
+                        inner.plans.remove(&key);
+                        self.usage_wake.notify_one();
+                    }
                 }
             }
+            // Those of accounts signed out of go with them.
+            let listed = |(id, account): &crate::usage::AccountKey| {
+                providers.iter().any(|provider| provider.id == *id && crate::usage::account_ids(provider).contains(account))
+            };
+            inner.usage.retain(|key, _| listed(key));
+            inner.plans.retain(|key, _| listed(key));
             inner.models = models;
             inner.providers = providers;
             self.broadcast_workspace(&inner);
@@ -989,6 +1105,13 @@ impl Factory {
         inner.state.collapsed_folders.retain(|(project, folder)| folder_exists(project, folder));
         let pruned = before != marks(&inner.state);
         self.retire_checkouts(&inner.config, &config);
+        // A removed agent's grants go with it, so one added later with its id
+        // gets none (deleted in the app, or edited out of config.json).
+        for agent in inner.config.agents.iter().filter(|agent| config.agent(&agent.id).is_none()) {
+            if let Err(error) = self.vault.forget_agent(&agent.id) {
+                tracing::error!(%error, agent = %agent.id, "could not take a removed agent's grants");
+            }
+        }
         self.add_presences(&config.agents);
         inner.config = config;
         if selected_gone {
@@ -1145,7 +1268,8 @@ impl Factory {
         if self.lock().config.agent(agent).is_none() {
             return Err(RequestError::UnknownAgent(agent.to_owned()));
         }
-        crate::extensions::tasks::stop(self, agent, task, "the person").map_err(RequestError::NoTask)
+        let person = self.lock().config.person().to_owned();
+        crate::extensions::tasks::stop(self, agent, task, &person).map_err(RequestError::NoTask)
     }
 
     /// Folds a project folder's agents away in the sidebar, or shows them.
@@ -1318,6 +1442,7 @@ impl Factory {
                 avatar_shape_override: character.shape_override,
                 avatar_face_override: None,
                 role: agent.role.clone(),
+                layout: self.viewer.layout(&agent.id),
             });
         }
         let config = &inner.config;
@@ -1331,6 +1456,7 @@ impl Factory {
             latest_backend: inner.latest_release.backend.clone(),
             changelog: inner.latest_release.changelog.iter().map(crate::update::ChangelogVersion::to_proto).collect(),
             remote: Some(self.remote_view(inner)),
+            vault: Some(self.vault.state(|agent, task| self.store.task_running(agent, task))),
             update_error: inner.update_error.clone(),
             next_agent_color: inner.config.next_color().to_owned(),
             extensions: crate::extensions::catalog(),
@@ -1343,10 +1469,22 @@ impl Factory {
                 .iter()
                 .map(|provider| {
                     let signed_in = !provider.signed_in_with.is_empty();
+                    let key = |account: &str| (provider.id.clone(), account.to_owned());
+                    let first = key(provider.accounts.first().map_or("", |account| account.id.as_str()));
+                    let accounts = provider
+                        .accounts
+                        .iter()
+                        .map(|account| v1::Account {
+                            usage: inner.usage.get(&key(&account.id)).cloned().or_else(|| account.usage.clone()),
+                            plan: inner.plans.get(&key(&account.id)).cloned().unwrap_or_else(|| account.plan.clone()),
+                            ..account.clone()
+                        })
+                        .collect();
                     v1::Provider {
                         // Until the first read, what the sign-in says: empty for a subscription.
-                        usage: if signed_in { inner.usage.get(&provider.id).cloned().or_else(|| provider.usage.clone()) } else { None },
-                        plan: if signed_in { inner.plans.get(&provider.id).cloned().unwrap_or_default() } else { String::new() },
+                        usage: if signed_in { inner.usage.get(&first).cloned().or_else(|| provider.usage.clone()) } else { None },
+                        plan: if signed_in { inner.plans.get(&first).cloned().unwrap_or_default() } else { String::new() },
+                        accounts,
                         ..provider.clone()
                     }
                 })
@@ -1360,8 +1498,11 @@ impl Factory {
                 disk_free_gb: config.resources.disk_free_gb,
                 disk_free_percent: config.resources.disk_free_percent,
                 cpu_percent: config.resources.cpu_percent,
+                build_cache_gb: config.resources.build_cache_gb,
                 sidebar_width: config.display.sidebar_width,
                 panel_width: config.display.panel_width,
+                user_name: config.user.name.clone(),
+                vault_unlock_minutes: config.vault.unlock_minutes,
             }),
         }
     }
@@ -1433,9 +1574,15 @@ async fn watch(factory: Weak<Factory>) {
     let mut config_stamp = stamp(&config_path).await;
     let mut auth_stamp = stamp(&auth_path).await;
     let mut release_stamp = stamp(&release_path).await;
-    // An edit since Factory read the file, before the stamp above, counts too.
+    // An edit since Factory read the files, before the stamps above, counts
+    // too: a sign-in or a release as Factory started is noticed, not missed
+    // until the next.
     match factory.upgrade() {
-        Some(factory) => factory.reload_config().await,
+        Some(factory) => {
+            factory.reload_config().await;
+            factory.refresh_models().await;
+            factory.refresh_release().await;
+        }
         None => return,
     }
     loop {
@@ -1483,4 +1630,18 @@ pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
     tmp.push(".tmp");
     tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, path).await
+}
+
+impl Factory {
+    /// The vault changed: what's hidden follows its values, and clients see
+    /// it as it is now.
+    pub(crate) fn vault_changed(&self) {
+        self.redaction.set(factory_agent::Redactor::new(&self.vault.every_variable()));
+        self.broadcast_workspace(&self.lock());
+    }
+
+    /// Makes new vault passphrases cheap to check; for tests.
+    pub fn set_vault_passphrase_cost(&self, params: &'static str) {
+        self.vault.set_passphrase_params(params);
+    }
 }

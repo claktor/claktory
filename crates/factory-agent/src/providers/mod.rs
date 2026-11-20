@@ -102,6 +102,8 @@ pub struct Provider {
     pub limits: Option<crate::limits::LimitsFn>,
     /// Reads which plan a subscription sign-in has; None when the provider can't say.
     pub plan: Option<crate::limits::PlanFn>,
+    /// Reads who a subscription sign-in is, to tell its accounts apart; None when the provider can't say.
+    pub identity: Option<crate::limits::IdentityFn>,
 }
 
 fn api_key(auth: impl ApiKeyAuth + 'static) -> Option<Arc<dyn ApiKeyAuth>> {
@@ -121,7 +123,18 @@ impl Provider {
         oauth: Option<Arc<dyn OAuthFlow>>,
         api: impl Api + 'static,
     ) -> Provider {
-        Provider { id, name, base_url, api_key, oauth, models: catalog::models(id), api: Some(Arc::new(api)), limits: None, plan: None }
+        Provider {
+            id,
+            name,
+            base_url,
+            api_key,
+            oauth,
+            models: catalog::models(id),
+            api: Some(Arc::new(api)),
+            limits: None,
+            plan: None,
+            identity: None,
+        }
     }
 }
 

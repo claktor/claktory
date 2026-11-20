@@ -237,7 +237,7 @@ void main() {
     expect(find.text('Open again'), findsOneWidget);
     expect(find.text('Copy link'), findsOneWidget);
 
-    await tester.enterText(find.byType(EditableText).first, 'code#state');
+    await tester.enterText(settingsField, 'code#state');
     await tester.pump();
     await tester.tap(find.text('Continue'));
     await settle(tester);
@@ -295,7 +295,7 @@ void main() {
     harness.page.value = AppPage.settings;
     await settle(tester);
 
-    final secret = find.byType(EditableText).first;
+    final secret = settingsField;
     expect(tester.widget<EditableText>(secret).obscureText, isTrue);
     await tester.enterText(secret, 'sk-ant-1');
     await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -317,7 +317,7 @@ void main() {
     // "high" isn't an effort GPT-6 accepts.
     expect(update.hasDefaultEffort(), isTrue);
 
-    await tester.enterText(find.byType(EditableText).first, '300k');
+    await tester.enterText(settingsField, '300k');
     await tester.pump();
     await tester.tap(find.text('Save'));
     await settle(tester);
@@ -573,7 +573,7 @@ void main() {
     );
     await tester.tap(find.text('Opus 5.5 · high'));
     await settle(tester);
-    expect(find.textContaining('One per line'), findsOneWidget);
+    expect(find.textContaining('separate lines'), findsOneWidget);
     final field = find.descendant(
       of: find.ancestor(
         of: find.text('Message box hint'),
@@ -878,4 +878,12 @@ Finder composerBox() => find
       return decoration is BoxDecoration && decoration.border != null;
     })
     .map((element) => find.byWidget(element.widget))
+    .first;
+
+/// The first field in Settings after Your name (which holds the harness's
+/// "Matt").
+Finder get settingsField => find
+    .byWidgetPredicate(
+      (widget) => widget is EditableText && widget.controller.text != 'Matt',
+    )
     .first;

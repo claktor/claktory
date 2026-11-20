@@ -55,6 +55,10 @@ struct Render<'a> {
     folder_name: Option<&'a str>,
     /// The project's folders, when it has any (see `Frame::folders`).
     folders: &'a BTreeMap<String, String>,
+    /// The user's name, when it's set.
+    user: Option<&'a str>,
+    /// The vault's secrets it may use (see `Frame::secrets`).
+    secrets: &'a BTreeMap<String, String>,
 }
 
 /// Where an agent works, and what else its file tools may reach: the Factory
@@ -151,7 +155,16 @@ fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path) -> String {
     if !agent.role.is_empty() {
         key["role"] = agent.role.clone().into();
     }
+    // The user's name, only when it's set, the same way.
+    if let Some(name) = config.user_name() {
+        key["user"] = name.into();
+    }
     key.to_string()
+}
+
+/// bash, taking `secrets` (see `factory_agent::tools::secrets`).
+fn takes_secrets(tool: &ToolSpec) -> bool {
+    tool.name == "bash" && tool.parameters.get("properties").and_then(|properties| properties.get("secrets")).is_some()
 }
 
 /// The models the system prompt lists, by id.
@@ -169,6 +182,7 @@ fn changes(
     roster: &BTreeMap<String, String>,
     models: &BTreeMap<String, String>,
     folders: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, String>,
 ) -> Option<String> {
     let mut said = Vec::new();
     let list = |now: &BTreeMap<String, String>, then: &BTreeMap<String, String>| -> (Vec<String>, Vec<String>) {
@@ -196,6 +210,20 @@ fn changes(
     }
     if !lost.is_empty() {
         said.push(format!("Project folders removed: {}.", lost.join("; ")));
+    }
+    let (gained, _) = list(secrets, &frame.secrets);
+    if !gained.is_empty() {
+        said.push(format!("You can now use the secrets (pass names in bash's `secrets`): {}.", gained.join("; ")));
+    }
+    // Taken back or deleted: by name, as it was known.
+    let lost: Vec<String> = frame
+        .secrets
+        .iter()
+        .filter(|(id, _)| !secrets.contains_key(*id))
+        .map(|(_, label)| label.split(" (sets").next().unwrap_or_default().to_owned())
+        .collect();
+    if !lost.is_empty() {
+        said.push(format!("You can no longer use the secrets: {}.", lost.join(", ")));
     }
     (!said.is_empty()).then(|| said.join("\n"))
 }
@@ -268,6 +296,12 @@ fn settings_note(
     if text("role") != agent.role {
         said.push(if agent.role.is_empty() { "you no longer have a role".to_owned() } else { format!("your role is now {}", agent.role) });
     }
+    if text("user") != config.user_name().unwrap_or_default() {
+        said.push(match config.user_name() {
+            Some(name) => format!("the person you work with is {name}, and your system prompt says so from your next context"),
+            None => "the name of the person you work with was removed".to_owned(),
+        });
+    }
     if text("effort") != agent.effort {
         said.push(format!("your effort is now {}", agent.effort));
     }
@@ -276,7 +310,7 @@ fn settings_note(
     if moved {
         said.push(match agent.project.as_deref().and_then(|project| config.project(project)) {
             Some(project) => format!("you're now in the project \"{}\"", project.name),
-            None => "you're now in Factory's workspace, outside any project".to_owned(),
+            None => "you're now in Claktory's workspace, outside any project".to_owned(),
         });
     }
     let mut before = agent.clone();
@@ -348,8 +382,10 @@ fn settings_note(
     let checkout = (in_checkout || (checkout_switched && enabled(agent, tree))).then(|| {
         let mut section = crate::extensions::tree::section(home, &agent.id, &source_folder(home, config, agent));
         if in_checkout && !can_land {
-            section.push_str(
-                "tree_land arrives with your next context (after compaction or /clear); until then, leave landing to the person.\n",
+            let _ = writeln!(
+                section,
+                "tree_land arrives with your next context (after compaction or /clear); until then, leave landing to {}.",
+                config.person()
             );
         }
         section
@@ -371,7 +407,7 @@ fn settings_note(
 /// of an extension turned on since its context began.
 const EXTENSION_CALL: &str = "extension_call";
 const EXTENSION_CALL_ABOUT: &str =
-    "Call a tool Factory told you is yours now but isn't in your tool list yet: tool is its name, args its arguments.";
+    "Call a tool Claktory told you is yours now but isn't in your tool list yet: tool is its name, args its arguments.";
 
 /// What the agent can use now that an extension came on mid-context: the
 /// extensions' instructions not in its system prompt (for `turned_on`), and
@@ -523,9 +559,12 @@ impl Factory {
         // new frame anyway.
         let compact = runtime.compact;
         let note = if compact { None } else { self.take_changes(&mut inner, id, current) };
+        let cleared = crate::extensions::tree::caches::take_note(self, id);
         let runtime = inner.agents.get_mut(id)?;
+        // A new run: a stop before now was of the one that ended.
+        runtime.stopped = false;
         let mut prompts = std::mem::take(&mut runtime.queue);
-        prompts.splice(0..0, note);
+        prompts.splice(0..0, note.into_iter().chain(cleared));
         let (epoch, compact) = (runtime.epoch, std::mem::take(&mut runtime.compact));
         let frame = runtime
             .transcript
@@ -556,6 +595,7 @@ impl Factory {
         let roster = crate::extensions::agents::roster(&inner.config, &agent);
         let folders = folder_lines(&inner.config, &agent);
         let names = model_lines(&inner.models);
+        let secrets = self.vault.granted(id);
         // tree_land in its tools, or reached through extension_call.
         let can_land = frame.tools.iter().any(|tool| tool.name == "tree_land" || tool.name == EXTENSION_CALL);
         let (settings, turned_on) = match settings_note(frame.told(), &self.home, &inner.config, &agent, &folder, can_land, &frame.tools) {
@@ -569,7 +609,7 @@ impl Factory {
             (Some(settings), Some(news)) => Some(format!("{settings}\n\n{news}")),
             (settings, news) => settings.or(news),
         };
-        let notes: Vec<String> = [settings, changes(&frame, &roster, &names, &folders)].into_iter().flatten().collect();
+        let notes: Vec<String> = [settings, changes(&frame, &roster, &names, &folders, &secrets)].into_iter().flatten().collect();
         if notes.is_empty() {
             return None;
         }
@@ -577,9 +617,10 @@ impl Factory {
         frame.roster = roster;
         frame.models = names;
         frame.folders = folders;
+        frame.secrets = secrets;
         // Left out of compaction: the next frame says it all.
         let event =
-            Event { source: EventSource::Host, from: "Factory".to_owned(), id: String::new(), summary: String::new(), transient: true };
+            Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary: String::new(), transient: true };
         let mut note = Queued::event(notes.join("\n"), event);
         match self.store.add_message(id, &note) {
             Ok(message) => note.id = message,
@@ -597,7 +638,7 @@ impl Factory {
     /// `announced` are the tools the agent was told it can call through
     /// extension_call, for a frame that keeps the tools it had.
     async fn new_frame(&self, id: &str, epoch: u64, tools: Vec<ToolSpec>, announced: Vec<String>) -> Option<Frame> {
-        let (agent, project, compact_at, models, sections, pinned, roster, folders, places, settings, folder_name) = {
+        let (agent, project, compact_at, models, sections, pinned, roster, folders, places, settings, folder_name, user) = {
             let mut inner = self.lock();
             if inner.agents.get(id).is_none_or(|runtime| runtime.epoch != epoch) {
                 return None;
@@ -611,8 +652,10 @@ impl Factory {
             let settings = settings_key(&inner.config, &agent, &places.folder);
             let folder_name = inner.config.agent_folder(&agent).map(|folder| folder.name.clone());
             let compact_at = inner.config.compact_at_tokens;
-            (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name)
+            let user = inner.config.user_name().map(str::to_owned);
+            (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user)
         };
+        let secrets = self.vault.granted(id);
         let render = Render {
             agent: &agent,
             project: project.as_ref(),
@@ -622,9 +665,21 @@ impl Factory {
             pinned: &pinned,
             folder_name: folder_name.as_deref(),
             folders: &folders,
+            user: user.as_deref(),
+            secrets: &secrets,
         };
         let system_prompt = system_prompt(&render, &places.folder, &self.home, &places.extra_dirs).await;
-        let frame = Frame { settings, system_prompt, tools, told: String::new(), roster, models: model_lines(&models), folders, announced };
+        let frame = Frame {
+            settings,
+            system_prompt,
+            tools,
+            told: String::new(),
+            roster,
+            models: model_lines(&models),
+            folders,
+            secrets,
+            announced,
+        };
         let mut inner = self.lock();
         let transcript =
             inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch).and_then(|runtime| runtime.transcript.as_mut())?;
@@ -718,13 +773,26 @@ impl Factory {
                 })
             })
         };
+        // A request that carried on with another account says so in the
+        // transcript, and the providers show the account it left at its limit.
+        let notes: factory_agent::providers::models::Notes = {
+            let factory = Arc::downgrade(self);
+            let (id, epoch) = (id.to_owned(), job.epoch);
+            Arc::new(move |note| {
+                let Some(factory) = factory.upgrade() else { return };
+                if let factory_agent::providers::models::AccountNote::Switched(text) = note {
+                    factory.notice(&id, epoch, text, NoticeLevel::Info);
+                }
+                tokio::spawn(async move { factory.refresh_models().await });
+            })
+        };
         let mut agent = Agent::new(AgentOptions {
             system_prompt,
             model,
             thinking_level,
             tools,
             messages: job.messages,
-            stream: self.models.stream(),
+            stream: self.models.stream_noting(notes),
             session_id: Some(id.to_owned()),
             transform_context: None,
             should_stop_after_turn: None,
@@ -732,6 +800,7 @@ impl Factory {
             compact_at: Some(job.compact_at),
             inbox: Some(self.inbox(id, job.epoch)),
             after_compaction: Some(after_compaction),
+            secrets: Some(self.secrets(id)),
         });
         let factory = self.clone();
         let agent_id = id.to_owned();
@@ -744,7 +813,7 @@ impl Factory {
                 Ok(())
             })
         }));
-        if !self.set_abort(id, Some(agent.abort_handle())) {
+        if !self.set_abort(id, Some((agent.abort_handle(), agent.detach_handle()))) {
             self.unsent(id, &job.prompts, "Stopped.".to_owned(), NoticeLevel::Info);
             return;
         }
@@ -799,6 +868,10 @@ impl Factory {
     fn build_tools(self: &Arc<Self>, id: &str, places: &Places, extensions: &[&'static dyn Extension]) -> Vec<Tool> {
         let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, Some(self.background(id)));
         factory_agent::tools::read_only(&mut tools, &places.read_only);
+        // Only agents given a secret see bash's `secrets`.
+        if !self.vault.granted(id).is_empty() {
+            factory_agent::tools::secrets(&mut tools);
+        }
         for extension in extensions {
             tools.extend(extension.tools(self, id));
         }
@@ -830,12 +903,12 @@ impl Factory {
         let handler: factory_agent::Handler = Arc::new(move |args| {
             let (factory, agent) = (factory.upgrade(), agent.clone());
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
                 let name = args.get("tool").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
                 let tools = factory.extension_tools(&agent);
                 let Some(tool) = tools.into_iter().find(|tool| tool.spec.name == name) else {
                     return Err(factory_agent::Error::Other(format!(
-                        "No tool \"{name}\" of an extension is on for you; extension_call reaches only those Factory told you of."
+                        "No tool \"{name}\" of an extension is on for you; extension_call reaches only those Claktory told you of."
                     )));
                 };
                 let args = args.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -884,8 +957,10 @@ impl Factory {
         };
         let now: serde_json::Value = serde_json::from_str(&now).unwrap_or_default();
         let changed = |keys: &[&str]| keys.iter().any(|key| then.get(key) != now.get(key));
+        // Given its first secret, its bash takes `secrets` from now on.
+        let needs_secrets = !frame.tools.iter().any(takes_secrets) && !self.vault.granted(id).is_empty();
         // Its project, folder or checkout.
-        if changed(&["project", "folder", "cwd"]) {
+        if changed(&["project", "folder", "cwd"]) || needs_secrets {
             // It works somewhere else now: its tools too.
             let Some(tools) = self.current_tools(id) else { return settings };
             let specs = tools.iter().map(|tool| tool.spec.clone()).collect();
@@ -929,7 +1004,10 @@ impl Factory {
             // Its character works while a tool runs, and thinks otherwise.
             let doing_changed = doing.as_ref().is_some_and(|doing| *doing != runtime.doing);
             if let Some(doing) = doing {
+                runtime.doing_since = if doing.is_some() { crate::transcript::now_ms() } else { 0 };
                 runtime.doing = doing;
+                // Messages that came just before it started.
+                runtime.make_way();
             }
             let Some(transcript) = runtime.transcript.as_mut() else { return };
             let applied = match transcript.apply(event) {
@@ -963,13 +1041,15 @@ impl Factory {
 
     /// Lets the person stop the run; false when they already did, while it
     /// was still starting.
-    fn set_abort(&self, id: &str, abort: Option<factory_agent::AbortHandle>) -> bool {
+    /// Also keeps what moves its bash command to the background when a
+    /// message comes (see `make_way`).
+    fn set_abort(&self, id: &str, handles: Option<(factory_agent::AbortHandle, factory_agent::DetachHandle)>) -> bool {
         let mut inner = self.lock();
         let Some(runtime) = inner.agents.get_mut(id) else { return false };
-        if runtime.stopped && abort.is_some() {
+        if runtime.stopped && handles.is_some() {
             return false;
         }
-        runtime.abort = abort;
+        (runtime.abort, runtime.detach) = handles.unzip();
         true
     }
 
@@ -1057,13 +1137,52 @@ impl Factory {
             }),
         }
     }
+
+    /// What the agent's bash needs for the vault's secrets: the values of the
+    /// ones it's granted, a log of each use, and the redactor for output.
+    fn secrets(self: &Arc<Self>, id: &str) -> factory_agent::Secrets {
+        let factory = Arc::downgrade(self);
+        let resolve: factory_agent::secrets::Resolve = Arc::new(move |agent, names| {
+            let factory = factory.clone();
+            Box::pin(async move {
+                let Some(factory) = factory.upgrade() else {
+                    return Err("Claktory is stopping.".to_owned());
+                };
+                factory.vault.resolve(&agent, &names)
+            })
+        });
+        let factory = Arc::downgrade(self);
+        let used: factory_agent::secrets::Used = Arc::new(move |used| {
+            if let Some(factory) = factory.upgrade() {
+                if let Err(error) = factory.vault.record_use(&used) {
+                    tracing::error!(%error, "could not log a secret's use");
+                }
+                factory.broadcast_workspace(&factory.lock());
+            }
+        });
+        let filter = match FILTER_EXECUTABLE.get() {
+            Some(factoryd) => vec![factoryd.clone().into_os_string(), "redact".into()],
+            None => Vec::new(),
+        };
+        factory_agent::Secrets { agent: id.to_owned(), resolve, used, redaction: self.redaction.clone(), filter }
+    }
+}
+
+/// The factoryd that runs a command's log filter (`factoryd redact`), which
+/// keeps secrets out of the log on disk; main sets it to itself. Unset, as
+/// in a program that runs Factory inside it, such logs aren't filtered.
+static FILTER_EXECUTABLE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Names the factoryd that filters the logs of commands with secrets.
+pub fn set_filter_executable(factoryd: PathBuf) {
+    let _ = FILTER_EXECUTABLE.set(factoryd);
 }
 
 async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_dirs: &[PathBuf]) -> String {
     let agent = render.agent;
     let mut prompt = factory_agent::coding_prompt(folder, extra_dirs);
     // Writing to a String can't fail.
-    let _ = write!(prompt, "\n\n# Factory\n\nYou are {}, a persistent agent in Factory. ", agent.name);
+    let _ = write!(prompt, "\n\n# Claktory\n\nYou are {}, a persistent agent in Claktory. ", agent.name);
     if !agent.role.is_empty() {
         let _ = write!(prompt, "Your role: {}. ", agent.role);
     }
@@ -1077,10 +1196,13 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
         (Some(project), None) => writeln!(prompt, "You work in the project \"{}\", in its folder {}.", project.name, folder.display()),
         (None, _) => writeln!(
             prompt,
-            "You work in Factory's workspace, {}, outside any project. Each project is a folder inside it.",
+            "You work in Claktory's workspace, {}, outside any project. Each project is a folder inside it.",
             folder.display()
         ),
     };
+    if let Some(name) = render.user {
+        let _ = writeln!(prompt, "The person you work with is {name}.");
+    }
     if !render.folders.is_empty() {
         prompt.push_str("The project's folders:\n");
         for line in render.folders.values() {
@@ -1094,15 +1216,21 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
     for text in render.sections.iter().chain(render.pinned) {
         let _ = write!(prompt, "\n{text}");
     }
+    if !render.secrets.is_empty() {
+        prompt.push_str("\n## Secrets\n\nThe person gave you these secrets from Claktory's vault. To use one, pass its name in bash's `secrets` (`\"secrets\": [\"AWS\"]`): its variables are set for that command only. You never see their values: output that holds one shows `[secret NAME/VARIABLE]` instead. Never print a value, or write one to a file or a commit.\n");
+        for line in render.secrets.values() {
+            let _ = writeln!(prompt, "- {line}");
+        }
+    }
     let _ = write!(
         prompt,
-        "\n## How you persist\n\nYour conversation continues across messages and restarts. When your context reaches {compact} tokens, Factory summarizes it and you continue from the summary, so keep important decisions and progress in the conversation or in files.\n",
+        "\n## How you persist\n\nYour conversation continues across messages and restarts. When your context reaches {compact} tokens, Claktory summarizes it and you continue from the summary, so keep important decisions and progress in the conversation or in files.\n",
         compact = render.compact_at,
     );
-    let manual = crate::manual::render(&crate::manual::manual().core, home);
+    let manual = crate::manual::render(&crate::manual::manual().core, home, render.user);
     let _ = write!(
         prompt,
-        "\n{manual}\n## This Factory now\n\nYour id in the settings is \"{id}\". Models available now, with their efforts:\n",
+        "\n{manual}\n## This Claktory now\n\nYour id in the settings is \"{id}\". Models available now, with their efforts:\n",
         id = agent.id,
     );
     if render.models.is_empty() {
@@ -1143,10 +1271,17 @@ mod tests {
             roster: map(&[("writer", "Writer (writer)")]),
             models: map(&[("a/one", "a/one (One)"), ("a/two", "a/two (Two)")]),
             folders: BTreeMap::new(),
+            secrets: BTreeMap::new(),
             announced: Vec::new(),
         };
-        assert_eq!(changes(&frame, &frame.roster, &frame.models, &frame.folders), None);
-        let said = changes(&frame, &frame.roster, &map(&[("a/one", "a/one (One)"), ("b/three", "b/three (Three)")]), &frame.folders);
+        assert_eq!(changes(&frame, &frame.roster, &frame.models, &frame.folders, &frame.secrets), None);
+        let said = changes(
+            &frame,
+            &frame.roster,
+            &map(&[("a/one", "a/one (One)"), ("b/three", "b/three (Three)")]),
+            &frame.folders,
+            &frame.secrets,
+        );
         assert_eq!(said.as_deref(), Some("Models now available: b/three (Three).\nModels no longer available: a/two (Two)."));
     }
 }

@@ -11,10 +11,12 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, Sleep, sleep};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use crate::errors::{AgentError, AgentFailure, Error};
+use crate::secrets::{Redaction, Redactor, SecretUse, SecretVariable, Secrets, StreamRedactor};
 use crate::text::{utf16_head, utf16_len, utf16_tail};
-use crate::tools::{MAX_OUTPUT, Update};
+use crate::tools::{MAX_OUTPUT, Update, checks};
 use crate::types::ToolResult;
 
 /// Output a command may write through pipes (with no background folder to
@@ -75,14 +77,20 @@ impl Task {
         self.log.with_extension("status")
     }
 
+    /// The folder of the files its secrets put there, if any.
+    fn secrets_dir(&self) -> PathBuf {
+        self.log.with_extension("secrets")
+    }
+
     /// Waits for a task this process no longer watches (it was started
     /// before a restart): until it records its exit code, or its process
-    /// group is gone because it was killed.
-    pub async fn wait_detached(self) -> Finished {
+    /// group is gone because it was killed. `redaction` hides secrets in
+    /// the end of its output.
+    pub async fn wait_detached(self, redaction: &Redaction) -> Finished {
         while self.recorded_exit().is_none() && group_alive(self.pid) {
             sleep(Duration::from_secs(1)).await;
         }
-        self.finished("stopped".to_owned())
+        self.finished("stopped".to_owned(), &redaction.current())
     }
 
     fn recorded_exit(&self) -> Option<i32> {
@@ -90,14 +98,15 @@ impl Task {
     }
 
     /// How it ended, from the exit code it recorded; `otherwise` when it
-    /// recorded none (it was killed).
-    fn finished(self, otherwise: String) -> Finished {
+    /// recorded none (it was killed). Its secrets' files go.
+    fn finished(self, otherwise: String, redactor: &Redactor) -> Finished {
+        remove_secret_files(&self.secrets_dir());
         let status = match self.recorded_exit() {
             Some(code) if code > 128 => format!("signal {}", signal_name(code - 128)),
             Some(code) => format!("exit {code}"),
             None => otherwise,
         };
-        let tail = log_tail(&self.log);
+        let tail = log_tail(&self.log, redactor);
         let seconds = (self.started > 0).then(|| crate::clock::now_ms().saturating_sub(self.started) as f64 / 1000.0);
         Finished { id: self.id, command: self.command, log: self.log, status, tail, seconds }
     }
@@ -165,6 +174,15 @@ pub fn took(seconds: f64) -> String {
 /// Runs the task's script ($1) and records its exit code in $2.
 const TASK_WRAPPER: &str = r#"bash --noprofile --norc -e -o pipefail -c "$1"; echo $? > "$2""#;
 
+/// As TASK_WRAPPER, for a command with secrets: its output goes to the log
+/// through the filter ($3 and its arguments), which hides their values; the
+/// values the filter gets aren't the command's.
+const FILTERED_TASK_WRAPPER: &str = concat!(
+    r#"( unset "#,
+    "CLAKTORY_REDACT",
+    r#"; exec bash --noprofile --norc -e -o pipefail -c "$1" ) 2>&1 | "${@:3}"; echo "${PIPESTATUS[0]}" > "$2""#
+);
+
 /// Whether any process of the group is still there.
 pub fn group_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process group exists.
@@ -172,18 +190,129 @@ pub fn group_alive(pid: u32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// The last FINISHED_TAIL characters of a log, reading only its end.
-fn log_tail(path: &Path) -> String {
+/// The last FINISHED_TAIL characters of a log, reading only its end, with
+/// secrets hidden (before it's cut, so a value the cut would split is too).
+fn log_tail(path: &Path, redactor: &Redactor) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
     let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let start = length.saturating_sub(FINISHED_TAIL as u64 * 4);
+    let start = length.saturating_sub(FINISHED_TAIL as u64 * 4 + redactor.longest() as u64);
     let mut bytes = Vec::new();
     if file.seek(SeekFrom::Start(start)).and_then(|_| file.read_to_end(&mut bytes)).is_err() {
         return String::new();
     }
     let text = String::from_utf8_lossy(&bytes);
-    utf16_tail(&text, FINISHED_TAIL).to_owned()
+    utf16_tail(&redactor.redact(&text), FINISHED_TAIL).to_owned()
+}
+
+/// Removes the folder of a command's secret files, if it has one.
+fn remove_secret_files(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(dir = %dir.display(), %error, "could not remove a command's secret files");
+        }
+        _ => {}
+    }
+}
+
+/// The secrets a command runs with.
+struct Injected<'a> {
+    secrets: Option<&'a Secrets>,
+    /// The names it asked for.
+    names: Vec<String>,
+    variables: Vec<SecretVariable>,
+    /// Hides every value there is, its own included.
+    redactor: Arc<Redactor>,
+}
+
+impl Injected<'_> {
+    /// Its environment variables; file secrets are written into `dir`
+    /// (mode 0700, the files 0600), which the caller removes when the
+    /// command ends.
+    fn environment(&self, dir: &Path) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let mut environment = Vec::with_capacity(self.variables.len());
+        let mut made = false;
+        for (index, variable) in self.variables.iter().enumerate() {
+            if !variable.file {
+                environment.push((variable.variable.clone(), variable.value.clone()));
+                continue;
+            }
+            if !made {
+                remove_secret_files(dir);
+                std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+                made = true;
+            }
+            let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+            let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
+            let path = dir.join(name);
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            file.write_all(variable.value.as_bytes())?;
+            environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
+        }
+        Ok(environment)
+    }
+
+    /// The filter a command's log goes through, and the values it hides:
+    /// for a command with secrets, when there's a filter to run.
+    fn filter(&self) -> Option<(&[std::ffi::OsString], Zeroizing<String>)> {
+        let secrets = self.secrets?;
+        (!self.variables.is_empty() && !secrets.filter.is_empty())
+            .then(|| (secrets.filter.as_slice(), crate::secrets::filter_values(&self.variables)))
+    }
+
+    /// Tells the program running the agent that `command` ran with them.
+    fn used(&self, command: &str, task: Option<String>, started: u64) {
+        if let Some(secrets) = self.secrets
+            && !self.names.is_empty()
+        {
+            (secrets.used)(SecretUse {
+                agent: secrets.agent.clone(),
+                secrets: self.names.clone(),
+                command: command.to_owned(),
+                task,
+                started,
+            });
+        }
+    }
+}
+
+/// Removes a command's secret files when it goes, unless it was kept
+/// (its command runs on as a background task, which removes them).
+struct SecretFiles(Option<PathBuf>);
+
+impl SecretFiles {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for SecretFiles {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            remove_secret_files(dir);
+        }
+    }
+}
+
+/// The secrets the call asks for, resolved, and what hides them.
+async fn inject<'a>(args: &BashArgs, secrets: Option<&'a Secrets>) -> Result<Injected<'a>, Error> {
+    let mut names: Vec<String> = Vec::new();
+    for name in args.secrets.iter().flatten() {
+        let name = name.trim();
+        if !name.is_empty() && !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+    }
+    let current = secrets.map(|secrets| secrets.redaction.current()).unwrap_or_default();
+    if names.is_empty() {
+        return Ok(Injected { secrets, names, variables: Vec::new(), redactor: current });
+    }
+    let Some(found) = secrets else { return Err(Error::Other("Secrets aren't available here.".into())) };
+    let variables = (found.resolve)(found.agent.clone(), names.clone()).await.map_err(Error::Other)?;
+    let redactor = Arc::new(current.with(&variables));
+    Ok(Injected { secrets, names, variables, redactor })
 }
 
 const WRAPPED_INVOCATIONS: [&str; 8] = ["bash", "sh", "bash -c", "bash -lc", "sh -c", "sh -lc", "/bin/bash -c", "/bin/sh -c"];
@@ -265,6 +394,9 @@ struct BashArgs {
     timeout: Option<f64>,
     #[serde(default)]
     run_in_background: Option<bool>,
+    /// Names of secrets to set in the command's environment.
+    #[serde(default)]
+    secrets: Option<Vec<String>>,
 }
 
 struct Output<'a> {
@@ -273,10 +405,18 @@ struct Output<'a> {
     output_bytes: usize,
     stopped: Option<&'static str>,
     update: Update<'a>,
+    stdout: StreamRedactor,
+    stderr: StreamRedactor,
 }
 
 impl Output<'_> {
-    fn consume(&mut self, text: String, stream: &str) {
+    /// Takes the stream's next text; `end`: it's the last.
+    fn consume(&mut self, text: &str, stream: &str, end: bool) {
+        let redactor = if stream == "stderr" { &mut self.stderr } else { &mut self.stdout };
+        let mut text = redactor.push(text);
+        if end {
+            text.push_str(&redactor.finish());
+        }
         self.characters += utf16_len(&text);
         let joined = format!("{}{text}", self.tail);
         self.tail = utf16_tail(&joined, MAX_OUTPUT).to_owned();
@@ -288,7 +428,7 @@ impl Output<'_> {
         self.output_bytes += bytes.len();
         if remaining > 0 {
             let text = decoder.write(&bytes[..remaining.min(bytes.len())]);
-            self.consume(text, stream);
+            self.consume(&text, stream, false);
         }
         self.output_bytes > OUTPUT_BYTES
     }
@@ -308,13 +448,6 @@ pub fn call_timeout(args: &Value) -> Option<Duration> {
 
 fn foreground_timeout(timeout: Option<f64>) -> f64 {
     timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS)
-}
-
-/// Whether the script starts with `sleep`: such a command is stopped at its
-/// timeout rather than moved, since waiting is all it does.
-fn starts_with_sleep(script: &str) -> bool {
-    let first = script.trim_start().split([';', '&', '|', '\n']).next().unwrap_or_default();
-    first.split_whitespace().next() == Some("sleep")
 }
 
 /// Stops a background task: its process group gets SIGTERM, and SIGKILL
@@ -347,12 +480,19 @@ fn stop(output: &mut Output, pid: u32, reason: &'static str, kill_timer: &mut Pi
 }
 
 /// Commands run with the permissions of the process that embeds the agent; the agent is not a sandbox.
+/// `folders` are the agent's own folder and the others it may read: a
+/// command that copies the repository any of them is in is refused.
+/// `secrets` resolves the secrets the call names and hides their values.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     cwd: &Path,
+    folders: &[&Path],
     args: &Value,
     cancel: &CancellationToken,
+    detach: &CancellationToken,
     update: Update<'_>,
     background: Option<&Background>,
+    secrets: Option<&Secrets>,
 ) -> Result<ToolResult, Error> {
     let args: BashArgs = serde_json::from_value(args.clone())?;
     if cancel.is_cancelled() {
@@ -363,16 +503,35 @@ pub async fn run(
     if WRAPPED_INVOCATIONS.contains(&invocation) {
         return Err(AgentError::new(AgentFailure::BashWrappedInvocation { command: invocation.to_owned() }).into());
     }
-    if args.run_in_background == Some(true) {
-        let Some(background) = background else { return Err(Error::Other("Background commands aren't available here.".into())) };
-        return start_background(cwd, args, background).await;
+    if args.run_in_background != Some(true)
+        && let Some(failure) = checks::long_sleep(&args.command)
+    {
+        return Err(AgentError::new(failure).into());
     }
+    let mut roots: Vec<PathBuf> = folders.iter().filter_map(|folder| checks::repository_root(folder)).collect();
+    roots.sort();
+    roots.dedup();
+    if let Some(failure) = checks::copies_repository(&args.command, cwd, &roots) {
+        return Err(AgentError::new(failure).into());
+    }
+    if args.run_in_background == Some(true) && background.is_none() {
+        return Err(Error::Other("Background commands aren't available here.".into()));
+    }
+    let injected = inject(&args, secrets).await?;
     if let Some(background) = background {
-        return run_logged(cwd, args, cancel, update, background).await;
+        if args.run_in_background == Some(true) {
+            return start_background(cwd, args, background, &injected).await;
+        }
+        return run_logged(cwd, args, cancel, detach, update, background, &injected).await;
     }
     let began = std::time::Instant::now();
-    let (child, pid) = spawn(cwd, &args.command)?;
-    let ended = collect(child, pid, Some(foreground_timeout(args.timeout)), cancel, update).await?;
+    let started = crate::clock::now_ms();
+    let files = SecretFiles(Some(std::env::temp_dir().join(format!("claktory-secrets-{}", uuid::Uuid::new_v4()))));
+    let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let (child, pid) = spawn(cwd, &args.command, &environment)?;
+    let ended = collect(child, pid, Some(foreground_timeout(args.timeout)), cancel, update, &injected.redactor).await?;
+    drop(files);
+    injected.used(&args.command, None, started);
     let truncated = if ended.characters > utf16_len(&ended.tail) { "[Earlier output truncated]\n" } else { "" };
     let text = format!("{truncated}{}\n[{}, {}]", ended.tail, ended.state, took(began.elapsed().as_secs_f64()));
     Ok(ToolResult::text(
@@ -383,11 +542,15 @@ pub async fn run(
 
 /// Starts the command and returns at once. It runs on by itself, writing
 /// to its log; `background.finished` hears when it ends.
-async fn start_background(cwd: &Path, args: BashArgs, background: &Background) -> Result<ToolResult, Error> {
+async fn start_background(cwd: &Path, args: BashArgs, background: &Background, injected: &Injected<'_>) -> Result<ToolResult, Error> {
     tokio::fs::create_dir_all(&background.dir).await?;
     let (id, log, file) = new_log(&background.dir)?;
-    let (child, pid) = spawn_wrapped(cwd, &args.command, &log, file)?;
+    let mut files = SecretFiles(Some(log.with_extension("secrets")));
+    let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let (child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
+    files.keep();
     let task = Task { id, command: args.command, pid, log, started: crate::clock::now_ms() };
+    injected.used(&task.command, Some(task.id.clone()), task.started);
     let limit = args.timeout.unwrap_or(BACKGROUND_TIMEOUT_SECS).min(MAX_BACKGROUND_SECS);
     let started = format!(
         "Started {} in the background (process group {pid}). Its output goes to {}. You'll get an event when it finishes; until then, read the log to check on it, or stop it with `kill -- -{pid}`. It's stopped if it runs past {}.",
@@ -397,13 +560,14 @@ async fn start_background(cwd: &Path, args: BashArgs, background: &Background) -
     );
     let details = json!({"task": task.id, "pid": pid, "log": task.log});
     (background.started)(&task);
-    tokio::spawn(watch(child, task, limit, background.finished.clone()));
+    tokio::spawn(watch(child, task, limit, background.finished.clone(), injected.redactor.clone()));
     Ok(ToolResult::text(started, details))
 }
 
 /// Waits for a background task to end, stopping it once it has run `limit`
-/// seconds (from now), and tells `finished`.
-async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Finished) + Send + Sync>) {
+/// seconds (from now), and tells `finished`; `redactor` hides secrets in
+/// the end of its output.
+async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Finished) + Send + Sync>, redactor: Arc<Redactor>) {
     let pid = task.pid;
     let deadline = sleep(Duration::from_secs_f64(limit));
     tokio::pin!(deadline);
@@ -426,7 +590,7 @@ async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Fi
         },
         Err(error) => format!("failed: {error}"),
     };
-    let mut done = task.finished(otherwise);
+    let mut done = task.finished(otherwise, &redactor);
     if timed_out {
         done.status = format!("{TIME_LIMIT} ({})", took(limit));
     }
@@ -478,8 +642,14 @@ impl Captured {
 }
 
 /// Reads what the command wrote to its log since `offset`, for the agent's
-/// updates and the result.
-fn read_more(file: &mut std::fs::File, decoder: &mut Utf8Decoder, captured: &mut Captured, update: Update<'_>) -> std::io::Result<()> {
+/// updates and the result, with secrets hidden.
+fn read_more(
+    file: &mut std::fs::File,
+    decoder: &mut Utf8Decoder,
+    redactor: &mut StreamRedactor,
+    captured: &mut Captured,
+    update: Update<'_>,
+) -> std::io::Result<()> {
     use std::io::Read;
     let mut buffer = vec![0u8; 1 << 20];
     loop {
@@ -488,7 +658,7 @@ fn read_more(file: &mut std::fs::File, decoder: &mut Utf8Decoder, captured: &mut
             return Ok(());
         }
         captured.bytes += read as u64;
-        let text = decoder.write(&buffer[..read]);
+        let text = redactor.push(&decoder.write(&buffer[..read]));
         if !text.is_empty() {
             captured.add(&text);
             update(ToolResult::text(text, json!({"stream": "output"})));
@@ -506,18 +676,23 @@ async fn run_logged(
     cwd: &Path,
     args: BashArgs,
     cancel: &CancellationToken,
+    detach: &CancellationToken,
     update: Update<'_>,
     background: &Background,
+    injected: &Injected<'_>,
 ) -> Result<ToolResult, Error> {
     tokio::fs::create_dir_all(&background.dir).await?;
     let began = std::time::Instant::now();
     let started = crate::clock::now_ms();
     let (id, log, file) = new_log(&background.dir)?;
     let mut reader = std::fs::File::open(&log)?;
-    let (mut child, pid) = spawn_wrapped(cwd, &args.command, &log, file)?;
+    let mut files = SecretFiles(Some(log.with_extension("secrets")));
+    let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let (mut child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
     let timeout = foreground_timeout(args.timeout);
-    let sleeping = starts_with_sleep(&args.command);
+    let sleeping = checks::starts_with_sleep(&args.command);
     let mut decoder = Utf8Decoder::default();
+    let mut redactor = StreamRedactor::new(injected.redactor.clone());
     let mut captured = Captured::new();
     let timer = sleep(Duration::from_secs_f64(timeout));
     tokio::pin!(timer);
@@ -536,9 +711,25 @@ async fn run_logged(
                     kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
                     kill_armed = true;
                 } else {
-                    read_more(&mut reader, &mut decoder, &mut captured, update)?;
+                    read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
                     let task = Task { id, command: args.command, pid, log, started };
-                    return Ok(moved(task, child, &captured, timeout, began, background));
+                    files.keep();
+                    injected.used(&task.command, Some(task.id.clone()), started);
+                    return Ok(moved(task, child, &captured, Moved::Timeout(timeout), began, background, injected.redactor.clone()));
+                }
+            }
+            () = detach.cancelled(), if stopped.is_none() => {
+                if sleeping {
+                    stopped = Some("stopped so a new message could reach you");
+                    kill_group(pid, libc::SIGTERM);
+                    kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
+                    kill_armed = true;
+                } else {
+                    read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
+                    let task = Task { id, command: args.command, pid, log, started };
+                    files.keep();
+                    injected.used(&task.command, Some(task.id.clone()), started);
+                    return Ok(moved(task, child, &captured, Moved::ForMessage, began, background, injected.redactor.clone()));
                 }
             }
             () = cancel.cancelled(), if stopped.is_none() => {
@@ -553,7 +744,7 @@ async fn run_logged(
             }
             status = child.wait() => break status?,
             _ = ticker.tick() => {
-                read_more(&mut reader, &mut decoder, &mut captured, update)?;
+                read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
                 if captured.bytes > LOG_BYTES && stopped.is_none() {
                     stopped = Some("output limit exceeded");
                     kill_group(pid, libc::SIGTERM);
@@ -566,12 +757,15 @@ async fn run_logged(
     if stopped.is_some() {
         kill_group(pid, libc::SIGKILL);
     }
-    read_more(&mut reader, &mut decoder, &mut captured, update)?;
-    let rest = decoder.end();
+    read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
+    let mut rest = redactor.push(&decoder.end());
+    rest.push_str(&redactor.finish());
     if !rest.is_empty() {
         captured.add(&rest);
         update(ToolResult::text(rest, json!({"stream": "output"})));
     }
+    drop(files);
+    injected.used(&args.command, None, started);
     let task = Task { id, command: args.command, pid, log, started };
     let recorded = task.recorded_exit();
     let _ = std::fs::remove_file(task.status_path());
@@ -601,22 +795,44 @@ async fn run_logged(
     ))
 }
 
-/// The command ran past its foreground timeout: it runs on in the
-/// background as a task, and the agent hears when it ends.
-fn moved(task: Task, child: Child, captured: &Captured, timeout: f64, began: std::time::Instant, background: &Background) -> ToolResult {
+/// Why a foreground command moved to the background.
+enum Moved {
+    /// It ran past its timeout, in seconds.
+    Timeout(f64),
+    /// A message came for the agent.
+    ForMessage,
+}
+
+/// The command moved to the background: it runs on as a task, and the agent
+/// hears when it ends.
+fn moved(
+    task: Task,
+    child: Child,
+    captured: &Captured,
+    why: Moved,
+    began: std::time::Instant,
+    background: &Background,
+    redactor: Arc<Redactor>,
+) -> ToolResult {
     let (id, pid, log) = (task.id.clone(), task.pid, task.log.clone());
     (background.started)(&task);
-    tokio::spawn(watch(child, task, MOVED_LIMIT_SECS, background.finished.clone()));
+    tokio::spawn(watch(child, task, MOVED_LIMIT_SECS, background.finished.clone(), redactor));
     let so_far = match &captured.whole {
         Some(whole) => utf16_tail(whole, PREVIEW_TAIL).to_owned(),
         None => captured.tail.clone(),
     };
+    let ran = took(began.elapsed().as_secs_f64());
+    let (why, advice) = match why {
+        Moved::Timeout(timeout) => (
+            format!("Still running after {} (its timeout), so it", took(timeout)),
+            "\nA command this slow blocks your work. Next time run it with run_in_background, or better, find out why it's slow and fix that: needless copies, cold rebuilds, scanning huge folders.",
+        ),
+        Moved::ForMessage => (format!("A new message came for you after {ran}, so this command"), ""),
+    };
     let text = format!(
-        "Still running after {} (its timeout), so it moved to the background as {id} (process group {pid}). It keeps running, for up to {} more, and you'll get an event when it ends; don't start it again meanwhile. Its output goes to {}; stop it with `kill -- -{pid}`.\nA command this slow blocks your work. Next time run it with run_in_background, or better, find out why it's slow and fix that: needless copies, cold rebuilds, scanning huge folders.\n\nOutput so far ends with:\n{so_far}\n[moved to the background, {}]",
-        took(timeout),
+        "{why} moved to the background as {id} (process group {pid}). It keeps running, for up to {} more, and you'll get an event when it ends; don't start it again meanwhile. Its output goes to {}; stop it with `kill -- -{pid}`.{advice}\n\nOutput so far ends with:\n{so_far}\n[moved to the background, {ran}]",
         took(MOVED_LIMIT_SECS),
         log.display(),
-        took(began.elapsed().as_secs_f64()),
     );
     ToolResult::text(text, json!({"movedToBackground": id, "task": id, "pid": pid, "log": log}))
 }
@@ -631,19 +847,30 @@ pub fn spawn_detached(cwd: &Path, script: &str, log: &Path) -> std::io::Result<(
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    spawn_wrapped(cwd, script, log, file)
+    spawn_wrapped(cwd, script, log, file, &[], None)
 }
 
-fn spawn_wrapped(cwd: &Path, script: &str, log: &Path, file: std::fs::File) -> std::io::Result<(Child, u32)> {
+/// `environment`: variables set for this command only, on top of what it
+/// inherits. `filter`: the program (with its arguments) its output goes
+/// through to the log, and the values it hides.
+fn spawn_wrapped(
+    cwd: &Path,
+    script: &str,
+    log: &Path,
+    file: std::fs::File,
+    environment: &[(String, Zeroizing<String>)],
+    filter: Option<(&[std::ffi::OsString], Zeroizing<String>)>,
+) -> std::io::Result<(Child, u32)> {
     let mut command = Command::new("bash");
+    let wrapper = if filter.is_some() { FILTERED_TASK_WRAPPER } else { TASK_WRAPPER };
     command
-        .args(["--noprofile", "--norc", "-c", TASK_WRAPPER, "factory-task", script])
+        .args(["--noprofile", "--norc", "-c", wrapper, "factory-task", script])
         .arg(log.with_extension("status"))
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(file.try_clone()?))
-        .stderr(Stdio::from(file))
-        .process_group(0);
+        .envs(environment.iter().map(|(name, value)| (name, value.as_str())));
+    if let Some((program, values)) = filter {
+        command.args(program).env(crate::secrets::FILTER_VALUES, values.as_str());
+    }
+    command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file)).process_group(0);
     let child = command.spawn()?;
     let pid = child.id().ok_or_else(|| std::io::Error::other("the shell was spawned without a pid"))?;
     Ok((child, pid))
@@ -668,10 +895,11 @@ fn new_log(dir: &Path) -> std::io::Result<(String, PathBuf, std::fs::File)> {
     }
 }
 
-fn spawn(cwd: &Path, script: &str) -> Result<(Child, u32), Error> {
+fn spawn(cwd: &Path, script: &str, environment: &[(String, Zeroizing<String>)]) -> Result<(Child, u32), Error> {
     let mut command = Command::new("bash");
     command
         .args(["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script])
+        .envs(environment.iter().map(|(name, value)| (name, value.as_str())))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -696,10 +924,25 @@ struct Ended {
 
 /// Streams the command's output to `update` until it ends, is stopped, or
 /// (with a timeout) runs out of time.
-async fn collect(mut child: Child, pid: u32, timeout: Option<f64>, cancel: &CancellationToken, update: Update<'_>) -> Result<Ended, Error> {
+async fn collect(
+    mut child: Child,
+    pid: u32,
+    timeout: Option<f64>,
+    cancel: &CancellationToken,
+    update: Update<'_>,
+    redactor: &Arc<Redactor>,
+) -> Result<Ended, Error> {
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    let mut output = Output { tail: String::new(), characters: 0, output_bytes: 0, stopped: None, update };
+    let mut output = Output {
+        tail: String::new(),
+        characters: 0,
+        output_bytes: 0,
+        stopped: None,
+        update,
+        stdout: StreamRedactor::new(redactor.clone()),
+        stderr: StreamRedactor::new(redactor.clone()),
+    };
     let (mut out_decoder, mut err_decoder) = (Utf8Decoder::default(), Utf8Decoder::default());
     let (mut out_buf, mut err_buf) = (vec![0u8; 65_536], vec![0u8; 65_536]);
     let timer = sleep(Duration::from_secs_f64(timeout.unwrap_or(0.0)));
@@ -728,7 +971,7 @@ async fn collect(mut child: Child, pid: u32, timeout: Option<f64>, cancel: &Canc
                     }
                     _ => {
                         let rest = out_decoder.end();
-                        output.consume(rest, "stdout");
+                        output.consume(&rest, "stdout", true);
                         stdout = None;
                     }
                 }
@@ -742,7 +985,7 @@ async fn collect(mut child: Child, pid: u32, timeout: Option<f64>, cancel: &Canc
                     }
                     _ => {
                         let rest = err_decoder.end();
-                        output.consume(rest, "stderr");
+                        output.consume(&rest, "stderr", true);
                         stderr = None;
                     }
                 }

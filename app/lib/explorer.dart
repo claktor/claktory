@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'layout.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'tell_rivet.dart';
@@ -144,7 +145,8 @@ class _Tree extends StatelessWidget {
     void folder(
       String error,
       List<FileEntry> entries,
-      String folderId, {
+      String folderId,
+      String base, {
       String agentId = '',
     }) {
       if (error.isNotEmpty) {
@@ -176,6 +178,7 @@ class _Tree extends StatelessWidget {
                 projectId: project.id,
                 folderId: folderId,
                 agentId: agentId,
+                base: base,
                 entry: entry,
               ),
             ),
@@ -190,7 +193,7 @@ class _Tree extends StatelessWidget {
         explorer.folders.isEmpty ||
         explorer.entries.isNotEmpty ||
         explorer.error.isNotEmpty;
-    if (ownFolder) folder(explorer.error, explorer.entries, '');
+    if (ownFolder) folder(explorer.error, explorer.entries, '', project.path);
     final names = {
       for (final folder in project.folders) folder.id: folder.name,
     };
@@ -211,7 +214,13 @@ class _Tree extends StatelessWidget {
           first: first,
         ),
       );
-      folder(root.error, root.entries, root.folderId, agentId: root.agentId);
+      folder(
+        root.error,
+        root.entries,
+        root.folderId,
+        root.path,
+        agentId: root.agentId,
+      );
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.m),
@@ -299,6 +308,29 @@ class _RootHeading extends StatelessWidget {
   }
 }
 
+String _join(String base, String path) =>
+    base.endsWith('/') ? '$base$path' : '$base/$path';
+
+/// Opens [path] in a viewer beside the selected agent's conversation, as an
+/// agent's `show` does, or makes its pane glow when it's open already.
+void openFile(BuildContext context, String path) {
+  final scope = AppScope.scope(context);
+  final backend = scope.backend;
+  final agent = backend.workspace.selectedAgent;
+  if (agent == null) return;
+  // From Settings or the Marketplace, back to the agent.
+  if (scope.page.value != AppPage.agent) AppScope.closePage(context);
+  final root = layoutOf(agent);
+  final opened = open(root, path);
+  if (identical(opened.root, root)) {
+    backend.highlights.glow('pane:${agent.id}:${opened.paneId}', [
+      agentColor(agent.color),
+    ]);
+    return;
+  }
+  fireAndLog(backend.setLayout(agent.id, opened.root));
+}
+
 /// [path] with the home folder as "~", so its end has room to show.
 String shortPath(String path) =>
     path.replaceFirst(RegExp(r'^/(Users|home)/[^/]+(?=/|$)'), '~');
@@ -308,10 +340,14 @@ class _FileRow extends StatelessWidget {
     required this.projectId,
     required this.folderId,
     required this.entry,
+    required this.base,
     this.agentId = '',
   });
 
   final String projectId;
+
+  /// The folder the entry's path is from.
+  final String base;
 
   /// The agent whose checkout it's in, if it's in one.
   final String agentId;
@@ -325,7 +361,6 @@ class _FileRow extends StatelessWidget {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
     return Pressable(
-      // Files can't be opened yet.
       onTap: entry.isDir
           ? () => fireAndLog(
               backend.expandFolder(
@@ -336,7 +371,7 @@ class _FileRow extends StatelessWidget {
                 agentId: agentId,
               ),
             )
-          : null,
+          : () => openFile(context, _join(base, entry.path)),
       builder: (context, hovered) {
         final color = hovered ? palette.text : palette.textMuted;
         return Opacity(

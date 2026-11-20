@@ -24,7 +24,10 @@ import 'tunnel_client.dart';
 /// them. Agents can be dragged between the workspace and projects. With a
 /// project focused, it shows only that project.
 class Sidebar extends StatelessWidget {
-  const Sidebar({super.key});
+  const Sidebar({super.key, this.width = sidebarWidth});
+
+  /// The whole screen's width on a phone.
+  final double width;
 
   @override
   Widget build(BuildContext context) {
@@ -37,11 +40,12 @@ class Sidebar extends StatelessWidget {
         border: Border(right: BorderSide(color: palette.hairline)),
       ),
       child: SizedBox(
-        width: sidebarWidth,
+        width: width,
         child: ListenableBuilder(
           listenable: Listenable.merge([
             backend.workspace,
             backend.connected,
+            backend.reconnecting,
             backend.refused,
             scope.page,
           ]),
@@ -329,6 +333,8 @@ class _Place extends StatelessWidget {
     void select(Agent agent) {
       AppScope.closePage(context);
       fireAndLog(backend.selectAgent(agent.id));
+      // On a phone, its conversation is pushed over the list.
+      PhoneNavigation.of(context)?.value = true;
     }
 
     Widget branch(_Node node, List<_Node> siblings) {
@@ -1241,8 +1247,7 @@ class _Footer extends StatelessWidget {
         Pressable(
           onTap: chooseFactory,
           builder: (context, hovered) => Text(
-            "This device isn't paired with ${remote?.label ?? 'this Claktory'} "
-            'any more',
+            '${remote?.label ?? 'This Claktory'} no longer allows this device',
             style: TextStyles.caption.copyWith(
               color: palette.danger,
               decoration: hovered ? TextDecoration.underline : null,
@@ -1251,7 +1256,9 @@ class _Footer extends StatelessWidget {
           ),
         ),
       );
-    } else if (!connected) {
+    } else if (!connected && !scope.backend.reconnecting.value) {
+      // Back from the background or a network change, it reconnects
+      // without a word for a few seconds first.
       status.add(
         ValueListenableBuilder(
           valueListenable: scope.backend.tunnel,
@@ -1271,7 +1278,7 @@ class _Footer extends StatelessWidget {
                   : chooseFactory,
               builder: (context, hovered) => Text(
                 failing
-                    ? "Can't reach ${remote.label}"
+                    ? "Can't connect to ${remote.label}"
                     : remote == null
                     ? 'Connecting…'
                     : 'Connecting to ${remote.label}…',
@@ -1485,13 +1492,13 @@ class _ConfigErrorState extends State<_ConfigError> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Settings file has an error',
+            'Your settings file has an error',
             style: TextStyles.emphasis.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.s),
           Text(
-            'Claktory keeps using the last settings that worked. Restoring '
-            'puts them back in place of the broken file, which is kept as a copy.',
+            'Claktory is still using your last working settings. Restore '
+            'them to replace the broken file. A copy of it is kept.',
             style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.l),

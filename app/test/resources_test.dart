@@ -3,6 +3,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/resources.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:factory_app/settings_view.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -56,7 +57,7 @@ Resources sample({List<String> alerts = const [], bool measured = true}) {
           mount: '/',
           total: Int64(994 * gb),
           available: Int64(212 * gb),
-          uses: ["Factory's data", 'Factory'],
+          uses: ["Claktory's data", 'Site'],
         ),
         Volume(
           mount: '/Volumes/Work',
@@ -68,7 +69,7 @@ Resources sample({List<String> alerts = const [], bool measured = true}) {
     ),
     factory: [
       ResourceProcess(
-        label: "Factory's backend",
+        label: 'Claktory service',
         kind: 'backend',
         pid: 100,
         processes: 1,
@@ -104,14 +105,14 @@ Resources sample({List<String> alerts = const [], bool measured = true}) {
     ],
     disk: [
       DiskUsage(
-        label: "Factory's data",
+        label: "Claktory's data",
         kind: 'home',
         path: '/Users/me/.factory',
         bytes: Int64(42 * gb),
         parts: [
           DiskUsage(label: 'Releases', kind: 'releases', bytes: Int64(2 * gb)),
           DiskUsage(
-            label: 'Checkouts (copy-on-write)',
+            label: 'Checkouts',
             kind: 'checkout',
             bytes: Int64(38 * gb),
           ),
@@ -131,10 +132,17 @@ Resources sample({List<String> alerts = const [], bool measured = true}) {
             bytes: Int64(120 * 1000 * 1000),
           ),
           DiskUsage(
-            label: 'Checkout (copy-on-write)',
+            label: 'Checkout',
             kind: 'checkout',
             id: 'a1',
             bytes: Int64(18 * gb),
+          ),
+          DiskUsage(
+            label: 'Build cache (target)',
+            kind: 'build_cache',
+            id: 'a1',
+            path: '/Users/me/.factory/agents/a1/checkout/target',
+            bytes: Int64(9 * gb),
           ),
         ],
       ),
@@ -200,12 +208,12 @@ void main() {
         inPanel('Memory is 94% used: 30.0 GB of 32.0 GB.'),
         findsOneWidget,
       );
-      expect(inPanel('Sampled at 14:02, every minute'), findsOneWidget);
+      expect(inPanel('Updated at 14:02, every minute'), findsOneWidget);
       expect(inPanel('34% of 10 cores'), findsOneWidget);
       expect(inPanel('30.0 GB of 32.0 GB'), findsOneWidget);
       expect(inPanel('1.2 GB of 4.0 GB'), findsOneWidget);
       expect(inPanel('212 GB free of 994 GB'), findsOneWidget);
-      expect(inPanel("Factory's data, Factory"), findsOneWidget);
+      expect(inPanel("Claktory's data, Site"), findsOneWidget);
       expect(inPanel('8.0 GB free of 500 GB'), findsOneWidget);
 
       final palette = Palette.of(tester.element(find.byType(ResourcesView)));
@@ -245,7 +253,7 @@ void main() {
       expect(inPanel('40%'), findsOneWidget, reason: 'the latest load');
 
       await reveal(tester, 'Docker');
-      expect(inPanel("Factory's backend"), findsOneWidget);
+      expect(inPanel('Claktory service'), findsOneWidget);
       expect(inPanel('180 MB'), findsOneWidget);
       expect(inPanel('task-3 npm run dev'), findsOneWidget);
       expect(
@@ -273,25 +281,58 @@ void main() {
 
       await tester.tap(inPanel('Builder').last);
       await tester.pump();
-      await reveal(tester, 'Checkout (copy-on-write)');
+      await reveal(tester, 'Checkout');
       expect(inPanel('Conversations'), findsOneWidget);
       expect(inPanel('120 MB'), findsOneWidget);
       expect(inPanel('18.0 GB'), findsOneWidget);
       expect(
         find.descendant(
           of: find.byType(ResourcesView),
-          matching: find.textContaining('Shares most of its blocks'),
+          matching: find.textContaining('Shares most of its space'),
         ),
         findsOneWidget,
       );
     },
   );
 
+  testWidgets('a build cache cleans now, and says why it could not', (
+    tester,
+  ) async {
+    const path = '/Users/me/.factory/agents/a1/checkout/target';
+    final harness = await show(tester, sample());
+    await reveal(tester, '~/factory');
+    expect(inPanel('Clean'), findsNothing, reason: 'only build caches');
+    await tester.tap(inPanel('Builder').last);
+    await tester.pump();
+    await tester.ensureVisible(inPanel('Clean'));
+    await tester.pump();
+    expect(inPanel('9.0 GB'), findsOneWidget);
+    await tester.tap(inPanel('Clean'));
+    await tester.pump();
+    expect(harness.last.clearBuildCache.path, path);
+    expect(inPanel('Clean'), findsOneWidget, reason: 'done, ready again');
+
+    harness.backend.refuse = 'An agent is working there.';
+    await tester.tap(inPanel('Clean'));
+    await tester.pump();
+    expect(inPanel('An agent is working there.'), findsOneWidget);
+    final palette = Palette.of(tester.element(find.byType(ResourcesView)));
+    expect(
+      tester.widget<Text>(inPanel('An agent is working there.')).style!.color,
+      palette.danger,
+    );
+
+    harness.backend.refuse = null;
+    await tester.tap(inPanel('Clean'));
+    await tester.pump();
+    expect(inPanel('An agent is working there.'), findsNothing);
+  });
+
   testWidgets('before the disk is measured, it says so', (tester) async {
     await show(tester, sample(measured: false));
     await reveal(tester, 'Disk');
     expect(
-      inPanel('Not measured yet; it takes a moment after Claktory starts.'),
+      inPanel('Measuring… This takes a minute after Claktory starts.'),
       findsOneWidget,
     );
   });
@@ -303,7 +344,12 @@ void main() {
     await harness.show(tester);
     harness.page.value = AppPage.settings;
     await settle(tester);
-    final settings = find.byType(Scrollable).first;
+    final settings = find
+        .descendant(
+          of: find.byType(SettingsView),
+          matching: find.byType(Scrollable),
+        )
+        .first;
     await tester.scrollUntilVisible(
       find.text('Processors'),
       200,
@@ -344,5 +390,41 @@ void main() {
     await tester.tap(find.text('Save').last);
     await settle(tester);
     expect(find.text('Enter a whole number.'), findsOneWidget);
+  });
+
+  testWidgets('Settings sets how big build caches grow', (tester) async {
+    final snapshot = resourcesWorkspace();
+    snapshot.settings.buildCacheGb = 25;
+    final harness = Harness(snapshot);
+    await harness.show(tester);
+    harness.page.value = AppPage.settings;
+    await settle(tester);
+    final note = find.text(
+      "When one grows past this, Claktory clears it while nothing's using "
+      'it. 0 means never.',
+    );
+    await tester.scrollUntilVisible(
+      note,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(find.text('Build caches'), findsOneWidget);
+    final field = find.descendant(
+      of: find.ancestor(of: find.text('GB each'), matching: find.byType(Wrap)),
+      matching: find.byType(EditableText),
+    );
+    expect(tester.widget<EditableText>(field).controller.text, '25');
+    await tester.enterText(field, '40');
+    await tester.pump();
+    expect(note, findsNothing, reason: 'Save stands in its place');
+    await tester.tap(find.text('Save'));
+    await settle(tester);
+    expect(harness.last.updateSettings.buildCacheGb, 40);
+    expect(harness.last.updateSettings.hasRamPercent(), isFalse);
   });
 }

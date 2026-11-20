@@ -21,14 +21,14 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Highlights",
     icon: "sparkles",
-    description: "The agent can make parts of the app glow for a moment (an agent, a project, a checklist item, an extension's icon, Settings or the Marketplace) to show the person what it means.",
+    description: "Lets it make parts of the app glow for a moment, to show you what it means.",
     default_enabled: false,
     options: &[],
 };
 
 const PROMPT: &str = "## Highlights
 
-The person sees Factory in its app. `highlight` makes parts of the app glow for a moment, so they find what you mean: after you set something up, or when you tell them where to click. Targets, by kind and id:
+The person sees Claktory in its app. `highlight` makes parts of the app glow for a moment, so they find what you mean: after you set something up, or when you tell them where to click. Targets, by kind and id:
 - agent: an agent's id (its row in the sidebar)
 - project: a project's id
 - checklist_item: \"<agent id>#<number>\", e.g. \"backend#4\"
@@ -74,7 +74,7 @@ impl Extension for Highlight {
             let factory = factory.upgrade();
             let agent = agent.clone();
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
                 let args: Args = serde_json::from_value(args)?;
                 let text = show(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
                 Ok(ToolResult::text(text, json!({})))
@@ -100,7 +100,7 @@ struct Target {
 
 /// Sends the highlight if every target exists; says whether the person sees it.
 fn show(factory: &Factory, agent: &str, args: Args) -> Result<String, String> {
-    let (targets, on) = {
+    let (targets, on, person) = {
         let inner = factory.lock();
         let mut targets = Vec::new();
         for target in args.targets {
@@ -108,12 +108,12 @@ fn show(factory: &Factory, agent: &str, args: Args) -> Result<String, String> {
             check(factory, &inner.config, &target.kind, &id)?;
             targets.push(v1::HighlightTarget { kind: target.kind, id });
         }
-        (targets, inner.config.highlights)
+        (targets, inner.config.highlights, inner.config.person_capitalized().to_owned())
     };
     let text = args.text.unwrap_or_default().trim().to_owned();
     let kind = v1::HighlightKind::Agent.into();
     factory.send(Body::Highlight(v1::Highlight { targets, text, from_agent_id: agent.to_owned(), kind }));
-    Ok(if on { "Shown." } else { "Highlights are off: the person turned them off in Settings, so they don't see it." }.to_owned())
+    Ok(if on { "Shown.".to_owned() } else { format!("Highlights are off: {person} turned them off in Settings, so they don't see it.") })
 }
 
 /// An error saying what's wrong with the target, if anything.

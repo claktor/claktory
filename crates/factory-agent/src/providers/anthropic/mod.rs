@@ -81,6 +81,7 @@ pub fn provider() -> Provider {
     );
     provider.limits = Some(crate::limits::anthropic);
     provider.plan = Some(crate::limits::anthropic_plan);
+    provider.identity = Some(crate::limits::anthropic_identity);
     provider
 }
 
@@ -706,6 +707,18 @@ fn dispatch(
     Ok(())
 }
 
+/// Whether a failed response is the subscription's usage limit (its 5-hour
+/// or weekly one), not a passing rate limit or an overload: a 429 whose
+/// `anthropic-ratelimit-unified-status` is "rejected". Some, with when it
+/// resets (`anthropic-ratelimit-unified-reset`, seconds since 1970) if said.
+pub fn usage_limit(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Option<u64>> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::trim);
+    if status != 429 || header("anthropic-ratelimit-unified-status") != Some("rejected") {
+        return None;
+    }
+    Some(header("anthropic-ratelimit-unified-reset").and_then(|reset| reset.parse::<f64>().ok()).map(|seconds| (seconds * 1000.0) as u64))
+}
+
 async fn request(
     model: &Model,
     context: &LlmContext,
@@ -725,7 +738,13 @@ async fn request(
     let response = send_request(builder, options).await?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
+        if let Some(resets_at) = usage_limit(status, response.headers()) {
+            crate::accounts::mark_usage_limit(&mut parser.output, resets_at);
+        }
         let text = response_text(response).await;
+        if crate::accounts::credit_error(status, &text) {
+            crate::accounts::mark_out_of_credit(&mut parser.output);
+        }
         let parsed = serde_json::from_str::<Value>(&text).ok().filter(truthy);
         let fallback = if parsed.is_some() { None } else { Some(text.as_str()) };
         return Err(api_error_message(Some(status), &parsed.unwrap_or(Value::Null), fallback));

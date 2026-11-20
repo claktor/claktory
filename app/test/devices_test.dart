@@ -2,6 +2,7 @@ import 'package:factory_app/connections.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -115,28 +116,32 @@ void main() {
     return harness;
   }
 
-  testWidgets('remote access turns on from Settings → Devices', (tester) async {
+  testWidgets('with no devices, adding one turns access on first', (
+    tester,
+  ) async {
     final harness = await showSettings(tester, workspace(on: false));
-    expect(find.text('No device is paired yet.'), findsOneWidget);
-    expect(
-      find.text('Turn on remote access to pair a device.'),
-      findsOneWidget,
-    );
-    await tester.tap(labeled('Remote access'));
+    expect(find.text('No devices yet.'), findsOneWidget);
+    for (final gone in ['Remote access', 'Port', 'Listen on', 'Status']) {
+      expect(find.text(gone), findsNothing, reason: gone);
+    }
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
     await pumpFrames(tester);
-    expect(harness.last.setRemoteAccess.on, isTrue);
-    expect(harness.last.setRemoteAccess.port, 0, reason: 'kept');
-    expect(harness.last.setRemoteAccess.hasListen(), isFalse);
-
-    await harness.apply(tester, workspace());
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await pumpFrames(tester);
     expect(
-      find.text('Listening on port 7443, on every address'),
-      findsOneWidget,
+      harness.backend.sent
+          .where((m) => m.hasSetRemoteAccess() || m.hasCreatePairing())
+          .map((m) => m.whichBody()),
+      [ClientMessage_Body.createPairing],
+      reason: 'a code waiting turns remote access on by itself',
     );
-    expect(find.text('Turn on remote access to pair a device.'), findsNothing);
+    expect(harness.last.createPairing.host, '', reason: 'no address to pick');
   });
 
-  testWidgets('paired devices: this one marked, unpairing it confirmed', (
+  testWidgets('devices: this one marked, removing it confirmed', (
     tester,
   ) async {
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -163,52 +168,69 @@ void main() {
     );
     await pumpFrames(tester);
     expect(find.textContaining('This device'), findsOneWidget);
+    expect(find.text('Connected now · Added 12 Nov'), findsOneWidget);
     expect(
-      find.text('Connected now · 100.64.0.7 · paired 12 Nov'),
+      find.text('Last connected 5 min ago · Added 12 Nov'),
       findsOneWidget,
     );
-    expect(
-      find.text('Last connected 5 min ago · paired 12 Nov'),
-      findsOneWidget,
-    );
-    expect(find.text('Never connected · paired 12 Nov'), findsOneWidget);
+    expect(find.text('Never connected · Added 12 Nov'), findsOneWidget);
 
     // Another device goes at once.
-    await tester.ensureVisible(find.text('Unpair').at(1));
-    await tester.tap(find.text('Unpair').at(1));
+    await tester.ensureVisible(find.text('Remove').at(1));
+    await tester.tap(find.text('Remove').at(1));
     await pumpFrames(tester);
     expect(harness.last.unpairDevice.deviceId, 'd2');
 
     // This one asks first.
     final sent = harness.backend.sent.length;
-    await tester.tap(find.text('Unpair').first);
+    await tester.tap(find.text('Remove').first);
     await pumpFrames(tester);
-    expect(find.text('Unpair this device?'), findsOneWidget);
+    expect(find.text('Remove this device?'), findsOneWidget);
     expect(harness.backend.sent.length, sent);
-    await tester.tap(find.text('Unpair').last);
+    await tester.tap(find.text('Remove').last);
     await pumpFrames(tester);
     expect(harness.last.unpairDevice.deviceId, 'd1');
   });
 
-  testWidgets('pairing a device shows its code once, to copy', (tester) async {
+  testWidgets('adding a device shows its code once, to copy', (tester) async {
     final harness = await showSettings(tester, workspace());
-    await tester.ensureVisible(find.text('Pair a device…'));
-    await tester.tap(find.text('Pair a device…'));
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
     await pumpFrames(tester);
-    expect(find.text('Pair a device'), findsOneWidget);
+    expect(find.text('Add a device'), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, 'Laptop');
     await tester.pump();
-    await tester.tap(find.text('Make pairing code'));
+    await tester.tap(find.text('Show code'));
     await pumpFrames(tester);
     final request = harness.last.createPairing;
     expect(request.name, 'Laptop');
-    expect(request.host, '100.64.0.2', reason: 'the best address first');
-    expect(find.text('Pairing code for Laptop'), findsOneWidget);
-    expect(find.text(harness.backend.pairingCode.code), findsOneWidget);
-    expect(find.text('Copy'), findsOneWidget);
+    expect(
+      harness.backend.sent.where((m) => m.hasSetRemoteAccess()),
+      isEmpty,
+      reason: 'already on',
+    );
+    expect(find.text('Scan with your iPhone'), findsOneWidget);
+    expect(
+      find.text(harness.backend.pairingCode.code),
+      findsNothing,
+      reason: 'the code is the QR code; Copy code copies it',
+    );
+    final copied = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      },
+    );
+    await tester.tap(find.text('Copy code'));
+    await tester.pump();
+    expect(copied, [harness.backend.pairingCode.code]);
     await tester.tap(find.text('Done').last);
     await pumpFrames(tester);
-    expect(find.text('Pairing code for Laptop'), findsNothing);
+    expect(find.text('Scan with your iPhone'), findsNothing);
   });
 
   testWidgets('the footer connects to another Factory from its code', (
@@ -222,7 +244,7 @@ void main() {
     expect(find.text('This Mac'), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, 'nonsense');
     await tester.pump();
-    expect(find.textContaining("That isn't a pairing code"), findsOneWidget);
+    expect(find.text("That isn't a Claktory code."), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, _code);
     await tester.pump();
     await tester.tap(find.text('Connect'));
@@ -239,15 +261,10 @@ void main() {
     // Refused: it says so, and stops trying.
     harness.backend.refused.value = 'unknown device';
     await pumpFrames(tester);
-    expect(
-      find.text("This device isn't paired with mac mini any more"),
-      findsOneWidget,
-    );
+    expect(find.text('mac mini no longer allows this device'), findsOneWidget);
 
     // Back to this Mac's.
-    await tester.tap(
-      find.text("This device isn't paired with mac mini any more"),
-    );
+    await tester.tap(find.text('mac mini no longer allows this device'));
     await pumpFrames(tester);
     await tester.tap(find.text('This Mac'));
     await pumpFrames(tester);

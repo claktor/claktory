@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 10] = [
+const MIGRATIONS: [&str; 11] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -146,6 +146,7 @@ ALTER TABLE tasks ADD COLUMN alerted INTEGER;
     crate::extensions::monitors::SCHEMA,
     crate::characters::SCHEMA,
     crate::proposals::SCHEMA,
+    crate::extensions::viewer::SCHEMA,
 ];
 
 /// A background task as recorded.
@@ -325,6 +326,14 @@ impl Store {
     }
 
     /// Background tasks that hadn't ended when Factory last stopped, by agent.
+    /// Whether the agent's background task runs now.
+    pub(crate) fn task_running(&self, agent: &str, task: &str) -> bool {
+        self.db()
+            .query_row("SELECT 1 FROM tasks WHERE agent = ?1 AND task = ?2 AND ended IS NULL", [agent, task], |_| Ok(()))
+            .optional()
+            .is_ok_and(|found| found.is_some())
+    }
+
     pub(crate) fn running_tasks(&self) -> Result<Vec<(String, Task)>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare("SELECT agent, task, command, pid, log, started FROM tasks WHERE ended IS NULL ORDER BY id")?;
@@ -333,7 +342,13 @@ impl Store {
         while let Some(row) = rows.next()? {
             let log: String = row.get(4)?;
             let started: i64 = row.get(5)?;
-            let task = Task { id: row.get(1)?, command: row.get(2)?, pid: row.get(3)?, log: log.into(), started: u64::try_from(started).unwrap_or(0) };
+            let task = Task {
+                id: row.get(1)?,
+                command: row.get(2)?,
+                pid: row.get(3)?,
+                log: log.into(),
+                started: u64::try_from(started).unwrap_or(0),
+            };
             tasks.push((row.get(0)?, task));
         }
         Ok(tasks)

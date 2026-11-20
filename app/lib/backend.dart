@@ -22,6 +22,24 @@ const _clientVersion = '0.1.0';
 const _port = String.fromEnvironment('FACTORY_PORT', defaultValue: '7420');
 const _localEndpoint = 'ws://127.0.0.1:$_port';
 
+/// This Mac's Factory's own pairing code, which its backend keeps in its
+/// data folder (the dev one's for dev builds): the app reaches it through
+/// the private tunnel like any other, with this code's token. Null when
+/// there's none, from a backend before the tunnel.
+Future<RemoteFactory?> readLocalPairing() async {
+  final home = Platform.environment['HOME'] ?? '';
+  const folder = bool.fromEnvironment('FACTORY_DEV')
+      ? '.factory-dev'
+      : '.factory';
+  try {
+    final code = await File('$home/$folder/remote/local-pairing')
+        .readAsString();
+    return parsePairingCode(code);
+  } on IOException {
+    return null;
+  }
+}
+
 const _minRetryDelay = Duration(milliseconds: 250);
 const _maxRetryDelay = Duration(seconds: 5);
 
@@ -34,16 +52,24 @@ class TunnelOpenFailure implements Exception {
 
 /// A request the backend refused, or that couldn't reach it.
 class RequestFailure implements Exception {
-  const RequestFailure(this.message);
+  const RequestFailure(
+    this.message, {
+    this.code = ErrorCode.ERROR_CODE_UNSPECIFIED,
+  });
 
   final String message;
+
+  /// What kind of refusal, when the backend said: the vault's ask for the
+  /// passphrase rather than show an error.
+  final ErrorCode code;
 
   @override
   String toString() => message;
 }
 
-/// Keeps one connection to the backend open, reconnecting with backoff when it
-/// drops, and routes what the backend sends into the stores. Speaks the
+/// Keeps one connection to a backend open, reconnecting with backoff when it
+/// drops, and routes what the backend sends into the stores. The app keeps
+/// one for each Claktory it's connected to, all live at once (rail.dart). Speaks the
 /// protocol in proto/factory/v1/factory.proto.
 class Backend {
   Backend({
@@ -53,8 +79,11 @@ class Backend {
     required this.extensionView,
     QueuedStore? queued,
     Tunnels? tunnels,
+    this.localBackend = true,
+    Future<RemoteFactory?> Function()? localPairing,
   }) : queued = queued ?? QueuedStore(),
        _tunnels = tunnels ?? RustTunnels(),
+       _localPairing = localPairing ?? readLocalPairing,
        // Made now, so it sees every snapshot from the first.
        highlights = HighlightStore(
          workspace: workspace,
@@ -72,6 +101,47 @@ class Backend {
 
   /// True from the backend's `welcome` until the connection drops.
   final connected = ValueNotifier<bool>(false);
+
+  /// True while it reconnects after the app came back from the background
+  /// or a connection that was up dropped (a network change, say), for up to
+  /// [quietReconnect]: what shows stays, and nothing says it can't connect.
+  final reconnecting = ValueNotifier<bool>(false);
+
+  /// How long a reconnect stays quiet before the app says it can't connect.
+  static const quietReconnect = Duration(seconds: 8);
+
+  Timer? _quiet;
+
+  void _reconnectQuietly() {
+    reconnecting.value = true;
+    _quiet?.cancel();
+    _quiet = Timer(quietReconnect, () => reconnecting.value = false);
+  }
+
+  /// When the app went to the background, while it's there.
+  DateTime? _hiddenAt;
+
+  /// The app went to the background: iOS suspends it soon, and the
+  /// connection dies without saying so.
+  void hidden() => _hiddenAt ??= DateTime.now();
+
+  /// The app is back. After more than a moment away, the connection is
+  /// made afresh at once (the old one is most likely dead), quietly, and
+  /// the backend's snapshot brings the conversation up to date.
+  void resumed({DateTime? now}) {
+    final hiddenAt = _hiddenAt;
+    _hiddenAt = null;
+    if (hiddenAt == null ||
+        (now ?? DateTime.now()).difference(hiddenAt) <
+            const Duration(seconds: 3)) {
+      return;
+    }
+    _reconnectQuietly();
+    unawaited(_tunnel?.reconnect());
+    _retryDelay = _minRetryDelay;
+    unawaited(_socket?.close());
+    _wakeUp();
+  }
 
   WebSocket? _socket;
   var _closed = false;
@@ -98,6 +168,18 @@ class Backend {
 
   final Tunnels _tunnels;
 
+  /// Reads this Mac's own pairing code, each time it connects: a backend
+  /// that's been updated may have a new one.
+  final Future<RemoteFactory?> Function() _localPairing;
+
+  /// This app's key for this Mac's Factory: any key on this machine gets
+  /// in with its code, so one made for each run.
+  late final _localKey = newDeviceKey();
+
+  /// Whether this device runs a Factory of its own to show when no other
+  /// is chosen: a Mac does, a phone doesn't, and waits to be paired.
+  final bool localBackend;
+
   /// This device's iroh key for a Factory reached through the tunnel; the
   /// app keeps one per pairing ([Connections.deviceKey]).
   String Function(RemoteFactory target) deviceKey = (_) => newDeviceKey();
@@ -118,19 +200,30 @@ class Backend {
         continue;
       }
       final target = _target;
+      if (target == null && !localBackend) {
+        await _wake.future;
+        continue;
+      }
+      // This Mac's Factory through the tunnel too, with its own code; the
+      // open port is only for a backend from before it.
+      final local = target == null ? await _localPairing() : null;
+      final via = target ?? local;
       try {
         final WebSocket socket;
-        if (target == null) {
+        if (via == null) {
           socket = await WebSocket.connect(_localEndpoint);
-        } else if (target.tunnelled) {
-          final tunnel = await _tunnelTo(target);
+        } else if (via.tunnelled) {
+          final tunnel = await _tunnelTo(
+            via,
+            key: target == null ? _localKey : null,
+          );
           // Plain ws: iroh already encrypts it end to end, to the key the
           // pairing code names.
           socket = await WebSocket.connect('ws://127.0.0.1:${tunnel.port}');
         } else {
           socket = await WebSocket.connect(
-            target.endpoint.toString(),
-            customClient: target.client(),
+            via.endpoint.toString(),
+            customClient: via.client(),
           );
         }
         if (_closed || target != _target) {
@@ -146,7 +239,7 @@ class Backend {
             hello: Hello(
               protocolVersion: _protocolVersion,
               clientVersion: _clientVersion,
-              token: target?.token,
+              token: via?.token,
             ),
           ),
         );
@@ -195,16 +288,24 @@ class Backend {
     _wakeUp();
   }
 
-  /// The tunnel to [target], opened the first time.
-  Future<Tunnel> _tunnelTo(RemoteFactory target) async {
+  /// [target] under another name the person gave it: the same Factory
+  /// (pairing codes are equal), so the connection stays as it is.
+  void relabel(RemoteFactory target) {
+    if (target == _target) _target = target;
+  }
+
+  /// The tunnel to [target], opened the first time, as [key] (else this
+  /// device's key for it).
+  Future<Tunnel> _tunnelTo(RemoteFactory target, {String? key}) async {
     final open = _tunnel;
     if (open != null && _tunnelTarget == target) return open;
     await _closeTunnel();
     try {
       final opened = await _tunnels.open(
-        deviceKey: deviceKey(target),
+        deviceKey: key ?? deviceKey(target),
         endpointId: target.endpointId,
         relays: target.relays,
+        addresses: target.addresses,
       );
       _tunnel = opened;
       _tunnelTarget = target;
@@ -222,15 +323,30 @@ class Backend {
   }
 
   /// Keeps [tunnel] current while one's open: whether it connects direct
-  /// or through a relay can change at any time.
+  /// or through a relay can change at any time. It's read every second but
+  /// set only when it changed, so nothing that shows it rebuilds while it
+  /// stays the same.
   void _watchTunnel() {
     final open = _tunnel;
     if (open == null) return;
-    tunnel.value = open.status;
+    _showTunnel(open.status);
     _tunnelWatch ??= Timer.periodic(const Duration(seconds: 1), (_) {
       final current = _tunnel;
-      if (current != null) tunnel.value = current.status;
+      if (current != null) _showTunnel(current.status);
     });
+  }
+
+  void _showTunnel(TunnelStatus status) {
+    final shown = tunnel.value;
+    if (shown != null &&
+        shown.phase == status.phase &&
+        shown.path == status.path &&
+        shown.error == status.error &&
+        shown.failure == status.failure &&
+        shown.relayConnected == status.relayConnected) {
+      return;
+    }
+    tunnel.value = status;
   }
 
   Future<void> _closeTunnel() async {
@@ -257,6 +373,7 @@ class Backend {
 
   Future<void> close() async {
     _closed = true;
+    _quiet?.cancel();
     _wakeUp();
     await _socket?.close();
     await _closeTunnel();
@@ -353,8 +470,163 @@ class Backend {
   Future<void> cancelLogin() =>
       _request(ClientMessage(cancelLogin: CancelLogin()));
 
-  Future<void> signOut(String providerId) =>
-      _request(ClientMessage(signOut: SignOut(providerId: providerId)));
+  /// Signs out of [accountId] (`Account.id`), or of all the provider's
+  /// accounts when it's empty.
+  Future<void> signOut(String providerId, {String accountId = ''}) => _request(
+    ClientMessage(
+      signOut: SignOut(providerId: providerId, accountId: accountId),
+    ),
+  );
+
+  /// Moves one of a provider's accounts to [position] (0 is first) in the
+  /// order requests try them.
+  Future<void> moveAccount(String providerId, String accountId, int position) =>
+      _request(
+        ClientMessage(
+          moveAccount: MoveAccount(
+            providerId: providerId,
+            accountId: accountId,
+            position: position,
+          ),
+        ),
+      );
+
+  /// Renames one of a provider's accounts (an API key, say), or tries an
+  /// account that ran out of credit again.
+  Future<void> updateAccount(UpdateAccount update) =>
+      _request(ClientMessage(updateAccount: update));
+
+  Future<void> createSecret(
+    String name,
+    String description,
+    List<SecretEntry> entries,
+  ) => _request(
+    ClientMessage(
+      createSecret: CreateSecret(
+        name: name,
+        description: description,
+        entries: entries,
+      ),
+    ),
+  );
+
+  /// Renames or redescribes a secret; [entries], when given, replace its
+  /// variables and values.
+  Future<void> updateSecret(
+    String id,
+    String name,
+    String description, [
+    List<SecretEntry> entries = const [],
+  ]) => _request(
+    ClientMessage(
+      updateSecret: UpdateSecret(
+        id: id,
+        name: name,
+        description: description,
+        entries: entries,
+      ),
+    ),
+  );
+
+  Future<void> deleteSecret(String id) =>
+      _request(ClientMessage(deleteSecret: DeleteSecret(id: id)));
+
+  Future<void> grantSecret(String id, String agentId) => _request(
+    ClientMessage(
+      grantSecret: GrantSecret(id: id, agentId: agentId),
+    ),
+  );
+
+  Future<void> revokeSecret(
+    String id,
+    String agentId, {
+    bool stopRunningTasks = false,
+  }) => _request(
+    ClientMessage(
+      revokeSecret: RevokeSecret(
+        id: id,
+        agentId: agentId,
+        stopRunningTasks: stopRunningTasks,
+      ),
+    ),
+  );
+
+  /// A secret's values, to this device only. Never keep them.
+  Future<List<SecretEntry>> revealSecret(String id) async {
+    final reply = await _call(
+      ClientMessage(revealSecret: RevealSecret(id: id)),
+    );
+    if (!reply.hasSecretValue()) {
+      throw const RequestFailure('Claktory sent no value.');
+    }
+    return reply.secretValue.entries;
+  }
+
+  /// The variables a .env's [text] holds (names and hints, no values),
+  /// and what's wrong with it.
+  Future<EnvPreview> previewEnv(String text) async {
+    final reply = await _call(
+      ClientMessage(previewEnv: PreviewEnv(text: text)),
+    );
+    if (!reply.hasEnvPreview()) {
+      throw const RequestFailure('Claktory sent no preview.');
+    }
+    return reply.envPreview;
+  }
+
+  Future<void> importEnv(
+    String text,
+    String name,
+    String description, {
+    bool onePerVariable = false,
+  }) => _request(
+    ClientMessage(
+      importEnv: ImportEnv(
+        text: text,
+        name: name,
+        description: description,
+        onePerVariable: onePerVariable,
+      ),
+    ),
+  );
+
+  /// Gives an agent the secret it asked for (creating it from [entries]
+  /// when it's a new one), or dismisses its request.
+  Future<void> decideSecretRequest(
+    String agentId,
+    String requestId, {
+    required bool approve,
+    List<SecretEntry> entries = const [],
+    String comment = '',
+  }) => _request(
+    ClientMessage(
+      decideSecretRequest: DecideSecretRequest(
+        agentId: agentId,
+        requestId: requestId,
+        approve: approve,
+        entries: entries,
+        comment: comment,
+      ),
+    ),
+  );
+
+  /// How [id] (empty: every secret) was used, given and shown, newest
+  /// first.
+  Future<List<SecretUse>> listSecretUses(String id, {int limit = 0}) async {
+    final reply = await _call(
+      ClientMessage(
+        listSecretUses: ListSecretUses(id: id, limit: limit),
+      ),
+    );
+    if (!reply.hasSecretUses()) {
+      throw const RequestFailure('Claktory sent no uses.');
+    }
+    return reply.secretUses.uses;
+  }
+
+  /// Empties the build cache at [path].
+  Future<void> clearBuildCache(String path) =>
+      _request(ClientMessage(clearBuildCache: ClearBuildCache(path: path)));
 
   /// Installs the latest release. With [appPath], the backend replaces the app
   /// bundle there too, once this app quits.
@@ -501,6 +773,27 @@ class Backend {
     return reply.folderList;
   }
 
+  /// The file at [path] (absolute or "~/…"), or its start when it's long; a
+  /// file that can't be read comes back with `error` set.
+  Future<FileContent> readFile(String path, {int maxBytes = 0}) async {
+    final reply = await _call(
+      ClientMessage(
+        readFile: ReadFile(path: path, maxBytes: Int64(maxBytes)),
+      ),
+    );
+    if (!reply.hasFileContent()) {
+      throw const RequestFailure('Claktory sent no file.');
+    }
+    return reply.fileContent;
+  }
+
+  /// Lays out [agentId]'s panes; null (or a lone chat leaf) clears it.
+  Future<void> setLayout(String agentId, ViewNode? root) => _request(
+    ClientMessage(
+      setLayout: SetLayout(agentId: agentId, root: root),
+    ),
+  );
+
   /// Unpairs a device: it can't connect any more.
   Future<void> unpairDevice(String deviceId) =>
       _request(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
@@ -546,6 +839,8 @@ class Backend {
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
         _retryDelay = _minRetryDelay;
+        _quiet?.cancel();
+        reconnecting.value = false;
         deviceId = message.welcome.deviceId;
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
@@ -558,7 +853,9 @@ class Backend {
         }
         final pending = _pending.remove(message.replyTo.toInt());
         if (pending != null) {
-          pending.completeError(RequestFailure(message.error.message));
+          pending.completeError(
+            RequestFailure(message.error.message, code: message.error.code),
+          );
         } else {
           _log('error ${message.error.code.name}: ${message.error.message}');
         }
@@ -581,6 +878,12 @@ class Backend {
       case ServerMessage_Body.pairingCode:
       case ServerMessage_Body.appChunk:
       case ServerMessage_Body.folderList:
+      case ServerMessage_Body.fileContent:
+      case ServerMessage_Body.vaultSession:
+      case ServerMessage_Body.secretValue:
+      case ServerMessage_Body.envPreview:
+      case ServerMessage_Body.recoveryKey:
+      case ServerMessage_Body.secretUses:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
@@ -590,6 +893,9 @@ class Backend {
 
   void _disconnected() {
     _socket = null;
+    // A connection that was up and dropped is most likely a network change:
+    // it comes back without a word, if it can.
+    if (connected.value && !_closed) _reconnectQuietly();
     connected.value = false;
     final pending = _pending.values.toList();
     _pending.clear();

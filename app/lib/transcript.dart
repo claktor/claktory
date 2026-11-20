@@ -18,9 +18,11 @@ import 'identity.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'secrets.dart';
 import 'state.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
+import 'tool_views.dart';
 
 /// The selected agent's transcript.
 ///
@@ -72,7 +74,7 @@ const _glideDuration = Duration(milliseconds: 300);
 const _queuedOpacity = 0.5;
 
 /// How long a message that left the queue stays, waiting for its entry,
-/// before it fades out (as it does when Stop clears the queue).
+/// before it fades out (as it does when /clear drops the queue).
 const _leaveGrace = Duration(milliseconds: 1500);
 
 /// A queued message on show.
@@ -173,7 +175,7 @@ class _TranscriptViewState extends State<TranscriptView>
   }
 
   /// [waiting] left the queue. Its entry normally arrives at once and takes
-  /// its place; if it doesn't (Stop cleared the queue), it fades out, then
+  /// its place; if it doesn't (/clear dropped the queue), it fades out, then
   /// goes.
   void _leave(_Waiting waiting) {
     if (waiting.leaving != null) return;
@@ -449,32 +451,36 @@ class _TranscriptViewState extends State<TranscriptView>
       builder: (context, _) {
         final length = widget.transcript.length;
         final split = math.min(_split, length);
-        return SelectableArea(
-          onSelectionChanged: (content) =>
-              _selected = content != null && content.plainText.isNotEmpty,
-          child: _TranscriptSelection(
-            selected: () => _selected,
-            child: CustomScrollView(
-              controller: _controller,
-              center: _liveKey,
-              slivers: [
-                SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) => _item(split - 1 - index),
-                    childCount: split,
-                  ),
-                ),
-                SliverPadding(
-                  key: _liveKey,
-                  padding: const EdgeInsets.only(bottom: Space.xl),
-                  sliver: SliverList(
+        return ToolViewScope(
+          transcript: widget.transcript,
+          agentId: widget.transcript.agentId,
+          child: SelectableArea(
+            onSelectionChanged: (content) =>
+                _selected = content != null && content.plainText.isNotEmpty,
+            child: _TranscriptSelection(
+              selected: () => _selected,
+              child: CustomScrollView(
+                controller: _controller,
+                center: _liveKey,
+                slivers: [
+                  SliverList(
                     delegate: SliverChildBuilderDelegate(
-                      (context, index) => _item(split + index),
-                      childCount: length - split + _waiting.length,
+                      (context, index) => _item(split - 1 - index),
+                      childCount: split,
                     ),
                   ),
-                ),
-              ],
+                  SliverPadding(
+                    key: _liveKey,
+                    padding: const EdgeInsets.only(bottom: Space.xl),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) => _item(split + index),
+                        childCount: length - split + _waiting.length,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -651,6 +657,7 @@ class _EntryViewState extends State<EntryView> {
           block: widget.block,
           child: _ToolCallView(
             key: ValueKey(seq),
+            seq: seq,
             call: entry.toolCall,
             expanded: widget.expanded,
             onToggle: widget.onToggle,
@@ -669,6 +676,13 @@ class _EntryViewState extends State<EntryView> {
         Space.xl,
       ),
       Entry_Kind.notice => (_NoticeView(entry.notice), Space.m),
+      Entry_Kind.secretRequest => (
+        SecretRequestCard(
+          key: ValueKey(entry.secretRequest.id),
+          entry.secretRequest,
+        ),
+        Space.l,
+      ),
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
     return Padding(
@@ -1279,12 +1293,17 @@ class _Disclosure extends StatefulWidget {
     required this.onToggle,
     required this.header,
     required this.body,
+    this.under,
   });
 
   final bool expanded;
   final ValueChanged<bool> onToggle;
   final Widget Function(BuildContext context, bool open, bool hovered) header;
   final WidgetBuilder body;
+
+  /// Shown under the header open or not, apart from its click; null for
+  /// nothing.
+  final Widget? Function(BuildContext context)? under;
 
   @override
   State<_Disclosure> createState() => _DisclosureState();
@@ -1307,6 +1326,11 @@ class _DisclosureState extends State<_Disclosure> {
           onTap: _toggle,
           builder: (context, hovered) => widget.header(context, _open, hovered),
         ),
+        if (widget.under?.call(context) case final under?)
+          Padding(
+            padding: const EdgeInsets.only(left: Space.l + 2, bottom: Space.xs),
+            child: under,
+          ),
         if (_open)
           Padding(
             padding: const EdgeInsets.only(
@@ -1439,11 +1463,13 @@ class _ToolBlockPiece extends StatelessWidget {
 class _ToolCallView extends StatelessWidget {
   const _ToolCallView({
     super.key,
+    this.seq = 0,
     required this.call,
     required this.expanded,
     required this.onToggle,
   });
 
+  final int seq;
   final ToolCall call;
   final bool expanded;
   final ValueChanged<bool> onToggle;
@@ -1451,10 +1477,94 @@ class _ToolCallView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final failed = call.state == ToolCallState.TOOL_CALL_STATE_FAILED;
-    final running =
-        call.state == ToolCallState.TOOL_CALL_STATE_PENDING ||
-        call.state == ToolCallState.TOOL_CALL_STATE_RUNNING;
+    final info = ToolCallInfo(call, seq: seq);
+    final failed = info.failed;
+    final running = info.running;
+    final view = toolViewFor(info);
+    // After the line: how long it ran, whether it failed, and the chevron
+    // that opens its input and output.
+    List<Widget> ending(bool open, bool hovered) => [
+      // How long it has run (ticking) and when bash will stop it, or how
+      // long it took.
+      if (call.started > 0 && (call.ended > 0 || running)) ...[
+        const SizedBox(width: Space.s),
+        Ticking(
+          active: call.ended == 0,
+          builder: (context, now) => Text(
+            toolClock(call, now),
+            style: TextStyles.caption.copyWith(
+              color: palette.textFaint,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
+      if (failed) ...[
+        const SizedBox(width: Space.s),
+        Text(
+          'Failed',
+          style: TextStyles.caption.copyWith(color: palette.danger),
+        ),
+      ],
+      const SizedBox(width: Space.s),
+      Chevron(
+        color: hovered ? palette.textMuted : palette.textFaint,
+        down: open,
+      ),
+    ];
+    if (view != null) {
+      return _Disclosure(
+        expanded: expanded,
+        onToggle: onToggle,
+        header: (context, open, hovered) => SizedBox(
+          height: 24,
+          child: Row(
+            children: [
+              SizedBox(
+                width: Space.l + 2,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: running
+                      ? const LiveDot()
+                      : ExtensionGlyph(
+                          icon: view.icon,
+                          name: call.name,
+                          size: 14,
+                          color: failed
+                              ? palette.danger
+                              : hovered
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        ),
+                ),
+              ),
+              Expanded(child: view.line(context, info)),
+              ...ending(open, hovered),
+            ],
+          ),
+        ),
+        // What it did, always in sight: the message, the items, the results.
+        under: (context) {
+          final body = view.body?.call(context, info);
+          final error = failed && call.output.trim().isNotEmpty;
+          if (body == null && !error) return null;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ?body,
+              if (error)
+                Text(
+                  call.output.trim(),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyles.caption.copyWith(color: palette.danger),
+                ),
+            ],
+          );
+        },
+        body: (context) => _ToolCallBody(call: call, running: running),
+      );
+    }
     final summary = toolSummary(call.name, call.input);
     return _Disclosure(
       expanded: expanded,
@@ -1498,33 +1608,7 @@ class _ToolCallView extends StatelessWidget {
                 style: TextStyles.caption.copyWith(color: palette.textFaint),
               ),
             ],
-            // How long it has run (ticking) and when bash will stop it, or
-            // how long it took.
-            if (call.started > 0 && (call.ended > 0 || running)) ...[
-              const SizedBox(width: Space.s),
-              Ticking(
-                active: call.ended == 0,
-                builder: (context, now) => Text(
-                  toolClock(call, now),
-                  style: TextStyles.caption.copyWith(
-                    color: palette.textFaint,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
-            if (failed) ...[
-              const SizedBox(width: Space.s),
-              Text(
-                'Failed',
-                style: TextStyles.caption.copyWith(color: palette.danger),
-              ),
-            ],
-            const SizedBox(width: Space.s),
-            Chevron(
-              color: hovered ? palette.textMuted : palette.textFaint,
-              down: open,
-            ),
+            ...ending(open, hovered),
           ],
         ),
       ),
@@ -1780,7 +1864,7 @@ ToolSummary toolSummary(String name, String input) {
       final value = arguments[key];
       return value is String ? value : value?.toString();
     }
-    return _partialString(input, key);
+    return partialJsonString(input, key);
   }
 
   ToolSummary lines(String? value, {bool code = true}) {
@@ -1841,7 +1925,7 @@ ToolSummary toolSummary(String name, String input) {
           code: false,
         );
       }
-      return lines(_partialString(input, 'items'), code: false);
+      return lines(partialJsonString(input, 'items'), code: false);
     case 'checklist_item':
       final id =
           arguments?['id'] ??
@@ -1889,49 +1973,7 @@ ToolSummary toolSummary(String name, String input) {
     }
     return ToolSummary.none;
   }
-  return lines(_partialString(input, null));
-}
-
-/// The string value of [key] in [json] as far as it's written, decoding its
-/// escapes; with no [key], the first string value. Null when there's none
-/// yet.
-String? _partialString(String json, String? key) {
-  final pattern = key == null
-      ? RegExp(r'"[^"\\]*"\s*:\s*"')
-      : RegExp('"${RegExp.escape(key)}"\\s*:\\s*"');
-  final match = pattern.firstMatch(json);
-  if (match == null) return null;
-  final out = StringBuffer();
-  var i = match.end;
-  while (i < json.length) {
-    final char = json[i];
-    if (char == '"') break;
-    if (char == r'\') {
-      if (i + 1 >= json.length) break;
-      final next = json[i + 1];
-      switch (next) {
-        case 'n':
-          out.write('\n');
-        case 't':
-          out.write('\t');
-        case 'r':
-          break;
-        case 'u':
-          if (i + 6 > json.length) return out.toString();
-          final code = int.tryParse(json.substring(i + 2, i + 6), radix: 16);
-          if (code != null) out.writeCharCode(code);
-          i += 6;
-          continue;
-        default:
-          out.write(next);
-      }
-      i += 2;
-      continue;
-    }
-    out.write(char);
-    i++;
-  }
-  return out.toString();
+  return lines(partialJsonString(input, null));
 }
 
 /// 412000 → "412k".

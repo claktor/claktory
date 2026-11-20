@@ -364,7 +364,7 @@ pub fn failure_message(home: &Home) -> String {
     let Ok(bytes) = std::fs::read(home.update_failed_path()) else { return String::new() };
     match serde_json::from_slice::<Failed>(&bytes) {
         Ok(failed) => {
-            format!("Factory {} didn't start, so Factory went back to {}. {}", failed.version, failed.back_to, failed.reason)
+            format!("Claktory {} didn't start, so you're still on {}. {}", failed.version, failed.back_to, failed.reason)
         }
         Err(_) => String::new(),
     }

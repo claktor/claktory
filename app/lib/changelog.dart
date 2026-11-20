@@ -86,7 +86,7 @@ class ChangelogView extends StatelessWidget {
                             ? Padding(
                                 padding: const EdgeInsets.all(Space.xl),
                                 child: Text(
-                                  "Claktory hasn't published a changelog yet.",
+                                  'No release notes yet.',
                                   style: TextStyles.body.copyWith(
                                     color: palette.textFaint,
                                   ),

@@ -26,7 +26,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Web",
     icon: "globe",
-    description: "The agent searches the web and reads pages, as a browser on this computer would, with no account or key.",
+    description: "Lets it search the web and read pages. No account needed.",
     default_enabled: true,
     options: &[],
 };
@@ -108,7 +108,7 @@ fn tool(
         Arc::new(move |args| {
             let factory = factory.upgrade();
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
                 run(factory, args).await.map_err(factory_agent::Error::Other)
             })
         }),

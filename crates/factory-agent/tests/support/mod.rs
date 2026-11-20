@@ -286,7 +286,13 @@ pub mod fixtures {
             other => panic!("{name}: {other:?}"),
         };
         let actual = message_json(message);
-        assert!(same_json(&actual, &case["message"]), "{name}: {actual} != {}", case["message"]);
+        let mut expected = case["message"].clone();
+        // Factory marks a key out of credit (not Pi): its account is skipped for a while.
+        let body = case["http"]["chunks"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<String>();
+        if status != 200 && factory_agent::accounts::credit_error(status, &body) {
+            expected["outOfCredit"] = Value::Bool(true);
+        }
+        assert!(same_json(&actual, &expected), "{name}: {actual} != {expected}");
         if case["request"].is_null() {
             assert!(server.requests.lock().is_empty(), "{name}");
             return;

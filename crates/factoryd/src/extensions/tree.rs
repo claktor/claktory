@@ -4,6 +4,8 @@
 //! runner makes one before a run (`Factory::ensure_checkout`) and points the
 //! agent's tools at it (`runner::places`).
 
+pub(crate) mod caches;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Own checkout",
     icon: "git-branch",
-    description: "The agent works in its own copy-on-write checkout of the project's git repository (the files git tracks), on its own branch, so agents working in parallel don't step on each other. It lands its work on the main branch when it's ready. Agents outside a git repository work as before.",
+    description: "Gives it its own copy of the project's code, so agents working at the same time don't get in each other's way. It merges its work back when it's ready. For projects kept in git.",
     default_enabled: true,
     options: &[],
 };
@@ -61,11 +63,11 @@ impl Extension for Tree {
             let factory = factory.upgrade();
             let agent = agent.clone();
             Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
                 let checkout = {
                     let inner = factory.lock();
                     let Some(me) = inner.config.agent(&agent) else {
-                        return Err(factory_agent::Error::Other("You're no longer in this Factory.".into()));
+                        return Err(factory_agent::Error::Other("You're no longer in this Claktory.".into()));
                     };
                     crate::runner::checkout(&factory.home, &inner.config, me)
                 };
@@ -109,7 +111,7 @@ pub(crate) fn section(home: &Home, agent: &str, source: &Path) -> String {
     format!(
         "## Own checkout
 
-You work in your own checkout of the repository at {repo}: {folder}, on the branch {branch}. It's yours alone: it holds only what git tracks, so its build output (target/, node_modules/…) starts empty and the first build there is a full one, then stays between runs. The main checkout, {repo}{on}, is the person's and other agents': read it, but never change it, with bash either. {NEVER}
+You work in your own checkout of the repository at {repo}: {folder}, on the branch {branch}. It's yours alone: it holds only what git tracks, so its build output (target/, node_modules/…) starts empty and the first build there is a full one, then stays between runs, unless it outgrows the build-cache budget while you're idle: then it's cleared, and you're told. The main checkout, {repo}{on}, is the person's and other agents': read it, but never change it, with bash either. {NEVER}
 
 Commit your work here. To land it, rebase onto {main} (git rebase {main}: your branch and {main} share one repository), test, then call tree_land, which fast-forwards {main} in the main checkout to your branch. If {main} moved on meanwhile, rebase and land again.
 ",

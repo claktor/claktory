@@ -27,10 +27,33 @@ use tokio_tungstenite::{WebSocketStream, client_async};
 pub const MODEL: &str = "scripted/echo";
 /// Another model, which works like `MODEL`.
 pub const OTHER_MODEL: &str = "scripted/parrot";
-const WAIT: Duration = Duration::from_secs(10);
+/// How long a test waits for the server before calling it a hang. Never a
+/// measure of speed: a test process starved of the processor (agents' builds
+/// and tests run beside it) can stall for many seconds, and only a real hang
+/// should fail.
+const WAIT: Duration = Duration::from_secs(60);
 
 /// A fresh directory for one test.
+/// Lets this process open as many files as the tests need: every test of
+/// the crate runs in it (tests/all), each with a Factory of its own, and
+/// macOS starts a process at 256.
+pub fn raise_open_files() {
+    static RAISED: std::sync::Once = std::sync::Once::new();
+    RAISED.call_once(|| {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit and setrlimit only read and write `limit`.
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) == 0 {
+                // macOS refuses more than OPEN_MAX (10240) for the soft limit.
+                limit.rlim_cur = limit.rlim_max.min(10_240);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
+            }
+        }
+    });
+}
+
 pub fn temp_dir() -> PathBuf {
+    raise_open_files();
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!("factoryd-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
@@ -48,6 +71,9 @@ pub async fn start(dir: &Path) -> (SocketAddr, Arc<Factory>) {
 }
 
 pub async fn start_with(dir: &Path, models: Scripted) -> (SocketAddr, Arc<Factory>) {
+    raise_open_files();
+    // Logs of commands with secrets go through the real `factoryd redact`.
+    factoryd::set_filter_executable(env!("CARGO_BIN_EXE_factoryd").into());
     let factory = Factory::open(home(dir), Arc::new(models)).await.expect("open factory");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -151,11 +177,18 @@ impl Models for Scripted {
                 ],
                 usage: None,
                 plan: String::new(),
+                accounts: Vec::new(),
             }]
         })
     }
 
-    fn login<'a>(&'a self, _provider: &'a str, method: &'a str, interaction: &'a dyn AuthInteraction) -> BoxFuture<'a, Result<(), Error>> {
+    fn login<'a>(
+        &'a self,
+        _provider: &'a str,
+        method: &'a str,
+        interaction: &'a dyn AuthInteraction,
+        _add: bool,
+    ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let signed_in_with = if method == OAUTH {
                 interaction
@@ -177,12 +210,12 @@ impl Models for Scripted {
         })
     }
 
-    fn logout<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<(), Error>> {
+    fn logout<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<(), Error>> {
         *self.signed_in_with.lock().expect("lock") = None;
         Box::pin(async { Ok(()) })
     }
 
-    fn usage<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
         let subscribed = self.current() == Some(ACCOUNT);
         Box::pin(async move {
             Ok(subscribed.then(|| {
@@ -511,6 +544,7 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
             Some(Kind::Event(event)) if event.summary.is_empty() => format!("event from {}: {}", event.from, event.text),
             Some(Kind::Event(event)) => format!("event from {}: {}", event.from, event.summary),
             Some(Kind::Proposal(proposal)) => format!("proposal {} ({:?}): {}", proposal.id, proposal.state(), proposal.text),
+            Some(Kind::SecretRequest(request)) => format!("secret request {} ({:?}): {}", request.id, request.state(), request.reason),
             None => "empty".into(),
         });
     }

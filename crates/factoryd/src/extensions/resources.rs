@@ -35,17 +35,17 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Resources",
     icon: "gauge",
-    description: "How this machine and Factory use its processors, memory and disk: Factory's own processes, the other programs using the most, and what Factory's data takes. The agent hears when memory or disk runs low, to look into it and tell the person. Admin agents like Rivet have it.",
+    description: "Shows how this computer's processor, memory and disk are used, and how much Claktory takes. It hears when memory or disk runs low, and tells you. Rivet has it.",
     default_enabled: false,
     options: &[],
 };
 
 const PROMPT: &str = "## Resources
 
-The resources tool shows how this machine and Factory use its processors, memory and disk: the whole machine, Factory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Factory's data and projects take on disk. Factory samples it every minute and tells you when memory or disk runs low. Then look into it with the tool and tell the person what you found and what they could do. Never stop, kill or delete anything yourself unless the person asks you to.
+The resources tool shows how this machine and Claktory use its processors, memory and disk: the whole machine, Claktory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Claktory's data and projects take on disk. Claktory samples it every minute and tells you when memory or disk runs low. Then look into it with the tool and tell the person what you found and what they could do. Never stop, kill or delete anything yourself unless the person asks you to.
 ";
 
-const ABOUT: &str = "How this machine and Factory use its resources, in a few lines: processors, memory, swap and free disk; Factory's processes; the other programs using the most memory; alerts in effect. `detail`: \"processes\" (every process group of Factory's and the top others), \"disk\" (each volume, and what Factory's data, agents and projects take) or \"history\" (the last hour, every 5 minutes).";
+const ABOUT: &str = "How this machine and Claktory use its resources, in a few lines: processors, memory, swap and free disk; Claktory's processes; the other programs using the most memory; alerts in effect. `detail`: \"processes\" (every process group of Claktory's and the top others), \"disk\" (each volume, and what Claktory's data, agents and projects take) or \"history\" (the last hour, every 5 minutes). `clear_cache`: the path of a build cache (shown under detail \"disk\") to clear now, only when the person asks: it's moved aside and deleted, and the next build there is cold.";
 
 /// Samples kept: an hour's.
 const HISTORY: usize = 60;
@@ -205,7 +205,7 @@ fn known(factory: &Factory) -> sample::Known {
         Err(error) => tracing::error!(%error, "could not read the monitors"),
     }
     let inner = factory.lock();
-    let mut paths = vec![(factory.home.root().to_owned(), "Factory's data".to_owned())];
+    let mut paths = vec![(factory.home.root().to_owned(), "Claktory's data".to_owned())];
     for project in &inner.config.projects {
         paths.push((project.path.clone(), project.name.clone()));
         paths.extend(project.folders.iter().map(|folder| (folder.path.clone(), project.name.clone())));
@@ -241,7 +241,10 @@ fn plan(factory: &Factory) -> disk::Plan {
 /// it's about. Each is said once per crossing.
 fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String, String)> {
     let mut said = Vec::new();
-    let advice = "Look into it with the resources tool and tell the person what you find and what they could do. Don't stop, kill or delete anything yourself.";
+    let advice = format!(
+        "Look into it with the resources tool and tell {} what you find and what they could do. Don't stop, kill or delete anything yourself.",
+        config.person()
+    );
     let machine = now.machine.clone();
     let memory = percent(machine.memory_used, machine.memory_total);
     let busy = |crossing: &mut Crossing, over: bool, samples: u32| {
@@ -267,7 +270,7 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String
         let factory_memory: u64 = now.factory.iter().map(|process| process.memory).sum();
         let _ = write!(
             text,
-            ". Factory's processes use {} (most: {}); the other programs using the most: {}. {advice}",
+            ". Claktory's processes use {} (most: {}); the other programs using the most: {}. {advice}",
             size(factory_memory),
             few(config, &now.factory, 3),
             few(config, &now.others, 3)
@@ -307,7 +310,7 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String
         if now.measured > 0 {
             let biggest: Vec<String> =
                 now.disk.iter().filter(|row| row.kind != "home").take(3).map(|row| format!("{} {}", row.label, size(row.bytes))).collect();
-            let _ = write!(text, " Of Factory's, the most ({}): {}.", ago(now.measured), biggest.join(", "));
+            let _ = write!(text, " Of Claktory's, the most ({}): {}.", ago(now.measured), biggest.join(", "));
         }
         let _ = write!(text, " {advice}");
         said.push((format!("disk:{}", volume.mount), text));
@@ -356,7 +359,7 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         for agent in &told {
             let event = Event {
                 source: EventSource::Host,
-                from: "Factory".to_owned(),
+                from: "Claktory".to_owned(),
                 id: String::new(),
                 summary: String::new(),
                 transient: false,
@@ -415,6 +418,43 @@ fn unreadable(factory: &Weak<Factory>, error: &str) {
     }
 }
 
+/// Shows the build caches as last found (`tree::caches`) among the disk's
+/// rows: each agent's checkouts' and each project folder's, as parts of
+/// its row, and refreshes the panel.
+pub(crate) fn show_caches(factory: &Factory) {
+    let found = factory.build_caches.found();
+    {
+        let mut now = factory.resources.now();
+        for row in &mut now.disk {
+            row.parts.retain(|part| part.kind != "build_cache");
+            for place in &found {
+                let ours = match row.kind.as_str() {
+                    "agent" => place.agent.as_deref() == Some(row.id.as_str()),
+                    "project" | "folder" => place.agent.is_none() && std::path::Path::new(&row.path) == place.path,
+                    _ => false,
+                };
+                if !ours {
+                    continue;
+                }
+                for cache in &place.caches {
+                    let inside = cache.path.strip_prefix(&place.path).unwrap_or(&cache.path);
+                    row.parts.push(v1::DiskUsage {
+                        label: format!("Build cache {}", inside.display()),
+                        kind: "build_cache".to_owned(),
+                        id: row.id.clone(),
+                        path: cache.path.display().to_string(),
+                        bytes: cache.bytes,
+                        parts: Vec::new(),
+                        partial: cache.partial,
+                    });
+                }
+            }
+            row.parts.sort_by_key(|part| std::cmp::Reverse(part.bytes));
+        }
+    }
+    refresh_panel(factory);
+}
+
 /// Measures the disk in the background: shortly after start, then every
 /// 20 minutes.
 async fn measure(factory: Weak<Factory>) {
@@ -432,7 +472,7 @@ async fn measure(factory: Weak<Factory>) {
             now.disk = rows;
             now.measured = now_ms();
         }
-        refresh_panel(&factory);
+        show_caches(&factory);
     }
 }
 
@@ -440,6 +480,8 @@ async fn measure(factory: Weak<Factory>) {
 struct Args {
     #[serde(default)]
     detail: Option<String>,
+    #[serde(default)]
+    clear_cache: Option<String>,
 }
 
 fn machine_line(machine: &v1::Machine) -> String {
@@ -478,13 +520,16 @@ fn disk_row(out: &mut String, row: &v1::DiskUsage, indent: &str) {
 
 fn run(factory: &Factory, _agent: &str, args: Value) -> Result<String, String> {
     let args: Args = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    if let Some(path) = args.clear_cache.as_deref().filter(|path| !path.trim().is_empty()) {
+        return super::tree::caches::clear_on_request(factory, path);
+    }
     let config = factory.lock().config.clone();
     let now = factory.resources.now();
     if let Some(error) = &now.error {
         return Err(format!("This machine's resources can't be read: {error}"));
     }
     if now.sampled == 0 {
-        return Err("Factory hasn't sampled the machine yet; ask again in a few seconds.".to_owned());
+        return Err("Claktory hasn't sampled the machine yet; ask again in a few seconds.".to_owned());
     }
     let mut out = String::new();
     match args.detail.as_deref().map(str::trim).unwrap_or_default() {
@@ -492,7 +537,7 @@ fn run(factory: &Factory, _agent: &str, args: Value) -> Result<String, String> {
             let _ = writeln!(out, "{}", machine_line(&now.machine));
             let factory_memory: u64 = now.factory.iter().map(|process| process.memory).sum();
             let factory_cpu: f64 = now.factory.iter().map(|process| process.cpu_percent).sum();
-            let _ = writeln!(out, "Factory: {}, CPU {factory_cpu:.0}%: {}.", size(factory_memory), few(&config, &now.factory, 4));
+            let _ = writeln!(out, "Claktory: {}, CPU {factory_cpu:.0}%: {}.", size(factory_memory), few(&config, &now.factory, 4));
             let _ = writeln!(out, "Others by memory: {}.", few(&config, &now.others, OTHERS_SHOWN));
             if now.alerts.is_empty() {
                 let _ = writeln!(out, "No alerts.");
@@ -505,7 +550,7 @@ fn run(factory: &Factory, _agent: &str, args: Value) -> Result<String, String> {
         }
         "processes" => {
             let _ = writeln!(out, "{}", machine_line(&now.machine));
-            let _ = writeln!(out, "Factory's processes (CPU: 100% is one core, over the last minute):");
+            let _ = writeln!(out, "Claktory's processes (CPU: 100% is one core, over the last minute):");
             for process in &now.factory {
                 let _ = writeln!(out, "{}", process_line(&config, process));
             }
@@ -530,14 +575,19 @@ fn run(factory: &Factory, _agent: &str, args: Value) -> Result<String, String> {
             if now.measured == 0 {
                 let _ = write!(
                     out,
-                    "What Factory's data and projects take isn't measured yet: it's measured in the background, first a minute after Factory starts."
+                    "What Claktory's data and projects take isn't measured yet: it's measured in the background, first a minute after Claktory starts."
                 );
                 return Ok(out);
             }
             let _ = writeln!(
                 out,
-                "Measured {} (every 20 minutes). Checkouts are copy-on-write clones, so most of their bytes are shared.",
-                ago(now.measured)
+                "Measured {} (every 20 minutes). Checkouts are copy-on-write clones, so most of their bytes are shared. Build caches over {} in a checkout or project folder are cleared on their own while nothing works there; clear_cache clears one now.",
+                ago(now.measured),
+                if config.resources.build_cache_gb > 0.0 {
+                    gb((config.resources.build_cache_gb * 1e9) as u64)
+                } else {
+                    "the budget (none set)".to_owned()
+                }
             );
             for row in &now.disk {
                 disk_row(&mut out, row, "");
@@ -547,11 +597,11 @@ fn run(factory: &Factory, _agent: &str, args: Value) -> Result<String, String> {
             }
         }
         "history" => {
-            let _ = writeln!(out, "The last hour, every 5 minutes (memory used, swap used, Factory's memory, CPU):");
+            let _ = writeln!(out, "The last hour, every 5 minutes (memory used, swap used, Claktory's memory, CPU):");
             for sample in now.history.iter().rev().step_by(5).collect::<Vec<_>>().into_iter().rev() {
                 let _ = writeln!(
                     out,
-                    "- {}: memory {}, swap {}, Factory {}, CPU {:.0}%",
+                    "- {}: memory {}, swap {}, Claktory {}, CPU {:.0}%",
                     clock(sample.time),
                     gb(sample.memory_used),
                     gb(sample.swap_used),
@@ -581,7 +631,10 @@ impl Extension for Resources {
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
         let parameters = json!({
             "type": "object",
-            "properties": {"detail": {"type": "string", "enum": ["processes", "disk", "history"]}},
+            "properties": {
+                "detail": {"type": "string", "enum": ["processes", "disk", "history"]},
+                "clear_cache": {"type": "string"},
+            },
             "additionalProperties": false,
         });
         vec![factory_tool(factory, agent, "resources", "Resources", ABOUT, parameters, run)]

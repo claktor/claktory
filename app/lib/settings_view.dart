@@ -9,6 +9,7 @@ import 'identity.dart';
 import 'login.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
@@ -63,10 +64,15 @@ class SettingsView extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(vertical: Space.xl),
                       children: [
                         _Section(
+                          title: 'General',
+                          children: [_YourName(workspace: workspace)],
+                        ),
+                        const SizedBox(height: Space.xxl),
+                        _Section(
                           title: 'Providers',
                           children: [
                             for (final provider in workspace.providers)
-                              _ProviderCard(
+                              ProviderCard(
                                 provider: provider,
                                 flow:
                                     workspace.hasLogin() &&
@@ -76,6 +82,11 @@ class SettingsView extends StatelessWidget {
                                     : null,
                               ),
                           ],
+                        ),
+                        const SizedBox(height: Space.xxl),
+                        const _Section(
+                          title: 'Secrets',
+                          children: [SecretsSettings()],
                         ),
                         const SizedBox(height: Space.xxl),
                         _Section(
@@ -164,101 +175,6 @@ mixin SettingRequests<T extends StatefulWidget> on State<T> {
           padding: const EdgeInsets.only(top: Space.s),
           child: ErrorLine(failure!, about: 'In Settings:'),
         );
-}
-
-class _ProviderCard extends StatefulWidget {
-  const _ProviderCard({required this.provider, required this.flow});
-
-  final Provider provider;
-
-  /// The sign-in in progress for this provider, if any.
-  final LoginFlow? flow;
-
-  @override
-  State<_ProviderCard> createState() => _ProviderCardState();
-}
-
-class _ProviderCardState extends State<_ProviderCard> with SettingRequests {
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final scope = AppScope.scope(context);
-    final provider = widget.provider;
-    final flow = widget.flow;
-    final signedIn = provider.signedInWith.isNotEmpty;
-    var methodLabel = flow?.methodId ?? '';
-    for (final method in provider.methods) {
-      if (method.id == flow?.methodId) methodLabel = method.label;
-    }
-    return Container(
-      padding: const EdgeInsets.all(Space.l),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Radii.panel),
-        border: Border.all(color: palette.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      provider.name,
-                      style: TextStyles.label.copyWith(color: palette.text),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      signedIn
-                          ? 'Signed in with ${provider.signedInWith}'
-                          : 'Not signed in',
-                      style: TextStyles.caption.copyWith(
-                        color: signedIn ? palette.textMuted : palette.textFaint,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (provider.canSignOut)
-                Button(
-                  label: 'Sign out',
-                  onPressed: () =>
-                      run(() => scope.backend.signOut(provider.id)),
-                ),
-            ],
-          ),
-          if (flow != null) ...[
-            const SizedBox(height: Space.l),
-            Container(height: 1, color: palette.hairline),
-            const SizedBox(height: Space.l),
-            LoginPanel(flow: flow, method: methodLabel),
-          ] else if (provider.methods.isNotEmpty) ...[
-            const SizedBox(height: Space.m),
-            Wrap(
-              spacing: Space.xs,
-              runSpacing: Space.xs,
-              children: [
-                for (var i = 0; i < provider.methods.length; i++)
-                  Button(
-                    label: 'Sign in with ${provider.methods[i].label}',
-                    primary: !signedIn && i == 0,
-                    onPressed: () => run(
-                      () => scope.login.start(
-                        provider.id,
-                        provider.methods[i].id,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ],
-          failureLine(palette),
-        ],
-      ),
-    );
-  }
 }
 
 /// The model, effort and compaction threshold new agents start with. Only
@@ -388,29 +304,42 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
             ),
           ),
         SettingRow(
-          label: 'Compact context at',
-          child: Row(
+          label: 'Summarize conversations at',
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(
-                width: 96,
-                child: TextField(
-                  controller: _compactAt,
-                  onSubmitted: (_) => _saveCompactAt(),
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 96,
+                    child: TextField(
+                      controller: _compactAt,
+                      onSubmitted: (_) => _saveCompactAt(),
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  Text(
+                    'tokens',
+                    style: TextStyles.body.copyWith(color: palette.textMuted),
+                  ),
+                  const SizedBox(width: Space.m),
+                  ListenableBuilder(
+                    listenable: _compactAt,
+                    builder: (context, _) =>
+                        _compactAt.text.trim() ==
+                            formatTokens(settings.compactAtTokens)
+                        ? const SizedBox.shrink()
+                        : Button(label: 'Save', onPressed: _saveCompactAt),
+                  ),
+                ],
               ),
-              const SizedBox(width: Space.s),
+              const SizedBox(height: Space.xs),
               Text(
-                'tokens',
-                style: TextStyles.body.copyWith(color: palette.textMuted),
-              ),
-              const SizedBox(width: Space.m),
-              ListenableBuilder(
-                listenable: _compactAt,
-                builder: (context, _) =>
-                    _compactAt.text.trim() ==
-                        formatTokens(settings.compactAtTokens)
-                    ? const SizedBox.shrink()
-                    : Button(label: 'Save', onPressed: _saveCompactAt),
+                'When a conversation gets this long, older messages are '
+                'summarized so the agent can keep going.',
+                style: TextStyles.caption.copyWith(color: palette.textFaint),
               ),
             ],
           ),
@@ -448,9 +377,7 @@ class _ResourceAlertsState extends State<_ResourceAlerts> with SettingRequests {
         Padding(
           padding: const EdgeInsets.only(bottom: Space.m),
           child: Text(
-            'Admin agents with the Resources extension, such as Rivet, are '
-            'told when the machine runs low. Each agent\'s Resources panel '
-            'shows how it stands.',
+            'Rivet tells you when this computer runs low. Alert when:',
             style: TextStyles.caption.copyWith(color: palette.textMuted),
           ),
         ),
@@ -481,6 +408,17 @@ class _ResourceAlertsState extends State<_ResourceAlerts> with SettingRequests {
           note: settings.cpuPercent == 0 ? 'Off' : '0 turns it off.',
           onInvalid: _invalid,
           onSave: (values) => _save(UpdateSettings(cpuPercent: values[0])),
+        ),
+        _Threshold(
+          label: 'Build caches',
+          parts: [(settings.buildCacheGb.round(), 'GB each')],
+          lead: 'Up to',
+          note:
+              'When one grows past this, Claktory clears it while nothing\'s '
+              'using it. 0 means never.',
+          onInvalid: _invalid,
+          onSave: (values) =>
+              _save(UpdateSettings(buildCacheGb: values[0].toDouble())),
         ),
         failureLine(palette),
       ],
@@ -602,6 +540,95 @@ class _ThresholdState extends State<_Threshold> {
   }
 }
 
+/// The person's first name, which agents call them by
+/// (`Settings.user_name`); asked on the first launch, changed here.
+class _YourName extends StatefulWidget {
+  const _YourName({required this.workspace});
+
+  final Workspace workspace;
+
+  @override
+  State<_YourName> createState() => _YourNameState();
+}
+
+class _YourNameState extends State<_YourName> with SettingRequests {
+  late final _name = TextEditingController(
+    text: widget.workspace.settings.userName,
+  );
+  late var _shown = widget.workspace.settings.userName;
+
+  @override
+  void didUpdateWidget(_YourName old) {
+    super.didUpdateWidget(old);
+    // The backend's name, unless the person is editing it.
+    final name = widget.workspace.settings.userName;
+    if (name == _shown) return;
+    if (_name.text.trim() == _shown.trim()) _name.text = name;
+    _shown = name;
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => failure = 'Enter your first name.');
+      return;
+    }
+    run(
+      () => AppScope.of(context).updateSettings(UpdateSettings(userName: name)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Your name',
+          child: Row(
+            children: [
+              SizedBox(
+                width: 200,
+                child: TextField(
+                  controller: _name,
+                  placeholder: 'First name',
+                  onSubmitted: (_) => _save(),
+                ),
+              ),
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: ListenableBuilder(
+                  listenable: _name,
+                  builder: (context, _) =>
+                      _name.text.trim() == widget.workspace.settings.userName
+                      ? Text(
+                          'Your agents call you by it.',
+                          style: TextStyles.caption.copyWith(
+                            color: palette.textFaint,
+                          ),
+                        )
+                      : Align(
+                          alignment: Alignment.centerLeft,
+                          child: Button(label: 'Save', onPressed: _save),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
 /// Whether what changes glows (Workspace.highlights).
 class _Highlights extends StatefulWidget {
   const _Highlights({required this.workspace});
@@ -661,6 +688,23 @@ class SettingRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    if (isPhoneLayout(context)) {
+      // No room beside it: the label over the control.
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Space.m),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              label,
+              style: TextStyles.body.copyWith(color: palette.textMuted),
+            ),
+            const SizedBox(height: Space.xs),
+            Align(alignment: Alignment.centerLeft, child: child),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.m),
       child: Row(

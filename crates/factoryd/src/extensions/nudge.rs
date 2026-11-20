@@ -112,7 +112,7 @@ fn check(factory: &Arc<Factory>, after: Duration, reminded: &mut HashMap<String,
         }
         text.push_str(". Carry on, or mark what's waiting with status blocked and a note saying on what.");
         let summary = format!("Reminder: {total} outstanding checklist item{}", if total == 1 { "" } else { "s" });
-        let event = Event { source: EventSource::Host, from: "Factory".to_owned(), id: String::new(), summary, transient: false };
+        let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
         tracing::info!(agent = %id, total, "reminding an idle agent of its outstanding items");
         factory.deliver_event(&id, text, event);
         reminded.insert(id.clone(), situation(factory)?);

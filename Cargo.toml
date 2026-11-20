@@ -14,5 +14,14 @@ publish = false
 [profile.dev]
 debug = "line-tables-only"
 
+# No debug info for what `cargo test` builds: on macOS, rustc 1.88 and later
+# leaves every rebuild's *.rcgu.o files in target/*/deps and never deletes
+# them while there's debug info (rust-lang/rust#161824), ~1.2 GB per test
+# run. A failing test still prints where it panicked.
 [profile.test]
-debug = "line-tables-only"
+debug = "none"
+
+# The vault's passphrase hashing (Argon2id, 64 MiB) takes seconds unoptimized;
+# optimized it takes a fraction of one, in the dev Claktory and in tests too.
+[profile.dev.package.argon2]
+opt-level = 3

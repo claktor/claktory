@@ -20,21 +20,19 @@ class MarketplaceView extends StatefulWidget {
 enum _Kind {
   templates(
     'Agent templates',
-    'Ready-made agents: a prompt, a model and the skills they come with. '
-        'Adding one creates the agent in your Claktory.',
+    'Ready-made agents, each with its prompt, model and skills. Add one to '
+        'your Claktory.',
     'No agent templates yet.',
   ),
   skills(
     'Skills',
-    'Know-how an agent can pick up: instructions, and the scripts that go '
-        'with them, for one kind of task. Agent templates come with theirs, '
-        'and any agent can be given more.',
+    'Know-how for one kind of task: instructions and the scripts that go '
+        'with them. Give them to any agent.',
     'No skills yet.',
   ),
   extensions(
     'Extensions',
-    'New capabilities for Claktory itself, added while it runs. Whatever '
-        'Claktory might need to do, an extension can add.',
+    'New things your agents can do, added while Claktory runs.',
     'No extensions yet.',
   );
 
@@ -68,21 +66,32 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                 ),
                 child: Row(
                   children: [
-                    Text(
-                      'Marketplace',
-                      style: TextStyles.label.copyWith(
-                        color: palette.text,
-                        fontWeight: FontWeight.w600,
+                    // A phone has room for the tabs alone.
+                    if (!isPhoneLayout(context)) ...[
+                      Text(
+                        'Marketplace',
+                        style: TextStyles.label.copyWith(
+                          color: palette.text,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: Space.xl),
+                    ],
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            for (final kind in _Kind.values)
+                              _Tab(
+                                title: kind.title,
+                                selected: kind == _kind,
+                                onTap: () => setState(() => _kind = kind),
+                              ),
+                          ],
+                        ),
                       ),
                     ),
-                    const SizedBox(width: Space.xl),
-                    for (final kind in _Kind.values)
-                      _Tab(
-                        title: kind.title,
-                        selected: kind == _kind,
-                        onTap: () => setState(() => _kind = kind),
-                      ),
-                    const Spacer(),
                     Button(label: 'Done', onPressed: close),
                   ],
                 ),
@@ -198,11 +207,10 @@ class _ExtensionCard extends StatelessWidget {
                 const SizedBox(height: Space.s),
                 Text(
                   extension.defaultEnabled
-                      ? "On for every agent unless turned off in its settings"
+                      ? "On for every agent. Turn it off in an agent's settings."
                       : extension.adminDefault
-                      ? 'On for admin agents unless turned off in their '
-                            "settings; off for others until turned on"
-                      : "Off until turned on in an agent's settings",
+                      ? 'On for Rivet. Turn it on for others in their settings.'
+                      : "Turn it on in an agent's settings.",
                   style: TextStyles.caption.copyWith(color: palette.textFaint),
                 ),
               ],

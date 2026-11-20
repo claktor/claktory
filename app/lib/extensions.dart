@@ -21,8 +21,12 @@ import 'selection.dart';
 /// Width of the extension bar between the sidebar and the content.
 const extensionBarWidth = 40.0;
 
-/// Width of an extension's panel on the right.
+/// Width of an extension's panel on the right by default; the person can
+/// drag it between [panelMinWidth] and [panelMaxWidth]
+/// (`Settings.panel_width`), as far as the window has room.
 const panelWidth = 320.0;
+const panelMinWidth = 280.0;
+const panelMaxWidth = 800.0;
 
 /// [agent]'s settings for extension [id], or null when it has none.
 AgentExtension? agentExtension(Agent agent, String id) {
@@ -48,6 +52,47 @@ Extension? openPanelOf(Workspace workspace, Agent? agent) {
   return null;
 }
 
+/// A glyph button for each extension [agent] has on: clicking one opens its
+/// panel, clicking the open one closes it. In the extension bar, and in the
+/// agent's header on a phone.
+List<Widget> extensionButtons(BuildContext context, Agent agent) {
+  final backend = AppScope.of(context);
+  final workspace = backend.workspace.workspace;
+  final open = openPanelOf(workspace, agent);
+  return [
+    for (final extension in enabledExtensions(workspace, agent))
+      // Glows when it's pointed out, and for its panel's items while the
+      // panel is closed.
+      Glow(
+        store: backend.highlights,
+        matches: (key) =>
+            key == 'extension:${agent.id}/${extension.id}' ||
+            (open?.id != extension.id &&
+                extension.id == 'checklist' &&
+                key.startsWith('checklist_item:${agent.id}#')),
+        child: HoverCard(
+          beside: true,
+          card: (context) => Text(extension.name),
+          child: GlyphButton(
+            label: extension.name,
+            active: open?.id == extension.id,
+            onTap: () => fireAndLog(
+              backend.openPanel(
+                agent.id,
+                open?.id == extension.id ? '' : extension.id,
+              ),
+            ),
+            glyph: (color) => ExtensionGlyph(
+              icon: extension.icon,
+              name: extension.name,
+              color: color,
+            ),
+          ),
+        ),
+      ),
+  ];
+}
+
 /// A thin column right of the sidebar with an icon for each extension the
 /// selected agent has on. Clicking one opens its panel; clicking the open
 /// one closes it.
@@ -60,10 +105,7 @@ class ExtensionBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final backend = AppScope.of(context);
-    final workspace = backend.workspace.workspace;
     final agent = this.agent;
-    final open = openPanelOf(workspace, agent);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: palette.sidebar,
@@ -75,38 +117,10 @@ class ExtensionBar extends StatelessWidget {
           children: [
             const TitleSpace(),
             if (agent != null)
-              for (final extension in enabledExtensions(workspace, agent))
+              for (final button in extensionButtons(context, agent))
                 Padding(
                   padding: const EdgeInsets.only(bottom: Space.xs),
-                  // Glows when it's pointed out, and for its panel's items
-                  // while the panel is closed.
-                  child: Glow(
-                    store: backend.highlights,
-                    matches: (key) =>
-                        key == 'extension:${agent.id}/${extension.id}' ||
-                        (open?.id != extension.id &&
-                            extension.id == 'checklist' &&
-                            key.startsWith('checklist_item:${agent.id}#')),
-                    child: HoverCard(
-                      beside: true,
-                      card: (context) => Text(extension.name),
-                      child: GlyphButton(
-                        label: extension.name,
-                        active: open?.id == extension.id,
-                        onTap: () => fireAndLog(
-                          backend.openPanel(
-                            agent.id,
-                            open?.id == extension.id ? '' : extension.id,
-                          ),
-                        ),
-                        glyph: (color) => ExtensionGlyph(
-                          icon: extension.icon,
-                          name: extension.name,
-                          color: color,
-                        ),
-                      ),
-                    ),
-                  ),
+                  child: button,
                 ),
           ],
         ),
@@ -122,10 +136,14 @@ class ExtensionPanel extends StatelessWidget {
     super.key,
     required this.extension,
     required this.agent,
+    this.width = panelWidth,
   });
 
   final Extension extension;
   final Agent agent;
+
+  /// Its sheet's width on a phone.
+  final double width;
 
   @override
   Widget build(BuildContext context) {
@@ -137,7 +155,7 @@ class ExtensionPanel extends StatelessWidget {
         border: Border(left: BorderSide(color: palette.hairline)),
       ),
       child: SizedBox(
-        width: panelWidth,
+        width: width,
         child: ListenableBuilder(
           listenable: backend.extensionView,
           builder: (context, _) {

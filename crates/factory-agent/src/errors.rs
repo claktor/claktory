@@ -8,6 +8,8 @@ pub enum AgentFailure {
     ReadOnly { path: String },
     InvalidEdit { path: String, reason: String },
     BashWrappedInvocation { command: String },
+    BashLongSleep { seconds: String },
+    BashCopiesRepository { path: String },
 }
 
 impl AgentFailure {
@@ -18,6 +20,8 @@ impl AgentFailure {
             AgentFailure::ReadOnly { .. } => "read-only",
             AgentFailure::InvalidEdit { .. } => "invalid-edit",
             AgentFailure::BashWrappedInvocation { .. } => "bash-wrapped-invocation",
+            AgentFailure::BashLongSleep { .. } => "bash-long-sleep",
+            AgentFailure::BashCopiesRepository { .. } => "bash-copies-repository",
         }
     }
 
@@ -30,6 +34,12 @@ impl AgentFailure {
             AgentFailure::BashWrappedInvocation { command } => {
                 format!("command is \"{command}\", not a script. Put the script text itself in command.")
             }
+            AgentFailure::BashLongSleep { seconds } => format!(
+                "Blocked: sleep {seconds}. Claktory wakes you with an event when a background task ends or a message arrives, so there's nothing to wait for. To wait for a condition, add a monitor (check) or run an until-loop with run_in_background. Don't chain shorter sleeps to get around this."
+            ),
+            AgentFailure::BashCopiesRepository { path } => format!(
+                "Blocked: this copies the whole repository at {path}, build output included, which takes many minutes. Don't copy the repository. If you need a checkout of your own, ask for Claktory's Own checkout extension; to check what's committed, export it with `git archive HEAD | tar -x -C <dir>`."
+            ),
         }
     }
 }

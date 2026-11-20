@@ -90,8 +90,11 @@ NAME="factory-$VERSION-macos.tar.gz"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 # The license travels with every copy (PolyForm Shield).
+# The supervisor's app, in releases that have one (scripts/lib.sh make_supervisor_app).
+SUPERVISOR_DIR=()
+[[ -d "$RELEASE/supervisor" ]] && SUPERVISOR_DIR=(supervisor)
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd backend-version CHANGELOG.md \
+  -C "$RELEASE" "$APP_NAME" factoryd backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
   -C "$ROOT" LICENSE.md \
   -C "$ROOT/scripts" install-release.sh
 
@@ -148,7 +151,7 @@ if [[ -n "$REPO" ]]; then
   "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --expect "$SOURCE"
   gh release create "$VERSION" "${FILES[@]}" "$STAGE/latest.json" "$STAGE/install.sh" \
     --repo "$REPO" --target "$SOURCE" --title "Claktory $VERSION" --notes "${NOTES:-Claktory $VERSION}"
-  echo "published Factory $VERSION to $BASE"
+  echo "published Claktory $VERSION to $BASE"
   echo "install on another Mac, or a Linux machine, with:"
   echo "  curl -fsSL $BASE/latest/download/install.sh | bash"
 else
@@ -158,6 +161,6 @@ else
   # The manifest last, once what it names is there.
   cp "$STAGE/latest.json" "$LOCAL/latest.json.new"
   mv -f "$LOCAL/latest.json.new" "$LOCAL/latest.json"
-  echo "published Factory $VERSION to $LOCAL"
+  echo "published Claktory $VERSION to $LOCAL"
   echo "try it with: FACTORY_UPDATE_URL=$MANIFEST_URL"
 fi

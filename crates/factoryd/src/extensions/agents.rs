@@ -26,13 +26,13 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Messaging",
     icon: "users",
-    description: "Message other agents and see whether they're idle or working.",
+    description: "Lets it message other agents and see who's working.",
     default_enabled: true,
     options: &[
         OptionSpec {
             id: "reachable",
             label: "Other agents can message it",
-            description: "Off: it can still message others, but no agent can message it or see it.",
+            description: "When off, it can still message others, but no agent can message it or see it.",
             kind: OptionKind::Switch,
             default_on: true,
             includes_project: false,
@@ -40,7 +40,7 @@ static MANIFEST: Manifest = Manifest {
         OptionSpec {
             id: "admin",
             label: "Admin: can see and message every agent",
-            description: "For an admin agent like Rivet, which works across every project.",
+            description: "For an agent like Rivet that works across all projects.",
             kind: OptionKind::Switch,
             default_on: false,
             includes_project: false,
@@ -48,7 +48,7 @@ static MANIFEST: Manifest = Manifest {
         OptionSpec {
             id: "see_map",
             label: "Can see who can message whom",
-            description: "Gives it agents_map, which shows who every agent can message. Admin agents have it anyway.",
+            description: "Shows which agents can message each other. Admin agents always see it.",
             kind: OptionKind::Switch,
             default_on: false,
             includes_project: false,
@@ -56,7 +56,7 @@ static MANIFEST: Manifest = Manifest {
         OptionSpec {
             id: "also",
             label: "Can also see and message",
-            description: "Agents outside its project it may message. They can't message it back unless they're given it too.",
+            description: "Agents in other projects it can message. For them to reply, add it to their list too.",
             kind: OptionKind::Agents,
             default_on: false,
             includes_project: true,
@@ -68,7 +68,8 @@ const SEND: &str = "Message an agent by id or name. It arrives as an event from 
 const MAP: &str =
     "Who can message whom, one line per agent: whom it messages, and by whom it's messaged. `agent` (an id or name) shows just that agent.";
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
-const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only the person talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; the person approves or dismisses it, and you're told which.\n";
+/// `{person}`: the user's name, or "the person".
+const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; {person} approves or dismisses it, and you're told which.\n";
 
 pub(crate) struct Agents;
 
@@ -215,10 +216,12 @@ impl Extension for Agents {
             let _ = writeln!(text, "You can message: {}.", names.join(", "));
         }
         if sees_map(agent) {
-            text.push_str("agents_map shows who can message whom across Factory, for when you set up or check how agents work together.\n");
+            text.push_str(
+                "agents_map shows who can message whom across Claktory, for when you set up or check how agents work together.\n",
+            );
         }
         if !crate::proposals::is_admin(agent) {
-            text.push_str(PROPOSE);
+            text.push_str(&PROPOSE.replace("{person}", config.person()));
         }
         vec![PromptSection { kind: PromptKind::Static, text }]
     }
@@ -287,7 +290,7 @@ fn map_line(config: &Config, asker: &AgentConfig, agent: &AgentConfig) -> String
 fn map(factory: &Factory, asker: &str, agent: Option<&str>) -> Result<String, String> {
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(asker) = config.agent(asker) else { return Err("You're no longer in this Factory.".to_owned()) };
+    let Some(asker) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
     let Some(name) = agent.map(str::trim).filter(|name| !name.is_empty()) else {
         let lines: Vec<String> = config.agents.iter().map(|agent| map_line(config, asker, agent)).collect();
         return Ok(lines.join("\n"));
@@ -300,8 +303,6 @@ fn map(factory: &Factory, asker: &str, agent: Option<&str>) -> Result<String, St
 }
 
 fn map_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let asker = asker.to_owned();
     let parameters = json!({
         "type": "object",
         "properties": {"agent": {"type": "string"}},
@@ -312,15 +313,9 @@ fn map_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
         "Who messages whom",
         MAP,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let asker = asker.clone();
-            Box::pin(async move {
-                let args: StatusArgs = serde_json::from_value(args)?;
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let lines = map(&factory, &asker, args.agent.as_deref()).map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(lines, json!({})))
-            })
+        super::typed_handler(factory, asker, |factory, asker, args: StatusArgs| {
+            let lines = map(factory, asker, args.agent.as_deref())?;
+            Ok(ToolResult::text(lines, json!({})))
         }),
     )
 }
@@ -338,8 +333,6 @@ struct StatusArgs {
 }
 
 fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let sender = sender.to_owned();
     let parameters = json!({
         "type": "object",
         "required": ["to", "text"],
@@ -351,22 +344,11 @@ fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
         "Message agent",
         SEND,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let sender = sender.clone();
-            Box::pin(async move {
-                let args: SendArgs = serde_json::from_value(args)?;
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let sent = send(&factory, &sender, &args.to, args.text).map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(sent, json!({})))
-            })
-        }),
+        super::typed_handler(factory, sender, |factory, sender, args: SendArgs| send(factory, sender, &args.to, args.text)),
     )
 }
 
 fn status_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let asker = asker.to_owned();
     let parameters = json!({
         "type": "object",
         "properties": {"agent": {"type": "string"}},
@@ -377,16 +359,9 @@ fn status_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
         "Agent status",
         STATUS,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let asker = asker.clone();
-            Box::pin(async move {
-                let args: StatusArgs = serde_json::from_value(args)?;
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                let lines = status(&factory, &asker, args.agent.as_deref().filter(|agent| !agent.trim().is_empty()))
-                    .map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(lines, json!({})))
-            })
+        super::typed_handler(factory, asker, |factory, asker, args: StatusArgs| {
+            let lines = status(factory, asker, args.agent.as_deref().filter(|agent| !agent.trim().is_empty()))?;
+            Ok(ToolResult::text(lines, json!({})))
         }),
     )
 }
@@ -409,14 +384,16 @@ fn resolve<'a>(config: &'a Config, from: &AgentConfig, to: &str) -> Result<&'a A
 }
 
 /// Delivers one agent's message to another; says what happened, or why not.
-pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String) -> Result<String, String> {
-    let (from, target, working) = {
+/// Its details: whom it went to (`to`, its id, `name` and `role`), and whether it
+/// was `working`, so it reads the message after its current step.
+pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String) -> Result<ToolResult, String> {
+    let (from, target, name, role, working) = {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(from) = config.agent(sender) else { return Err("You're no longer in this Factory.".to_owned()) };
+        let Some(from) = config.agent(sender) else { return Err("You're no longer in this Claktory.".to_owned()) };
         let target = resolve(config, from, to)?;
         let working = inner.agents.get(&target.id).is_some_and(|runtime| runtime.running);
-        (signed(config, from, target), target.id.clone(), working)
+        (signed(config, from, target), target.id.clone(), target.name.clone(), target.role.clone(), working)
     };
     let event = Event { source: EventSource::Agent, from, id: sender.to_owned(), summary: String::new(), transient: false };
     factory.deliver_event(&target, text, event);
@@ -428,7 +405,8 @@ pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String)
         from_agent_id: sender.to_owned(),
         kind: v1::HighlightKind::Message.into(),
     }));
-    Ok(if working { "Sent; it's working and reads it after its current step.".to_owned() } else { "Sent.".to_owned() })
+    let said = if working { "Sent; it's working and reads it after its current step." } else { "Sent." };
+    Ok(ToolResult::text(said, json!({"to": target, "name": name, "role": role, "working": working})))
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.
@@ -447,7 +425,7 @@ pub(crate) fn status(factory: &Factory, asker: &str, only: Option<&str>) -> Resu
     let times = factory.store.run_times().map_err(|error| format!("Couldn't read runs: {error}"))?;
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(from) = config.agent(asker) else { return Err("You're no longer in this Factory.".to_owned()) };
+    let Some(from) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
     let agents = match only {
         Some(only) => vec![resolve(config, from, only)?],
         None => reachable(config, from),

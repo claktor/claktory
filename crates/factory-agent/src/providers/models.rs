@@ -4,9 +4,14 @@ use std::sync::Arc;
 use serde_json::Map;
 use tokio_util::sync::CancellationToken;
 
-use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_provider_auth};
+use hashbrown::HashMap;
+
+use parking_lot::Mutex;
+
+use crate::accounts::{account_name, account_noun, exhausted_message, key_label, out_of_credit, switch_note, usage_limit};
+use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
-use crate::credentials::{Credential, FileCredentialStore};
+use crate::credentials::{Account, Credential, FileCredentialStore};
 use crate::errors::{Error, models_error};
 use crate::limits::UsageLimit;
 use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels};
@@ -33,10 +38,112 @@ pub struct ModelInfo {
     pub efforts: Vec<ThinkingLevel>,
 }
 
+/// One of a provider's accounts, as a client shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountInfo {
+    pub id: String,
+    /// A subscription's email or name (empty until known); an API key's
+    /// name, or else its end ("sk-…a1b2"); a key from the environment, its
+    /// variable.
+    pub label: String,
+    /// "oauth" or "api_key".
+    pub kind: &'static str,
+    /// It reached a usage limit and is skipped until then, in ms since 1970;
+    /// 0 when it has capacity.
+    pub exhausted_until: u64,
+    /// An API key that ran out of credit, until a request on it succeeds.
+    pub out_of_credit: bool,
+    /// Factory stored it, so it can be signed out of; a key from the
+    /// environment can't.
+    pub stored: bool,
+    /// Requests go to it now: the first with capacity.
+    pub in_use: bool,
+}
+
+/// The account a key in the environment is, after those stored.
+pub const ENV_ACCOUNT: &str = "env";
+
+/// How long a key out of credit is skipped before a request tries it again.
+pub const CREDIT_RETRY_MS: u64 = 60 * 60 * 1000;
+
+/// What a stream tells its caller of the provider's accounts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountNote {
+    /// An account reached its limit and the request carried on with the
+    /// next: a line for the agent's transcript.
+    Switched(String),
+    /// An account reached its limit and none is left; the request fails
+    /// saying so.
+    Exhausted,
+    /// An account's state changed otherwise: a key out of credit has some again.
+    Changed,
+}
+
+/// Where a stream tells its caller of the provider's accounts.
+pub type Notes = Arc<dyn Fn(AccountNote) + Send + Sync>;
+
+/// How long an account that reached its limit is skipped when neither the
+/// provider nor its usage says when the limit resets.
+const UNKNOWN_RESET_MS: u64 = 15 * 60 * 1000;
+
+/// Whether requests can go to the account at `now`: past any limit's
+/// reset, and with credit (or out of it long enough to try again).
+fn has_capacity(account: &Account, now: u64) -> bool {
+    account.exhausted_until <= now && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
+}
+
+/// The first account with capacity at `now`, leaving out `tried`.
+fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], now: u64) -> Option<(usize, &'a Account)> {
+    accounts.iter().enumerate().find(|(_, account)| has_capacity(account, now) && !tried.contains(&account.id))
+}
+
+/// How an account's request failed for good on that account.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spent {
+    /// Its usage limit, resetting then (ms since 1970) if said.
+    Limit(Option<u64>),
+    /// An API key out of credit.
+    Credit,
+}
+
+fn spent(message: &AssistantMessage) -> Option<Spent> {
+    match usage_limit(message) {
+        Some(resets_at) => Some(Spent::Limit(resets_at)),
+        None => out_of_credit(message).then_some(Spent::Credit),
+    }
+}
+
+/// How people see an account: a key unnamed by its end.
+fn shown_label(account: &Account) -> String {
+    match &account.credential {
+        Credential::ApiKey { key, .. } if account.label.is_empty() => key_label(key),
+        _ => account.label.clone(),
+    }
+}
+
+/// The error a stream ends with when it can't go on, without a response.
+fn failed(model: &Model, text: String) -> StreamEvent {
+    let message = AssistantMessage {
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        usage: Usage::empty(),
+        stop_reason: StopReason::Error,
+        error_message: Some(text),
+        timestamp: now_ms(),
+        extra: Map::new(),
+    };
+    StreamEvent::Error { reason: StopReason::Error, error: message }
+}
+
 struct Inner {
     providers: Vec<Provider>,
     store: FileCredentialStore,
     env: Env,
+    /// The state of the keys in the environment, by provider id: when the
+    /// limit resets and since when out of credit (they aren't stored).
+    env_state: Mutex<HashMap<String, (u64, u64)>>,
 }
 
 #[derive(Clone)]
@@ -51,7 +158,7 @@ impl Registry {
     }
 
     pub fn with_providers(store: FileCredentialStore, env: Env, providers: Vec<Provider>) -> Registry {
-        Registry { inner: Arc::new(Inner { providers, store, env }) }
+        Registry { inner: Arc::new(Inner { providers, store, env, env_state: Mutex::new(HashMap::new()) }) }
     }
 
     pub fn providers(&self) -> &[Provider] {
@@ -112,41 +219,200 @@ impl Registry {
         Ok(resolution.map(|result| AuthCheck { source: Some(result.source), kind: "api_key" }))
     }
 
+    /// The provider's accounts, in the order requests try them.
+    pub async fn accounts(&self, id: &str) -> Result<Vec<AccountInfo>, Error> {
+        let now = now_ms();
+        let accounts = self.candidates(id).await?;
+        let in_use = with_capacity(&accounts, &[], now).map(|(position, _)| position);
+        Ok(accounts
+            .into_iter()
+            .enumerate()
+            .map(|(position, account)| AccountInfo {
+                label: shown_label(&account),
+                kind: account.credential.kind(),
+                exhausted_until: if account.exhausted_until > now { account.exhausted_until } else { 0 },
+                out_of_credit: account.out_of_credit_since != 0,
+                stored: account.id != ENV_ACCOUNT,
+                in_use: in_use == Some(position),
+                id: account.id,
+            })
+            .collect())
+    }
+
+    /// The provider's accounts in the order requests try them: those stored,
+    /// then a key in the environment.
+    async fn candidates(&self, id: &str) -> Result<Vec<Account>, Error> {
+        let mut accounts = credential_result(self.inner.store.accounts(id).await, "read", id)?;
+        if let Some((variable, key)) = self.env_key(id) {
+            let (exhausted_until, out_of_credit_since) = self.inner.env_state.lock().get(id).copied().unwrap_or_default();
+            accounts.push(Account {
+                id: ENV_ACCOUNT.into(),
+                label: variable,
+                identity: String::new(),
+                exhausted_until,
+                out_of_credit_since,
+                credential: Credential::ApiKey { key, extra: Map::new() },
+            });
+        }
+        Ok(accounts)
+    }
+
+    /// The provider's key in the environment: its variable and the key.
+    fn env_key(&self, id: &str) -> Option<(String, String)> {
+        let api_key = self.provider(id)?.api_key.as_ref()?;
+        let resolved = api_key.resolve(&self.inner.env, None).ok()??;
+        Some((resolved.source, resolved.auth.api_key?))
+    }
+
+    /// Changes an account's limit and credit state, stored or not; returns
+    /// the provider's accounts then.
+    async fn set_state(&self, id: &str, account: &str, change: impl FnOnce(&mut u64, &mut u64) + Send) -> Result<Vec<Account>, Error> {
+        if account == ENV_ACCOUNT {
+            {
+                let mut states = self.inner.env_state.lock();
+                let state = states.entry(id.to_owned()).or_default();
+                change(&mut state.0, &mut state.1);
+            }
+            return self.candidates(id).await;
+        }
+        let account = account.to_owned();
+        let changed = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| async move {
+                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
+                change(&mut stored.exhausted_until, &mut stored.out_of_credit_since);
+                Ok(Some(accounts))
+            })
+            .await;
+        credential_result(changed, "modify", id)?;
+        self.candidates(id).await
+    }
+
+    /// Renames one of the provider's accounts (an empty `label`: back to the
+    /// name Factory gives it) and, with `retry`, tries a key out of credit
+    /// again from the next request.
+    pub async fn update_account(&self, id: &str, account: &str, label: Option<&str>, retry: bool) -> Result<(), Error> {
+        let accounts = self.candidates(id).await?;
+        if !accounts.iter().any(|stored| stored.id == account) {
+            return Err(models_error("auth", format!("No such account: {account}"), None));
+        }
+        if let Some(label) = label {
+            if account == ENV_ACCOUNT {
+                return Err(models_error("auth", "A key from the environment is named by its variable", None));
+            }
+            let (wanted, label) = (account.to_owned(), label.trim().to_owned());
+            let renamed = self
+                .inner
+                .store
+                .modify_accounts(id, |mut accounts| async move {
+                    let Some(stored) = accounts.iter_mut().find(|stored| stored.id == wanted) else { return Ok(None) };
+                    stored.label = label;
+                    Ok(Some(accounts))
+                })
+                .await;
+            credential_result(renamed, "modify", id)?;
+        }
+        if retry {
+            self.set_state(id, account, |_, since| *since = 0).await?;
+        }
+        Ok(())
+    }
+
     /// The usage limits of a provider signed in with a subscription (Claude Pro/Max, ChatGPT), read from the
     /// provider; None when it isn't signed in that way or has no limits to read. Refreshes a token due for it.
+    /// Its first account's.
     pub async fn usage_limits(&self, id: &str) -> Result<Option<Vec<UsageLimit>>, Error> {
+        self.account_usage(id, None).await
+    }
+
+    /// `usage_limits` of one of the provider's accounts (None: its first).
+    pub async fn account_usage(&self, id: &str, account: Option<&str>) -> Result<Option<Vec<UsageLimit>>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(limits) = provider.limits else { return Ok(None) };
-        let Some((base_url, auth)) = self.subscription_auth(provider).await? else { return Ok(None) };
+        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
         limits(base_url, auth).await.map(Some)
     }
 
     /// The plan of a provider signed in with a subscription, such as "Claude Max 20x", read from the provider;
     /// None when it isn't signed in that way or can't say, and empty when it didn't say. Refreshes a token due for it.
+    /// Its first account's.
     pub async fn plan(&self, id: &str) -> Result<Option<String>, Error> {
+        self.account_plan(id, None).await
+    }
+
+    /// `plan` of one of the provider's accounts (None: its first). An account
+    /// not yet known by name (one signed in before accounts were) is read
+    /// for who it is too.
+    pub async fn account_plan(&self, id: &str, account: Option<&str>) -> Result<Option<String>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(plan) = provider.plan else { return Ok(None) };
-        let Some((base_url, auth)) = self.subscription_auth(provider).await? else { return Ok(None) };
+        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
+        if let Some(identify) = provider.identity {
+            let stored = credential_result(self.inner.store.accounts(id).await, "read", id)?;
+            let unnamed = match account {
+                Some(account) => stored.iter().find(|stored| stored.id == account),
+                None => stored.first(),
+            }
+            .filter(|stored| stored.label.is_empty())
+            .map(|stored| stored.id.clone());
+            if let Some(account) = unnamed {
+                match identify(base_url.clone(), auth.clone()).await {
+                    Ok(identity) if !identity.label.is_empty() || !identity.key.is_empty() => {
+                        self.name_account(id, &account, identity).await?;
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(provider = id, %error, "could not read who the account is"),
+                }
+            }
+        }
         plan(base_url, auth).await.map(Some)
     }
 
-    /// The base url and auth of a provider signed in with a subscription; None when it isn't.
-    async fn subscription_auth(&self, provider: &Provider) -> Result<Option<(String, RequestAuth)>, Error> {
+    async fn name_account(&self, id: &str, account: &str, identity: crate::limits::Identity) -> Result<(), Error> {
+        let account = account.to_owned();
+        let named = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| async move {
+                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
+                stored.label = identity.label;
+                stored.identity = identity.key;
+                Ok(Some(accounts))
+            })
+            .await;
+        credential_result(named, "modify", id).map(|_| ())
+    }
+
+    /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.
+    async fn subscription_auth(&self, provider: &Provider, account: Option<&str>) -> Result<Option<(String, RequestAuth)>, Error> {
         let Some(oauth) = &provider.oauth else { return Ok(None) };
-        if !oauth.is_subscription()
-            || !matches!(credential_result(self.inner.store.read(provider.id).await, "read", provider.id)?, Some(Credential::Oauth { .. }))
-        {
+        let accounts = credential_result(self.inner.store.accounts(provider.id).await, "read", provider.id)?;
+        let stored = match account {
+            Some(account) => accounts.iter().find(|stored| stored.id == account),
+            None => accounts.first(),
+        };
+        if !oauth.is_subscription() || !matches!(stored, Some(Account { credential: Credential::Oauth { .. }, .. })) {
             return Ok(None);
         }
-        let resolution = resolve_provider_auth(provider, &self.inner.store, &self.inner.env, &CancellationToken::new()).await?;
+        let resolution = resolve_account_auth(provider, &self.inner.store, &self.inner.env, account, &CancellationToken::new()).await?;
         let Some(resolution) = resolution else { return Ok(None) };
         let base_url = resolution.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
         Ok(Some((base_url, resolution.auth)))
     }
 
     pub async fn get_auth(&self, model: &Model) -> Result<Option<AuthResult>, Error> {
+        self.account_auth(model, None).await
+    }
+
+    /// `get_auth` with one of the provider's accounts (None: its first).
+    async fn account_auth(&self, model: &Model, account: Option<&str>) -> Result<Option<AuthResult>, Error> {
         let Some(provider) = self.provider(&model.provider) else { return Ok(None) };
-        let Some(mut result) = resolve_provider_auth(provider, &self.inner.store, &self.inner.env, &CancellationToken::new()).await? else {
+        let resolved = match (account, &provider.api_key) {
+            (Some(ENV_ACCOUNT), Some(api_key)) => api_key.resolve(&self.inner.env, None)?,
+            _ => resolve_account_auth(provider, &self.inner.store, &self.inner.env, account, &CancellationToken::new()).await?,
+        };
+        let Some(mut result) = resolved else {
             return Ok(None);
         };
         if model.headers.is_some() {
@@ -155,7 +421,16 @@ impl Registry {
         Ok(Some(result))
     }
 
+    /// Signs in and stores the credential as the provider's first account,
+    /// replacing it, unless it's an account already signed in, which is
+    /// signed in again.
     pub async fn login(&self, id: &str, kind: &str, interaction: &dyn AuthInteraction) -> Result<Credential, Error> {
+        self.login_account(id, kind, interaction, false).await
+    }
+
+    /// `login`; with `add`, the account is added after the provider's others
+    /// instead of replacing its first (unless it's one of them).
+    pub async fn login_account(&self, id: &str, kind: &str, interaction: &dyn AuthInteraction, add: bool) -> Result<Credential, Error> {
         let provider = self.provider(id).ok_or_else(|| models_error("provider", format!("Unknown provider: {id}"), None))?;
         let login = match kind {
             "oauth" => provider.oauth.as_ref().map(|oauth| oauth.login(interaction)),
@@ -170,25 +445,140 @@ impl Registry {
             () = cancel.cancelled() => return Err(Error::Aborted),
             credential = login => credential?,
         };
+        let identity = self.identify(provider, &credential).await;
         let stored = credential.clone();
         self.inner
             .store
-            .modify(id, |_| async move { Ok(Some(stored)) })
+            .modify_accounts(id, |mut accounts| async move {
+                let same = accounts.iter().position(|account| !identity.key.is_empty() && account.identity == identity.key);
+                let mut account = Account::new(stored);
+                account.label = identity.label;
+                account.identity = identity.key;
+                match same {
+                    // Signed in again: the same account, with its new credential and its limit forgotten.
+                    Some(position) => {
+                        let label = if account.label.is_empty() { accounts[position].label.clone() } else { account.label };
+                        accounts[position] = Account { id: accounts[position].id.clone(), label, ..account }
+                    }
+                    None if add || accounts.is_empty() => accounts.push(account),
+                    None => accounts[0] = account,
+                }
+                Ok(Some(accounts))
+            })
             .await
             .map_err(|error| models_error("auth", format!("Credential store modify failed for {id}"), Some(&error)))?;
         Ok(credential)
     }
 
+    /// Who a new sign-in is: read from a subscription, or the end of an API
+    /// key; nothing when that fails.
+    async fn identify(&self, provider: &Provider, credential: &Credential) -> crate::limits::Identity {
+        match credential {
+            // A key is named by its end until given a name; the same key added again is the same account.
+            Credential::ApiKey { key, .. } => {
+                use sha2::Digest;
+                let digest = sha2::Sha256::digest(key.trim().as_bytes());
+                let hex: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+                crate::limits::Identity { key: format!("key:{hex}"), label: String::new() }
+            }
+            Credential::Oauth { .. } => {
+                let (Some(identify), Some(oauth)) = (provider.identity, &provider.oauth) else { return Default::default() };
+                let auth = match oauth.to_auth(credential) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        tracing::warn!(provider = provider.id, %error, "could not read who the account is");
+                        return Default::default();
+                    }
+                };
+                let base_url = auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+                identify(base_url, auth).await.unwrap_or_else(|error| {
+                    tracing::warn!(provider = provider.id, %error, "could not read who the account is");
+                    Default::default()
+                })
+            }
+        }
+    }
+
+    /// Signs out of all of the provider's accounts.
     pub async fn logout(&self, id: &str) -> Result<(), Error> {
         credential_result(self.inner.store.delete(id).await, "delete", id)
     }
 
-    async fn open(&self, model: &Model, context: LlmContext, options: StreamOptions) -> Result<EventStream, Error> {
+    /// Signs out of one of the provider's accounts; an empty `account`, all.
+    pub async fn logout_account(&self, id: &str, account: &str) -> Result<(), Error> {
+        if account.is_empty() {
+            return self.logout(id).await;
+        }
+        let account = account.to_owned();
+        let removed = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| async move {
+                let before = accounts.len();
+                accounts.retain(|stored| stored.id != account);
+                Ok((accounts.len() != before).then_some(accounts))
+            })
+            .await;
+        credential_result(removed, "modify", id).map(|_| ())
+    }
+
+    /// Moves one of the provider's accounts to `position` (0 is first, past
+    /// the end is last) in the order requests try them.
+    pub async fn move_account(&self, id: &str, account: &str, position: usize) -> Result<(), Error> {
+        if account == ENV_ACCOUNT {
+            return Err(models_error("auth", "A key from the environment comes after the accounts signed in", None));
+        }
+        let wanted = account.to_owned();
+        let mut found = false;
+        let moved = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| {
+                let from = accounts.iter().position(|stored| stored.id == wanted);
+                found = from.is_some();
+                async move {
+                    let Some(from) = from else { return Ok(None) };
+                    let moving = accounts.remove(from);
+                    accounts.insert(position.min(accounts.len()), moving);
+                    Ok(Some(accounts))
+                }
+            })
+            .await;
+        credential_result(moved, "modify", id)?;
+        if !found {
+            return Err(models_error("auth", format!("No such account: {account}"), None));
+        }
+        Ok(())
+    }
+
+    /// Marks an account as having reached its usage limit until it resets:
+    /// when the provider said, or else when its usage read now says its full
+    /// limits do, or else in a while. Returns the provider's accounts then.
+    async fn exhaust(&self, id: &str, account: &str, resets_at: Option<u64>) -> Result<Vec<Account>, Error> {
+        let now = now_ms();
+        let resets_at = match resets_at.filter(|at| *at > now) {
+            Some(at) => Some(at),
+            None => match self.account_usage(id, Some(account)).await {
+                Ok(Some(limits)) => {
+                    limits.iter().filter(|limit| limit.used_percent >= 100.0).map(|limit| limit.resets_at).filter(|at| *at > now).max()
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(provider = id, %error, "could not read the usage of an account at its limit");
+                    None
+                }
+            },
+        };
+        let until = resets_at.unwrap_or(now + UNKNOWN_RESET_MS);
+        self.set_state(id, account, move |exhausted_until, _| *exhausted_until = until).await
+    }
+
+    async fn open(&self, model: &Model, context: LlmContext, options: StreamOptions, account: Option<&str>) -> Result<EventStream, Error> {
         let provider = self
             .provider(&model.provider)
             .ok_or_else(|| models_error("provider", format!("Unknown provider: {}", model.provider), None))?;
         let resolution = self
-            .get_auth(model)
+            .account_auth(model, account)
             .await?
             .ok_or_else(|| models_error("auth", format!("Provider is not configured: {}", model.provider), None))?;
         let api = provider.api.as_ref().ok_or_else(|| {
@@ -210,34 +600,133 @@ impl Registry {
     /// refreshed and the rotated credential written back to the auth file before the request goes out.
     /// The stream exists at once; a setup failure ends it with an error event.
     pub fn stream_fn(&self) -> StreamFn {
+        self.stream_fn_with(None)
+    }
+
+    /// `stream_fn`, over the provider's accounts: a request goes to the first
+    /// with capacity, and when it fails on that account's usage limit, the
+    /// account is skipped until the limit resets and the request goes again,
+    /// at once, to the next, which `notes` is told. With none left, it fails
+    /// saying when the first resets. Nothing else changes accounts.
+    pub fn stream_fn_with(&self, notes: Option<Notes>) -> StreamFn {
         let registry = self.clone();
         Arc::new(move |model, context, options| {
             let (sink, stream) = event_stream();
-            let (registry, model) = (registry.clone(), model.clone());
+            let (registry, model, notes) = (registry.clone(), model.clone(), notes.clone());
             tokio::spawn(async move {
-                match registry.open(&model, context, options).await {
-                    Ok(mut inner) => {
-                        while let Some(event) = inner.next().await {
-                            sink.push(event);
+                let mut tried = Vec::new();
+                loop {
+                    let accounts = match registry.candidates(&model.provider).await {
+                        Ok(accounts) => accounts,
+                        Err(error) => {
+                            sink.push(failed(&model, error.to_string()));
+                            return;
                         }
+                    };
+                    let chosen = with_capacity(&accounts, &tried, now_ms()).map(|(_, account)| account.clone());
+                    if chosen.is_none() && !accounts.is_empty() {
+                        sink.push(failed(&model, registry.exhausted(&model.provider, &accounts)));
+                        return;
                     }
-                    Err(error) => {
-                        let message = AssistantMessage {
-                            content: Vec::new(),
-                            api: model.api.clone(),
-                            provider: model.provider.clone(),
-                            model: model.id.clone(),
-                            usage: Usage::empty(),
-                            stop_reason: StopReason::Error,
-                            error_message: Some(error.to_string()),
-                            timestamp: now_ms(),
-                            extra: Map::new(),
-                        };
-                        sink.push(StreamEvent::Error { reason: StopReason::Error, error: message });
+                    let account = chosen.as_ref().map(|account| account.id.clone());
+                    let mut inner = match registry.open(&model, context.clone(), options.clone(), account.as_deref()).await {
+                        Ok(inner) => inner,
+                        Err(error) => {
+                            sink.push(failed(&model, error.to_string()));
+                            return;
+                        }
+                    };
+                    // A response that fails on the account's limit or credit does so
+                    // before anything but its start: held until something else comes.
+                    let (mut held, mut forwarding) = (None, false);
+                    let (mut gone, mut done) = (None, false);
+                    while let Some(event) = inner.next().await {
+                        if !forwarding {
+                            match &event {
+                                StreamEvent::Start { .. } => {
+                                    held = Some(event);
+                                    continue;
+                                }
+                                StreamEvent::Error { error, .. } if account.is_some() && spent(error).is_some() => {
+                                    gone = spent(error);
+                                    held = Some(event);
+                                    break;
+                                }
+                                _ => {
+                                    forwarding = true;
+                                    if let Some(start) = held.take() {
+                                        sink.push(start);
+                                    }
+                                }
+                            }
+                        }
+                        done = matches!(event, StreamEvent::Done { .. });
+                        sink.push(event);
+                    }
+                    let (Some(gone), Some(account)) = (gone, account) else {
+                        if let Some(start) = held {
+                            sink.push(start);
+                        }
+                        // A key out of credit that answered has some again.
+                        if let (true, Some(chosen)) = (done, chosen.filter(|chosen| chosen.out_of_credit_since != 0)) {
+                            match registry.set_state(&model.provider, &chosen.id, |_, since| *since = 0).await {
+                                Ok(_) => {
+                                    if let Some(notes) = &notes {
+                                        notes(AccountNote::Changed);
+                                    }
+                                }
+                                Err(error) => tracing::warn!(provider = %model.provider, %error, "could not mark a key as having credit"),
+                            }
+                        }
+                        return;
+                    };
+                    tried.push(account.clone());
+                    let marked = match gone {
+                        Spent::Limit(resets_at) => registry.exhaust(&model.provider, &account, resets_at).await,
+                        Spent::Credit => registry.set_state(&model.provider, &account, |_, since| *since = now_ms()).await,
+                    };
+                    let accounts = match marked {
+                        Ok(accounts) => accounts,
+                        Err(error) => {
+                            tracing::warn!(provider = %model.provider, %error, "could not mark an account as spent");
+                            accounts
+                        }
+                    };
+                    let Some((position, next)) = with_capacity(&accounts, &tried, now_ms()) else {
+                        if let Some(notes) = &notes {
+                            notes(AccountNote::Exhausted);
+                        }
+                        sink.push(failed(&model, registry.exhausted(&model.provider, &accounts)));
+                        return;
+                    };
+                    if let Some(notes) = &notes {
+                        let noun = registry.noun(&model.provider);
+                        let from = accounts.iter().position(|stored| stored.id == account);
+                        let from = from.map_or_else(|| account.clone(), |from| account_name(&shown_label(&accounts[from]), from));
+                        let to = account_name(&shown_label(next), position);
+                        notes(AccountNote::Switched(switch_note(&noun, &from, &to, gone == Spent::Credit)));
                     }
                 }
             });
             Ok(stream)
         })
+    }
+
+    /// What people call the provider's accounts: "Claude".
+    fn noun(&self, id: &str) -> String {
+        account_noun(id, self.provider(id).map_or(id, |provider| provider.name))
+    }
+
+    /// Why a request can't go to any of the provider's `accounts`: all are at
+    /// their limit, and when the first resets.
+    fn exhausted(&self, id: &str, accounts: &[Account]) -> String {
+        let first = accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, account)| account.exhausted_until > 0)
+            .min_by_key(|(_, account)| account.exhausted_until);
+        let first = first.map(|(position, account)| (account_name(&shown_label(account), position), account.exhausted_until));
+        let credit = accounts.iter().any(|account| account.out_of_credit_since != 0);
+        exhausted_message(&self.noun(id), accounts.len(), first.as_ref().map(|(name, at)| (name.as_str(), *at)), credit)
     }
 }

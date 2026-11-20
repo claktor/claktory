@@ -1,5 +1,6 @@
-import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -15,9 +16,10 @@ import 'settings_view.dart';
 import 'usage.dart';
 import 'tell_rivet.dart';
 
-/// Settings → Devices: remote access to this Factory, and the devices
-/// paired with it. Any device showing this Factory may pair and unpair: a
-/// paired device already has full control.
+/// Settings → Devices: the devices that can show this Claktory, and adding
+/// one. Any device showing it may add and remove devices: one already
+/// added has full control. Adding one turns on access from other devices;
+/// the backend turns it off again after the last is removed.
 class DevicesSettings extends StatefulWidget {
   const DevicesSettings({super.key, required this.workspace});
 
@@ -29,144 +31,16 @@ class DevicesSettings extends StatefulWidget {
 
 class _DevicesSettingsState extends State<DevicesSettings>
     with SettingRequests {
-  final _port = TextEditingController();
-  var _shownPort = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _syncPort();
-  }
-
-  @override
-  void didUpdateWidget(DevicesSettings old) {
-    super.didUpdateWidget(old);
-    _syncPort();
-  }
-
-  /// Shows the backend's port unless the person is editing it.
-  void _syncPort() {
-    final port = widget.workspace.remote.port;
-    if (port == _shownPort) return;
-    final editing = _port.text != '$_shownPort' && _port.text.isNotEmpty;
-    _shownPort = port;
-    if (!editing) _port.text = port == 0 ? '' : '$port';
-  }
-
-  @override
-  void dispose() {
-    _port.dispose();
-    super.dispose();
-  }
-
-  void _savePort() {
-    final port = int.tryParse(_port.text.trim());
-    if (port == null || port < 1 || port > 65535) {
-      setState(() => failure = 'Enter a port from 1 to 65535, like 7443.');
-      return;
-    }
-    run(() => AppScope.of(context).setRemoteAccess(true, port: port));
-  }
-
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
     final remote = widget.workspace.remote;
-    // Only IP addresses can be listened on; names (mac-mini.local) can't.
-    final listenable = [
-      for (final address in remote.addresses)
-        if (InternetAddress.tryParse(address) != null) address,
-      if (remote.listen.isNotEmpty && !remote.addresses.contains(remote.listen))
-        remote.listen,
-    ];
     final now = DateTime.now();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SettingRow(
-          label: 'Remote access',
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Toggle(
-                  value: remote.on,
-                  label: 'Remote access',
-                  onChanged: (on) => run(() => backend.setRemoteAccess(on)),
-                ),
-              ),
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: Text(
-                  'Your other devices, such as a laptop, can show this '
-                  'Claktory and work with its agents, over the network. '
-                  'Pair each one below.',
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (remote.on) ...[
-          SettingRow(
-            label: 'Status',
-            child: remote.error.isNotEmpty
-                ? ErrorLine(
-                    remote.error,
-                    about: 'Remote access (Settings → Devices) has an error.',
-                    style: TextStyles.body.copyWith(color: palette.danger),
-                  )
-                : Text(
-                    remote.fingerprint.isEmpty
-                        ? 'Starting…'
-                        : remote.listen.isEmpty
-                        ? 'Listening on port ${remote.port}, on every address'
-                        : 'Listening on ${remote.listen}, port ${remote.port}',
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
-                  ),
-          ),
-          SettingRow(
-            label: 'Port',
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 96,
-                  child: TextField(
-                    controller: _port,
-                    onSubmitted: (_) => _savePort(),
-                  ),
-                ),
-                const SizedBox(width: Space.m),
-                ListenableBuilder(
-                  listenable: _port,
-                  builder: (context, _) => _port.text.trim() == '${remote.port}'
-                      ? const SizedBox.shrink()
-                      : Button(label: 'Save', onPressed: _savePort),
-                ),
-              ],
-            ),
-          ),
-          SettingRow(
-            label: 'Listen on',
-            child: SizedBox(
-              width: 280,
-              child: Select(
-                value: remote.listen,
-                options: [
-                  const SelectOption('', 'Every address'),
-                  for (final address in listenable)
-                    SelectOption(address, address),
-                ],
-                onChanged: (listen) =>
-                    run(() => backend.setRemoteAccess(true, listen: listen)),
-              ),
-            ),
-          ),
-        ],
-        failureLine(palette),
-        if (backend.target case final target? when target.tunnelled)
+        if (backend.target case final target? when target.tunnelled) ...[
           SettingRow(
             label: 'This device',
             child: ValueListenableBuilder(
@@ -177,18 +51,19 @@ class _DevicesSettingsState extends State<DevicesSettings>
               ),
             ),
           ),
-        const SizedBox(height: Space.m),
-        Text(
-          'Paired devices',
-          style: TextStyles.caption.copyWith(
-            color: palette.textMuted,
-            fontWeight: FontWeight.w500,
+          const SizedBox(height: Space.m),
+        ],
+        if (remote.error.isNotEmpty) ...[
+          ErrorLine(
+            remote.error,
+            about: 'Settings → Devices has an error.',
+            style: TextStyles.body.copyWith(color: palette.danger),
           ),
-        ),
-        const SizedBox(height: Space.s),
+          const SizedBox(height: Space.s),
+        ],
         if (remote.devices.isEmpty)
           Text(
-            'No device is paired yet.',
+            'No devices yet.',
             style: TextStyles.body.copyWith(color: palette.textFaint),
           ),
         for (final device in remote.devices)
@@ -198,27 +73,17 @@ class _DevicesSettingsState extends State<DevicesSettings>
             machine: remote.machine,
             now: now,
           ),
+        failureLine(palette),
         const SizedBox(height: Space.m),
         Row(
           children: [
             Button(
-              label: 'Pair a device…',
-              onPressed: remote.on
-                  ? () => showModal(
-                      context,
-                      (context, close) => PairDeviceForm(close: close),
-                    )
-                  : null,
-            ),
-            if (!remote.on) ...[
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: Text(
-                  'Turn on remote access to pair a device.',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
-                ),
+              label: 'Add a device…',
+              onPressed: () => showModal(
+                context,
+                (context, close) => PairDeviceForm(close: close),
               ),
-            ],
+            ),
           ],
         ),
       ],
@@ -226,8 +91,8 @@ class _DevicesSettingsState extends State<DevicesSettings>
   }
 }
 
-/// A paired device: its name, whether it's this one, when it was last
-/// connected and from where, and Unpair.
+/// A device that can show this Claktory: its name, whether it's this one,
+/// when it last connected and was added, and Remove.
 class _DeviceRow extends StatefulWidget {
   const _DeviceRow({
     required this.device,
@@ -259,13 +124,13 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
     showModal(
       context,
       (context, close) => FormFrame(
-        title: 'Unpair this device?',
+        title: 'Remove this device?',
         body:
-            'This app disconnects from $machine at once, and can only '
-            'connect again with a new pairing code.',
+            'This app disconnects from $machine right away. To use it '
+            'again, add it again on $machine.',
         fields: const [],
         error: null,
-        submitLabel: 'Unpair',
+        submitLabel: 'Remove',
         onSubmit: () {
           close();
           unpair();
@@ -286,8 +151,7 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
         : 'Last connected ${formatAge(device.lastSeenMs.toInt(), widget.now)}';
     final details = [
       seen,
-      if (device.lastAddress.isNotEmpty) device.lastAddress,
-      'paired ${pairedOn(device.pairedMs.toInt(), widget.now)}',
+      'Added ${pairedOn(device.pairedMs.toInt(), widget.now)}',
     ].join(' · ');
     return Container(
       padding: const EdgeInsets.symmetric(vertical: Space.s),
@@ -347,7 +211,7 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
                 ),
               ),
               const SizedBox(width: Space.m),
-              Button(label: 'Unpair', onPressed: _unpair),
+              Button(label: 'Remove', onPressed: _unpair),
             ],
           ),
           failureLine(palette),
@@ -357,7 +221,7 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
   }
 }
 
-/// When something was paired: "today", "yesterday", "12 Nov".
+/// When a device was added: "today", "yesterday", "12 Nov".
 String pairedOn(int ms, DateTime now) {
   final day = DateTime.fromMillisecondsSinceEpoch(ms);
   final today = DateTime(now.year, now.month, now.day);
@@ -374,8 +238,7 @@ String pairedOn(int ms, DateTime now) {
   return date.year == now.year ? label : '$label ${date.year}';
 }
 
-/// Pairs a new device: its name and the address it will reach this
-/// Factory by, then its pairing code, shown this once.
+/// Adds a device: its name, then its code, shown this once.
 class PairDeviceForm extends StatefulWidget {
   const PairDeviceForm({super.key, required this.close});
 
@@ -387,13 +250,6 @@ class PairDeviceForm extends StatefulWidget {
 
 class _PairDeviceFormState extends State<PairDeviceForm> {
   final _name = TextEditingController();
-  final _otherHost = TextEditingController();
-
-  /// One of the addresses, or null for the first.
-  String? _host;
-
-  /// Another address is being typed in rather than picked.
-  var _typing = false;
   var _submitting = false;
   String? _error;
   PairingCode? _code;
@@ -401,7 +257,6 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
   @override
   void dispose() {
     _name.dispose();
-    _otherHost.dispose();
     super.dispose();
   }
 
@@ -415,68 +270,26 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
         close: widget.close,
       );
     }
-    final store = AppScope.of(context).workspace;
     return ListenableBuilder(
-      listenable: Listenable.merge([store, _name, _otherHost]),
+      listenable: _name,
       builder: (context, _) {
-        final addresses = store.workspace.remote.addresses;
-        final host = addresses.isEmpty || _typing
-            ? null
-            : _host ?? addresses.first;
-        final ready =
-            !_submitting &&
-            _name.text.trim().isNotEmpty &&
-            (host != null || _otherHost.text.trim().isNotEmpty);
+        final ready = !_submitting && _name.text.trim().isNotEmpty;
         return FormFrame(
-          title: 'Pair a device',
-          body:
-              'Makes a pairing code for one device, such as your laptop. '
-              'With it, that device shows this Claktory.',
+          title: 'Add a device',
           error: _error,
-          submitLabel: _submitting ? 'Making…' : 'Make pairing code',
-          onSubmit: ready ? () => _pair(host) : null,
+          submitLabel: 'Show code',
+          onSubmit: ready ? _add : null,
           onCancel: widget.close,
           fields: [
             Field(
-              label: 'Device',
+              label: 'Name',
               child: TextField(
                 controller: _name,
-                placeholder: 'Laptop',
+                placeholder: 'iPhone',
                 autofocus: true,
                 onSubmitted: (_) {
-                  if (ready) _pair(host);
+                  if (ready) _add();
                 },
-              ),
-            ),
-            Field(
-              label: 'It reaches this Claktory at',
-              note:
-                  'Addresses on Tailscale (100.x) work from anywhere on '
-                  'your tailnet; the others only on this network.',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (addresses.isNotEmpty)
-                    Select<String>(
-                      value: host ?? '',
-                      options: [
-                        for (final address in addresses)
-                          SelectOption(address, address),
-                        const SelectOption('', 'Another address…'),
-                      ],
-                      onChanged: (value) => setState(() {
-                        _typing = value.isEmpty;
-                        _host = value.isEmpty ? null : value;
-                      }),
-                    ),
-                  if (addresses.isEmpty || _typing) ...[
-                    if (addresses.isNotEmpty) const SizedBox(height: Space.s),
-                    TextField(
-                      controller: _otherHost,
-                      placeholder: 'A name or address, such as mac-mini.local',
-                    ),
-                  ],
-                ],
               ),
             ),
           ],
@@ -485,20 +298,18 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
     );
   }
 
-  void _pair(String? host) {
-    final chosen = _typing || host == null ? _otherHost.text.trim() : host;
-    _submitWith(chosen);
-  }
-
-  Future<void> _submitWith(String host) async {
+  Future<void> _add() async {
     final name = _name.text.trim();
     if (name.isEmpty || _submitting) return;
     setState(() {
       _submitting = true;
       _error = null;
     });
+    final backend = AppScope.of(context);
     try {
-      final code = await AppScope.of(context).createPairing(name, host);
+      // A code waiting to be used is what lets the device in: the backend
+      // turns remote access on by itself.
+      final code = await backend.createPairing(name, '');
       if (mounted) setState(() => _code = code);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -547,30 +358,25 @@ class _PairingCodeViewState extends State<PairingCodeView> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Pairing code for $device',
+            'Scan with your iPhone',
             style: TextStyles.emphasis.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.s),
           Text(
-            'On $device, open Claktory, click the Claktory name at the '
-            'bottom of the sidebar, and paste this under "Connect to another '
-            'Claktory". It\'s shown only this once: it holds $device\'s key.',
+            'Open Claktory on $device and scan this code.',
             style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.xl),
-          Center(child: QrCode(text: widget.code, size: 200)),
+          Center(child: QrCode(text: widget.code, size: 240)),
           const SizedBox(height: Space.l),
-          Container(
-            padding: const EdgeInsets.all(Space.m),
-            decoration: BoxDecoration(
-              color: palette.sidebar,
-              borderRadius: BorderRadius.circular(Radii.control),
-              border: Border.all(color: palette.hairline),
-            ),
-            child: Text(
-              widget.code,
-              style: TextStyles.code.copyWith(color: palette.text),
-            ),
+          Text(
+            'Or copy the code and paste it on $device.',
+            style: TextStyles.body.copyWith(color: palette.textMuted),
+          ),
+          const SizedBox(height: Space.xs),
+          Text(
+            'This code works only for $device and is shown once.',
+            style: TextStyles.caption.copyWith(color: palette.textFaint),
           ),
           const SizedBox(height: Space.xl),
           Row(
@@ -581,7 +387,7 @@ class _PairingCodeViewState extends State<PairingCodeView> {
                   style: TextStyles.caption.copyWith(color: palette.textMuted),
                 ),
               const Spacer(),
-              Button(label: 'Copy', onPressed: _copy),
+              Button(label: 'Copy code', onPressed: _copy),
               const SizedBox(width: Space.s),
               Button(label: 'Done', onPressed: widget.close, primary: true),
             ],
@@ -621,7 +427,7 @@ class _QrCodeState extends State<QrCode> {
       if (modules == null) return const SizedBox.shrink();
       return Semantics(
         image: true,
-        label: 'QR code of the pairing code',
+        label: 'QR code',
         child: CustomPaint(
           size: Size.square(widget.size),
           painter: _QrPainter(modules),
@@ -641,7 +447,11 @@ class _QrPainter extends CustomPainter {
     // White under it in either theme, with a four-module quiet zone, so
     // any camera reads it.
     const quiet = 4;
-    final cell = size.width / (modules.size + 2 * quiet);
+    // Whole pixels per module, so its edges are sharp; what's left over
+    // goes around it.
+    final across = modules.size + 2 * quiet;
+    final cell = math.max(1.0, (size.width / across).floorToDouble());
+    final inset = ((size.width - cell * across) / 2).floorToDouble();
     final rounded = RRect.fromRectAndRadius(
       Offset.zero & size,
       const Radius.circular(Radii.control),
@@ -654,10 +464,10 @@ class _QrPainter extends CustomPainter {
         if (!modules.at(x, y)) continue;
         path.addRect(
           Rect.fromLTWH(
-            (x + quiet) * cell,
-            (y + quiet) * cell,
-            cell + 0.01,
-            cell + 0.01,
+            inset + (x + quiet) * cell,
+            inset + (y + quiet) * cell,
+            cell,
+            cell,
           ),
         );
       }
@@ -698,6 +508,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
   @override
   Widget build(BuildContext context) {
     final connections = AppScope.scope(context).connections;
+    final hasLocalBackend = AppScope.of(context).localBackend;
     return ListenableBuilder(
       listenable: Listenable.merge([connections, _code]),
       builder: (context, _) {
@@ -705,30 +516,25 @@ class _FactoryChooserState extends State<FactoryChooser> {
         final target = parsePairingCode(pasted);
         final current = connections.current;
         return FormFrame(
-          title: 'Claktories',
-          body:
-              'This app shows one Claktory at a time: this Mac\'s, or one '
-              'on another machine it\'s paired with.',
+          title: 'Your Claktories',
           error: pasted.isNotEmpty && target == null
-              ? "That isn't a pairing code. It starts with factory:// and "
-                    "comes from that Claktory's Settings → Devices."
+              ? "That isn't a Claktory code."
               : null,
           submitLabel: 'Connect',
           onSubmit: target == null ? null : () => _show(target),
           onCancel: widget.close,
           fields: [
-            _FactoryRow(
-              label: 'This Mac',
-              detail: 'The Claktory running here',
-              showing: current == null,
-              onTap: () => _show(null),
-            ),
+            if (hasLocalBackend)
+              _FactoryRow(
+                label: 'This Mac',
+                detail: 'Running here',
+                showing: current == null,
+                onTap: () => _show(null),
+              ),
             for (final saved in connections.saved)
               _FactoryRow(
                 label: saved.label,
-                detail: saved.tunnelled
-                    ? 'Through the private tunnel'
-                    : '${saved.host}:${saved.port}',
+                detail: 'On another device',
                 showing: saved == current,
                 onTap: () => _show(saved),
                 onForget: () {
@@ -740,12 +546,10 @@ class _FactoryChooserState extends State<FactoryChooser> {
             const SizedBox(height: Space.l),
             Field(
               label: 'Connect to another Claktory',
-              note:
-                  'Paste the pairing code made for this device in that '
-                  'Claktory\'s Settings → Devices → Pair a device…',
+              note: "Paste the code from that Claktory's Settings → Devices.",
               child: TextField(
                 controller: _code,
-                placeholder: 'factory://…',
+                placeholder: 'Paste code',
                 autofocus: true,
                 onSubmitted: (_) {
                   if (target != null) _show(target);
@@ -832,8 +636,12 @@ class _FactoryRow extends StatelessWidget {
   }
 }
 
-/// How this device reaches [machine] through the private tunnel: direct or
-/// through a relay, or why it can't.
+/// What this device is: "iPhone" or "Mac", for what it's told.
+String get thisDeviceKind =>
+    defaultTargetPlatform == TargetPlatform.iOS ? 'iPhone' : 'Mac';
+
+/// Whether this device is connected to [machine], connecting, or why it
+/// can't connect.
 class TunnelLine extends StatelessWidget {
   const TunnelLine({super.key, required this.status, required this.machine});
 
@@ -843,42 +651,36 @@ class TunnelLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final path = tunnelPathLabel(status.path);
-    final failed =
-        status.failure != TunnelFailure.none &&
-        status.phase != TunnelPhase.connected;
+    final connected = status.phase == TunnelPhase.connected;
+    final failed = status.failure != TunnelFailure.none && !connected;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           failed
-              ? "Can't reach $machine through the private tunnel"
-              : path.isEmpty
-              ? 'Reaching $machine through the private tunnel…'
-              : 'Reaches $machine through the private tunnel, $path',
+              ? "Can't connect to $machine"
+              : connected
+              ? 'Connected to $machine'
+              : 'Connecting to $machine…',
           style: TextStyles.body.copyWith(
             color: failed ? palette.danger : palette.textMuted,
           ),
         ),
-        if (failed)
-          Text(
-            [status.error, tunnelAdvice(status, machine)].join(' '),
-            style: TextStyles.caption.copyWith(color: palette.textMuted),
-          )
-        else
-          Text(
-            status.relayConnected
-                ? 'End-to-end encrypted. This device reaches its relay.'
-                : 'End-to-end encrypted.',
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+        Text(
+          failed
+              ? tunnelAdvice(status, machine, device: thisDeviceKind)
+              : 'Private and encrypted.',
+          style: TextStyles.caption.copyWith(
+            color: failed ? palette.textMuted : palette.textFaint,
           ),
+        ),
       ],
     );
   }
 }
 
-/// Why the app can't reach the Factory it shows through the private
-/// tunnel, and what to do: opened from the sidebar's footer.
+/// Why the app can't connect to the Claktory it shows, and what to do:
+/// opened from the sidebar's footer.
 class TunnelProblem extends StatelessWidget {
   const TunnelProblem({super.key, required this.close});
 
@@ -895,18 +697,20 @@ class TunnelProblem extends StatelessWidget {
         final now = status ?? idleTunnel;
         final connected = now.phase == TunnelPhase.connected;
         return FormFrame(
-          title: connected ? 'Connected to $machine' : "Can't reach $machine",
+          title: connected
+              ? 'Connected to $machine'
+              : "Can't connect to $machine",
           body: connected
-              ? 'This Mac reaches $machine through the private tunnel, '
-                    '${tunnelPathLabel(now.path)}.'
-              : tunnelAdvice(now, machine),
+              ? 'Private and encrypted.'
+              : tunnelAdvice(now, machine, device: thisDeviceKind),
           fields: [
+            // What went wrong exactly, for whoever looks into it.
             if (!connected && now.error.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: Space.m),
                 child: Text(
                   now.error,
-                  style: TextStyles.body.copyWith(color: palette.danger),
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
                 ),
               ),
           ],
@@ -920,7 +724,7 @@ class TunnelProblem extends StatelessWidget {
                 },
           onCancel: close,
           secondary: Button(
-            label: 'Show another Claktory…',
+            label: 'Switch Claktory…',
             onPressed: () {
               close();
               showModal(

@@ -7,7 +7,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Weak};
 
-use factory_agent::{Event, EventSource, Tool};
+use factory_agent::{Event, EventSource, Tool, ToolResult};
 use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::json;
@@ -33,12 +33,12 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Tasks",
     icon: "terminal",
-    description: "The agent sees and stops background tasks: its own, or every agent's with \"See all agents' tasks\".",
+    description: "Lets it see and stop its background tasks.",
     default_enabled: true,
     options: &[OptionSpec {
         id: "see_all",
         label: "See all agents' tasks",
-        description: "Can see and stop every agent's tasks",
+        description: "It can also see and stop other agents' tasks.",
         kind: OptionKind::Switch,
         default_on: false,
         includes_project: false,
@@ -106,7 +106,8 @@ impl Extension for Tasks {
         let tasks = tasks
             .into_iter()
             .map(|task| v1::BackgroundTask {
-                log_tail: log_tail(&task.log),
+                // The log on disk holds whatever the command printed.
+                log_tail: factory.redaction.redact(&log_tail(&task.log)),
                 id: task.task,
                 agent_id: task.agent,
                 command: task.command,
@@ -173,26 +174,39 @@ struct ListArgs {
     all: Option<bool>,
 }
 
-fn run_list(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_list(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: ListArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let whose = whose(factory, asker, args.agent.as_deref())?;
     let all = args.all.unwrap_or(false);
     let now = now_ms();
     let tasks = listed(factory, whose.as_deref(), all, now)?;
+    let shown: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            let mut shown =
+                json!({"task": task.task, "agent": task.agent, "command": short(&task.command), "running": task.ended.is_none()});
+            if let Some(status) = &task.status {
+                shown["status"] = json!(status);
+            }
+            shown
+        })
+        .collect();
+    let details = json!({"agent": whose.as_deref().unwrap_or("*"), "tasks": shown});
     if tasks.is_empty() {
         let what = if all { "No background tasks ran lately" } else { "No background tasks are running" };
-        return Ok(match whose.as_deref() {
+        let said = match whose.as_deref() {
             Some(agent) if agent != asker => format!("{what} for {agent}."),
             _ => format!("{what}."),
-        });
+        };
+        return Ok(ToolResult::text(said, details));
     }
-    Ok(tasks.iter().map(|task| line(task, now)).collect::<Vec<_>>().join("\n"))
+    Ok(ToolResult::text(tasks.iter().map(|task| line(task, now)).collect::<Vec<_>>().join("\n"), details))
 }
 
 /// Whose tasks `asker` asks about: Some(agent), or None for everyone's.
 fn whose(factory: &Factory, asker: &str, agent: Option<&str>) -> Result<Option<String>, String> {
     let inner = factory.lock();
-    let Some(me) = inner.config.agent(asker) else { return Err("You're no longer in this Factory.".to_owned()) };
+    let Some(me) = inner.config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
     let agent = agent.map(str::trim).filter(|agent| !agent.is_empty() && *agent != asker);
     match agent {
         None => Ok(Some(asker.to_owned())),
@@ -254,7 +268,7 @@ struct StopArgs {
     agent: Option<String>,
 }
 
-fn run_stop(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<String, String> {
+fn run_stop(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: StopArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let owner = match whose(factory, asker, args.agent.as_deref())? {
         Some(owner) => owner,
@@ -263,11 +277,12 @@ fn run_stop(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<S
     let by = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |agent| agent.name.clone());
     let task = args.task.trim();
     stop(factory, &owner, task, &by)?;
-    Ok(if owner == asker {
+    let said = if owner == asker {
         format!("Stopping {task}; you'll get an event when it ends.")
     } else {
         format!("Stopping {owner}'s {task}; {owner} gets an event when it ends.")
-    })
+    };
+    Ok(ToolResult::text(said, json!({"task": task, "agent": owner})))
 }
 
 /// Stops the agent's running task, noting who did; Err says why it can't.
@@ -325,7 +340,7 @@ fn alert(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         for admin in admins {
             let event = Event {
                 source: EventSource::Host,
-                from: "Factory".to_owned(),
+                from: "Claktory".to_owned(),
                 id: String::new(),
                 summary: String::new(),
                 transient: false,

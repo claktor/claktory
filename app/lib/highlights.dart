@@ -13,7 +13,8 @@ import 'state.dart';
 ///
 /// A glow is for a target key: `agent:<id>`, `project:<id>`,
 /// `folder:<project id>/<folder id>`, `checklist_item:<agent id>#<n>`,
-/// `extension:<agent id>/<extension id>`, `settings:` or `marketplace:`.
+/// `extension:<agent id>/<extension id>`, `pane:<agent id>:<pane id>` (a
+/// viewer beside an agent's conversation), `settings:` or `marketplace:`.
 /// Each [Glow] widget says which keys it shows, so a target that isn't on
 /// screen (folded away, say) glows on what stands for it.
 ///
@@ -35,6 +36,10 @@ class HighlightStore extends ChangeNotifier {
   static const calloutDuration = Duration(seconds: 5);
 
   final _glows = <HighlightGlow>[];
+
+  /// The keys the backend last pointed at, glowing or not: a viewer's pane
+  /// reads its file again when an agent shows it again.
+  final pointedAt = ValueNotifier<({List<String> keys, DateTime at})?>(null);
   HighlightCallout? _callout;
   var _nextId = 1;
 
@@ -84,6 +89,8 @@ class HighlightStore extends ChangeNotifier {
   void apply(Highlight highlight) {
     final keys = [for (final target in highlight.targets) ?targetKey(target)];
     if (keys.isEmpty) return;
+    // Pointed at, even with highlights off: a viewer reads its file again.
+    pointedAt.value = (keys: keys, at: DateTime.now());
     switch (highlight.kind) {
       case HighlightKind.HIGHLIGHT_KIND_MESSAGE:
         // From the sender to the recipient, both rows in both colors.
@@ -105,6 +112,7 @@ class HighlightStore extends ChangeNotifier {
     'project' ||
     'checklist_item' ||
     'extension' ||
+    'pane' ||
     'settings' ||
     'marketplace' => '${target.kind}:${target.id}',
     _ => null,
@@ -120,6 +128,7 @@ class HighlightStore extends ChangeNotifier {
       'agent' => id,
       'checklist_item' => id.split('#').first,
       'extension' => id.split('/').first,
+      'pane' => id.split(':').first,
       _ => null,
     };
     final agent = agentId == null ? null : workspace.agent(agentId);
@@ -325,15 +334,6 @@ class _GlowState extends State<Glow> with SingleTickerProviderStateMixin {
     }
   }
 
-  /// The glow's strength over its life: in quickly, a moment held, out
-  /// slowly.
-  static double _strength(double t) {
-    if (t <= 0 || t >= 1) return 0;
-    if (t < 0.22) return Curves.easeOut.transform(t / 0.22);
-    if (t < 0.45) return 1;
-    return 1 - Curves.easeInOut.transform((t - 0.45) / 0.55);
-  }
-
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -341,32 +341,25 @@ class _GlowState extends State<Glow> with SingleTickerProviderStateMixin {
     final halo = colors.length == 1
         ? colors.first
         : Color.lerp(colors.first, colors.last, 0.5)!;
-    Widget light(double strength) => strength <= 0
-        ? const SizedBox.shrink()
-        : Opacity(
-            opacity: strength,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(widget.radius),
-                gradient: LinearGradient(
-                  colors: [
-                    for (final color
-                        in colors.length == 1
-                            ? [colors.first, colors.first]
-                            : colors)
-                      color.withValues(alpha: 0.22),
-                  ],
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: halo.withValues(alpha: 0.4),
-                    blurRadius: 12,
-                    spreadRadius: 1,
-                  ),
-                ],
-              ),
-            ),
-          );
+    final light = DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(widget.radius),
+        gradient: LinearGradient(
+          colors: [
+            for (final color
+                in colors.length == 1 ? [colors.first, colors.first] : colors)
+              color.withValues(alpha: 0.22),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: halo.withValues(alpha: 0.4),
+            blurRadius: 12,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+    );
     final callout = _callout;
     final left = widget.side == AxisDirection.left;
     return OverlayPortal(
@@ -405,20 +398,37 @@ class _GlowState extends State<Glow> with SingleTickerProviderStateMixin {
             widget.child,
             Positioned.fill(
               child: IgnorePointer(
-                child: _still != null
-                    ? light(0.7)
-                    : AnimatedBuilder(
-                        animation: _fade,
-                        builder: (context, _) => light(
-                          _fade.isAnimating ? _strength(_fade.value) : 0,
+                // Its own layer, faded without rebuilding: a rebuild each
+                // frame, under the window's LayoutBuilder, would lay out
+                // and repaint the whole window.
+                child: RepaintBoundary(
+                  child: _still != null
+                      ? Opacity(opacity: 0.7, child: light)
+                      : FadeTransition(
+                          opacity: _fade.drive(const _Strength()),
+                          child: light,
                         ),
-                      ),
+                ),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+/// The glow's strength over its life: in quickly, a moment held, out
+/// slowly; none before it starts and after it ends.
+class _Strength extends Animatable<double> {
+  const _Strength();
+
+  @override
+  double transform(double t) {
+    if (t <= 0 || t >= 1) return 0;
+    if (t < 0.22) return Curves.easeOut.transform(t / 0.22);
+    if (t < 0.45) return 1;
+    return 1 - Curves.easeInOut.transform((t - 0.45) / 0.55);
   }
 }
 
@@ -480,6 +490,7 @@ bool matchesAgents(
     'agent' => id,
     'checklist_item' => id.split('#').first,
     'extension' => id.split('/').first,
+    'pane' => id.split(':').first,
     _ => null,
   };
   if (owner == null || !agentIds.contains(owner)) return false;

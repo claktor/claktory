@@ -190,7 +190,7 @@ void main() {
   test('a download whose hash is off is refused and left nowhere', () async {
     final pieces = Pieces(archiveOf(temp, 'dev.factory.app'))
       ..sha256Override = '0' * 64;
-    expect(await failure(pieces), "the download's SHA-256 doesn't match");
+    expect(await failure(pieces), "the download is damaged");
     expect(
       Directory('${temp.path}/Applications').listSync().map((e) => e.path),
       [bundle],
@@ -201,7 +201,7 @@ void main() {
     final pieces = Pieces(archiveOf(temp, 'com.example.other'));
     expect(
       await failure(pieces),
-      'the new app is com.example.other, not this app (dev.factory.app)',
+      'the download is a different app (com.example.other, not dev.factory.app)',
     );
   }, skip: !onMac);
 
@@ -209,7 +209,7 @@ void main() {
     final pieces = Pieces(archiveOf(temp, 'dev.factory.app', tamper: true));
     expect(
       await failure(pieces),
-      startsWith("the new app's signature doesn't check out"),
+      startsWith("the new app's signature isn't valid"),
     );
     expect(
       Directory('${temp.path}/Applications/.Factory.app.update').existsSync(),
@@ -223,12 +223,12 @@ void main() {
       bundle = '';
       expect(
         await failure(Pieces(const [])),
-        "this app isn't in a bundle it can replace",
+        "this copy of the app can't replace itself",
       );
       bundle = '/System/Factory.app';
       expect(
         await failure(Pieces(const [])),
-        startsWith("can't write beside the app, in /System"),
+        startsWith("can't save the update next to the app, in /System"),
       );
     },
   );

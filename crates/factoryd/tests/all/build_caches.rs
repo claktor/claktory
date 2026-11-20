@@ -1,0 +1,205 @@
+//! Build caches stay bounded on their own: over the budget, an agent's
+//! checkout's caches (a Rust target/, node_modules/…) and a project folder's
+//! are cleared while nothing works there, and the agent hears of it at its
+//! next run. Nothing else git ignores is ever touched.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, SystemTime};
+
+use crate::common::{Client, View, apply_request, create_agent, create_project, send_message, start, temp_dir};
+use factory_protocol::v1::{self, AgentStatus, client_message, entry::Kind, server_message::Body};
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git").arg("-C").arg(dir).args(args).output().expect("git");
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+fn idle(view: &View, agent: &str) -> bool {
+    let agent = view.agent(agent);
+    agent.status() == AgentStatus::Idle && agent.queued_messages == 0
+}
+
+/// Writes `bytes` to `path` and makes everything on the way look an hour
+/// old, as a build that finished a while ago leaves it.
+fn built(path: &Path, bytes: usize) {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(path, vec![7; bytes]).expect("write");
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for at in path.ancestors().take(4) {
+        if let Ok(file) = std::fs::File::open(at) {
+            let _ = file.set_modified(old);
+        }
+    }
+}
+
+async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{what} never happened");
+}
+
+/// A repository with a Rust crate, a project on it and its agent Builder,
+/// whose checkout is made by a first run; the budget is 1 MB.
+async fn setup(dir: &Path) -> (std::sync::Arc<factoryd::Factory>, Client, View, PathBuf, PathBuf) {
+    let repo = dir.join("site");
+    std::fs::create_dir_all(&repo).expect("repo");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), "target/\ndata/\nbuild/\n.env\n").expect("ignore");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"site\"\n").expect("cargo");
+    git(&repo, &["add", "."]);
+    git(&repo, &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "-m", "start"]);
+
+    let (addr, factory) = start(dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &repo)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let tree_on = v1::ExtensionChange { id: "tree".into(), enabled: Some(true), ..Default::default() };
+    let update = v1::UpdateAgent { agent_id: "builder".into(), extension: Some(tree_on), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(update)).await;
+    let budget = v1::UpdateSettings { build_cache_gb: Some(0.001), ..Default::default() };
+    let reply = apply_request(&mut client, &mut view, client_message::Body::UpdateSettings(budget)).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
+    assert_eq!(view.workspace.settings.as_ref().map(|settings| settings.build_cache_gb), Some(0.001));
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    let tree = dir.join("home/trees/builder/site");
+    assert!(tree.join(".git").is_file(), "the checkout was made");
+    (factory, client, view, repo, tree)
+}
+
+/// What Builder was told by Factory of cleared caches.
+fn told(view: &View) -> Vec<String> {
+    view.entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory && event.text.contains("build cache") => {
+                Some(event.text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn caches_over_budget_are_cleared_while_idle_and_nothing_else_is_touched() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view, repo, tree) = setup(&dir).await;
+    // Builds in the checkout and in the main folder; things git ignores that
+    // aren't caches: data/, a build/ with no Flutter project, .env.
+    built(&tree.join("target/debug/big"), 2_000_000);
+    built(&repo.join("target/debug/big"), 2_000_000);
+    built(&tree.join("data/keep.csv"), 3_000_000);
+    built(&tree.join("build/out.html"), 3_000_000);
+    built(&tree.join(".env"), 10);
+    // Under the budget: kept.
+    std::fs::write(tree.join("package.json"), "{}").expect("package");
+    built(&tree.join("node_modules/tiny/index.js"), 1_000);
+
+    factory.set_build_cache_every(Duration::from_millis(100));
+    eventually("clearing the checkout's target", || !tree.join("target").exists()).await;
+    eventually("clearing the main folder's target", || !repo.join("target").exists()).await;
+    for kept in ["data/keep.csv", "build/out.html", ".env", "node_modules/tiny/index.js", "Cargo.toml"] {
+        assert!(tree.join(kept).exists(), "{kept} is left");
+    }
+    let trash = dir.join("home/trash");
+    eventually("deleting what was moved aside", || std::fs::read_dir(&trash).is_ok_and(|mut entries| entries.next().is_none())).await;
+
+    // Builder hears of it at its next run, not before.
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    assert!(told(&view).is_empty(), "an idle agent isn't woken for it");
+    apply_request(&mut client, &mut view, send_message("builder", "build it")).await;
+    view.follow(&mut client, |view| idle(view, "builder") && !told(view).is_empty()).await;
+    let told = told(&view);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].starts_with("Your checkout's build cache (0.0 GB, ") && told[0].ends_with("was cleared; the next build is cold."),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn caches_are_left_while_the_agent_works_and_cleared_on_request() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view, _repo, tree) = setup(&dir).await;
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+
+    // A background task of Builder's runs: its checkout is left alone.
+    let task = r#"call bash {"command":"sleep 30","run_in_background":true}"#;
+    apply_request(&mut client, &mut view, send_message("builder", task)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    built(&tree.join("target/debug/big"), 2_000_000);
+    factory.set_build_cache_every(Duration::from_millis(50));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(tree.join("target/debug/big").exists(), "left while Builder's task runs");
+
+    // Asked to clear it meanwhile, it says why not.
+    let clear = |path: &Path| client_message::Body::ClearBuildCache(v1::ClearBuildCache { path: path.display().to_string() });
+    let refused = apply_request(&mut client, &mut view, clear(&tree.join("target"))).await;
+    assert!(
+        matches!(&refused, Body::Error(error) if error.message == "Builder is working there now; clear it once Builder is idle."),
+        "{refused:?}"
+    );
+
+    // Once the task is stopped, it's cleared.
+    let stop = v1::StopTask { agent_id: "builder".into(), task_id: "task-1".into() };
+    apply_request(&mut client, &mut view, client_message::Body::StopTask(stop)).await;
+    eventually("clearing after the task ended", || !tree.join("target").exists()).await;
+
+    // On request: a cache under the budget is cleared; what isn't a cache isn't.
+    factory.set_build_cache_every(Duration::from_secs(3600));
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    std::fs::write(tree.join("package.json"), "{}").expect("package");
+    built(&tree.join("node_modules/tiny/index.js"), 1_000);
+    built(&tree.join("data/keep.csv"), 1_000);
+    let reply = apply_request(&mut client, &mut view, clear(&tree.join("node_modules"))).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
+    assert!(!tree.join("node_modules").exists());
+    let refused = apply_request(&mut client, &mut view, clear(&tree.join("data"))).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("isn't a build cache Claktory knows")), "{refused:?}");
+    assert!(tree.join("data/keep.csv").exists());
+    let outside = apply_request(&mut client, &mut view, clear(&dir.join("elsewhere/target"))).await;
+    assert!(
+        matches!(&outside, Body::Error(error) if error.message.contains("isn't in an agent's checkout or a project's folder")),
+        "{outside:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_dev_claktory_keeps_to_its_own_data_folder() {
+    // A dev Claktory, with a project in its data folder and one outside it,
+    // such as the repository the real Claktory's agents build in.
+    let dir = temp_dir();
+    let home = factoryd::home::Home::new(dir.join(".factory-dev"));
+    let factory = factoryd::Factory::open(home, std::sync::Arc::new(crate::common::Scripted::signed_in())).await.expect("open");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(factoryd::serve(listener, factory.clone()));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let (inside, outside) = (dir.join(".factory-dev/workspace/lab"), dir.join("factory"));
+    for (name, path) in [("Lab", &inside), ("Factory", &outside)] {
+        std::fs::create_dir_all(path).expect("project");
+        std::fs::write(path.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("cargo");
+        built(&path.join("target/debug/big"), 2_000_000);
+        apply_request(&mut client, &mut view, create_project(name, path)).await;
+    }
+    let budget = v1::UpdateSettings { build_cache_gb: Some(0.001), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateSettings(budget)).await;
+
+    factory.set_build_cache_every(Duration::from_millis(100));
+    eventually("clearing the target in its data folder", || !inside.join("target").exists()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(outside.join("target/debug/big").exists(), "a folder outside its data folder is left");
+
+    // Asked to, it says why not.
+    let clear = client_message::Body::ClearBuildCache(v1::ClearBuildCache { path: outside.join("target").display().to_string() });
+    let refused = apply_request(&mut client, &mut view, clear).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("outside this Claktory's data folder")), "{refused:?}");
+    assert!(outside.join("target/debug/big").exists());
+}

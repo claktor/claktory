@@ -9,6 +9,7 @@ import 'folder_browser.dart';
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'secrets.dart';
 import 'settings_view.dart';
 import 'state.dart';
 
@@ -25,6 +26,7 @@ class FormFrame extends StatelessWidget {
     required this.onCancel,
     this.body,
     this.secondary,
+    this.cancelLabel = 'Cancel',
   });
 
   final String title;
@@ -39,6 +41,9 @@ class FormFrame extends StatelessWidget {
   final VoidCallback? onSubmit;
   final VoidCallback onCancel;
 
+  /// The cancel button's words, such as "Not now".
+  final String cancelLabel;
+
   /// A less common action, on the left of the buttons (e.g. delete).
   final Widget? secondary;
 
@@ -46,6 +51,7 @@ class FormFrame extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     void submit() => onSubmit?.call();
+    final phone = isPhoneLayout(context);
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): submit,
@@ -87,13 +93,19 @@ class FormFrame extends StatelessWidget {
               ),
             Row(
               children: [
-                ?secondary,
+                if (!phone) ?secondary,
                 const Spacer(),
-                Button(label: 'Cancel', onPressed: onCancel),
+                Button(label: cancelLabel, onPressed: onCancel),
                 const SizedBox(width: Space.s),
                 Button(label: submitLabel, onPressed: onSubmit, primary: true),
               ],
             ),
+            // A phone is too narrow for three buttons in a row: the less
+            // common action goes on a line of its own, under them.
+            if (phone && secondary != null) ...[
+              const SizedBox(height: Space.m),
+              Align(alignment: Alignment.centerLeft, child: secondary),
+            ],
           ],
         ),
       ),
@@ -374,8 +386,8 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
             Field(
               label: 'Path',
               note:
-                  "Left empty, a new folder in the project's folder, named "
-                  "after it. It's created if it doesn't exist.",
+                  'Leave empty to make one inside the project, named after '
+                  'it.',
               child: _PathField(
                 controller: _newPath,
                 placeholder: '${project.path}/…',
@@ -418,9 +430,9 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
             Field(
               label: 'Folders',
               note:
-                  "Each agent works in the project's folder or one of these. "
-                  'Removing a folder moves its agents to the project\'s '
-                  'folder; its files are kept.',
+                  "Agents work in the project's folder or in one of these. "
+                  'Removing a folder keeps its files and moves its agents to '
+                  "the project's folder.",
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -603,12 +615,14 @@ List<SelectOption<String>> _effortOptions(
   for (final candidate in workspace.models) {
     if (candidate.id != model) continue;
     for (final effort in candidate.efforts) {
-      options.add(SelectOption(effort, effort));
+      options.add(SelectOption(effort, effortLabel(effort)));
       if (effort == current) found = true;
     }
   }
   if (!found) {
-    options.add(SelectOption(current, current.isEmpty ? 'Not set' : current));
+    options.add(
+      SelectOption(current, current.isEmpty ? 'Not set' : effortLabel(current)),
+    );
   }
   return options;
 }
@@ -646,8 +660,15 @@ String _defaultModelLabel(Workspace workspace) {
 
 String _defaultEffortLabel(Workspace workspace) {
   final effort = workspace.settings.defaultEffort;
-  return effort.isEmpty ? 'Default' : 'Default ($effort)';
+  return effort.isEmpty ? 'Default' : 'Default (${effortLabel(effort)})';
 }
+
+/// A reasoning effort as the person reads it: "xhigh" is "Extra high".
+String effortLabel(String effort) => switch (effort) {
+  'xhigh' => 'Extra high',
+  '' => '',
+  _ => effort[0].toUpperCase() + effort.substring(1),
+};
 
 /// Shared fields of the create and settings forms.
 class _AgentFields extends StatelessWidget {
@@ -1113,6 +1134,18 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   Agent get _current =>
       AppScope.of(context).workspace.agent(widget.agent.id) ?? widget.agent;
 
+  /// The agent as it would be saved: the backend's, with the extensions
+  /// turned on or off and the options changed here.
+  Agent get _edited {
+    final edited = _current.deepCopy();
+    for (final extension in edited.extensions) {
+      final enabled = _enabled[extension.id];
+      if (enabled != null) extension.enabled = enabled;
+      extension.options.addAll(_options[extension.id] ?? const {});
+    }
+    return edited;
+  }
+
   /// One change per extension turned on or off, and per option changed.
   List<ExtensionChange> _extensionChanges() {
     final changes = <ExtensionChange>[];
@@ -1219,8 +1252,8 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
             Field(
               label: 'Shape',
               note:
-                  'Automatic: Claktory picks one from the agent\'s id, so '
-                  'renaming or moving it never changes it.',
+                  'Automatic keeps the same shape when you rename or move '
+                  'the agent.',
               child: _AvatarPicker(
                 value: _shape,
                 options: [
@@ -1263,14 +1296,16 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               onSubmit: _submit,
               offerDefault: false,
               offerWorkspace: true,
-              outsideLabel: outsideProjectsLabel(agent),
+              // As the backend has it now, with what's changed here: the
+              // admin option turned on or off makes it an admin agent.
+              outsideLabel: outsideProjectsLabel(_edited),
               close: widget.close,
             ),
             Field(
               label: 'Message box hint',
               note:
-                  'What its message box says while empty. One per line; '
-                  'several take turns.',
+                  'Shown in the empty message box. Put several on separate '
+                  'lines to rotate them.',
               child: TextField(
                 controller: _placeholder,
                 minLines: 1,
@@ -1308,6 +1343,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                   ],
                 ),
               ),
+            AgentSecretsField(agent: agent),
           ],
         );
       },
@@ -1711,7 +1747,7 @@ class _AgentListOptionState extends State<_AgentListOption> {
                 ? Padding(
                     padding: const EdgeInsets.all(Space.s),
                     child: Text(
-                      'There are no other agents.',
+                      'No other agents.',
                       style: TextStyles.body.copyWith(color: palette.textFaint),
                     ),
                   )

@@ -5,7 +5,23 @@ import 'connections.dart';
 import 'drafts.dart';
 import 'history.dart';
 import 'login.dart';
+import 'scanner.dart';
 import 'update.dart';
+
+/// On a phone, whether an agent's conversation is pushed over the sidebar:
+/// how the app moves between its screens there (docs/IDENTITY.md, "Phone").
+/// Local to the screen, like [AppPage].
+class PhoneNavigation extends InheritedNotifier<ValueNotifier<bool>> {
+  const PhoneNavigation({
+    super.key,
+    required ValueNotifier<bool> conversation,
+    required super.child,
+  }) : super(notifier: conversation);
+
+  /// Null outside a phone's layout.
+  static ValueNotifier<bool>? of(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<PhoneNavigation>()?.notifier;
+}
 
 /// What the content area shows.
 enum AppPage { agent, settings, marketplace, changelog }
@@ -23,6 +39,7 @@ class AppScope extends InheritedWidget {
     required this.drafts,
     required this.history,
     required this.connections,
+    this.camera = const DeviceCamera(),
     required super.child,
   });
 
@@ -42,6 +59,9 @@ class AppScope extends InheritedWidget {
 
   /// Which Factory this app shows, kept on this device.
   final Connections connections;
+
+  /// The phone's camera, which scans pairing codes.
+  final Camera camera;
 
   static AppScope scope(BuildContext context) {
     final scope = context.getInheritedWidgetOfExactType<AppScope>();
@@ -64,14 +84,10 @@ class AppScope extends InheritedWidget {
   }
 
   /// Shows [target]'s Factory from now on (null for this Mac's): the
-  /// device remembers it, and the app reconnects there.
-  static void switchFactory(BuildContext context, RemoteFactory? target) {
-    final scope = AppScope.scope(context);
-    scope.connections.use(target);
-    scope.history.clear();
-    scope.page.value = AppPage.agent;
-    scope.backend.connectTo(target);
-  }
+  /// device remembers it, and connects to it if it's new. Every Factory
+  /// it knows stays connected; the window shows this one, as it was left.
+  static void switchFactory(BuildContext context, RemoteFactory? target) =>
+      scope(context).connections.use(target);
 
   /// Back to the selected agent, or on to one the person picked: either
   /// way, a fresh start for back and forward.
@@ -88,5 +104,6 @@ class AppScope extends InheritedWidget {
       oldWidget.appBuild != appBuild ||
       oldWidget.drafts != drafts ||
       oldWidget.history != history ||
+      oldWidget.camera != camera ||
       oldWidget.connections != connections;
 }

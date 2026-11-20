@@ -157,22 +157,43 @@ fn expires_soon(credential: &Credential) -> bool {
 }
 
 /// A stored credential owns the provider; the environment is consulted only when nothing is stored.
+/// The provider's first account's, when it has several.
 pub async fn resolve_provider_auth(
     provider: &Provider,
     store: &FileCredentialStore,
     env: &Env,
     cancel: &CancellationToken,
 ) -> Result<Option<AuthResult>, Error> {
+    resolve_account_auth(provider, store, env, None, cancel).await
+}
+
+/// `resolve_provider_auth` for one of the provider's accounts (`account`, its
+/// id), or its first (None). None when it has no such account.
+pub async fn resolve_account_auth(
+    provider: &Provider,
+    store: &FileCredentialStore,
+    env: &Env,
+    account: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<Option<AuthResult>, Error> {
     if cancel.is_cancelled() {
         return Err(Error::Aborted);
     }
-    let stored = store
-        .read(provider.id)
+    let accounts = store
+        .accounts(provider.id)
         .await
         .map_err(|error| models_error("auth", format!("Credential store read failed for {}", provider.id), Some(&error)))?;
+    let stored = match account {
+        Some(id) => match accounts.into_iter().find(|stored| stored.id == id) {
+            Some(stored) => Some(stored),
+            None => return Ok(None),
+        },
+        None => accounts.into_iter().next(),
+    };
+    let (account_id, stored) = stored.map(|stored| (stored.id, stored.credential)).unzip();
     match (stored, &provider.oauth, &provider.api_key) {
         (Some(credential @ Credential::Oauth { .. }), Some(oauth), _) => {
-            resolve_stored_oauth(store, provider.id, oauth.as_ref(), credential, cancel).await
+            resolve_stored_oauth(store, provider.id, account_id.as_deref().unwrap_or_default(), oauth.as_ref(), credential, cancel).await
         }
         (Some(credential @ Credential::ApiKey { .. }), _, Some(api_key)) => {
             resolve_api_key(provider.id, api_key.as_ref(), env, Some(&credential))
@@ -191,6 +212,7 @@ fn resolve_api_key(id: &str, api_key: &dyn ApiKeyAuth, env: &Env, credential: Op
 async fn resolve_stored_oauth(
     store: &FileCredentialStore,
     id: &str,
+    account: &str,
     oauth: &dyn OAuthFlow,
     stored: Credential,
     cancel: &CancellationToken,
@@ -198,7 +220,7 @@ async fn resolve_stored_oauth(
     let mut credential = stored;
     if expires_soon(&credential) {
         let post = store
-            .modify(id, |current| async move {
+            .modify_account(id, account, |current| async move {
                 let Some(current) = current.filter(|current| matches!(current, Credential::Oauth { .. }) && expires_soon(current)) else {
                     return Ok(None);
                 };

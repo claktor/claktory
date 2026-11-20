@@ -47,9 +47,6 @@ pub(crate) const TOOL: &str = "propose_to_rivet";
 
 const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation.";
 
-/// Who decides: the person. Their name comes with the user's name setting.
-const PERSON: &str = "The person";
-
 /// Rivet: the admin agent proposals go to. The one with Rivet's id if it's
 /// an admin agent, else the first admin agent in the settings.
 pub(crate) fn rivet(config: &Config) -> Option<&AgentConfig> {
@@ -67,8 +64,6 @@ struct ProposeArgs {
 }
 
 pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     let parameters = json!({
         "type": "object",
         "required": ["message"],
@@ -80,15 +75,7 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
         "Propose to Rivet",
         ABOUT,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let args: ProposeArgs = serde_json::from_value(args)?;
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Factory is stopping.".into())) };
-                propose(&factory, &agent, args.message).map_err(factory_agent::Error::Other)
-            })
-        }),
+        crate::extensions::typed_handler(factory, agent, |factory, agent, args: ProposeArgs| propose(factory, agent, args.message)),
     )
 }
 
@@ -99,19 +86,20 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
     if text.is_empty() {
         return Err("The message is empty; nothing was proposed.".to_owned());
     }
-    {
+    let person = {
         let inner = factory.lock();
-        let Some(me) = inner.config.agent(agent) else { return Err("You're no longer in this Factory.".to_owned()) };
+        let Some(me) = inner.config.agent(agent) else { return Err("You're no longer in this Claktory.".to_owned()) };
         if is_admin(me) {
             return Err("You're an admin agent: message agents directly instead.".to_owned());
         }
         let Some(rivet) = rivet(&inner.config) else {
-            return Err("This Factory has no Rivet (admin agent) to propose to, so nothing was proposed.".to_owned());
+            return Err("This Claktory has no Rivet (admin agent) to propose to, so nothing was proposed.".to_owned());
         };
         if !inner.models.iter().any(|model| model.id == rivet.model) {
             return Err(format!("{} has no model available, so it can't act on a proposal; nothing was proposed.", rivet.name));
         }
-    }
+        inner.config.person().to_owned()
+    };
     let id = {
         let db = factory.store.db();
         db.execute(
@@ -121,7 +109,7 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
         .map_err(|error| format!("Couldn't record the proposal: {error}"))?;
         db.last_insert_rowid().to_string()
     };
-    let said = format!("Proposed; {} will approve or dismiss it.", PERSON.to_lowercase());
+    let said = format!("Proposed; {person} will approve or dismiss it.");
     Ok(ToolResult::text(said, json!({"proposal": id, "text": text})))
 }
 
@@ -202,7 +190,7 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
         return Err(RequestError::Proposal(format!("This proposal was already {}.", row.state)));
     }
     // Who it's for, and what Rivet reads.
-    let (rivet_name, delivery) = {
+    let (rivet_name, person, delivery) = {
         let inner = factory.lock();
         let config = &inner.config;
         let Some(from) = config.agent(agent) else { return Err(RequestError::UnknownAgent(agent.to_owned())) };
@@ -226,7 +214,8 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
                 Some((rivet.id.clone(), message))
             }
         };
-        (rivet.map_or_else(|| "Rivet".to_owned(), |rivet| rivet.name.clone()), delivery)
+        let rivet_name = rivet.map_or_else(|| "Rivet".to_owned(), |rivet| rivet.name.clone());
+        (rivet_name, config.person_capitalized().to_owned(), delivery)
     };
     let state = if approve { "approved" } else { "dismissed" };
     let decided = now_ms();
@@ -256,13 +245,13 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
         }
     }
-    let mut summary = format!("{PERSON} {state} your proposal to {rivet_name}");
+    let mut summary = format!("{person} {state} your proposal to {rivet_name}");
     if !comment.is_empty() {
         let _ = write!(summary, " (comment: {comment})");
     }
     summary.push('.');
     let text = format!("{summary}\n\nYour proposal:\n{}", row.text);
-    let event = Event { source: EventSource::Host, from: "Factory".to_owned(), id: String::new(), summary, transient: false };
+    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
     factory.deliver_event(agent, text, event);
     Ok(())
 }

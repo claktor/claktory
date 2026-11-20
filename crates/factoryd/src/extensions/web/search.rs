@@ -120,7 +120,7 @@ impl Health {
             Ok(Outcome::Blocked(Block::RateLimited)) => (doubled(policy.limited_max_ms), "rate-limited this computer"),
             Ok(Outcome::Blocked(Block::Denied)) => (HOUR, "denied access"),
             Ok(Outcome::Blocked(Block::Degraded)) => (HOUR, "returned results that don't match (a soft block)"),
-            Ok(Outcome::Broken(_)) => (HOUR, "returned a page Factory can't read"),
+            Ok(Outcome::Broken(_)) => (HOUR, "returned a page Claktory can't read"),
             Err(_) => (MINUTE, "couldn't be reached"),
         };
         if matches!(outcome, Ok(Outcome::Blocked(Block::Challenge | Block::RateLimited))) {
@@ -228,7 +228,7 @@ impl Searcher {
                 }
                 Ok(Outcome::Broken(start)) => {
                     tracing::warn!(engine = engine.name(), start, "a search engine's page couldn't be read; its layout may have changed");
-                    reasons.push(format!("{} returned a page Factory can't read", engine.name()));
+                    reasons.push(format!("{} returned a page Claktory can't read", engine.name()));
                 }
                 Err(error) => {
                     tracing::warn!(engine = engine.name(), %error, "a search engine couldn't be reached");

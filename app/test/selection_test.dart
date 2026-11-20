@@ -3,6 +3,7 @@ import 'package:factory_app/selection.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:factory_app/settings_view.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -229,8 +230,8 @@ void main() {
         find.textContaining('A soft glow'),
         200,
         scrollable: find
-            .ancestor(
-              of: find.text('Providers'),
+            .descendant(
+              of: find.byType(SettingsView),
               matching: find.byType(Scrollable),
             )
             .first,

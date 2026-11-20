@@ -6,24 +6,32 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 bytes = "1.12.2"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 dom_smoothie = "0.19"
 factory-agent = { version = "0.1.0", path = "../factory-agent" }
 factory-protocol = { version = "0.1.0", path = "../factory-protocol" }
 futures-util = "0.3.34"
 getrandom = "0.4"
 globset = "0.4"
+hkdf = "0.13"
+hmac = "0.13"
 htmd = "0.6"
 ignore = "0.4.34"
+# The private tunnel (remote.rs): pinned, the same as the app's (app/rust); ring, as the
+# process default, and no portmapper, so Factory never asks the router to open a port.
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 jiff = "1"
 libc = "0.2"
 pdf-extract = "0.12"
 primp = "2"
 prost = "0.14.6"
-rcgen = "0.14"
+# `factoryd pair` shows the code as a QR code in the terminal; no image formats.
+qrcode = { version = "0.15", default-features = false, features = ["std"] }
 regex = "1"
 rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
-# ring is the process default (main.rs); remote access names aws-lc-rs itself.
+# ring is the process default (main.rs), and the tunnel's (iroh, tls-ring).
 rustls = { version = "0.23", features = ["ring"] }
 scraper = "0.29"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -32,8 +40,14 @@ sha2 = "0.11"
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync", "process", "signal"] }
-tokio-rustls = "0.26"
 tokio-tungstenite = "0.30.0"
 tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zeroize = "1.9"
+
+[dev-dependencies]
+# tests/tls.rs: a TLS server with a certificate of its own, and the other
+# crypto provider beside ring.
+rcgen = "0.14"
+tokio-rustls = "0.26"

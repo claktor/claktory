@@ -18,14 +18,14 @@ pub struct TunnelHandle {
     tunnel: Arc<tunnel::Tunnel>,
 }
 
-/// Opens a tunnel to the backend [endpoint_id] (its relays [relays], from
-/// its pairing code), as the device [device_key]. It listens at once and
-/// dials when the app first connects.
-pub async fn open_tunnel(device_key: String, endpoint_id: String, relays: Vec<String>) -> anyhow::Result<TunnelHandle> {
+/// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
+/// direct addresses [addresses], from its pairing code), as the device
+/// [device_key]. It listens at once and dials when the app first connects.
+pub async fn open_tunnel(device_key: String, endpoint_id: String, relays: Vec<String>, addresses: Vec<String>) -> anyhow::Result<TunnelHandle> {
     RUNTIME
         .spawn(async move {
             let key = tunnel::parse_key(&device_key)?;
-            let backend = tunnel::backend_addr(&endpoint_id, &relays)?;
+            let backend = tunnel::backend_addr(&endpoint_id, &relays, &addresses)?;
             let endpoint = tunnel::device_endpoint(key).await?;
             let tunnel = tunnel::Tunnel::open(endpoint, backend).await?;
             Ok(TunnelHandle { tunnel: Arc::new(tunnel) })
@@ -65,6 +65,14 @@ impl TunnelHandle {
             },
             relay_connected: status.relay_connected,
         }
+    }
+
+    /// After the app was suspended or the network changed: the connection
+    /// is made afresh by the next socket, and iroh looks at the network
+    /// again.
+    pub async fn reconnect(&self) {
+        let tunnel = self.tunnel.clone();
+        let _ = RUNTIME.spawn(async move { tunnel.reconnect().await }).await;
     }
 
     /// Stops it: the port closes, and so does the connection.

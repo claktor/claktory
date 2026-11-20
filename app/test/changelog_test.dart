@@ -107,7 +107,7 @@ void main() {
     final harness = await show(tester, focusedOn(''));
     harness.page.value = AppPage.changelog;
     await settle(tester);
-    expect(inPage("Claktory hasn't published a changelog yet."), findsOneWidget);
+    expect(inPage('No release notes yet.'), findsOneWidget);
   });
 
   testWidgets("the Update banner offers What's new", (tester) async {

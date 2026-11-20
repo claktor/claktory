@@ -6,8 +6,10 @@
 //   swift scripts/icons.swift
 //
 // Writes app/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_*.png
-// and app/macos/dev/AppIcon.icns. Run it from the repo root after changing
-// the design; the outputs are checked in.
+// and app/macos/dev/AppIcon.icns, and for iOS the 1024px square of
+// app/ios/Runner/Assets.xcassets/AppIcon.appiconset and app/ios/dev's
+// icons. Run it from the repo root after changing the design; the outputs
+// are checked in.
 
 import AppKit
 import CoreText
@@ -65,16 +67,17 @@ func cog(center: NSPoint, body: CGFloat, tip: CGFloat, hole: CGFloat, teeth: Int
 }
 
 /// One icon on macOS's 1024 grid: an 824pt flat tile with a soft shadow
-/// beneath, and a hard offset shadow under the mark.
-func draw(_ style: Style) {
+/// beneath, and a hard offset shadow under the mark. For iOS (`square`) the
+/// tile is square and shadowless, as iOS rounds it itself.
+func draw(_ style: Style, square: Bool = false) {
     let tile = NSRect(x: 100, y: 100, width: 824, height: 824)
-    let shape = NSBezierPath(roundedRect: tile, xRadius: 185, yRadius: 185)
+    let shape = square ? NSBezierPath(rect: tile) : NSBezierPath(roundedRect: tile, xRadius: 185, yRadius: 185)
     NSGraphicsContext.saveGraphicsState()
     let shadow = NSShadow()
     shadow.shadowColor = NSColor(white: 0, alpha: 0.3)
     shadow.shadowOffset = NSSize(width: 0, height: -10)
     shadow.shadowBlurRadius = 24
-    shadow.set()
+    if !square { shadow.set() }
     style.tile.setFill()
     shape.fill()
     NSGraphicsContext.restoreGraphicsState()
@@ -106,16 +109,22 @@ func draw(_ style: Style) {
     }
 }
 
-func png(_ style: Style, pixels: Int) -> Data {
+func png(_ style: Style, pixels: Int, square: Bool = false) -> Data {
     // Drawn in sRGB, so the identity's hex colors land exactly.
     let context = CGContext(
         data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0,
-        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: (square ? CGImageAlphaInfo.noneSkipLast : CGImageAlphaInfo.premultipliedLast).rawValue)!
     context.interpolationQuality = .high
-    context.scaleBy(x: CGFloat(pixels) / 1024, y: CGFloat(pixels) / 1024)
+    if square {
+        // The tile fills the image, opaque, as iOS wants.
+        context.scaleBy(x: CGFloat(pixels) / 824, y: CGFloat(pixels) / 824)
+        context.translateBy(x: -100, y: -100)
+    } else {
+        context.scaleBy(x: CGFloat(pixels) / 1024, y: CGFloat(pixels) / 1024)
+    }
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-    draw(style)
+    draw(style, square: square)
     NSGraphicsContext.restoreGraphicsState()
     return NSBitmapImageRep(cgImage: context.makeImage()!).representation(using: .png, properties: [:])!
 }
@@ -143,4 +152,15 @@ iconutil.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
 iconutil.arguments = ["-c", "icns", iconset, "-o", devDir + "/AppIcon.icns"]
 try! iconutil.run()
 iconutil.waitUntilExit()
-print("wrote \(catalog) and \(devDir)/AppIcon.icns")
+
+// iOS: one 1024px square in the catalog, which Xcode scales; Claktory Dev's
+// as loose files the dev build points at (scripts/ios.sh), the way the Mac's
+// dev build uses AppIcon.icns.
+let iosCatalog = root + "/app/ios/Runner/Assets.xcassets/AppIcon.appiconset"
+write(png(claktory, pixels: 1024, square: true), "\(iosCatalog)/Icon-App-1024x1024@1x.png")
+let iosDev = root + "/app/ios/dev"
+try! FileManager.default.createDirectory(atPath: iosDev, withIntermediateDirectories: true)
+for (name, pixels) in [("AppIcon60x60@2x", 120), ("AppIcon60x60@3x", 180), ("AppIcon76x76@2x~ipad", 152), ("AppIcon83.5x83.5@2x~ipad", 167)] {
+    write(png(dev, pixels: pixels, square: true), "\(iosDev)/\(name).png")
+}
+print("wrote \(catalog), \(devDir)/AppIcon.icns, \(iosCatalog) and \(iosDev)")

@@ -9,7 +9,7 @@ import 'scope.dart';
 /// full, after [about] (where it showed) when there's one.
 String errorRequest(String error, {String about = ''}) {
   final where = about.isEmpty ? '' : '$about\n';
-  return 'Claktory shows this error, please fix it:\n\n$where$error';
+  return 'Claktory shows this error. Please fix it:\n\n$where$error';
 }
 
 /// Hands an error Factory shows to Rivet, as the sidebar's "+" hands it a
@@ -46,7 +46,7 @@ class TellRivet extends StatelessWidget {
         if (rivet == null || !rivet.modelAvailable || error.isEmpty) {
           return const SizedBox.shrink();
         }
-        final label = 'Tell ${rivet.name}';
+        final label = 'Ask ${rivet.name} to fix';
         void tell() {
           if (askRivet(
             context,

@@ -9,6 +9,10 @@
 # never interrupts the agents. A backend that fails to start after an update
 # is undone by the supervisor (crates/factoryd/src/update.rs).
 #
+# A release for the real Factory is signed with the Developer ID and notarized
+# when this Mac has the identity and the notarization key, and signed ad hoc
+# otherwise (scripts/sign-release.sh says which).
+#
 # A release for the real Factory needs its entries in docs/CHANGELOG.md,
 # stamped with its version by scripts/changelog.sh stamp (and committed); it
 # builds that version. Each release carries the changelog, which the app shows.
@@ -36,6 +40,14 @@ fi
 export FACTORY_VERSION
 
 FINGERPRINT="$(backend_fingerprint)"
+if [[ "$APP_NAME" == "Factory.app" ]]; then
+  # Signing with a Developer ID makes a different backend: the first signed
+  # release ships one even when the source didn't change.
+  SIGNING="$(signing_mode)"
+  if [[ "$SIGNING" != adhoc ]]; then
+    FINGERPRINT="$(printf '%s\nsigning: %s\n' "$FINGERPRINT" "$SIGNING" | shasum -a 256 | cut -d' ' -f1)"
+  fi
+fi
 PREVIOUS=""
 if [[ -f "$RELEASES/latest" ]]; then
   PREVIOUS="$RELEASES/$(cat "$RELEASES/latest")"
@@ -66,6 +78,13 @@ fi
 take_build "$ROOT/app/build/macos/Build/Products/Release/Factory.app" "$partial/$APP_NAME"
 if [[ "$APP_NAME" == "Factory Dev.app" ]]; then
   make_dev_app "$partial/$APP_NAME" Release.entitlements
+else
+  # The supervisor as an app (Developer Tools needs one); installers put it
+  # in place, updates never do.
+  make_supervisor_app "$partial"
+  # Developer ID and notarized when this Mac has what that takes; ad hoc
+  # otherwise, as dev releases always are.
+  "$ROOT/scripts/sign-release.sh" "$partial"
 fi
 mv "$partial" "$RELEASES/$FACTORY_VERSION"
 # Named only once complete; the rename makes the change atomic.
@@ -78,4 +97,4 @@ ls -1 "$RELEASES" | grep -v '^latest' | while read -r name; do
 done | sort -r | cut -f2 | tail -n +4 | while read -r old; do
   rm -rf "${RELEASES:?}/$old"
 done
-echo "published Factory $FACTORY_VERSION to $RELEASES"
+echo "published Claktory $FACTORY_VERSION to $RELEASES"
