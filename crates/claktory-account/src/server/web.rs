@@ -421,6 +421,13 @@ fn clear_cookie() -> (HeaderName, HeaderValue) {
     )
 }
 
+/// The bare root, which has nothing of its own: on to the account page.
+pub(super) fn root() -> Reply {
+    let mut reply = Reply { status: StatusCode::FOUND, content_type: "text/plain; charset=utf-8", headers: Vec::new(), body: Vec::new() };
+    reply.headers.push((hyper::header::LOCATION, HeaderValue::from_static("/account")));
+    reply
+}
+
 /// Back to the account page, after a form.
 fn redirect(cookie: Option<String>) -> Reply {
     let mut reply =

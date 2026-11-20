@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The apps host (claktory-apps) under the hardened runtime: wasmtime compiles
+     each app's WebAssembly to machine code in memory it then makes executable,
+     without MAP_JIT, which the hardened runtime kills unless this allows it.
+     scripts/sign-release.sh signs it with this. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>

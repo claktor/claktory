@@ -158,7 +158,6 @@ pub const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024 + 768 * 1024;
 impl Attachment {
     /// `<attachment path="…" name="…" size="…" type="…"/>`: how the model reads it.
     fn tag(&self) -> String {
-        let attribute = |value: &str| value.replace('"', "'").replace(['\n', '\r'], " ");
         let kind = if self.mime.is_empty() { String::new() } else { format!(" type=\"{}\"", attribute(&self.mime)) };
         format!("<attachment path=\"{}\" name=\"{}\" size=\"{}\"{kind}/>", attribute(&self.path), attribute(&self.name), self.size)
     }
@@ -216,10 +215,50 @@ pub struct SentFrom {
 impl SentFrom {
     /// `<sent from="Matt's iPhone" device="phone">`: how the model reads it.
     fn tag(&self) -> String {
-        let attribute = |value: &str| value.replace('"', "'").replace(['\n', '\r'], " ");
         let kind = if self.kind.is_empty() { String::new() } else { format!(" device=\"{}\"", attribute(&self.kind)) };
         format!("<sent from=\"{}\"{kind}>\n", attribute(&self.device))
     }
+}
+
+/// A value as it goes between an attribute's quotes in a tag the model
+/// reads: a double quote becomes a single one and a line break a space, so it
+/// can't end the attribute, and `<` becomes `&lt;`, so it can't start a tag.
+fn attribute(value: &str) -> String {
+    value.replace('"', "'").replace(['\n', '\r'], " ").replace('<', "&lt;")
+}
+
+/// The tags Claktory wraps a message in, which text inside one must not
+/// open or close.
+const TAGS: [&str; 3] = ["event", "sent", "attachment"];
+
+/// Text from outside, as it goes inside an `<event>` tag: every `<` that
+/// would open or close one of Claktory's tags (`</event>`, `<sent from=…>`,
+/// `< /Event >` and the like) becomes `&lt;`, so a message, a task's output
+/// or an app's event can't end its event early and pass what follows off as
+/// the person or as another event. Text without one is returned as it is,
+/// byte for byte, so conversations keep their prompt cache.
+fn defuse(text: &str) -> std::borrow::Cow<'_, str> {
+    let opens_tag = |at: usize| {
+        let rest = text[at + 1..].trim_start();
+        let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
+        TAGS.iter().any(|tag| {
+            rest.get(..tag.len()).is_some_and(|name| name.eq_ignore_ascii_case(tag))
+                && !rest[tag.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
+        })
+    };
+    let dangerous: Vec<usize> = text.match_indices('<').map(|(at, _)| at).filter(|&at| opens_tag(at)).collect();
+    if dangerous.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut defused = String::with_capacity(text.len() + dangerous.len() * 3);
+    let mut from = 0;
+    for at in dangerous {
+        defused.push_str(&text[from..at]);
+        defused.push_str("&lt;");
+        from = at + 1;
+    }
+    defused.push_str(&text[from..]);
+    std::borrow::Cow::Owned(defused)
 }
 
 impl UserMessage {
@@ -246,8 +285,9 @@ impl UserMessage {
         let (open, close) = match (&self.event, &self.sent_from) {
             (Some(event), _) => {
                 // An agent's id too, when its name doesn't say it, so a reply reaches it.
-                let id = if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", event.id) };
-                (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), event.from), "\n</event>")
+                let id =
+                    if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", attribute(&event.id)) };
+                (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), attribute(&event.from)), "\n</event>")
             }
             (None, Some(sent_from)) => (sent_from.tag(), "\n</sent>"),
             (None, None) if self.attachments.is_empty() => return self.clone(),
@@ -263,15 +303,21 @@ impl UserMessage {
             };
             Some(format!("{}{}", if written { "\n" } else { "" }, tags.join("\n")))
         };
+        // An event's text comes from outside (another agent, a task, an app):
+        // it can't open or close a tag. The person's own text is theirs.
+        let inside = |text: &str| if self.event.is_some() { defuse(text).into_owned() } else { text.to_owned() };
         let content = match &self.content {
-            UserContent::Text(text) if tags.is_none() => UserContent::Text(format!("{open}{text}{close}")),
-            UserContent::Text(text) => UserContent::Text(format!("{open}{text}{}{close}", tags.unwrap_or_default())),
+            UserContent::Text(text) if tags.is_none() => UserContent::Text(format!("{open}{}{close}", inside(text))),
+            UserContent::Text(text) => UserContent::Text(format!("{open}{}{}{close}", inside(text), tags.unwrap_or_default())),
             UserContent::Parts(parts) => {
                 let mut wrapped = Vec::with_capacity(parts.len() + 3);
                 if !open.is_empty() {
                     wrapped.push(UserPart::Text { text: open });
                 }
-                wrapped.extend(parts.iter().cloned());
+                wrapped.extend(parts.iter().map(|part| match part {
+                    UserPart::Text { text } => UserPart::Text { text: inside(text) },
+                    other => other.clone(),
+                }));
                 if let Some(tags) = tags {
                     wrapped.push(UserPart::Text { text: tags });
                 }
@@ -315,6 +361,8 @@ pub enum EventSource {
     Task,
     /// A monitor the agent (or another agent) set, firing.
     Monitor,
+    /// An app the agent hears (its events).
+    App,
 }
 
 impl EventSource {
@@ -324,6 +372,7 @@ impl EventSource {
             EventSource::Agent => "agent",
             EventSource::Task => "task",
             EventSource::Monitor => "monitor",
+            EventSource::App => "app",
         }
     }
 }
@@ -503,6 +552,15 @@ pub enum AgentEvent {
         message: Message,
         attempt: u32,
         delay_ms: u64,
+    },
+    /// The response that the last `MessageStart` began failed because none of
+    /// the provider's accounts can take a request now (`accounts::none_left`).
+    /// It ends that message in place of `MessageEnd` and is not part of the
+    /// context; the run waits until `until_ms` (ms since 1970), or, when None,
+    /// until the person changes something, then sends the request again.
+    Waiting {
+        message: Message,
+        until_ms: Option<u64>,
     },
     /// The context was replaced by a summary of it. `messages` is the new context, which `state.messages` now
     /// holds: the summary as a user message, followed by the run's prompt when it was the latest message.

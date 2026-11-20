@@ -4,6 +4,7 @@
 mod account;
 mod annotations;
 mod app_archive;
+pub mod apps;
 mod arrange;
 pub mod channel;
 mod characters;
@@ -24,7 +25,9 @@ mod login;
 mod manual;
 mod map;
 pub mod models;
+mod network;
 mod patch;
+mod person;
 mod proposals;
 pub mod remote;
 mod runner;
@@ -38,6 +41,7 @@ mod uploads;
 mod usage;
 mod usage_report;
 pub mod vault;
+mod waits;
 
 pub use connection::{ConnectionError, serve};
 pub use factory::Factory;

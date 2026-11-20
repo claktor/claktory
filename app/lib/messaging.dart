@@ -6,6 +6,7 @@ import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
+import 'usage_wait.dart';
 
 /// Who [agentId] can message and who can message it, each agent with its
 /// dot, name, project when it's another one's, and whether it's working
@@ -127,7 +128,9 @@ class _AgentLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final agent = store.agent(id);
-    final working = agent?.status == AgentStatus.AGENT_STATUS_WORKING;
+    final working = agent != null && atWork(agent);
+    // Held up by usage limits: what it waits for, in place of its role.
+    final wait = agent == null ? '' : usageWaitLine(agent);
     final String place;
     if (agent == null || agent.projectId == home) {
       place = '';
@@ -142,10 +145,12 @@ class _AgentLine extends StatelessWidget {
         ? 'no model'
         : working
         ? 'working'
+        : wait.isNotEmpty
+        ? 'on hold'
         : 'idle';
     return Container(
       // Taller with a role, for its line under the name, as in the sidebar.
-      height: (agent?.role ?? '').isEmpty ? 32 : 40,
+      height: (agent?.role ?? '').isEmpty && wait.isEmpty ? 32 : 40,
       padding: const EdgeInsets.symmetric(horizontal: Space.s),
       child: Row(
         children: [
@@ -158,7 +163,7 @@ class _AgentLine extends StatelessWidget {
           Expanded(
             child: NameOverRole(
               name: agent?.name ?? id,
-              role: agent?.role ?? '',
+              role: wait.isNotEmpty ? wait : agent?.role ?? '',
               style: TextStyles.body.copyWith(
                 color: agent == null ? palette.textFaint : palette.text,
               ),

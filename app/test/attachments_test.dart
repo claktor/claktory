@@ -1,11 +1,12 @@
 import 'dart:io';
 
+import 'package:factory_app/agent_view.dart' show FileDropOverlay;
 import 'package:factory_app/attachments.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart' show Image;
+import 'package:flutter/widgets.dart' show EditableText, IgnorePointer, Image;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'drafts_test.dart' show two;
@@ -105,6 +106,46 @@ void main() {
     await tester.pump();
     expect(find.text('notes.txt'), findsNothing);
     expect(harness.backend.attachments.of('a1'), isEmpty);
+  });
+
+  testWidgets('files dragged over the conversation dim it and say where '
+      'they go', (tester) async {
+    final harness = Harness(two());
+    await harness.show(tester);
+    expect(find.text('Drop to add to your message to Builder'), findsNothing);
+
+    // An older window says only that some are.
+    await fromWindow(tester, 'filesOver', true);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your message to Builder'), findsOneWidget);
+    expect(find.textContaining('files'), findsNothing);
+
+    await fromWindow(tester, 'filesOver', 3);
+    expect(FileDrop.over.value, isTrue);
+    expect(find.text('3 files'), findsOneWidget);
+    final overlay = find.byType(FileDropOverlay);
+    // Over the conversation, and it never takes the pointer.
+    expect(
+      tester.getSize(overlay).height,
+      greaterThan(tester.getSize(find.byType(EditableText)).height * 4),
+    );
+    expect(
+      find.descendant(of: overlay, matching: find.byType(IgnorePointer)),
+      findsWidgets,
+    );
+
+    // Gone once they leave, after it fades.
+    await fromWindow(tester, 'filesOver', 0);
+    expect(find.text('Drop to add to your message to Builder'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your message to Builder'), findsNothing);
+
+    // Dropped: gone too, and the files are in the box.
+    await fromWindow(tester, 'filesOver', 1);
+    await fromWindow(tester, 'filesDropped', [notes]);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your message to Builder'), findsNothing);
+    expect(find.text('notes.txt'), findsOneWidget);
   });
 
   testWidgets('the paperclip opens the picker; files stay with their agent', (

@@ -21,6 +21,8 @@ import 'phone.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
+import 'usage_wait.dart' show atWork;
+import 'waiting.dart' show waitingIn, waitingLabel;
 
 /// The rail of Claktories at the window's far left, as thin as the
 /// extension bar.
@@ -275,10 +277,9 @@ class _Glance {
         if (archivedProjectOf(workspace, agent) == null) agent,
     ];
     connected = backend.connected.value;
-    working =
-        connected &&
-        agents.any((agent) => agent.status == AgentStatus.AGENT_STATUS_WORKING);
+    working = connected && agents.any(atWork);
     unseen = agents.any((agent) => agent.unseen);
+    waiting = waitingIn(agents);
     connection = Connection(backend);
     problem = connection.problem ? connection.line : null;
   }
@@ -286,6 +287,9 @@ class _Glance {
   late final bool connected;
   late final bool working;
   late final bool unseen;
+
+  /// What waits for the person's answer in its agents' conversations.
+  late final int waiting;
 
   /// How it's connected.
   late final Connection connection;
@@ -576,8 +580,12 @@ class _Tile extends StatelessWidget {
                     ),
                   ),
           ),
-          // Its connection first (can't, or connecting), then its news.
-          if (glance.problem != null || glance.connecting || glance.unseen)
+          // Its connection first (can't, or connecting), then what waits
+          // for the person, then its news.
+          if (glance.problem != null ||
+              glance.connecting ||
+              glance.waiting > 0 ||
+              glance.unseen)
             Positioned(
               right: -3,
               top: -3,
@@ -586,6 +594,8 @@ class _Tile extends StatelessWidget {
                     glance.problem ??
                     (glance.connecting
                         ? glance.connection.line
+                        : glance.waiting > 0
+                        ? waitingLabel(name, glance.waiting)
                         : '$name has something new'),
                 child: Container(
                   width: 11,
@@ -600,6 +610,8 @@ class _Tile extends StatelessWidget {
                       : Dot(
                           color: glance.problem != null
                               ? palette.danger
+                              : glance.waiting > 0
+                              ? palette.signal
                               : palette.text,
                           size: 7,
                         ),
@@ -811,6 +823,7 @@ class ClaktoriesBackRow extends StatelessWidget {
       builder: (context, _) => _BackRow(
         label: 'Claktories',
         news: others.any((other) => _Glance(other).unseen),
+        waiting: others.any((other) => _Glance(other).waiting > 0),
         onTap: back.back,
         // How the one showing is connected, at the top of its agents.
         trailing: _PhoneConnection(shown.backend),
@@ -824,12 +837,17 @@ class _BackRow extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.news = false,
+    this.waiting = false,
     this.trailing,
   });
 
   final String label;
   final VoidCallback onTap;
   final bool news;
+
+  /// Something waits for the person's answer there: a `signal` dot, in
+  /// place of the news dot.
+  final bool waiting;
 
   /// At its end, such as [_PhoneConnection].
   final Widget? trailing;
@@ -861,9 +879,12 @@ class _BackRow extends StatelessWidget {
                       color: hovered ? palette.text : palette.textMuted,
                     ),
                   ),
-                  if (news) ...[
+                  if (waiting || news) ...[
                     const SizedBox(width: Space.s),
-                    Dot(color: palette.text, size: 7),
+                    Dot(
+                      color: waiting ? palette.signal : palette.text,
+                      size: 7,
+                    ),
                   ],
                   if (trailing case final trailing?) ...[
                     const Spacer(),

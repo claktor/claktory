@@ -224,6 +224,8 @@ fn show(factory: &Factory, proposal: &v1::ConnectProposal) {
         .and_then(|transcript| transcript.set_connect_proposal(proposal.clone()));
     if let Some(entry) = entry {
         factory.send_change(&inner, &proposal.agent_id, crate::transcript::Change::Entry(entry));
+        // Whether it waits for the person shows with the agent.
+        factory.broadcast_workspace(&inner);
     }
 }
 

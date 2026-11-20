@@ -17,6 +17,25 @@ pub fn mark_usage_limit(output: &mut AssistantMessage, resets_at: Option<u64>) {
     output.extra.insert(USAGE_LIMIT.into(), json!({ "resetsAt": resets_at }));
 }
 
+/// The key a failed response's `extra` has when none of the provider's
+/// accounts can take a request now: `{"until": <ms since 1970>}`, when the
+/// first to reset does, or `{"until": null}` when none resets by itself (out
+/// of credit), so it waits for the person.
+pub const NONE_LEFT: &str = "noAccountLeft";
+
+/// Marks `output` as failed because no account can take a request until
+/// `until` (ms since 1970), or until the person does something (None).
+pub fn mark_none_left(output: &mut AssistantMessage, until: Option<u64>) {
+    output.extra.insert(NONE_LEFT.into(), json!({ "until": until }));
+}
+
+/// Whether the response failed because no account can take a request now:
+/// Some, with until when (None: until the person does something).
+pub fn none_left(message: &AssistantMessage) -> Option<Option<u64>> {
+    let mark = message.extra.get(NONE_LEFT)?;
+    Some(mark.get("until").and_then(Value::as_u64).filter(|at| *at > 0))
+}
+
 /// The key in an answer's `extra` naming the account that gave it, when the
 /// provider has several: the account's id.
 pub const ANSWERED_BY: &str = "account";
@@ -134,7 +153,7 @@ pub fn when(at: u64) -> String {
 // libc deprecates musl's `time_t` alias ahead of a change to 64 bits; it's
 // 64 bits already on the targets Claktory builds (x86_64, aarch64).
 #[allow(deprecated)]
-fn local_time(at: u64) -> Option<String> {
+pub fn local_time(at: u64) -> Option<String> {
     let seconds = libc::time_t::try_from(at / 1000).ok()?;
     // SAFETY: localtime_r and strftime write only into the buffers given, which outlive the calls.
     unsafe {

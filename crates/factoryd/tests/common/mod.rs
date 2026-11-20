@@ -673,6 +673,7 @@ pub fn create_agent(project_id: &str, name: &str, prompt: &str) -> client_messag
         color: String::new(),
         folder_id: String::new(),
         role: String::new(),
+        lead_id: String::new(),
     })
 }
 

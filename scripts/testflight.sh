@@ -109,11 +109,14 @@ cd "$root/app"
 # signing the archive itself would use the project's development identity,
 # whose profile needs a registered device (the team may have none), while
 # the export's distribution certificate and App Store profile need none.
+# Its build folder is its own, kept between runs: the shared DerivedData is
+# also every other build's on this Mac, and other Xcode versions'.
 flutter build ios --release --config-only --build-name "$version" --build-number "$build"
 cd ios
 xcodebuild archive -quiet \
   -workspace Runner.xcworkspace -scheme Runner -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
+  -derivedDataPath "$root/app/build/ios/testflight-derived" \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
   CODE_SIGNING_ALLOWED=NO
 

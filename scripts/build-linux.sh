@@ -10,7 +10,7 @@
 #
 #   scripts/build-linux.sh ARCH OUT [PACKAGE]
 #       ARCH: x86_64 or aarch64; OUT: the binary to write; PACKAGE: factoryd
-#       (the default) or claktory-account
+#       (the default), claktory-apps (the apps host) or claktory-account
 #
 #   FACTORY_CONTAINER=docker   the container engine (podman unless it's missing)
 #   FACTORY_LINUX_JOBS=N       parallel jobs (2: more can run a small VM out of memory)
@@ -21,14 +21,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="${1:-}" OUT="${2:-}" PACKAGE="${3:-factoryd}"
-usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-account]" >&2; exit 2; }
+usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account]" >&2; exit 2; }
 case "$ARCH" in
   x86_64 | aarch64) ;;
   *) usage ;;
 esac
 [[ -n "$OUT" ]] || usage
 case "$PACKAGE" in
-  factoryd | claktory-account) ;;
+  factoryd | claktory-apps | claktory-account) ;;
   *) usage ;;
 esac
 
@@ -79,6 +79,8 @@ IMAGE="docker.io/library/rust:1-alpine"
     if [ "$3" = "$(uname -m)-unknown-linux-musl" ]; then
       case "$4" in
         factoryd) "$file" not-a-command 2>&1 | grep -q usage ;;
+        # Frames on stdin: with none, it stops cleanly.
+        claktory-apps) "$file" </dev/null >/dev/null 2>&1 ;;
         *) "$file" help 2>&1 | grep -q Usage: ;;
       esac
     fi

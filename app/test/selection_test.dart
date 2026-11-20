@@ -218,7 +218,30 @@ void main() {
       await settle(tester);
       // Text joins the selection after the frame that builds it.
       await tester.pump();
+      // Under Profile and Providers.
+      await tester.scrollUntilVisible(
+        find.text('Defaults'),
+        200,
+        scrollable: find
+            .descendant(
+              of: find.byType(SettingsView),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.pump();
       final heading = find.text('Defaults');
+      await tester.scrollUntilVisible(
+        heading,
+        200,
+        scrollable: find
+            .descendant(
+              of: find.byType(SettingsView),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.pump();
       await rightClick(
         tester,
         heading,

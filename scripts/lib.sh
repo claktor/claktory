@@ -198,3 +198,44 @@ PLIST
   plutil -lint -s "$app/Contents/Info.plist"
   codesign --force --sign - "$app"
 }
+
+# The public repository holds one commit per release: its files are exactly
+# that release's source, its parent is the previous release's public commit,
+# and its message is what the release brings, from the changelog. The
+# day-to-day commits stay on this Mac (and its private backup).
+#   public_commit REPO SOURCE VERSION [PARENT]
+# makes that commit in the git repository REPO (without moving any branch)
+# and prints its id: SOURCE's files, VERSION's changelog section from
+# SOURCE's docs/CHANGELOG.md (and those of versions between PARENT's and it
+# that weren't published on their own), dated when it was released, by
+# Claktory. The same arguments always make the same commit, so a publish
+# that's tried again makes the one it made before.
+PUBLIC_NAME="Claktory"
+PUBLIC_EMAIL="releases@claktory.com"
+public_commit() {
+  local repo="$1" source="$2" version="$3" parent="${4:-}"
+  local changelog previous="" sections released date
+  changelog="$(git -C "$repo" show "$source:docs/CHANGELOG.md")" || return 1
+  # The newest version the parent has: its sections are already public.
+  [[ -z "$parent" ]] ||
+    previous="$(git -C "$repo" show "$parent:docs/CHANGELOG.md" 2>/dev/null | sed -n 's/^## \(v[0-9][0-9.]*\)$/\1/p' | head -1)"
+  sections="$(awk -v version="$version" -v previous="$previous" '
+    /^## / { name = substr($0, 4)
+             if (name == version) { on = 1; count = 0 }
+             else if (on && (name == previous || previous == "" || name !~ /^v[0-9]/)) exit
+             if (on) { count++; print; next } }
+    on' <<<"$changelog")"
+  [[ -n "$sections" ]] || { echo "$source's docs/CHANGELOG.md has no section for $version" >&2; return 1; }
+  # One version: its lines. Several (versions never published on their own
+  # come with the next): each under its heading.
+  if [[ "$(grep -c '^## ' <<<"$sections")" == 1 ]]; then
+    sections="$(sed '1d' <<<"$sections")"
+  fi
+  sections="$(sed -e '/./,$!d' <<<"$sections" | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}')"
+  released="$(sed -n 's/^Released \([0-9-]*\) \([0-9:]*\) UTC\.$/\1T\2:00+0000/p' <<<"$sections" | head -1)"
+  date="${released:-$(git -C "$repo" log -1 --format=%cI "$source")}"
+  printf 'Claktory %s\n\n%s\n' "$version" "$sections" |
+    GIT_AUTHOR_NAME="$PUBLIC_NAME" GIT_AUTHOR_EMAIL="$PUBLIC_EMAIL" GIT_AUTHOR_DATE="$date" \
+    GIT_COMMITTER_NAME="$PUBLIC_NAME" GIT_COMMITTER_EMAIL="$PUBLIC_EMAIL" GIT_COMMITTER_DATE="$date" \
+    git -C "$repo" -c commit.gpgsign=false commit-tree "$source^{tree}" ${parent:+-p "$parent"}
+}

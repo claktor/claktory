@@ -45,6 +45,6 @@ Local, and pins the key to the app at its first install.
 
 `src/lib.rs` is the app, written against the `Host` trait; `src/tests.rs`
 tests it with a stand-in host and Telegram. `src/wasm.rs` is the real
-host, through `wit/world.wit` and `wasi:http`. `manifest.toml` is what
+host, through the host's world (`crates/claktory-apps/wit/app.wit`) and `wasi:http`. `manifest.toml` is what
 Claktory shows for approval when you install it: the host it reaches
 (api.telegram.org), its secret, scopes, events and tools.

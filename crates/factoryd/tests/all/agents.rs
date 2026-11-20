@@ -227,6 +227,31 @@ async fn agents_working_when_factory_stops_carry_on_when_it_starts_again() {
 }
 
 #[tokio::test]
+async fn an_agent_working_when_the_computer_restarted_is_told_so() {
+    let dir = temp_dir();
+    let (addr, _old) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Idle", "")).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hang")).await;
+    delivered(&dir, "hang").await;
+    // Its run began before the computer last started.
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.execute("UPDATE runs SET started = 1000 WHERE ended IS NULL", []).expect("update");
+
+    let (addr, _new) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    view.follow(&mut client, |view| view.entries.len() >= 2 && idle(view, "builder")).await;
+    let Some(v1::entry::Kind::Event(note)) = &view.entries[1].kind else { panic!("the note is an event: {:?}", view.entries) };
+    assert_eq!(note.summary, "The computer restarted");
+    assert!(note.text.starts_with("The computer restarted while you were working."), "{}", note.text);
+}
+
+#[tokio::test]
 async fn a_factory_from_before_factory_db_keeps_its_working_agents_and_what_it_showed() {
     let dir = temp_dir();
     let (addr, _old) = start(&dir).await;

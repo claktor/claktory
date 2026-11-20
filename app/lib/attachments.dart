@@ -122,6 +122,16 @@ class FileDrop {
   /// Files are being dragged over the window.
   static final over = ValueNotifier<bool>(false);
 
+  /// How many files are being dragged over the window; 0 when none are.
+  static final count = ValueNotifier<int>(0);
+
+  /// The native window says files came over it ([files] of them) or left.
+  @visibleForTesting
+  static void dragged(int files) {
+    count.value = files;
+    over.value = files > 0;
+  }
+
   static final _dropped = StreamController<List<String>>.broadcast();
 
   /// The paths of files dropped on the window.
@@ -138,9 +148,11 @@ class FileDrop {
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'filesOver':
-          over.value = call.arguments == true;
+          // How many, or (from an older window) whether any.
+          final files = call.arguments;
+          dragged(files is int ? files : (files == true ? 1 : 0));
         case 'filesDropped':
-          over.value = false;
+          dragged(0);
           _dropped.add([
             for (final path in call.arguments as List<Object?>)
               if (path is String) path,

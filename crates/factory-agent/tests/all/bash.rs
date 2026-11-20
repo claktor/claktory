@@ -255,6 +255,27 @@ async fn a_background_task_outlives_whoever_started_it_and_can_be_picked_up_agai
     assert_eq!(done.tail, "late\n");
 }
 
+#[tokio::test]
+async fn a_task_from_before_the_computer_restarted_has_ended_whatever_has_its_pid_now() {
+    use factory_agent::tools::bash::{boot_time_ms, started_before_boot};
+    let boot = boot_time_ms().expect("this computer's boot time");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_millis() as u64;
+    assert!(boot < now && boot > now - 10 * 365 * 86_400_000, "{boot}");
+    assert!(started_before_boot(boot - 1) && !started_before_boot(boot + 1) && !started_before_boot(0));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("task-1.log");
+    std::fs::write(&log, "building\n").expect("log");
+    // Its pid is now this test's own process group, which is alive.
+    // SAFETY: getpgrp has no preconditions.
+    let pid = unsafe { libc::getpgrp() } as u32;
+    let task = factory_agent::Task { id: "task-1".into(), command: "cargo build".into(), pid, log, started: boot - 60_000 };
+    let done = tokio::time::timeout(HANG, task.wait_detached(&factory_agent::Redaction::default())).await.expect("at once");
+    assert_eq!((done.status.as_str(), done.seconds), ("the computer restarted", None));
+    assert!(done.text().contains("The computer restarted while it ran, which ended it."), "{}", done.text());
+    assert_eq!(done.summary(), "task-1 finished (the computer restarted): cargo build");
+}
+
 /// A shell loop that waits for `file` to appear, checking every 0.1 s, but
 /// for a minute at most: a test that fails, or ends, first never leaves it
 /// running.

@@ -15,7 +15,8 @@ use crate::{API, App, Host, Level, POLL_SECONDS, Request, Response};
 
 wit_bindgen::generate!({
     world: "app",
-    path: "wit",
+    // The host's own world, so the app always builds against it.
+    path: "../../crates/claktory-apps/wit",
 });
 
 use claktory::app::host;

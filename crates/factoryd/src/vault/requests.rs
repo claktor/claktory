@@ -92,9 +92,7 @@ pub(crate) fn revoke_secret(factory: &Factory, request: &v1::RevokeSecret) -> Re
 /// Lets `agent` use the secret (by id or name), `by` an admin agent ('' for
 /// the person). Returns its name.
 pub(crate) fn give(factory: &Factory, secret: &str, agent: &str, by: &str) -> Result<String, RequestError> {
-    if factory.lock().config.agent(agent).is_none() {
-        return Err(RequestError::UnknownAgent(agent.to_owned()));
-    }
+    factory.known_agent(agent)?;
     let name = factory.vault.grant(secret, agent, by)?;
     factory.vault_changed();
     Ok(name)
@@ -307,12 +305,12 @@ pub(crate) async fn set_locked_mode(
 /// shows the decision, and the agent is told.
 pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
-    if factory.lock().config.agent(agent).is_none() {
-        return Err(RequestError::UnknownAgent(agent.to_owned()));
-    }
+    factory.known_agent(agent)?;
     let asked = factory.vault.pending_request(agent, &request.request_id)?;
     let given = if request.approve {
+        let mut aliases = std::collections::BTreeMap::new();
         let secret = if !request.secret_id.is_empty() {
+            aliases = aliases_for(factory, &asked, request)?;
             request.secret_id.clone()
         } else if !request.entries.is_empty() {
             let wanted = asked.new_secret.clone().unwrap_or_default();
@@ -325,7 +323,8 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         } else {
             return Err(VaultError::Invalid("Choose a secret to give, or add a new one with its values.".to_owned()).into());
         };
-        let name = give(factory, &secret, agent, "")?;
+        factory.known_agent(agent)?;
+        let name = factory.vault.grant_as(&secret, agent, "", &aliases)?;
         Some((secret, name))
     } else {
         None
@@ -334,17 +333,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         factory.vault.decide_request(agent, &asked.id, given.as_ref().map(|(id, name)| (id.as_str(), name.as_str())), &request.comment)?;
     factory.vault_changed();
     // Its entry shows the decision.
-    {
-        let mut inner = factory.lock();
-        let entry = inner
-            .agents
-            .get_mut(agent)
-            .and_then(|runtime| runtime.transcript.as_mut())
-            .and_then(|transcript| transcript.set_secret_request(decided));
-        if let Some(entry) = entry {
-            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
-        }
-    }
+    show(factory, decided);
     let person = factory.lock().config.person_capitalized().to_owned();
     let comment = request.comment.trim();
     // What it got, and nothing else of the vault.
@@ -371,48 +360,83 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     Ok(())
 }
 
-/// A request left waiting this long expires.
+/// The other names an existing secret given for `asked` is given under:
+/// the person's (`request.aliases`), none (`as_is`, or the secret sets every
+/// name asked for), or the one missing name paired with the one unused
+/// variable. Any other mismatch is the person's to settle.
+fn aliases_for(
+    factory: &Factory,
+    asked: &v1::SecretRequest,
+    request: &v1::DecideSecretRequest,
+) -> Result<std::collections::BTreeMap<String, String>, RequestError> {
+    if !request.aliases.is_empty() {
+        return Ok(request.aliases.iter().map(|(alias, variable)| (alias.trim().to_owned(), variable.trim().to_owned())).collect());
+    }
+    if request.as_is {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let state = factory.vault.state(|_, _| false);
+    let Some(secret) = state.secrets.iter().find(|secret| secret.id == request.secret_id || secret.name == request.secret_id) else {
+        return Err(VaultError::NoSecret(request.secret_id.clone()).into());
+    };
+    let has: Vec<&str> = secret.variables.iter().map(|variable| variable.name.as_str()).collect();
+    let wanted: Vec<&str> =
+        asked.new_secret.iter().flat_map(|wanted| wanted.variables.iter().map(|variable| variable.name.as_str())).collect();
+    let missing: Vec<&str> = wanted.iter().copied().filter(|name| !has.contains(name)).collect();
+    let unused: Vec<&str> = has.iter().copied().filter(|name| !wanted.contains(name)).collect();
+    match (missing.as_slice(), unused.as_slice()) {
+        ([], _) => Ok(std::collections::BTreeMap::new()),
+        ([alias], [variable]) => Ok(std::collections::BTreeMap::from([((*alias).to_owned(), (*variable).to_owned())])),
+        _ => Err(VaultError::Invalid(format!(
+            "{} sets {}, not {}: choose which of its variables each name is, or give it as it is.",
+            secret.name,
+            has.join(", "),
+            missing.join(", ")
+        ))
+        .into()),
+    }
+}
+
+/// Shows a request as it is now in its agent's conversation.
+pub(crate) fn show(factory: &Factory, request: v1::SecretRequest) {
+    let agent = request.agent_id.clone();
+    let mut inner = factory.lock();
+    let entry = inner
+        .agents
+        .get_mut(&agent)
+        .and_then(|runtime| runtime.transcript.as_mut())
+        .and_then(|transcript| transcript.set_secret_request(request));
+    if let Some(entry) = entry {
+        factory.send_change(&inner, &agent, crate::transcript::Change::Entry(entry));
+        // Whether it waits for the person shows with the agent.
+        factory.broadcast_workspace(&inner);
+    }
+}
+
+/// A request left waiting this long since it was made or last changed
+/// expires, however much its agent works meanwhile: the person may not open
+/// its conversation for hours.
 const EXPIRE_AFTER_MS: i64 = 12 * 60 * 60 * 1000;
-/// Or once the agent has finished this many runs since it asked.
-const EXPIRE_AFTER_RUNS: i64 = 10;
-/// How often waiting requests are checked, besides whenever a run ends.
+/// How often waiting requests are checked.
 const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Wakes the check: a run ended, so a request may have waited its runs.
-static RUN_ENDED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-/// A run ended: waiting requests are checked.
-pub(crate) fn run_ended() {
-    RUN_ENDED.notify_one();
+/// Whether a request made or last changed at `since` has expired at `now`.
+fn expired(since: i64, now: i64) -> bool {
+    now - since >= EXPIRE_AFTER_MS
 }
 
-/// Why a request made at `created` has expired at `now`, after `runs` of
-/// its agent's runs ended since; None while it may wait.
-fn why_expired(created: i64, now: i64, runs: i64) -> Option<&'static str> {
-    if now - created >= EXPIRE_AFTER_MS {
-        Some("it waited 12 hours")
-    } else if runs >= EXPIRE_AFTER_RUNS {
-        Some("10 of your runs ended")
-    } else {
-        None
-    }
-}
-
-/// Checks waiting requests every minute and whenever a run ends.
+/// Checks waiting requests every minute.
 pub(crate) async fn monitor(factory: std::sync::Weak<Factory>) {
     loop {
-        tokio::select! {
-            () = tokio::time::sleep(CHECK_EVERY) => {}
-            () = RUN_ENDED.notified() => {}
-        }
+        tokio::time::sleep(CHECK_EVERY).await;
         let Some(factory) = factory.upgrade() else { return };
-        expire_requests(&factory);
+        expire_requests(&factory, crate::transcript::now_ms());
     }
 }
 
-/// Expires the requests that have waited too long: each shows Expired in its
-/// conversation, and its agent is told, so it can ask again.
-pub(crate) fn expire_requests(factory: &Arc<Factory>) {
+/// Expires the requests that have waited too long by `now`: each shows
+/// Expired in its conversation, and its agent is told, so it can ask again.
+pub(crate) fn expire_requests(factory: &Arc<Factory>, now: i64) {
     let waiting = match factory.vault.waiting_requests() {
         Ok(waiting) => waiting,
         Err(error) => {
@@ -420,18 +444,10 @@ pub(crate) fn expire_requests(factory: &Arc<Factory>) {
             return;
         }
     };
-    let now = crate::transcript::now_ms();
-    for (asked, created) in waiting {
-        let runs = factory
-            .store
-            .db()
-            .query_row(
-                "SELECT COUNT(*) FROM runs WHERE agent = ?1 AND started > ?2 AND ended IS NOT NULL",
-                rusqlite::params![asked.agent_id, created],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let Some(why) = why_expired(created, now, runs) else { continue };
+    for (asked, since) in waiting {
+        if !expired(since, now) {
+            continue;
+        }
         let expired = match factory.vault.expire_request(&asked.agent_id, &asked.id) {
             Ok(Some(expired)) => expired,
             Ok(None) => continue,
@@ -440,26 +456,16 @@ pub(crate) fn expire_requests(factory: &Arc<Factory>) {
                 continue;
             }
         };
-        tracing::info!(request = %asked.id, agent = %asked.agent_id, why, "a secret request expired");
+        tracing::info!(request = %asked.id, agent = %asked.agent_id, "a secret request expired");
         factory.vault_changed();
         let agent = asked.agent_id.as_str();
-        {
-            let mut inner = factory.lock();
-            let entry = inner
-                .agents
-                .get_mut(agent)
-                .and_then(|runtime| runtime.transcript.as_mut())
-                .and_then(|transcript| transcript.set_secret_request(expired));
-            if let Some(entry) = entry {
-                factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
-            }
-        }
+        show(factory, expired);
         if factory.lock().config.agent(agent).is_none() {
             continue;
         }
         let summary = format!("Your request for {} expired", asked.secret_name);
         let text = format!(
-            "{summary}: {why} without an answer, so it can't be answered any more. If you still need it, ask again with secrets_request.\n\nYou asked because: {}",
+            "{summary}: it waited 12 hours without an answer, so it can't be answered any more. If you still need it, ask again with secrets_request.\n\nYou asked because: {}",
             asked.reason
         );
         let event = factory_agent::Event {
@@ -478,10 +484,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_expire_after_12_hours_or_10_runs() {
+    fn requests_expire_after_12_hours() {
         let hour = 3_600_000;
-        assert_eq!(why_expired(0, 11 * hour, 9), None);
-        assert_eq!(why_expired(0, 12 * hour, 0), Some("it waited 12 hours"));
-        assert_eq!(why_expired(0, hour, 10), Some("10 of your runs ended"));
+        assert!(!expired(0, 11 * hour));
+        assert!(expired(0, 12 * hour));
     }
 }

@@ -155,6 +155,9 @@ pub(crate) async fn serve_stream<S: Stream>(
             // pairing code), or nothing once that app uses the tunnel.
             let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
             let Authorized::Connected(connected) = factory.authorize(&hello.token, &local, kind).await else {
+                // A program on this machine without its app's token: an
+                // app build or test made without FACTORY_PORT, say.
+                tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
                 let reason = format!(
                     "This port wants a token: connect with the pairing code in {}.",
                     factory.home.root().join("remote/local-pairing").display()
@@ -346,6 +349,7 @@ async fn handle(
                 // Faces are gone: ignored.
                 avatar_face: _,
                 role,
+                lead_id,
             } = request;
             let change = AgentChange {
                 name: name.as_deref(),
@@ -359,6 +363,7 @@ async fn handle(
                 folder: folder_id.as_deref(),
                 avatar_shape: avatar_shape.as_deref(),
                 role: role.as_deref(),
+                lead: lead_id.as_deref(),
             };
             factory.update_agent(&agent_id, change).await
         }
@@ -377,6 +382,7 @@ async fn handle(
         }
         Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
         Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
+        Some(Request::ShuffleAvatar(_)) => factory.shuffle_avatar().await,
         Some(Request::SetZoom(request)) => factory.set_zoom(&connection.zoom_device, request.zoom).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
         // A remote device's app is on another machine: its path means nothing here.
@@ -450,6 +456,26 @@ async fn handle(
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
+        Some(
+            Request::InstallLocalApp(_)
+            | Request::SetAppRunning(_)
+            | Request::UninstallApp(_)
+            | Request::GrantApp(_)
+            | Request::SubscribeApp(_)
+            | Request::SetAppSecret(_),
+        ) if !factory.apps.available() => return error(ErrorCode::InvalidRequest, "Apps aren't available in this Claktory yet."),
+        Some(Request::InstallLocalApp(request)) => {
+            return match factory.install_local_app(&request).await {
+                Ok(Some(permissions)) => Body::AppPermissions(permissions),
+                Ok(None) => Body::Ack(v1::Ack {}),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::SetAppRunning(request)) => factory.set_app_running(&request).await,
+        Some(Request::UninstallApp(request)) => factory.uninstall_app(&request).await,
+        Some(Request::GrantApp(request)) => factory.grant_app(&request).await,
+        Some(Request::SubscribeApp(request)) => factory.subscribe_app(&request).await,
+        Some(Request::SetAppSecret(request)) => factory.set_app_secret(&request).await,
         Some(Request::LoadUsage(request)) => {
             return match factory.load_usage(&request) {
                 Ok(report) => Body::UsageReport(report),

@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import 'apps.dart' show labelInSentence;
 import 'controls.dart';
 import 'map_layout.dart' show sidebarOrder;
 import 'identity.dart';
@@ -22,6 +23,7 @@ class MapAgentDetails {
     required this.everyone,
     required this.messages,
     required this.secrets,
+    this.apps = const [],
   });
 
   final MapNode agent;
@@ -37,6 +39,10 @@ class MapAgentDetails {
   final bool everyone;
   final List<MapNode> messages;
   final List<MapNode> secrets;
+
+  /// The apps given to it: each app's node, what it may do with it and
+  /// the events it hears (the edges' labels; empty when none).
+  final List<({MapNode app, String can, String hears})> apps;
 }
 
 /// The details of the agent [node] in [workspace]'s map.
@@ -66,6 +72,8 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
   final reads = <MapNode>[];
   final messages = <MapNode>[];
   final secrets = <MapNode>[];
+  final can = <String, String>{};
+  final hears = <String, String>{};
   for (final edge in map.edges) {
     final from = edge.fromId == node.id;
     final to = edge.toId == node.id;
@@ -87,6 +95,10 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
         if (!messages.contains(other)) messages.add(other);
       case MapEdgeKind.MAP_EDGE_KIND_SECRET when to:
         secrets.add(other);
+      case MapEdgeKind.MAP_EDGE_KIND_APP when to:
+        can[other.id] = edge.label;
+      case MapEdgeKind.MAP_EDGE_KIND_HEARS when to:
+        hears[other.id] = edge.label;
       default:
     }
   }
@@ -105,6 +117,11 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
     everyone: node.admin,
     messages: messages,
     secrets: secrets,
+    apps: [
+      for (final id in {...can.keys, ...hears.keys})
+        if (nodes[id] case final app?)
+          (app: app, can: can[id] ?? '', hears: hears[id] ?? ''),
+    ],
   );
 }
 
@@ -194,12 +211,14 @@ class MapAgentCard extends StatelessWidget {
                               size: 12,
                             ),
                             const SizedBox(width: Space.xs),
-                            Text(
-                              extension.label,
-                              style: TextStyles.caption.copyWith(
-                                color: extension.important
-                                    ? palette.text
-                                    : palette.textFaint,
+                            Flexible(
+                              child: Text(
+                                extension.label,
+                                style: TextStyles.caption.copyWith(
+                                  color: extension.important
+                                      ? palette.text
+                                      : palette.textFaint,
+                                ),
                               ),
                             ),
                           ],
@@ -228,7 +247,56 @@ class MapAgentCard extends StatelessWidget {
                 ? Text('Every agent', style: caption)
                 : names(details.messages, 'No one'),
           ),
-          _Section(title: 'Secrets', child: names(details.secrets, 'None')),
+          // Each with what it grants, so none reads as more than it is.
+          _Section(
+            title: 'Secrets',
+            child: details.secrets.isEmpty
+                ? names(details.secrets, 'None')
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final secret in details.secrets)
+                        Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(text: secret.label),
+                              if (secret.detail.isNotEmpty)
+                                TextSpan(
+                                  text: '  ${secret.detail}',
+                                  style: faint,
+                                ),
+                            ],
+                          ),
+                          style: caption,
+                        ),
+                    ],
+                  ),
+          ),
+          if (details.apps.isNotEmpty)
+            _Section(
+              title: 'Apps',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final (:app, :can, :hears) in details.apps)
+                    Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(text: app.label),
+                          if (can.isNotEmpty)
+                            TextSpan(text: '  $can', style: faint),
+                          if (hears.isNotEmpty)
+                            TextSpan(
+                              text: '  Hears: ${labelInSentence(hears)}',
+                              style: faint,
+                            ),
+                        ],
+                      ),
+                      style: caption,
+                    ),
+                ],
+              ),
+            ),
           if (actions != null && actions.isNotEmpty) ...[
             const SizedBox(height: Space.m),
             Row(

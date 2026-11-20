@@ -43,11 +43,12 @@ fn state_of(state: &str) -> SecretRequestState {
         "granted" => SecretRequestState::Granted,
         "dismissed" => SecretRequestState::Dismissed,
         "expired" => SecretRequestState::Expired,
+        "withdrawn" => SecretRequestState::Withdrawn,
         _ => SecretRequestState::Pending,
     }
 }
 
-const COLUMNS: &str = "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name";
+const COLUMNS: &str = "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name, updated";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let new_secret: String = row.get(4)?;
@@ -73,6 +74,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         comment: row.get(8)?,
         given_secret_id: row.get(9)?,
         given_secret_name: row.get(10)?,
+        updated_ms: row.get(11)?,
     })
 }
 
@@ -127,15 +129,65 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
         comment: String::new(),
         given_secret_id: String::new(),
         given_secret_name: String::new(),
+        updated_ms: 0,
     })
 }
 
 /// The requests waiting for the person, oldest first, each with when it
-/// was made (ms since 1970).
+/// was made or the agent last changed it (ms since 1970).
 fn pending(db: &Connection) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
-    let mut statement = db.prepare(&format!("SELECT {COLUMNS}, created FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
-    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(11)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let mut statement =
+        db.prepare(&format!("SELECT {COLUMNS}, MAX(created, updated) FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
+    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(12)?)))?.collect::<Result<Vec<_>, _>>()?;
     Ok(requests)
+}
+
+/// A reason as an agent gives it, checked.
+fn check_reason(reason: &str) -> Result<String, VaultError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(VaultError::Invalid("Say why you need it, in reason: the person reads it.".to_owned()));
+    }
+    if reason.chars().count() > MAX_REASON {
+        return Err(VaultError::Invalid(format!("Keep reason under {MAX_REASON} characters.")));
+    }
+    Ok(reason.to_owned())
+}
+
+fn check_description(description: &str) -> Result<String, VaultError> {
+    let description = description.trim();
+    if description.chars().count() > MAX_REASON {
+        return Err(VaultError::Invalid(format!("Keep description under {MAX_REASON} characters.")));
+    }
+    Ok(description.to_owned())
+}
+
+fn check_variables(given: &[WantedVariable]) -> Result<Vec<WantedVariable>, VaultError> {
+    if given.len() > MAX_VARIABLES {
+        return Err(VaultError::Invalid(format!("Name {MAX_VARIABLES} variables at most.")));
+    }
+    let mut variables = Vec::new();
+    for variable in given {
+        let variable_name = variable.name.trim();
+        if !valid_variable(variable_name) {
+            return Err(VaultError::Invalid(format!(
+                "\"{variable_name}\" isn't a variable name: letters, digits and _, not starting with a digit."
+            )));
+        }
+        if variables.iter().any(|seen: &WantedVariable| seen.name == variable_name) {
+            return Err(VaultError::Invalid(format!("{variable_name} is named twice.")));
+        }
+        variables.push(WantedVariable { name: variable_name.to_owned(), file: variable.file });
+    }
+    Ok(variables)
+}
+
+/// What an agent changes in a request of its own; None keeps it as it was.
+#[derive(Default)]
+pub(crate) struct Change {
+    pub description: Option<String>,
+    pub reason: Option<String>,
+    pub variables: Option<Vec<WantedVariable>>,
 }
 
 impl Vault {
@@ -144,50 +196,30 @@ impl Vault {
     /// difference to the answer: nothing of the vault shows through. Errors
     /// say what to fix.
     pub(crate) fn ask(&self, agent: &str, wanted: Wanted, reason: &str) -> Result<v1::SecretRequest, VaultError> {
-        let reason = reason.trim();
-        if reason.is_empty() {
-            return Err(VaultError::Invalid("Say why you need it, in reason: the person reads it.".to_owned()));
-        }
-        if reason.chars().count() > MAX_REASON {
-            return Err(VaultError::Invalid(format!("Keep reason under {MAX_REASON} characters.")));
-        }
+        let reason = check_reason(reason)?;
         let name = check_name(&wanted.name).map_err(|_| {
             VaultError::Invalid(
                 "Give what you need a short name, such as \"Cloudflare token\": letters, digits, spaces and - _ . @ ( ), up to 64."
                     .to_owned(),
             )
         })?;
-        let description = wanted.description.trim();
-        if description.chars().count() > MAX_REASON {
-            return Err(VaultError::Invalid(format!("Keep description under {MAX_REASON} characters.")));
-        }
-        if wanted.variables.len() > MAX_VARIABLES {
-            return Err(VaultError::Invalid(format!("Name {MAX_VARIABLES} variables at most.")));
-        }
-        let mut variables = Vec::new();
-        for variable in &wanted.variables {
-            let variable_name = variable.name.trim();
-            if !valid_variable(variable_name) {
-                return Err(VaultError::Invalid(format!(
-                    "\"{variable_name}\" isn't a variable name: letters, digits and _, not starting with a digit."
-                )));
-            }
-            if variables.iter().any(|seen: &WantedVariable| seen.name == variable_name) {
-                return Err(VaultError::Invalid(format!("{variable_name} is named twice.")));
-            }
-            variables.push(WantedVariable { name: variable_name.to_owned(), file: variable.file });
-        }
-        let wanted = Wanted { name: name.clone(), description: description.to_owned(), variables };
+        let description = check_description(&wanted.description)?;
+        let variables = check_variables(&wanted.variables)?;
+        let wanted = Wanted { name: name.clone(), description, variables };
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
-        let waiting: bool = db.query_row(
-            "SELECT COUNT(*) > 0 FROM requests WHERE agent = ?1 AND secret_name = ?2 COLLATE NOCASE AND state = 'pending'",
-            [agent, &name],
-            |row| row.get(0),
-        )?;
-        if waiting {
-            return Err(VaultError::Invalid(format!("You asked for {name} already; it's waiting for the person.")));
+        let waiting: Option<String> = db
+            .query_row(
+                "SELECT id FROM requests WHERE agent = ?1 AND secret_name = ?2 COLLATE NOCASE AND state = 'pending'",
+                [agent, &name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(waiting) = waiting {
+            return Err(VaultError::Invalid(format!(
+                "You asked for {name} already ({waiting}); it's waiting for the person. Change it with secrets_request_update, or withdraw it with secrets_request_cancel."
+            )));
         }
         let id = format!("r{}", crypto::hex(&crypto::random::<4>()));
         db.execute(
@@ -208,6 +240,9 @@ impl Vault {
         match found {
             None => Err(VaultError::NoRequest(id.to_owned())),
             Some(request) if request.state() == SecretRequestState::Expired => Err(VaultError::Invalid("This request expired.".to_owned())),
+            Some(request) if request.state() == SecretRequestState::Withdrawn => {
+                Err(VaultError::Invalid("The agent withdrew this request.".to_owned()))
+            }
             Some(request) if request.state() != SecretRequestState::Pending => {
                 Err(VaultError::Invalid("This request was decided already.".to_owned()))
             }
@@ -242,7 +277,7 @@ impl Vault {
     }
 
     /// The requests waiting for the person, oldest first, each with when it
-    /// was made; none while there's no vault.
+    /// was made or last changed; none while there's no vault.
     pub(crate) fn waiting_requests(&self) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
@@ -264,6 +299,96 @@ impl Vault {
         let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
         inner.state = None;
         Ok(Some(request))
+    }
+
+    /// Changes `agent`'s waiting request `id`; returns it as it is now.
+    pub(crate) fn update_request(&self, agent: &str, id: &str, change: Change) -> Result<v1::SecretRequest, VaultError> {
+        let current = self.own_waiting(agent, id)?;
+        let mut wanted: Wanted = Wanted {
+            name: current.secret_name.clone(),
+            ..current.new_secret.as_ref().map_or_else(Wanted::default, |wanted| Wanted {
+                name: wanted.name.clone(),
+                description: wanted.description.clone(),
+                variables: wanted
+                    .variables
+                    .iter()
+                    .map(|variable| WantedVariable { name: variable.name.clone(), file: variable.file })
+                    .collect(),
+            })
+        };
+        if let Some(description) = &change.description {
+            wanted.description = check_description(description)?;
+        }
+        if let Some(variables) = &change.variables {
+            wanted.variables = check_variables(variables)?;
+        }
+        let reason = match &change.reason {
+            Some(reason) => check_reason(reason)?,
+            None => current.reason.clone(),
+        };
+        if change.description.is_none() && change.variables.is_none() && change.reason.is_none() {
+            return Err(VaultError::Invalid("Say what to change: description, reason or variables.".to_owned()));
+        }
+        let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let changed = db.execute(
+            "UPDATE requests SET new_secret = ?3, reason = ?4, updated = ?5 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![id, agent, json, reason, now_ms()],
+        )?;
+        if changed == 0 {
+            return Err(VaultError::Invalid(format!("Your request {id} isn't waiting any more.")));
+        }
+        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(request)
+    }
+
+    /// Withdraws `agent`'s waiting request `id`, with its reason (may be
+    /// empty); returns it as it is now.
+    pub(crate) fn withdraw_request(&self, agent: &str, id: &str, reason: &str) -> Result<v1::SecretRequest, VaultError> {
+        self.own_waiting(agent, id)?;
+        let reason = check_description(reason)?;
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let changed = db.execute(
+            "UPDATE requests SET state = 'withdrawn', decided = ?3, comment = ?4 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![id, agent, now_ms(), reason],
+        )?;
+        if changed == 0 {
+            return Err(VaultError::Invalid(format!("Your request {id} isn't waiting any more.")));
+        }
+        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(request)
+    }
+
+    /// `agent`'s own request `id`, if it's waiting; or why not, for the agent.
+    fn own_waiting(&self, agent: &str, id: &str) -> Result<v1::SecretRequest, VaultError> {
+        let inner = self.lock();
+        let found = Self::db(&inner)?
+            .query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id.trim(), agent], row)
+            .optional()?;
+        match found {
+            None => Err(VaultError::Invalid(format!("You have no request {}. secrets_requests lists yours.", id.trim()))),
+            Some(request) if request.state() != SecretRequestState::Pending => {
+                Err(VaultError::Invalid(format!("Your request {} isn't waiting any more.", request.id)))
+            }
+            Some(request) => Ok(request),
+        }
+    }
+
+    /// `agent`'s waiting requests and its latest `decided` others, newest
+    /// first.
+    pub(crate) fn recent_requests(&self, agent: &str, decided: u32) -> Result<Vec<v1::SecretRequest>, VaultError> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(Vec::new()) };
+        let mut statement = db.prepare(&format!(
+            "SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND state = 'pending'
+             UNION ALL SELECT * FROM (SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND state != 'pending' ORDER BY decided DESC LIMIT ?2)"
+        ))?;
+        let requests = statement.query_map(params![agent, decided], row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
     }
 
     /// Every request of `agent`'s, to show its conversation as it is.

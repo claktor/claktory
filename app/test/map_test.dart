@@ -156,6 +156,63 @@ void main() {
     expect(find.byType(MapAgentCard), findsNothing);
   });
 
+  testWidgets("an agent's card says what each of its secrets grants", (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(
+          child: MapAgentCard(
+            details: MapAgentDetails(
+              agent: MapNode(id: 'agent:devops', label: 'Arjun'),
+              extensions: const [],
+              folder: null,
+              reads: const [],
+              everyone: false,
+              messages: const [],
+              secrets: [
+                MapNode(
+                  id: 'secret:s1',
+                  label: 'CF_CLAKTORY_DNS',
+                  detail: 'Cloudflare: DNS Edit on claktory.com',
+                ),
+                MapNode(id: 'secret:s2', label: 'Hetzner'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(
+      find.text('CF_CLAKTORY_DNS  Cloudflare: DNS Edit on claktory.com'),
+      findsOneWidget,
+    );
+    expect(find.text('Hetzner'), findsOneWidget);
+  });
+
+  testWidgets("apps are on it, and an agent's card says what it may do "
+      'with each', (tester) async {
+    final workspace = claktoryWorkspace(apps: true);
+    await showMap(tester, workspace: workspace);
+    expect(chip('Telegram'), findsOneWidget);
+    final rivet = mapAgentDetails(workspace, node(workspace, 'agent:rivet'));
+    expect(rivet.apps.single.app.label, 'Telegram');
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(child: MapAgentCard(details: rivet)),
+      ),
+    );
+    expect(
+      find.text(
+        'Telegram  Send you Telegram messages · Read your chat with the bot'
+        '  Hears: messages you send the bot',
+      ),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('the key says what badges are', (tester) async {
     await showMap(tester);
     expect(find.text('Badges: extra reach or power'), findsOneWidget);
@@ -250,7 +307,10 @@ void main() {
   });
 
   testWidgets('each kind of line has a switch', (tester) async {
-    await showMap(tester);
+    await showMap(
+      tester,
+      workspace: claktoryWorkspace(apps: true, leads: true),
+    );
     Finder toggle(String name) => find.byWidgetPredicate(
       (w) =>
           w is Semantics &&

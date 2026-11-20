@@ -1,0 +1,92 @@
+/// A Claktory app: one instance per Claktory, run by the claktory-apps host
+/// in its own sandbox. It can only do what this world hands it: HTTP to the
+/// hosts its approved manifest names, its own key-value store and secrets,
+/// timers, events for the agents subscribed to them, and a status line for
+/// the person. No files, processes or sockets.
+///
+/// Besides `host`, the host provides WASI 0.2's `wasi:http/outgoing-handler`
+/// and `wasi:http/types` (requests to hosts the manifest doesn't name fail
+/// with `HTTP-request-denied`), and `wasi:io`, `wasi:clocks`, `wasi:random`
+/// and `wasi:cli` as Rust's wasm32-wasip2 standard library uses them: no
+/// environment, arguments, stdin or preopened folders, and stdout and stderr
+/// go nowhere (use `log`).
+package claktory:app@1.0.0;
+
+interface types {
+  /// What a tool call answers: text for the agent, optional JSON data, and
+  /// whether it failed.
+  record tool-result {
+    text: string,
+    data: option<string>,
+    is-error: bool,
+  }
+
+  /// Something that happened, for the agents subscribed to `kind` and
+  /// granted `scope` (both as the manifest declares them). Events with the
+  /// same `dedupe-key` are delivered once.
+  record event {
+    kind: string,
+    text: string,
+    data: option<string>,
+    dedupe-key: option<string>,
+    scope: string,
+  }
+
+  enum log-level {
+    error,
+    warn,
+    info,
+    debug,
+  }
+}
+
+interface host {
+  use types.{event, log-level};
+
+  /// One of the app's own secrets, as its manifest names them
+  /// ("bot_token"); none until the person has given it.
+  secret: func(name: string) -> option<string>;
+
+  /// The app's own store, kept across restarts and updates. Keys are up to
+  /// 1024 bytes; `kv-set` fails when the store would grow past the
+  /// manifest's `storage-mb`.
+  kv-get: func(key: string) -> option<list<u8>>;
+  kv-set: func(key: string, value: list<u8>) -> result<_, string>;
+  kv-delete: func(key: string);
+
+  /// Tells the subscribed agents.
+  emit: func(e: event);
+
+  /// Calls `on-timer(name)` once, `after-ms` from now; setting a name again
+  /// replaces it. Up to 64 timers at once. Timers don't outlive the
+  /// instance: `start` sets them again.
+  set-timer: func(name: string, after-ms: u64);
+  cancel-timer: func(name: string);
+
+  /// One short line the person sees under the app in Settings → Apps, such
+  /// as how to finish its setup; empty clears it.
+  set-status: func(text: string);
+
+  log: func(level: log-level, message: string);
+}
+
+/// One instance, its calls one at a time; an outgoing HTTP request keeps
+/// running between them (start it with outgoing-handler.handle, keep the
+/// future, and look again from a timer). Deadlines: start, upgrade,
+/// on-timer and call 60 s, stop 5 s. A trap, a missed deadline or running
+/// out of memory ends the instance; Claktory starts it again after a while,
+/// and pauses the app if that keeps happening.
+world app {
+  import host;
+
+  use types.{tool-result};
+
+  export start: func();
+  export stop: func();
+  /// Before `start`, once after an update from `from-version`.
+  export upgrade: func(from-version: string);
+  /// A tool of the app, called by an agent granted it (`caller`: the
+  /// agent's id); `args` is JSON.
+  export call: func(tool: string, args: string, caller: string) -> tool-result;
+  export on-timer: func(name: string);
+}

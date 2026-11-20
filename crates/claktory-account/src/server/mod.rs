@@ -248,6 +248,7 @@ impl Service {
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
             (&Method::GET, "/v1/relay/allowlist") => api::allowlist(self, call),
             (&Method::GET, "/v1/stats/public") => api::public_stats(self),
+            (&Method::GET | &Method::HEAD, "/") => Ok(web::root()),
             (_, path) if path == "/account" || path.starts_with("/account/") => Ok(web::page(self, call).await),
             _ => Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "There's nothing here.")),
         }

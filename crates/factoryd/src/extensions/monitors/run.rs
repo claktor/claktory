@@ -642,9 +642,12 @@ fn watch_log(factory: &Factory, monitor: &Monitor) -> PathBuf {
     factory.home.agent_dir(&monitor.agent).join("monitors").join(format!("m{}.log", monitor.id))
 }
 
-/// Whether the watch's process has ended.
-fn process_ended(pid: u32, log: &Path) -> bool {
-    log.with_extension("status").exists() || !factory_agent::tools::bash::group_alive(pid)
+/// Whether the watch's process, started at `started` (ms since 1970), has
+/// ended: a restart of the computer since then ended it, whatever process
+/// has its pid now.
+fn process_ended(pid: u32, started: Option<i64>, log: &Path) -> bool {
+    use factory_agent::tools::bash::{group_alive, started_before_boot};
+    log.with_extension("status").exists() || started_before_boot(started.unwrap_or(0).max(0) as u64) || !group_alive(pid)
 }
 
 fn watch(
@@ -657,7 +660,7 @@ fn watch(
 ) -> rusqlite::Result<()> {
     let log = watch_log(factory, monitor);
     match monitor.cursor.pid {
-        Some(pid) if process_ended(pid, &log) => {
+        Some(pid) if process_ended(pid, monitor.cursor.started, &log) => {
             let ran = now - monitor.cursor.started.unwrap_or(now);
             monitor.cursor.quick_runs = if ran < QUICK_RUN { monitor.cursor.quick_runs + 1 } else { 0 };
             monitor.cursor.pid = None;
@@ -790,10 +793,14 @@ pub(super) fn fire_by_hand(factory: &Arc<Factory>, monitor: &mut Monitor, actor:
     trigger(factory, monitor, Trigger { cause: format!("fired by {by}"), what: String::new(), late: None, last: false }, now)
 }
 
-/// Stops a watch's process, if it has one running.
+/// Stops a watch's process, if it has one running (one from before the
+/// computer restarted is gone, and its pid may be another's now).
 pub(crate) fn stop_process(_factory: &Factory, monitor: &Monitor) {
-    if let (When::Watch { .. }, Some(pid)) = (&monitor.when, monitor.cursor.pid) {
-        factory_agent::tools::bash::stop_group(pid);
+    use factory_agent::tools::bash::{started_before_boot, stop_group};
+    if let (When::Watch { .. }, Some(pid)) = (&monitor.when, monitor.cursor.pid)
+        && !started_before_boot(monitor.cursor.started.unwrap_or(0).max(0) as u64)
+    {
+        stop_group(pid);
     }
 }
 

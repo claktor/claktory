@@ -494,6 +494,15 @@ impl State {
         Ok((share.epoch, opened))
     }
 
+    /// The account it's signed in with, while signing in is on: its id,
+    /// email and service.
+    pub(crate) fn signed_in_as(&self, config: &AccountConfig) -> Option<(String, String, String)> {
+        let inner = self.lock();
+        let saved = &inner.saved;
+        (config.enabled && saved.signed_in() && !saved.revoked)
+            .then(|| (saved.account_id.clone(), saved.email.clone(), saved.service.clone()))
+    }
+
     /// What the app shows: None while signing in is off.
     pub(crate) fn view(&self, config: &AccountConfig) -> Option<v1::ClaktoryAccount> {
         if !config.enabled {

@@ -16,13 +16,13 @@ const mapCell = 8.0;
 
 /// The kinds of line, each drawn in its own color and shown or hidden
 /// together.
-enum MapLayer { messages, secrets, hierarchy, data }
+enum MapLayer { messages, leads, secrets, hierarchy, data, apps }
 
 /// What a box on the board is.
-enum MapBoxKind { workspace, project, folder, admins, vault }
+enum MapBoxKind { workspace, project, folder, admins, vault, apps }
 
 /// A rounded region: the workspace or a project (with its title), a folder
-/// inside one, or the vault.
+/// inside one, the vault, or the apps.
 class MapBox {
   const MapBox({
     required this.id,
@@ -34,7 +34,7 @@ class MapBox {
   });
 
   /// The node it stands for ("project:…", "folder:…/…", "workspace"), or
-  /// "vault" / "admins".
+  /// "vault" / "admins" / "apps".
   final String id;
   final MapBoxKind kind;
   final Rect rect;
@@ -46,7 +46,8 @@ class MapBox {
   final bool outlined;
 }
 
-/// A node drawn as a chip: an agent, a secret or Claktory's records.
+/// A node drawn as a chip: an agent, a secret, an app or Claktory's
+/// records.
 class MapChip {
   const MapChip({required this.node, required this.rect, this.depth = 0});
 
@@ -111,9 +112,14 @@ class MapLayout {
     required this.related,
     required this.reads,
     required this.writes,
+    this.you,
   });
 
   final Size size;
+
+  /// Where the person goes, centred over the admins (or the boxes); null
+  /// when the board leaves them out.
+  final Rect? you;
   final List<MapBox> boxes;
   final List<MapChip> chips;
   final List<MapWire> wires;
@@ -185,9 +191,13 @@ String debugMapGrid(ClaktoryMap map, {Map<String, int> order = const {}}) {
 
 /// Lays out [map]; [order] (see [sidebarOrder]) puts things as the sidebar
 /// has them, and anything it doesn't name follows by id.
-MapLayout layoutMap(ClaktoryMap map, {Map<String, int> order = const {}}) {
+MapLayout layoutMap(
+  ClaktoryMap map, {
+  Map<String, int> order = const {},
+  bool you = false,
+}) {
   if (map.nodes.isEmpty) return MapLayout.empty;
-  return _Layout(map, order).run();
+  return _Layout(map, order, you: you).run();
 }
 
 // Sizes, in cells.
@@ -197,6 +207,11 @@ const _rowGap = 3;
 const _indent = 2;
 const _maxDepth = 3;
 const _margin = 4;
+
+/// The person's node over the admins ([layoutMap]'s `you`), and the room
+/// it takes above them.
+const _youH = 7;
+const _youBand = _youH + 3;
 const _header = 6;
 const _regionLabel = 3;
 const _smallH = 4;
@@ -298,7 +313,15 @@ class _Port {
 }
 
 class _Layout {
-  _Layout(this.map, this.order);
+  _Layout(this.map, this.order, {this.you = false});
+
+  /// Whether the person has a node over the admins.
+  final bool you;
+
+  /// Where the admins (or the boxes) start: under the person's node.
+  int get _top => _margin + (you ? _youBand : 0);
+
+  _Cells? youCells;
 
   final ClaktoryMap map;
   final Map<String, int> order;
@@ -313,6 +336,7 @@ class _Layout {
   final dots = <MapDot>[];
   List<MapNode> admins = const [];
   List<MapNode> secrets = const [];
+  List<MapNode> apps = const [];
   MapNode? records;
 
   int compare(String a, String b) {
@@ -333,6 +357,13 @@ class _Layout {
         return from != 0 ? from : compare(a.toId, b.toId);
       });
 
+  /// The nodes of [kind], by name.
+  List<MapNode> _byLabel(MapNodeKind kind) =>
+      map.nodes.where((node) => node.kind == kind).toList()..sort((a, b) {
+        final byName = a.label.toLowerCase().compareTo(b.label.toLowerCase());
+        return byName != 0 ? byName : a.id.compareTo(b.id);
+      });
+
   MapLayout run() {
     for (final node in map.nodes) {
       nodes[node.id] = node;
@@ -344,16 +375,8 @@ class _Layout {
       for (final agent in agents)
         if (agent.admin) agent,
     ];
-    secrets =
-        map.nodes
-            .where((node) => node.kind == MapNodeKind.MAP_NODE_KIND_SECRET)
-            .toList()
-          ..sort((a, b) {
-            final byName = a.label.toLowerCase().compareTo(
-              b.label.toLowerCase(),
-            );
-            return byName != 0 ? byName : a.id.compareTo(b.id);
-          });
+    secrets = _byLabel(MapNodeKind.MAP_NODE_KIND_SECRET);
+    apps = _byLabel(MapNodeKind.MAP_NODE_KIND_APP);
     records = nodes['data:records'];
 
     // Where each agent works: the node it writes that's a place.
@@ -562,6 +585,11 @@ class _Layout {
   late final List<MapEdge> secretEdges = edgesOf(
     MapEdgeKind.MAP_EDGE_KIND_SECRET,
   );
+  late final List<MapEdge> appEdges = edgesOf(MapEdgeKind.MAP_EDGE_KIND_APP);
+
+  /// From each agent with a lead to its lead.
+  late final List<MapEdge> leadEdges = edgesOf(MapEdgeKind.MAP_EDGE_KIND_LEAD);
+  late final List<MapEdge> hearEdges = edgesOf(MapEdgeKind.MAP_EDGE_KIND_HEARS);
   late final List<MapEdge> recordReads = [
     for (final edge in edgesOf(MapEdgeKind.MAP_EDGE_KIND_READS))
       if (edge.toId == 'data:records') edge,
@@ -598,7 +626,16 @@ class _Layout {
         right(child, 'h:${node.id}');
       }
     }
-    for (final edge in [...secretEdges, ...recordReads]) {
+    for (final edge in leadEdges) {
+      right(edge.fromId, 'l:${edge.toId}');
+      right(edge.toId, 'l:${edge.toId}');
+    }
+    for (final edge in [
+      ...secretEdges,
+      ...recordReads,
+      ...appEdges,
+      ...hearEdges,
+    ]) {
       right(edge.toId, edge.fromId);
       right(edge.fromId, edge.toId);
     }
@@ -613,14 +650,18 @@ class _Layout {
     }
 
     final int crossing = math.min(
-      loose.length + secrets.length + (this.records == null ? 0 : 1),
+      loose.length +
+          {for (final edge in leadEdges) edge.toId}.length +
+          secrets.length +
+          apps.length +
+          (this.records == null ? 0 : 1),
       10,
     );
     final int gapX = 5 + crossing;
     final int channel = 5 + math.min(loose.length, 8);
 
     // The admins along the top, over the backbone.
-    var y = _margin;
+    var y = _top;
     if (admins.isNotEmpty) {
       y += _chipH;
       backboneY = y + 3;
@@ -694,8 +735,35 @@ class _Layout {
         math.min(_chipW, ((records.label.length * 7 + 44) / mapCell).ceil()),
       );
       cells[records.id] = _Cells(x, vaultTop + _regionLabel + 2, w, _smallH);
-      x += w;
+      x += w + gapX;
       bottom = math.max(bottom, vaultTop + _regionLabel + 2 + _smallH);
+    }
+    // The apps beside them, along the board's bottom edge: the ways out of
+    // Claktory, each wired to the agents it's given to.
+    if (apps.isNotEmpty) {
+      final top = vaultTop + _regionLabel + 2;
+      var cx = x + 2;
+      for (final app in apps) {
+        final w = math.max(
+          12,
+          math.min(_chipW, ((app.label.length * 7 + 44) / mapCell).ceil()),
+        );
+        cells[app.id] = _Cells(cx, top, w, _smallH);
+        cx += w + 3;
+      }
+      final appsBottom = top + _smallH + 2;
+      outBoxes.add(
+        MapBox(
+          id: 'apps',
+          kind: MapBoxKind.apps,
+          rect: _rect(x, vaultTop, cx - 1 - x, appsBottom - vaultTop),
+          label: 'Apps',
+        ),
+      );
+      x = cx - 1;
+      bottom = math.max(bottom, appsBottom);
+    } else if (records != null) {
+      x -= gapX;
     }
     right0 = math.max(right0, x);
 
@@ -707,10 +775,26 @@ class _Layout {
         _margin + 2 + (right0 - _margin - 2 - width) ~/ 2,
       );
       for (final admin in admins) {
-        cells[admin.id] = _Cells(ax, _margin, _chipW, _chipH);
+        cells[admin.id] = _Cells(ax, _top, _chipW, _chipH);
         ax += _chipW + 4;
       }
       right0 = math.max(right0, ax - 4);
+    }
+
+    // The person, centred over the admins, or over the boxes.
+    if (you) {
+      final first = admins.isEmpty ? null : cells[admins.first.id];
+      final last = admins.isEmpty ? null : cells[admins.last.id];
+      final center = first != null && last != null
+          ? (first.x + last.x + last.w) ~/ 2
+          : (_margin + 2 + right0) ~/ 2;
+      youCells = _Cells(
+        math.max(_margin + 2, center - _chipW ~/ 2),
+        _margin,
+        _chipW,
+        _youH,
+      );
+      right0 = math.max(right0, youCells!.x + _chipW);
     }
 
     boardWidth = right0 + _margin + 2;
@@ -949,7 +1033,7 @@ class _Layout {
       }
       // Lines come down into the vault to their secret, rather than run
       // along its chips.
-      if (box.kind == MapBoxKind.vault) {
+      if (box.kind == MapBoxKind.vault || box.kind == MapBoxKind.apps) {
         for (var y = y0 + 1; y < y1; y++) {
           for (var x = x0 + 1; x < x1; x++) {
             if (blocked[_p(x, y)] == 0) blocked[_p(x, y)] = 2;
@@ -960,7 +1044,8 @@ class _Layout {
       // go around the words, not over them.
       if (box.label.isEmpty && box.detail.isEmpty) continue;
       final folder = box.kind == MapBoxKind.folder;
-      final small = folder || box.kind == MapBoxKind.vault;
+      final small =
+          folder || box.kind == MapBoxKind.vault || box.kind == MapBoxKind.apps;
       final labelLeft = small ? x0 + 1 : x0 + _gutterOf(box.id);
       final words = math.max(
         box.label.length * 8,
@@ -980,9 +1065,11 @@ class _Layout {
 
     _buses();
     _hierarchy();
+    _leads();
     _loose();
     _secrets();
     _records();
+    _apps();
     // Every port's first step is its net's before anything is routed, so
     // no line blocks a chip that's routed later.
     for (final job in jobs) {
@@ -1062,6 +1149,9 @@ class _Layout {
       related: related,
       reads: reads,
       writes: writes,
+      you: youCells == null
+          ? null
+          : _rect(youCells!.x, youCells!.y, youCells!.w, youCells!.h),
     );
   }
 
@@ -1258,6 +1348,22 @@ class _Layout {
     }
   }
 
+  /// Each lead: a net from its right side to those of the agents that
+  /// report to it, a chevron on each one's branch pointing to the lead.
+  void _leads() {
+    final reports = <String, List<String>>{};
+    for (final edge in leadEdges) {
+      if (cells.containsKey(edge.fromId) && cells.containsKey(edge.toId)) {
+        (reports[edge.toId] ??= []).add(edge.fromId);
+      }
+    }
+    for (final lead in reports.keys.toList()..sort(compare)) {
+      _job(MapLayer.leads, 'l:$lead', lead, _port(lead, 0), [
+        for (final report in reports[lead]!) (report, _port(report, 0)),
+      ], arrows: -1);
+    }
+  }
+
   /// Messages no bus says: each its own line, from left side to left side.
   void _loose() {
     for (final edge in loose) {
@@ -1314,11 +1420,40 @@ class _Layout {
     ]);
   }
 
+  /// Each app: a net from its chip to the agents it's given to, and a
+  /// line with an arrow into each agent that hears its events.
+  void _apps() {
+    for (final app in apps) {
+      if (!cells.containsKey(app.id)) continue;
+      final given = [
+        for (final edge in appEdges)
+          if (edge.fromId == app.id && cells.containsKey(edge.toId)) edge.toId,
+      ];
+      if (given.isNotEmpty) {
+        _job(MapLayer.apps, app.id, app.id, _port(app.id, 3), [
+          for (final agent in given) (agent, _port(agent, 0)),
+        ]);
+      }
+      for (final edge in hearEdges) {
+        if (edge.fromId != app.id || !cells.containsKey(edge.toId)) continue;
+        _job(
+          MapLayer.apps,
+          'hears:${app.id}>${edge.toId}',
+          app.id,
+          _port(app.id, 3),
+          [(edge.toId, _port(edge.toId, 0))],
+          arrows: 1,
+        );
+      }
+    }
+  }
+
   final jobs = <_Job>[];
 
   /// A net to route from [root] to each of [terminals]. [arrows] puts a
   /// chevron (1) or two opposite ones (2) on a two-ended net, pointing from
-  /// root to terminal.
+  /// root to terminal, or (-1) one on each terminal's branch, pointing back
+  /// toward the root.
   void _job(
     MapLayer layer,
     String name,
@@ -1398,8 +1533,9 @@ class _Layout {
   }
 
   /// Chevrons on the longest straight run of [points] (drawn from the
-  /// terminal back to the root): one pointing at the terminal, or two
-  /// opposite ones for a pair that message each other.
+  /// terminal back to the root): one pointing at the terminal, two
+  /// opposite ones for a pair that message each other, or (-1) one
+  /// pointing away from it, toward the root.
   static List<MapArrow> _chevrons(List<Offset> points, int count) {
     var best = 0;
     var length = -1.0;
@@ -1415,6 +1551,7 @@ class _Layout {
     final step = (b - a) / math.max(length, 1);
     // The route runs from the terminal: toward it is backwards.
     final toward = -step;
+    if (count == -1) return [MapArrow((a + b) / 2, step)];
     if (count == 1) return [MapArrow((a + b) / 2, toward)];
     return [
       MapArrow(a + (b - a) / 3, toward),

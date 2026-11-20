@@ -47,7 +47,8 @@ Future<Harness> showSettings(
   WidgetTester tester,
   Provider provider, {
   LoginFlow? login,
-  Size size = const Size(1200, 900),
+  // Tall enough for Profile and every account.
+  Size size = const Size(1200, 1100),
 }) async {
   final snapshot = workspace(login: login)
     ..providers.clear()
@@ -102,6 +103,8 @@ void main() {
     expect(harness.last.startLogin.methodId, 'oauth');
     expect(harness.last.startLogin.addAccount, isTrue);
 
+    await tester.ensureVisible(find.text('Add an API key'));
+    await settle(tester);
     await tester.tap(find.text('Add an API key'));
     await settle(tester);
     expect(harness.last.startLogin.methodId, 'api_key');

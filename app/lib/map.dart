@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'avatar.dart';
 import 'backend.dart' show fireAndLog;
 import 'canvas.dart';
 import 'controls.dart';
@@ -16,26 +17,30 @@ import 'scope.dart';
 import 'selection.dart';
 
 /// The color of a [MapLayer]'s lines. Not agent colors, which say whose
-/// something is, and not signal, which marks selection: four hues of their
+/// something is, and not signal, which marks selection: hues of their
 /// own, a little lighter in the dark.
 Color mapLayerColor(MapLayer layer, Palette palette) {
   final dark = palette.canvas.computeLuminance() < 0.5;
   return switch (layer) {
     MapLayer.messages =>
       dark ? const Color(0xFF5AA6E8) : const Color(0xFF1D6FC2),
+    MapLayer.leads => dark ? const Color(0xFFE6809F) : const Color(0xFFB23A63),
     MapLayer.secrets =>
       dark ? const Color(0xFFE2A93E) : const Color(0xFFA66A00),
     MapLayer.hierarchy => palette.textFaint,
     MapLayer.data => dark ? const Color(0xFF52B985) : const Color(0xFF16804B),
+    MapLayer.apps => dark ? const Color(0xFFB394F0) : const Color(0xFF7248C4),
   };
 }
 
 /// What each layer is called in the key.
 const mapLayerNames = {
   MapLayer.messages: 'Messages',
+  MapLayer.leads: 'Leads',
   MapLayer.secrets: 'Secrets',
   MapLayer.hierarchy: 'Under other agents',
   MapLayer.data: "Claktory's records",
+  MapLayer.apps: 'Apps',
 };
 
 /// The Map: how this Claktory is arranged, drawn like a circuit board.
@@ -82,7 +87,7 @@ class _MapViewState extends State<MapView> {
     if (_laidOut != workspace.map || !_sameOrder(order)) {
       _laidOut = workspace.map;
       _order = order;
-      _layout = layoutMap(workspace.map, order: order);
+      _layout = layoutMap(workspace.map, order: order, you: true);
     }
     return _layout;
   }
@@ -274,6 +279,7 @@ class _MapViewState extends State<MapView> {
                                       _GridPainter(transform, palette.hairline),
                                   child: _Board(
                                     layout: layout,
+                                    person: workspace.person,
                                     hidden: _hidden,
                                     focus: focus,
                                     onHover: _hovered,
@@ -304,6 +310,7 @@ class _MapViewState extends State<MapView> {
 class _Board extends StatelessWidget {
   const _Board({
     required this.layout,
+    required this.person,
     required this.hidden,
     required this.focus,
     required this.onHover,
@@ -311,6 +318,10 @@ class _Board extends StatelessWidget {
   });
 
   final MapLayout layout;
+
+  /// The person, over the admins: they can message every agent, so no
+  /// line leads to them.
+  final Person person;
   final Set<MapLayer> hidden;
   final String? focus;
   final ValueChanged<String?> onHover;
@@ -335,6 +346,25 @@ class _Board extends StatelessWidget {
             ),
           ),
         ),
+        if (layout.you case final you?)
+          Positioned.fromRect(
+            rect: you,
+            child: AnimatedOpacity(
+              duration: Motion.fast,
+              opacity: lit == null ? 1 : 0.3,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  PersonAvatar(person: person, size: 32),
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    'You',
+                    style: TextStyles.label.copyWith(color: palette.text),
+                  ),
+                ],
+              ),
+            ),
+          ),
         for (final chip in layout.chips)
           Positioned.fromRect(
             rect: chip.rect,
@@ -380,8 +410,13 @@ class _Chip extends StatelessWidget {
     );
     if (!agent) {
       final secret = node.kind == MapNodeKind.MAP_NODE_KIND_SECRET;
+      final app = node.kind == MapNodeKind.MAP_NODE_KIND_APP;
       final color = mapLayerColor(
-        secret ? MapLayer.secrets : MapLayer.data,
+        secret
+            ? MapLayer.secrets
+            : app
+            ? MapLayer.apps
+            : MapLayer.data,
         palette,
       );
       return Container(
@@ -390,8 +425,12 @@ class _Chip extends StatelessWidget {
         child: Row(
           children: [
             ExtensionGlyph(
-              icon: secret ? 'key-round' : 'database',
-              name: '',
+              icon: secret
+                  ? 'key-round'
+                  : app
+                  ? node.icon
+                  : 'database',
+              name: app ? node.label : '',
               color: color,
               size: 14,
             ),
@@ -528,7 +567,10 @@ class _BoardPainter extends CustomPainter {
             Offset(rect.left + _titleInset(box), rect.top + mapCell * 3 + 2),
             rect.width - _titleInset(box) - mapCell,
           );
-        case MapBoxKind.folder || MapBoxKind.vault || MapBoxKind.admins:
+        case MapBoxKind.folder ||
+            MapBoxKind.vault ||
+            MapBoxKind.admins ||
+            MapBoxKind.apps:
           final writing = writes?.contains(box.id) ?? false;
           final reading = reads?.contains(box.id) ?? false;
           if (!box.outlined) {
@@ -556,7 +598,8 @@ class _BoardPainter extends CustomPainter {
           canvas.drawRRect(
             shape,
             Paint()
-              ..color = box.kind == MapBoxKind.vault
+              ..color =
+                  box.kind == MapBoxKind.vault || box.kind == MapBoxKind.apps
                   ? palette.sidebar
                   : palette.canvas.withValues(alpha: 0.6),
           );

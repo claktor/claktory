@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Checks that no secret is anywhere in a commit's history, before it goes
 # public (scripts/publish.sh runs it and stops on any finding). It scans every
-# change of every commit REV reaches, deleted files included, and every commit
-# message, with gitleaks: its own rules (API keys, tokens, private keys of
+# change of every commit REV reaches, deleted files included, every commit
+# message, and REV's own files as they are, with gitleaks: its own rules (API keys, tokens, private keys of
 # every kind) plus .gitleaks.toml's (credential and database files, paths in
 # a real home folder), plus this machine's own names (your user name, home
 # folder and host name). The config is read from REV itself, so the exceptions
@@ -57,7 +57,7 @@ TOML
 
 # One line per finding: what, where and in which commit, never the secret itself.
 cat >"$WORK/finding.tmpl" <<'TEMPLATE'
-{{ range . }}  {{ .RuleID }} ({{ .Description }}): {{ if .Commit }}{{ .File }}:{{ .StartLine }} in commit {{ printf "%.10s" .Commit }}{{ else }}a commit message, line {{ .StartLine }}{{ end }}
+{{ range . }}  {{ .RuleID }} ({{ .Description }}): {{ if .Commit }}{{ .File }}:{{ .StartLine }} in commit {{ printf "%.10s" .Commit }}{{ else if .File }}{{ .File }}:{{ .StartLine }}, as it is now{{ else }}a commit message, line {{ .StartLine }}{{ end }}
 {{ end }}
 TEMPLATE
 scan() { gitleaks "$@" --no-banner --log-level error --redact --config "$WORK/config.toml" --report-format template --report-template "$WORK/finding.tmpl"; }
@@ -67,13 +67,18 @@ status=0
 # -m: a merge's changes against each parent too, so nothing a merge brings is skipped.
 scan git --log-opts="-m --full-history $SHA" --report-path "$WORK/history.txt" "$ROOT" || status=1
 git -C "$ROOT" log -m --format='commit %H%n%B' "$SHA" | scan stdin --report-path "$WORK/messages.txt" || status=1
+# Its files as they are, outside git: what anyone downloading it gets.
+mkdir "$WORK/tree"
+git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/tree"
+scan dir --report-path "$WORK/tree.txt" "$WORK/tree" || status=1
 
 if ((status)); then
   echo "SECRET CHECK FAILED for $REV ($SHA): don't publish. Found:" >&2
   # A message's line counts from the top of `git log -m --format='commit %H%n%B' $SHA`.
   cat "$WORK/history.txt" "$WORK/messages.txt" >&2
+  sed "s|$WORK/tree/||" "$WORK/tree.txt" >&2
   echo "Remove what's real from the history before publishing. A false positive is allowed only by a" >&2
   echo "narrow, explained exception in .gitleaks.toml, committed so it's reviewed." >&2
   exit 1
 fi
-echo "secret check passed: $count commits of $REV ($SHA), their changes and messages"
+echo "secret check passed: $count commits of $REV ($SHA), their changes and messages, and its files"

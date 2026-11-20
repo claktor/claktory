@@ -730,6 +730,7 @@ class _AgentFields extends StatelessWidget {
     required this.offerWorkspace,
     this.outsideLabel = 'Workspace',
     this.defaultPrompt = '',
+    this.lead,
     required this.close,
   });
 
@@ -768,6 +769,9 @@ class _AgentFields extends StatelessWidget {
   /// The prompt Claktory ships for this agent, to go back to; empty when it
   /// has none (only Rivet has one).
   final String defaultPrompt;
+
+  /// The Lead field, under where it works; only an existing agent has it.
+  final Widget? lead;
 
   /// Closes the form, for leaving it to sign in.
   final VoidCallback close;
@@ -853,6 +857,7 @@ class _AgentFields extends StatelessWidget {
               onChanged: onFolder,
             ),
           ),
+        ?lead,
         if (workspace.models.isEmpty)
           Field(
             label: 'Model',
@@ -1166,6 +1171,9 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   late var _effort = widget.agent.effort;
   late var _color = widget.agent.color;
 
+  /// The agent it reports to, as chosen here; empty for none.
+  late var _lead = widget.agent.leadId;
+
   /// The shape chosen here; empty for automatic.
   late var _shape = _shapeChoice(widget.agent);
   var _confirmingDelete = false;
@@ -1203,6 +1211,8 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     if (_model != agent.model) update.model = _model;
     if (_effort != agent.effort) update.effort = _effort;
     if (_color != agent.color) update.color = _color;
+    final lead = _leadIn(AppScope.of(context).workspace.workspace);
+    if (lead != agent.leadId) update.leadId = lead;
     if (_shape != _shapeChoice(agent)) update.avatarShape = _shape;
     // One hint, or examples one per line, without blank lines.
     final placeholder = placeholderLines(_placeholder.text).join('\n');
@@ -1217,9 +1227,21 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
         update.hasColor() ||
         update.hasAvatarShape() ||
         update.hasPlaceholder() ||
-        update.hasFolderId();
+        update.hasFolderId() ||
+        update.hasLeadId();
     return changed ? update : null;
   }
+
+  /// The lead chosen here, if it can still be one where the agent is going;
+  /// else none, as the backend would make it.
+  String _leadIn(Workspace workspace) =>
+      leadCandidates(
+        workspace,
+        widget.agent.id,
+        _project,
+      ).any((candidate) => candidate.id == _lead)
+      ? _lead
+      : '';
 
   /// [agent] as it would look saved: its color and shape as picked here.
   /// Automatic keeps the shape it has now.
@@ -1405,6 +1427,32 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                       if (candidate.id == agent.id) candidate.defaultPrompt,
                   ].firstOrNull ??
                   agent.defaultPrompt,
+              lead: Field(
+                label: 'Lead',
+                note:
+                    "Who this agent reports to. Its lead can see how it's "
+                    'set up.',
+                child: Select(
+                  value: _leadIn(workspace),
+                  options: [
+                    const SelectOption('', 'None'),
+                    for (final candidate in leadCandidates(
+                      workspace,
+                      agent.id,
+                      _project,
+                    ))
+                      SelectOption(
+                        candidate.id,
+                        candidate.projectId == _project
+                            ? candidate.name
+                            // Elsewhere, so an admin: its role says so.
+                            : '${candidate.name} '
+                                  '(${candidate.role.isEmpty ? 'Admin' : candidate.role})',
+                      ),
+                  ],
+                  onChanged: (id) => setState(() => _lead = id),
+                ),
+              ),
               close: widget.close,
             ),
             Field(
@@ -1456,6 +1504,40 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
       },
     );
   }
+}
+
+/// Whom agent [agentId] can report to from [project]: the other agents
+/// there, then the admin agents elsewhere. Those that report to it,
+/// directly or through others, are left out: that would make a loop.
+List<Agent> leadCandidates(
+  Workspace workspace,
+  String agentId,
+  String project,
+) {
+  final byId = {for (final agent in workspace.agents) agent.id: agent};
+  bool reportsToIt(Agent candidate) {
+    final seen = <String>{};
+    for (
+      var lead = candidate.leadId;
+      lead.isNotEmpty && seen.add(lead);
+      lead = byId[lead]?.leadId ?? ''
+    ) {
+      if (lead == agentId) return true;
+    }
+    return false;
+  }
+
+  bool fits(Agent candidate) =>
+      candidate.id != agentId && !reportsToIt(candidate);
+  return [
+    for (final candidate in workspace.agents)
+      if (candidate.projectId == project && fits(candidate)) candidate,
+    for (final candidate in workspace.agents)
+      if (candidate.projectId != project &&
+          isAdminAgent(candidate) &&
+          fits(candidate))
+        candidate,
+  ];
 }
 
 /// Whether two option values are the same: the switch, and the same agents

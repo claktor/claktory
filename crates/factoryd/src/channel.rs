@@ -378,6 +378,15 @@ impl Channel {
             if !verify.status.success() {
                 return Err(rejected(format!("its app's signature doesn't verify: {}", String::from_utf8_lossy(&verify.stderr).trim())));
             }
+            // The apps host, which releases from before apps don't have.
+            let host = partial.join(crate::update::APPS_HOST);
+            if tokio::fs::metadata(&host).await.is_ok_and(|metadata| metadata.is_file()) {
+                let verify = tokio::process::Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&host).output().await?;
+                if !verify.status.success() {
+                    let why = String::from_utf8_lossy(&verify.stderr);
+                    return Err(rejected(format!("its apps host's signature doesn't verify: {}", why.trim())));
+                }
+            }
         } else {
             // Its app is the Mac release's, fetched when a paired app asks.
             let mac = Tarball { url: manifest.url.clone(), sha256: manifest.sha256.clone(), size: manifest.size };

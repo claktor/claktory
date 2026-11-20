@@ -48,6 +48,26 @@ class FakeSecret {
   final List<String> holders;
 }
 
+class FakeApp {
+  const FakeApp(
+    this.id,
+    this.name, {
+    this.icon = '',
+    this.given = const {},
+    this.hears = const {},
+  });
+
+  final String id;
+  final String name;
+  final String icon;
+
+  /// Agent id → the scopes' labels, joined.
+  final Map<String, String> given;
+
+  /// Agent id → the events' labels, joined.
+  final Map<String, String> hears;
+}
+
 const _badgeLabels = {
   'agents:admin': ('Messages every agent', 'users'),
   'secrets:give': ('Gives secrets to agents', 'key-round'),
@@ -63,6 +83,8 @@ ClaktoryMap fakeMap({
   List<FakeProject> projects = const [],
   List<FakeAgent> agents = const [],
   List<FakeSecret> secrets = const [],
+  List<FakeApp> apps = const [],
+  Map<String, String> leads = const {},
 }) {
   final nodes = <MapNode>[
     MapNode(
@@ -189,6 +211,15 @@ ClaktoryMap fakeMap({
       );
     }
   }
+  for (final MapEntry(key: agent, value: lead) in leads.entries) {
+    edges.add(
+      MapEdge(
+        fromId: 'agent:$agent',
+        toId: 'agent:$lead',
+        kind: MapEdgeKind.MAP_EDGE_KIND_LEAD,
+      ),
+    );
+  }
   if (records) {
     nodes.add(
       MapNode(
@@ -212,8 +243,40 @@ ClaktoryMap fakeMap({
       edges.add(
         MapEdge(
           fromId: 'secret:${secret.id}',
-          toId: 'agent:$holder',
+          // A secret given to an app goes to the app.
+          toId: holder.startsWith('app:') ? holder : 'agent:$holder',
           kind: MapEdgeKind.MAP_EDGE_KIND_SECRET,
+        ),
+      );
+    }
+  }
+  for (final app in apps) {
+    nodes.add(
+      MapNode(
+        id: 'app:${app.id}',
+        kind: MapNodeKind.MAP_NODE_KIND_APP,
+        label: app.name,
+        refId: app.id,
+        icon: app.icon,
+      ),
+    );
+    for (final MapEntry(key: agent, value: label) in app.given.entries) {
+      edges.add(
+        MapEdge(
+          fromId: 'app:${app.id}',
+          toId: 'agent:$agent',
+          kind: MapEdgeKind.MAP_EDGE_KIND_APP,
+          label: label,
+        ),
+      );
+    }
+    for (final MapEntry(key: agent, value: label) in app.hears.entries) {
+      edges.add(
+        MapEdge(
+          fromId: 'app:${app.id}',
+          toId: 'agent:$agent',
+          kind: MapEdgeKind.MAP_EDGE_KIND_HEARS,
+          label: label,
         ),
       );
     }
@@ -385,45 +448,86 @@ const claktorySecrets = [
   FakeSecret('s3', 'OpenAI', ['opus-researcher', 'researcher']),
 ];
 
-/// Matt's Claktory, as it is.
-ClaktoryMap claktoryMap() => fakeMap(
+/// Telegram, given to Rivet (who hears it) and Arjun, with its bot token.
+const claktoryApps = [
+  FakeApp(
+    'telegram',
+    'Telegram',
+    icon: 'send',
+    given: {
+      'rivet': 'Send you Telegram messages · Read your chat with the bot',
+      'devops': 'Send you Telegram messages',
+    },
+    hears: {'rivet': 'Messages you send the bot'},
+  ),
+];
+
+/// Mike reports to Rivet, and the rest of the Claktory project to Mike.
+const claktoryLeads = {
+  'coordinator': 'rivet',
+  'researcher': 'coordinator',
+  'opus-researcher': 'coordinator',
+  'ux-writer': 'coordinator',
+  'builder': 'coordinator',
+  'backend-2': 'coordinator',
+  'backend-3': 'coordinator',
+  'frontend': 'coordinator',
+  'frontend-2': 'coordinator',
+  'frontend-3': 'coordinator',
+  'devops': 'coordinator',
+  'claktor': 'coordinator',
+  'writer': 'coordinator',
+  'qa': 'coordinator',
+};
+
+/// Matt's Claktory, as it is; with [apps], Telegram installed too; with
+/// [leads], [claktoryLeads].
+ClaktoryMap claktoryMap({bool apps = false, bool leads = false}) => fakeMap(
   projects: claktoryProjects,
   agents: claktoryAgents,
-  secrets: claktorySecrets,
+  secrets: [
+    ...claktorySecrets,
+    if (apps) const FakeSecret('s4', 'Telegram Bot token', ['app:telegram']),
+  ],
+  apps: apps ? claktoryApps : const [],
+  leads: leads ? claktoryLeads : const {},
 );
 
 /// A workspace with [claktoryMap]'s projects and agents, and the map.
-Workspace claktoryWorkspace() => Workspace(
-  projects: [
-    for (final project in claktoryProjects)
-      Project(
-        id: project.id,
-        name: project.name,
-        path: '/Users/me/${project.id}',
-        folders: [
-          for (final folder in project.folders)
-            ProjectFolder(id: folder.toLowerCase(), name: folder),
-        ],
-      ),
-  ],
-  agents: [
-    for (final agent in claktoryAgents)
-      Agent(
-        id: agent.id,
-        name: agent.name,
-        projectId: agent.project,
-        folderId: agent.folder,
-        parentId: agent.parent,
-        color: agent.color,
-        role: agent.role,
-        model: 'anthropic/claude-opus-5-5',
-        modelAvailable: true,
-      ),
-  ],
-  settings: Settings(userName: 'Matt'),
-  map: claktoryMap(),
-  extensions: claktoryExtensions(),
-)..agents.forEach(_extensionsOn);
+Workspace claktoryWorkspace({bool apps = false, bool leads = false}) =>
+    Workspace(
+      projects: [
+        for (final project in claktoryProjects)
+          Project(
+            id: project.id,
+            name: project.name,
+            path: '/Users/me/${project.id}',
+            folders: [
+              for (final folder in project.folders)
+                ProjectFolder(id: folder.toLowerCase(), name: folder),
+            ],
+          ),
+      ],
+      agents: [
+        for (final agent in claktoryAgents)
+          Agent(
+            id: agent.id,
+            name: agent.name,
+            projectId: agent.project,
+            folderId: agent.folder,
+            parentId: agent.parent,
+            color: agent.color,
+            role: agent.role,
+            model: 'anthropic/claude-opus-5-5',
+            modelAvailable: true,
+            leadId: leads ? claktoryLeads[agent.id] : null,
+          ),
+      ],
+      settings: Settings(userName: 'Matt'),
+      map: claktoryMap(apps: apps, leads: leads),
+      appsAvailable: apps,
+      extensions: claktoryExtensions(),
+    )..agents.forEach(_extensionsOn);
 
 /// Some of Claktory's extensions, for the agents' cards.
 List<Extension> claktoryExtensions() => [
@@ -489,8 +593,20 @@ Map<String, int> claktoryOrder() {
 
 /// A crowded Claktory: long names, many agents, deep nesting, agents in no
 /// project, an admin inside a project, one with messaging off and one no
-/// one can reach, grants both ways, and a secret no one has.
-ClaktoryMap crowdedMap() => fakeMap(
+/// one can reach, grants both ways, and a secret no one has. With [leads],
+/// a chain of leads down the site, each project's agents reporting to its
+/// first, and those to Rivet.
+ClaktoryMap crowdedMap({bool leads = false}) => fakeMap(
+  leads: leads
+      ? {
+          for (var a = 1; a < 14; a++) 's$a': 's${a - 1}',
+          's0': 'boss',
+          for (var p = 0; p < 5; p++) ...{
+            'a$p-0': 'rivet',
+            for (var a = 1; a < 3 + p; a++) 'a$p-$a': 'a$p-0',
+          },
+        }
+      : const {},
   projects: [
     const FakeProject(
       'site',

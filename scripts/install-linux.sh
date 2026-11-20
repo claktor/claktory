@@ -4,6 +4,7 @@
 # runs the copy of this script that comes in each published Linux release, so
 # it needs nothing else from the repo.
 #   ~/.factory/bin/factoryd             the backend, which updates replace
+#   ~/.factory/bin/claktory-apps        the apps host beside it, which runs apps
 #   ~/.factory/bin/factoryd-supervisor  keeps it running and undoes updates
 #                                       that don't start; a systemd user
 #                                       service runs it, from boot on
@@ -43,6 +44,12 @@ mkdir -p "$HOME_DIR/bin" "$UNIT_DIR"
 cp "$RELEASE/factoryd" "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
+# The apps host, beside the backend (releases before apps have none).
+if [[ -f "$RELEASE/claktory-apps" ]]; then
+  cp "$RELEASE/claktory-apps" "$HOME_DIR/bin/claktory-apps.new"
+  chmod 755 "$HOME_DIR/bin/claktory-apps.new"
+  mv -f "$HOME_DIR/bin/claktory-apps.new" "$HOME_DIR/bin/claktory-apps"
+fi
 cp "$RELEASE/factoryd" "$BIN-supervisor.new"
 chmod 755 "$BIN-supervisor.new"
 mv -f "$BIN-supervisor.new" "$BIN-supervisor"

@@ -150,6 +150,26 @@ void main() {
       expect(find.text('Show more'), findsOneWidget);
     });
 
+    testWidgets('quotes, ampersands and angle brackets show as themselves, '
+        'folded and open', (tester) async {
+      const first = 'The "unknown device" & <knock> isn\'t ours.';
+      await showing(tester, [
+        call('agents_send', {
+          'to': 'builder',
+          'text': '$first\n\nSecond: "a" & \'b\' < c > d.',
+        }),
+      ]);
+      expect(find.text(first), findsOneWidget);
+      expect(find.textContaining('&quot;'), findsNothing);
+      expect(find.textContaining('&amp;'), findsNothing);
+      await tester.tap(find.text('Show more'));
+      await settle(tester);
+      expect(find.text(first), findsOneWidget);
+      expect(find.text('Second: "a" & \'b\' < c > d.'), findsOneWidget);
+      expect(find.textContaining('&#39;'), findsNothing);
+      expect(find.textContaining('&lt;'), findsNothing);
+    });
+
     testWidgets('a short plain message has nothing to show more of', (
       tester,
     ) async {
@@ -346,6 +366,31 @@ void main() {
       'message': 'Please set up the **Cloudflare** token for the site.\n\nIt needs DNS edit.',
       'reason': 'Sam keeps the deploy secrets and can ask you for the token.',
     };
+
+    testWidgets('its draft and why show quotes and ampersands as they are', (
+      tester,
+    ) async {
+      const message = 'Ask "Sam" about A & B <now>, it\'s urgent.';
+      const reason = 'Sam has the "keys" & knows <why>.';
+      await showing(tester, [
+        call(
+          'agents_suggest_talk',
+          {'agent': 'Sam', 'message': message, 'reason': reason},
+          output: 'Suggested.',
+          details: {
+            'agent_id': 'builder',
+            'agent_name': 'Sam',
+            'agent_role': 'Backend',
+            'message': message,
+            'reason': reason,
+          },
+        ),
+      ]);
+      expect(find.text(reason), findsOneWidget);
+      expect(find.text(message), findsOneWidget);
+      expect(find.textContaining('&quot;'), findsNothing);
+      expect(find.textContaining('&amp;'), findsNothing);
+    });
 
     testWidgets("why, the draft, and Talk to Sam: opens Sam's conversation "
         'with the message in its box, not sent, once', (tester) async {

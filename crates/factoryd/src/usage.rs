@@ -91,6 +91,8 @@ pub(crate) fn due(tracked: &Tracked, working: bool, now: i64) -> bool {
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     let Some(wake) = factory.upgrade().map(|strong| strong.usage_wake.clone()) else { return };
     let mut tracked = HashMap::new();
+    // At start with the computer, the first read waits for the network.
+    crate::network::ready().await;
     loop {
         let Some(strong) = factory.upgrade() else { return };
         strong.check_usage(&mut tracked).await;
@@ -274,15 +276,25 @@ impl Factory {
             let resets = usage.map(|usage| usage.resets.iter().map(|reset| format!("{} ×{}", reset.label, reset.left)));
             resets.into_iter().flatten().collect::<Vec<_>>().join(", ")
         };
-        let before = resets(inner.usage.get(key));
+        // What the app's circles and cards show: each window's share used.
+        let used = |usage: Option<&v1::ProviderUsage>| {
+            let windows = usage.map(|usage| usage.windows.iter().map(|window| format!("{} {}%", window.id, window.used_percent)));
+            windows.into_iter().flatten().collect::<Vec<_>>().join(", ")
+        };
+        let before = (resets(inner.usage.get(key)), used(inner.usage.get(key)));
         let changed = match usage {
             Some(usage) => inner.usage.insert(key.clone(), usage.clone()).as_ref() != Some(&usage),
             None => inner.usage.remove(key).is_some(),
         };
         if changed {
-            let after = resets(inner.usage.get(key));
-            if after != before {
-                tracing::info!(provider = %key.0, account = %key.1, resets = %after, "usage resets");
+            let after = (resets(inner.usage.get(key)), used(inner.usage.get(key)));
+            if after.0 != before.0 {
+                tracing::info!(provider = %key.0, account = %key.1, resets = %after.0, "usage resets");
+            }
+            // Only when a share changes, not each read: a log shows what the
+            // app does without a line every few minutes.
+            if after.1 != before.1 && !after.1.is_empty() {
+                tracing::info!(provider = %key.0, account = %key.1, used = %after.1, "usage");
             }
             self.broadcast_workspace(&inner);
         }

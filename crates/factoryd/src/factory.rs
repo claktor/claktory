@@ -82,10 +82,16 @@ pub enum RequestError {
     NotInProject(String),
     #[error("can't update the app at {0}: it isn't an app on Claktory's computer, or the release has no such app")]
     NotAnApp(String),
+    #[error(
+        "Claktory can't update the app in {0}, because your account on this Mac isn't allowed to change that folder. Update from an administrator's account, or move Claktory to the Applications folder in your home folder."
+    )]
+    AppNotWritable(String),
     #[error("no extension with id \"{0}\"")]
     UnknownExtension(String),
     #[error("{0}")]
     Arrange(String),
+    #[error("{0}")]
+    Lead(String),
     #[error("project \"{project}\" has no folder \"{folder}\"")]
     UnknownFolder { project: String, folder: String },
     #[error("folder \"{0}\" isn't one of the agent's project's folders")]
@@ -117,6 +123,9 @@ pub enum RequestError {
     /// A build cache that can't be cleared, and why.
     #[error("{0}")]
     BuildCache(String),
+    /// Installing or setting up an app (`crate::apps`), and why not.
+    #[error("{0}")]
+    Apps(String),
     #[error("before_seq {0} is beyond the end of the transcript")]
     NoEntries(u64),
     /// A layout that can't be used, and why.
@@ -181,13 +190,16 @@ impl RequestError {
             | RequestError::NoRelease
             | RequestError::NotInProject(_)
             | RequestError::NotAnApp(_)
+            | RequestError::AppNotWritable(_)
             | RequestError::Arrange(_)
+            | RequestError::Lead(_)
             | RequestError::NotItsFolder(_)
             | RequestError::Command(_)
             | RequestError::Monitor(_)
             | RequestError::Remote(_)
             | RequestError::Proposal(_)
             | RequestError::BuildCache(_)
+            | RequestError::Apps(_)
             | RequestError::Layout(_)
             | RequestError::NoEntries(_)
             | RequestError::Upload(_)
@@ -235,6 +247,8 @@ pub struct AgentChange<'a> {
     pub avatar_shape: Option<&'a str>,
     /// What it does; empty for none.
     pub role: Option<&'a str>,
+    /// The agent it reports to, by id; empty for none.
+    pub lead: Option<&'a str>,
 }
 
 /// What a client starts from: the state now, and the events that follow it.
@@ -270,6 +284,9 @@ pub struct Factory {
     task_check_every: std::sync::atomic::AtomicU64,
     /// Wakes the usage monitor, so a new sign-in's usage and plan are read at once.
     pub(crate) usage_wake: Arc<tokio::sync::Notify>,
+    /// Wakes agents waiting out their accounts' usage limits (`crate::waits`)
+    /// when the accounts or the settings change.
+    pub(crate) capacity: Arc<tokio::sync::Notify>,
     /// The accounts a usage reset is being used on now (`crate::usage`).
     pub(crate) resetting: Mutex<std::collections::HashSet<crate::usage::AccountKey>>,
     /// The Monitors extension's scheduler.
@@ -297,10 +314,14 @@ pub struct Factory {
     pub(crate) annotations: crate::annotations::State,
     /// The secrets agents use (`crate::vault`).
     pub(crate) vault: crate::vault::Vault,
+    /// The apps installed, as they run (`crate::apps`).
+    pub(crate) apps: crate::apps::Apps,
     /// Hides the vault's values in what agents and the app are shown.
     pub(crate) redaction: factory_agent::Redaction,
     /// This Claktory's color until the person picks one (`remote::key_color`).
     pub(crate) key_color: &'static str,
+    /// The seed of the person's avatar until they shuffle it (`crate::person`).
+    pub(crate) key_seed: String,
     /// This Claktory's account at claktory.com (`crate::account`).
     pub(crate) account: crate::account::State,
     /// Notified when a project is unarchived: its agents read what waited.
@@ -425,6 +446,12 @@ pub(crate) struct Runtime {
     /// compaction failed for good, or its folder was unusable); it ends as
     /// "failed" unless a later prompt in it succeeds. Cleared when it ends.
     pub(crate) failed: bool,
+    /// What it waits for while none of its model's accounts can take a
+    /// request (`crate::waits`); None when it doesn't.
+    pub(crate) usage_wait: Option<crate::waits::UsageWait>,
+    /// The reset time its conversation last said it waits for, so a wait
+    /// that starts again for the same one isn't said twice.
+    pub(crate) wait_said: Option<Option<u64>>,
 }
 
 impl Runtime {
@@ -525,6 +552,7 @@ impl Factory {
         let viewer = crate::extensions::viewer::State::load(&store);
         let remote = crate::remote::State::new(&home);
         let key_color = crate::remote::key_color(&home);
+        let key_seed = crate::remote::key_seed(&home);
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
         let account = crate::account::State::new(&home);
         let factory = Arc::new(Factory {
@@ -541,6 +569,7 @@ impl Factory {
             nudge_after: std::sync::atomic::AtomicU64::new(30_000),
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
+            capacity: Arc::default(),
             resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
             web: crate::extensions::web::State::default(),
@@ -555,9 +584,11 @@ impl Factory {
             annotations: crate::annotations::State::default(),
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
+            apps: crate::apps::Apps::default(),
             account,
             unarchived: tokio::sync::Notify::new(),
             key_color,
+            key_seed,
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
@@ -583,6 +614,7 @@ impl Factory {
         tokio::spawn(crate::vault::requests::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::apps::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -595,6 +627,7 @@ impl Factory {
             });
         }
         tokio::spawn(resume_unarchived(Arc::downgrade(&factory)));
+        tokio::spawn(load_waiting(Arc::downgrade(&factory)));
         Ok(factory)
     }
 
@@ -723,8 +756,10 @@ impl Factory {
                     }
                 }
                 config.agents.retain(|agent| agent.project.as_deref() != Some(id));
+                config.forget_stale_leads();
                 for agent in &removed {
                     crate::extensions::forget_agent(config, agent);
+                    crate::apps::forget_agent(config, agent);
                 }
                 Ok(removed)
             })
@@ -744,7 +779,7 @@ impl Factory {
 
     /// Creates an agent, in a project or (with an empty `project`) the workspace.
     pub async fn create_agent(&self, request: &v1::CreateAgent) -> Result<(), RequestError> {
-        let v1::CreateAgent { project_id: project, name, prompt, model, effort, color, folder_id: folder, role } = request;
+        let v1::CreateAgent { project_id: project, name, prompt, model, effort, color, folder_id: folder, role, lead_id: lead } = request;
         let (project, model, effort, folder) = (project.as_str(), model.as_str(), effort.as_str(), folder.as_str());
         let name = name.trim();
         if name.is_empty() {
@@ -783,7 +818,15 @@ impl Factory {
                     folder: folder.to_owned(),
                     extensions: Default::default(),
                     avatar: Default::default(),
+                    lead: None,
                 };
+                let lead = lead.trim();
+                if !lead.is_empty()
+                    && let Some(why) = config.lead_refused(&agent, lead)
+                {
+                    return Err(RequestError::Lead(why));
+                }
+                let agent = AgentConfig { lead: Some(lead.to_owned()).filter(|lead| !lead.is_empty()), ..agent };
                 config.agents.push(agent);
                 Ok(id)
             })
@@ -799,7 +842,10 @@ impl Factory {
             }
             crate::arrange::lift_children(config, id);
             config.agents.retain(|agent| agent.id != id);
+            // No agent reports to it any more.
+            config.forget_stale_leads();
             crate::extensions::forget_agent(config, id);
+            crate::apps::forget_agent(config, id);
             Ok(())
         })
         .await?;
@@ -823,6 +869,16 @@ impl Factory {
     pub(crate) fn identity(&self) -> crate::remote::Identity {
         let config = &self.lock().config;
         crate::remote::Identity { name: config.claktory_name(), color: config.claktory_color(self.key_color).to_owned() }
+    }
+
+    /// New colours for the person's avatar, never the ones it had.
+    pub(crate) async fn shuffle_avatar(&self) -> Result<(), RequestError> {
+        let key_seed = self.key_seed.clone();
+        self.edit_config(|config| {
+            config.user.avatar.seed = crate::person::shuffled(crate::person::seed(config, &key_seed));
+            Ok(())
+        })
+        .await
     }
 
     pub async fn update_settings(&self, request: v1::UpdateSettings) -> Result<(), RequestError> {
@@ -968,7 +1024,8 @@ impl Factory {
             {
                 return Err(RequestError::UnknownProject(project.to_owned()));
             }
-            let AgentChange { name, prompt, model, effort, project, color, extension, placeholder, folder, avatar_shape, role } = change;
+            let AgentChange { name, prompt, model, effort, project, color, extension, placeholder, folder, avatar_shape, role, lead } =
+                change;
             if let Some(extension) = extension {
                 crate::extensions::apply_change(config, id, extension)?;
             }
@@ -994,7 +1051,20 @@ impl Factory {
             if let Some(folder) = folder {
                 crate::arrange::check_folder(config, id, folder)?;
             }
+            if project.is_some() {
+                // A lead elsewhere now, and those reporting to it from there, go.
+                config.forget_stale_leads();
+            }
+            if let Some(lead) = lead.map(str::trim).filter(|lead| !lead.is_empty()) {
+                let Some(agent) = config.agent(id) else { return Err(RequestError::UnknownAgent(id.to_owned())) };
+                if let Some(why) = config.lead_refused(agent, lead) {
+                    return Err(RequestError::Lead(why));
+                }
+            }
             let Some(agent) = config.agent_mut(id) else { return Err(RequestError::UnknownAgent(id.to_owned())) };
+            if let Some(lead) = lead {
+                agent.lead = Some(lead.trim().to_owned()).filter(|lead| !lead.is_empty());
+            }
             if let Some(folder) = folder {
                 agent.folder = folder.to_owned();
             }
@@ -1017,10 +1087,15 @@ impl Factory {
         Ok(())
     }
 
-    pub async fn select_agent(&self, id: &str) -> Result<(), RequestError> {
-        if self.lock().config.agent(id).is_none() {
-            return Err(RequestError::UnknownAgent(id.to_owned()));
+    pub(crate) fn known_agent(&self, agent: &str) -> Result<(), RequestError> {
+        if self.lock().config.agent(agent).is_none() {
+            return Err(RequestError::UnknownAgent(agent.to_owned()));
         }
+        Ok(())
+    }
+
+    pub async fn select_agent(&self, id: &str) -> Result<(), RequestError> {
+        self.known_agent(id)?;
         self.ensure_loaded(id).await?;
         let mut inner = self.lock();
         inner.state.selected_agent = Some(id.to_owned());
@@ -1041,9 +1116,7 @@ impl Factory {
     /// files first if it isn't loaded.
     pub async fn load_entries(&self, request: &v1::LoadEntries) -> Result<v1::EntryPage, RequestError> {
         let id = request.agent_id.as_str();
-        if self.lock().config.agent(id).is_none() {
-            return Err(RequestError::UnknownAgent(id.to_owned()));
-        }
+        self.known_agent(id)?;
         self.ensure_loaded(id).await?;
         let inner = self.lock();
         let transcript = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());
@@ -1069,9 +1142,7 @@ impl Factory {
         if text.is_empty() && attached.is_empty() {
             return Err(RequestError::Empty("message"));
         }
-        if self.lock().config.agent(id).is_none() {
-            return Err(RequestError::UnknownAgent(id.to_owned()));
-        }
+        self.known_agent(id)?;
         let attachments = self.attachments(id, attached)?;
         let mut inner = self.lock();
         let queued = Queued { client_id: client_id.to_owned(), attachments, ..Queued::from_person(text, sent_from) };
@@ -1174,9 +1245,24 @@ impl Factory {
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
         if runtime.transcript.is_none() {
+            let waiting = !transcript.waiting_seqs().is_empty();
             runtime.transcript = Some(transcript);
+            // What waits in it shows with the agent.
+            if waiting {
+                self.broadcast_workspace(&inner);
+            }
         }
         Ok(())
+    }
+
+    /// Whether something of the agent's waits for the person: a request for
+    /// a secret, or a proposal to connect a service or to Rivet.
+    fn has_waiting(&self, id: &str) -> bool {
+        let requests = self.vault.requests_of(id).unwrap_or_default();
+        let connects = self.vault.proposals_of(id).unwrap_or_default();
+        requests.iter().any(|request| request.state() == v1::SecretRequestState::Pending)
+            || connects.iter().any(|proposal| proposal.state() == v1::ConnectProposalState::Pending)
+            || crate::proposals::pending_of(&self.store, id)
     }
 
     /// Changes the config in memory and on disk, or changes nothing.
@@ -1305,11 +1391,14 @@ impl Factory {
             inner.models = models;
             inner.providers = providers;
             self.broadcast_workspace(&inner);
+            self.capacity_changed();
         }
     }
 
     /// Swaps in a valid config, stopping agents it removed.
     fn apply_config(&self, inner: &mut Inner, config: Config) {
+        // An agent waiting for an account may have another model now.
+        self.capacity_changed();
         let mut removed = Vec::new();
         for id in inner.agents.keys() {
             if config.agent(id).is_none() {
@@ -1524,9 +1613,7 @@ impl Factory {
     /// Stops an agent's running background task for the person; the agent
     /// gets the event that it finished, stopped by the person.
     pub fn stop_task(&self, agent: &str, task: &str) -> Result<(), RequestError> {
-        if self.lock().config.agent(agent).is_none() {
-            return Err(RequestError::UnknownAgent(agent.to_owned()));
-        }
+        self.known_agent(agent)?;
         let person = self.lock().config.person().to_owned();
         crate::extensions::tasks::stop(self, agent, task, &person).map_err(RequestError::NoTask)
     }
@@ -1707,6 +1794,10 @@ impl Factory {
                 role: agent.role.clone(),
                 layout: self.viewer.layout(&agent.id),
                 default_prompt: Config::default_prompt(agent).unwrap_or_default().to_owned(),
+                waiting_seqs: runtime.and_then(|runtime| runtime.transcript.as_ref()).map(Transcript::waiting_seqs).unwrap_or_default(),
+                lead_id: inner.config.lead(agent).map(|lead| lead.id.clone()).unwrap_or_default(),
+                usage_wait: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map(|wait| wait.text.clone()).unwrap_or_default(),
+                usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
             });
         }
         let config = &inner.config;
@@ -1715,8 +1806,12 @@ impl Factory {
             vault.connectors = self.broker.catalog();
             vault.flows = self.broker.flows();
         }
+        let apps = crate::apps::infos(self, config, &vault);
         v1::Workspace {
-            map: Some(crate::map::build(config, &self.home, &vault)),
+            map: Some(crate::map::build(config, &self.home, &vault, &apps)),
+            apps,
+            apps_available: self.apps.available(),
+            person: Some(crate::person::person(config, &self.key_seed, self.account.signed_in_as(&config.account))),
             projects,
             agents,
             models: inner.models.clone(),
@@ -1848,6 +1943,22 @@ pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
     Some(v1::Transcript { agent_id: id.to_owned(), entries, has_earlier })
 }
 
+/// Reads the conversations of agents with something waiting for the
+/// person when Claktory starts, so every device sees what waits (each
+/// agent's `waiting_seqs`) without opening them.
+async fn load_waiting(factory: Weak<Factory>) {
+    let Some(factory) = factory.upgrade() else { return };
+    let ids: Vec<String> = factory.lock().config.agents.iter().map(|agent| agent.id.clone()).collect();
+    for id in ids {
+        if !factory.has_waiting(&id) {
+            continue;
+        }
+        if let Err(error) = factory.ensure_loaded(&id).await {
+            tracing::warn!(agent = %id, %error, "could not read the transcript of an agent with something waiting");
+        }
+    }
+}
+
 /// Starts the agents of a project brought back from the archive on what
 /// waited for them.
 async fn resume_unarchived(factory: Weak<Factory>) {
@@ -1964,6 +2075,14 @@ impl Factory {
         hidden.extend(self.broker.hidden(&self.vault));
         self.redaction.set(factory_agent::Redactor::new(&hidden));
         self.broadcast_workspace(&self.lock());
+        // An app's secret given or taken back may start or stop it.
+        self.apps.poke();
+    }
+
+    /// Checks the secret requests waiting as if `later_ms` had passed; for
+    /// tests.
+    pub fn expire_secret_requests_after(self: &Arc<Self>, later_ms: i64) {
+        crate::vault::requests::expire_requests(self, crate::transcript::now_ms() + later_ms);
     }
 
     /// Makes new vault passphrases cheap to check; for tests.

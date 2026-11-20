@@ -176,6 +176,13 @@ CREATE TABLE connect_proposals (
 ALTER TABLE connect_proposals ADD COLUMN statements TEXT NOT NULL DEFAULT '';
 ALTER TABLE connect_proposals ADD COLUMN region TEXT NOT NULL DEFAULT '';
 ",
+    "
+-- Other names a grant's agent gets the secret's values under, as the
+-- request it answered asked: JSON {name: the secret's variable}; '' for none.
+ALTER TABLE grants ADD COLUMN aliases TEXT NOT NULL DEFAULT '';
+-- When the agent last changed its request; 0 if never.
+ALTER TABLE requests ADD COLUMN updated INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// A value is too short to hide in output below this many bytes.
@@ -292,8 +299,24 @@ fn aad(parts: &[&str]) -> Vec<u8> {
     parts.join("\0").into_bytes()
 }
 
-fn grant_message(vault_id: &str, secret: &str, agent: &str, granted: i64) -> Vec<u8> {
-    aad(&["grant", vault_id, secret, agent, &granted.to_string()])
+/// What a grant's MAC covers; its aliases (JSON) only when it has any, so
+/// grants from before them still check.
+fn grant_message(vault_id: &str, secret: &str, agent: &str, granted: i64, aliases: &str) -> Vec<u8> {
+    let granted = granted.to_string();
+    let mut parts = vec!["grant", vault_id, secret, agent, &granted];
+    if !aliases.is_empty() {
+        parts.push(aliases);
+    }
+    aad(&parts)
+}
+
+/// A grant's aliases as kept: '' for none.
+fn aliases_text(aliases: &BTreeMap<String, String>) -> String {
+    if aliases.is_empty() { String::new() } else { serde_json::to_string(aliases).unwrap_or_default() }
+}
+
+fn aliases_of(text: &str) -> BTreeMap<String, String> {
+    serde_json::from_str(text).unwrap_or_default()
 }
 
 /// A secret's name: what agents pass to bash's `secrets`.
@@ -819,10 +842,15 @@ impl Vault {
         Ok(crypto::derive(vmk.as_slice(), inner.vault_id.as_bytes(), "claktory vault grants v1"))
     }
 
-    /// Lets `agent` use the secret. Returns its name.
     /// Lets `agent` use the secret; `by` is the admin agent that did it, ''
     /// for the person. Returns its name.
     pub(crate) fn grant(&self, id: &str, agent: &str, by: &str) -> Result<String, VaultError> {
+        self.grant_as(id, agent, by, &BTreeMap::new())
+    }
+
+    /// `grant`, with other names `agent`'s commands get the secret's values
+    /// under (`aliases`: name → the secret's variable), checked.
+    pub(crate) fn grant_as(&self, id: &str, agent: &str, by: &str, aliases: &BTreeMap<String, String>) -> Result<String, VaultError> {
         let mut inner = self.lock();
         let key = Self::grant_key(&inner)?;
         let db = Self::db(&inner)?;
@@ -832,9 +860,28 @@ impl Vault {
                 "Agents can't be given {name} itself. Make a secret from it with only the access the work needs, and give that."
             )));
         }
+        let variables: Vec<String> =
+            db.prepare("SELECT name FROM variables WHERE secret = ?1")?.query_map([&id], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        for (alias, variable) in aliases {
+            if !valid_variable(alias) {
+                return Err(VaultError::Invalid(format!(
+                    "\"{alias}\" isn't a variable name: letters, digits and _, not starting with a digit."
+                )));
+            }
+            if variables.contains(alias) {
+                return Err(VaultError::Invalid(format!("{name} sets {alias} already.")));
+            }
+            if !variables.contains(variable) {
+                return Err(VaultError::Invalid(format!("{name} has no variable {variable}.")));
+            }
+        }
+        let aliases = aliases_text(aliases);
         let now = now_ms();
-        let mac = crypto::mac(&key, &grant_message(&inner.vault_id, &id, agent, now));
-        db.execute("INSERT OR REPLACE INTO grants (secret, agent, granted, mac) VALUES (?1, ?2, ?3, ?4)", params![id, agent, now, mac])?;
+        let mac = crypto::mac(&key, &grant_message(&inner.vault_id, &id, agent, now, &aliases));
+        db.execute(
+            "INSERT OR REPLACE INTO grants (secret, agent, granted, mac, aliases) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, agent, now, mac, aliases],
+        )?;
         Self::log(db, &id, &name, "grant", agent, "", by)?;
         inner.state = None;
         Ok(name)
@@ -1009,14 +1056,14 @@ impl Vault {
                 }
                 secret.variables.push(variable);
             }
-            let mut grants = db.prepare("SELECT agent, granted, mac FROM grants WHERE secret = ?1 ORDER BY granted")?;
-            for row in
-                grants.query_map([&secret.id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)))?
-            {
-                let (agent, granted, mac) = row?;
+            let mut grants = db.prepare("SELECT agent, granted, mac, aliases FROM grants WHERE secret = ?1 ORDER BY granted")?;
+            for row in grants.query_map([&secret.id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?))
+            })? {
+                let (agent, granted, mac, aliases) = row?;
                 // Locked, grants can't be checked, and can't be used either.
                 if let Some(key) = &grant_key
-                    && !crypto::mac_matches(key, &grant_message(&inner.vault_id, &secret.id, &agent, granted), &mac)
+                    && !crypto::mac_matches(key, &grant_message(&inner.vault_id, &secret.id, &agent, granted, &aliases), &mac)
                 {
                     secret.warnings.push(format!("A grant to {agent} was changed outside Claktory, so it's ignored."));
                     continue;
@@ -1025,7 +1072,12 @@ impl Vault {
                 if !tasks.is_empty() {
                     recent.insert((secret.id.clone(), agent.clone()), tasks);
                 }
-                secret.grants.push(v1::SecretGrant { agent_id: agent, granted_ms: granted, running_tasks: 0 });
+                secret.grants.push(v1::SecretGrant {
+                    agent_id: agent,
+                    granted_ms: granted,
+                    running_tasks: 0,
+                    aliases: aliases_of(&aliases).into_iter().collect(),
+                });
             }
             Self::connection_view(db, &mut secret)?;
             secrets.push(secret);
@@ -1044,12 +1096,22 @@ impl Vault {
 
     /// Whether `agent` holds a grant of the secret with the right MAC.
     fn is_granted(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<bool, VaultError> {
-        let row: Option<(i64, Vec<u8>)> = Self::db(inner)?
-            .query_row("SELECT granted, mac FROM grants WHERE secret = ?1 AND agent = ?2", [secret, agent], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+        Ok(Self::grant_of(inner, key, secret, agent)?.is_some())
+    }
+
+    /// `agent`'s grant of the secret, if it holds one with the right MAC:
+    /// its aliases.
+    fn grant_of(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<Option<BTreeMap<String, String>>, VaultError> {
+        let row: Option<(i64, Vec<u8>, String)> = Self::db(inner)?
+            .query_row("SELECT granted, mac, aliases FROM grants WHERE secret = ?1 AND agent = ?2", [secret, agent], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .optional()?;
-        Ok(row.is_some_and(|(granted, mac)| crypto::mac_matches(key, &grant_message(&inner.vault_id, secret, agent, granted), &mac)))
+        Ok(row
+            .filter(|(granted, mac, aliases)| {
+                crypto::mac_matches(key, &grant_message(&inner.vault_id, secret, agent, *granted, aliases), mac)
+            })
+            .map(|(_, _, aliases)| aliases_of(&aliases)))
     }
 
     /// The secrets granted to `agent`, by id, as it's told of them: "Name
@@ -1069,13 +1131,19 @@ impl Vault {
                 .collect::<Result<Vec<_>, _>>()?;
             let mut granted = BTreeMap::new();
             for (id, name, description) in rows {
-                if !Self::is_granted(&inner, &key, &id, agent)? {
-                    continue;
-                }
+                let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else { continue };
                 let variables = db
                     .prepare("SELECT name, file FROM variables WHERE secret = ?1 ORDER BY position")?
                     .query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
-                    .map(|row| row.map(|(name, file)| if file { format!("{name} (a file's path)") } else { name }))
+                    .map(|row| {
+                        row.map(|(name, file)| {
+                            let mut label = name.clone();
+                            for (alias, _) in aliases.iter().filter(|(_, variable)| **variable == name) {
+                                label.push_str(&format!(" also as {alias}"));
+                            }
+                            if file { format!("{label} (a file's path)") } else { label }
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let about = if description.is_empty() { String::new() } else { format!(": {description}") };
                 granted.insert(id, format!("{name} (sets {}){about}", variables.join(", ")));
@@ -1086,6 +1154,20 @@ impl Vault {
             tracing::error!(%error, agent, "could not read the vault's grants");
             BTreeMap::new()
         })
+    }
+
+    /// The first value of secret `id` for `grantee` (an app's "app:<id>"),
+    /// if the vault keeps it granted to it; None if not, or it's gone.
+    pub(crate) fn value_for(&self, id: &str, grantee: &str) -> Result<Option<Zeroizing<String>>, VaultError> {
+        let inner = self.lock();
+        let key = Self::grant_key(&inner)?;
+        let vmk = Self::open_vmk(&inner)?;
+        let db = Self::db(&inner)?;
+        let exists: Option<String> = db.query_row("SELECT id FROM secrets WHERE id = ?1", [id], |row| row.get(0)).optional()?;
+        if exists.is_none() || !Self::is_granted(&inner, &key, id, grantee)? {
+            return Ok(None);
+        }
+        Ok(Self::values_of(db, &inner.vault_id, vmk, id)?.into_iter().next().map(|value| value.value))
     }
 
     /// Every variable of the secrets `names` (by name, any case), for one of
@@ -1132,24 +1214,29 @@ impl Vault {
                 .optional()?;
             let Some((id, name)) = found else { return Err(Refusal::NotYours(asked.trim().to_owned())) };
             // Said as for a name the vault doesn't have: nothing shows through.
-            if !Self::is_granted(&inner, &key, &id, agent)? {
+            let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else {
                 return Err(Refusal::NotYours(asked.trim().to_owned()));
-            }
+            };
             let public = Self::public_variables(db, &id)?;
             for value in Self::values_of(db, &inner.vault_id, vmk, &id)? {
-                if let Some(other) = variables.iter().find(|other| other.variable == value.variable) {
-                    return Err(Refusal::Said(format!(
-                        "{} and {name} both set {}: use one of them per command.",
-                        other.secret, value.variable
-                    )));
+                // Its own name, and any other the grant gives it.
+                let names = std::iter::once(value.variable.clone())
+                    .chain(aliases.iter().filter(|(_, variable)| **variable == value.variable).map(|(alias, _)| alias.clone()));
+                for variable in names.collect::<Vec<_>>() {
+                    if let Some(other) = variables.iter().find(|other| other.variable == variable) {
+                        return Err(Refusal::Said(format!(
+                            "{} and {name} both set {variable}: use one of them per command.",
+                            other.secret
+                        )));
+                    }
+                    variables.push(factory_agent::SecretVariable {
+                        secret: name.clone(),
+                        public: public.contains(&value.variable),
+                        variable,
+                        value: value.value.clone(),
+                        file: value.file,
+                    });
                 }
-                variables.push(factory_agent::SecretVariable {
-                    secret: name.clone(),
-                    public: public.contains(&value.variable),
-                    variable: value.variable,
-                    value: value.value,
-                    file: value.file,
-                });
             }
         }
         Ok(variables)

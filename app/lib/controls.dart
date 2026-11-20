@@ -1779,6 +1779,11 @@ class _LucidePainter extends CustomPainter {
       old.color != color || old.draw != draw;
 }
 
+void _drawUser(Canvas canvas, Paint paint) {
+  canvas.drawCircle(const Offset(12, 7), 4, paint);
+  _paths(const ['M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2'])(canvas, paint);
+}
+
 void _drawUsers(Canvas canvas, Paint paint) {
   const r4 = Radius.circular(4);
   canvas.drawCircle(const Offset(9, 7), 4, paint);
@@ -1939,6 +1944,7 @@ final _drawBrain = _paths(const [
 /// The Lucide icons this app can draw, by name.
 final _lucide = <String, void Function(Canvas, Paint)>{
   'users': _drawUsers,
+  'user': _drawUser,
   'list-checks': _drawListChecks,
   'x': _drawX,
   'brain': _drawBrain,
@@ -1974,6 +1980,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'pause': _drawPause,
   'film': _drawFilm,
   'chart-column': _drawChartColumn,
+  'upload': _drawUpload,
 };
 
 final _drawEllipsis = _paths(const [
@@ -2152,6 +2159,12 @@ final _drawTerminal = _paths(const ['m4 17 6-6-6-6', 'M12 19h8']);
 final _drawPlus = _paths(const ['M5 12h14', 'M12 5v14']);
 
 final _drawArrowDown = _paths(const ['M12 5v14', 'm19 12-7 7-7-7']);
+
+final _drawUpload = _paths(const [
+  'M12 3v12',
+  'm17 8-5-5-5 5',
+  'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4',
+]);
 
 /// An extension's 16px icon: the Lucide icon it names, or for one this app
 /// can't draw, the first letter of [name].

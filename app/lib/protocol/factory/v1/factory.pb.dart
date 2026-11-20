@@ -115,6 +115,13 @@ enum ClientMessage_Body {
   setZoom,
   useUsageReset,
   loadUsage,
+  installLocalApp,
+  setAppRunning,
+  uninstallApp,
+  grantApp,
+  subscribeApp,
+  setAppSecret,
+  shuffleAvatar,
   notSet
 }
 
@@ -214,6 +221,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     SetZoom? setZoom,
     UseUsageReset? useUsageReset,
     LoadUsage? loadUsage,
+    InstallLocalApp? installLocalApp,
+    SetAppRunning? setAppRunning,
+    UninstallApp? uninstallApp,
+    GrantApp? grantApp,
+    SubscribeApp? subscribeApp,
+    SetAppSecret? setAppSecret,
+    ShuffleAvatar? shuffleAvatar,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -315,6 +329,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (setZoom != null) result.setZoom = setZoom;
     if (useUsageReset != null) result.useUsageReset = useUsageReset;
     if (loadUsage != null) result.loadUsage = loadUsage;
+    if (installLocalApp != null) result.installLocalApp = installLocalApp;
+    if (setAppRunning != null) result.setAppRunning = setAppRunning;
+    if (uninstallApp != null) result.uninstallApp = uninstallApp;
+    if (grantApp != null) result.grantApp = grantApp;
+    if (subscribeApp != null) result.subscribeApp = subscribeApp;
+    if (setAppSecret != null) result.setAppSecret = setAppSecret;
+    if (shuffleAvatar != null) result.shuffleAvatar = shuffleAvatar;
     return result;
   }
 
@@ -422,6 +443,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     97: ClientMessage_Body.setZoom,
     98: ClientMessage_Body.useUsageReset,
     99: ClientMessage_Body.loadUsage,
+    100: ClientMessage_Body.installLocalApp,
+    101: ClientMessage_Body.setAppRunning,
+    102: ClientMessage_Body.uninstallApp,
+    103: ClientMessage_Body.grantApp,
+    104: ClientMessage_Body.subscribeApp,
+    105: ClientMessage_Body.setAppSecret,
+    106: ClientMessage_Body.shuffleAvatar,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -521,7 +549,14 @@ class ClientMessage extends $pb.GeneratedMessage {
       96,
       97,
       98,
-      99
+      99,
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -712,6 +747,20 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: UseUsageReset.$_createMessage)
     ..aOM<LoadUsage>(99, _omitFieldNames ? '' : 'loadUsage',
         subBuilder: LoadUsage.$_createMessage)
+    ..aOM<InstallLocalApp>(100, _omitFieldNames ? '' : 'installLocalApp',
+        subBuilder: InstallLocalApp.$_createMessage)
+    ..aOM<SetAppRunning>(101, _omitFieldNames ? '' : 'setAppRunning',
+        subBuilder: SetAppRunning.$_createMessage)
+    ..aOM<UninstallApp>(102, _omitFieldNames ? '' : 'uninstallApp',
+        subBuilder: UninstallApp.$_createMessage)
+    ..aOM<GrantApp>(103, _omitFieldNames ? '' : 'grantApp',
+        subBuilder: GrantApp.$_createMessage)
+    ..aOM<SubscribeApp>(104, _omitFieldNames ? '' : 'subscribeApp',
+        subBuilder: SubscribeApp.$_createMessage)
+    ..aOM<SetAppSecret>(105, _omitFieldNames ? '' : 'setAppSecret',
+        subBuilder: SetAppSecret.$_createMessage)
+    ..aOM<ShuffleAvatar>(106, _omitFieldNames ? '' : 'shuffleAvatar',
+        subBuilder: ShuffleAvatar.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -829,6 +878,13 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(97)
   @$pb.TagNumber(98)
   @$pb.TagNumber(99)
+  @$pb.TagNumber(100)
+  @$pb.TagNumber(101)
+  @$pb.TagNumber(102)
+  @$pb.TagNumber(103)
+  @$pb.TagNumber(104)
+  @$pb.TagNumber(105)
+  @$pb.TagNumber(106)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -923,6 +979,13 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(97)
   @$pb.TagNumber(98)
   @$pb.TagNumber(99)
+  @$pb.TagNumber(100)
+  @$pb.TagNumber(101)
+  @$pb.TagNumber(102)
+  @$pb.TagNumber(103)
+  @$pb.TagNumber(104)
+  @$pb.TagNumber(105)
+  @$pb.TagNumber(106)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1971,6 +2034,90 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearLoadUsage() => $_clearField(99);
   @$pb.TagNumber(99)
   LoadUsage ensureLoadUsage() => $_ensure(93);
+
+  /// Apps (see AppInfo). Installs an app from a .clapp file on the
+  /// Claktory's machine: without `approve`, answered with AppPermissions to
+  /// review (to the asker only); approved, installed.
+  @$pb.TagNumber(100)
+  InstallLocalApp get installLocalApp => $_getN(94);
+  @$pb.TagNumber(100)
+  set installLocalApp(InstallLocalApp value) => $_setField(100, value);
+  @$pb.TagNumber(100)
+  $core.bool hasInstallLocalApp() => $_has(94);
+  @$pb.TagNumber(100)
+  void clearInstallLocalApp() => $_clearField(100);
+  @$pb.TagNumber(100)
+  InstallLocalApp ensureInstallLocalApp() => $_ensure(94);
+
+  @$pb.TagNumber(101)
+  SetAppRunning get setAppRunning => $_getN(95);
+  @$pb.TagNumber(101)
+  set setAppRunning(SetAppRunning value) => $_setField(101, value);
+  @$pb.TagNumber(101)
+  $core.bool hasSetAppRunning() => $_has(95);
+  @$pb.TagNumber(101)
+  void clearSetAppRunning() => $_clearField(101);
+  @$pb.TagNumber(101)
+  SetAppRunning ensureSetAppRunning() => $_ensure(95);
+
+  @$pb.TagNumber(102)
+  UninstallApp get uninstallApp => $_getN(96);
+  @$pb.TagNumber(102)
+  set uninstallApp(UninstallApp value) => $_setField(102, value);
+  @$pb.TagNumber(102)
+  $core.bool hasUninstallApp() => $_has(96);
+  @$pb.TagNumber(102)
+  void clearUninstallApp() => $_clearField(102);
+  @$pb.TagNumber(102)
+  UninstallApp ensureUninstallApp() => $_ensure(96);
+
+  /// Gives an agent scopes of an app, or takes them back.
+  @$pb.TagNumber(103)
+  GrantApp get grantApp => $_getN(97);
+  @$pb.TagNumber(103)
+  set grantApp(GrantApp value) => $_setField(103, value);
+  @$pb.TagNumber(103)
+  $core.bool hasGrantApp() => $_has(97);
+  @$pb.TagNumber(103)
+  void clearGrantApp() => $_clearField(103);
+  @$pb.TagNumber(103)
+  GrantApp ensureGrantApp() => $_ensure(97);
+
+  /// Which agents hear an app's events of one kind.
+  @$pb.TagNumber(104)
+  SubscribeApp get subscribeApp => $_getN(98);
+  @$pb.TagNumber(104)
+  set subscribeApp(SubscribeApp value) => $_setField(104, value);
+  @$pb.TagNumber(104)
+  $core.bool hasSubscribeApp() => $_has(98);
+  @$pb.TagNumber(104)
+  void clearSubscribeApp() => $_clearField(104);
+  @$pb.TagNumber(104)
+  SubscribeApp ensureSubscribeApp() => $_ensure(98);
+
+  /// One of the secrets an app's setup asks for.
+  @$pb.TagNumber(105)
+  SetAppSecret get setAppSecret => $_getN(99);
+  @$pb.TagNumber(105)
+  set setAppSecret(SetAppSecret value) => $_setField(105, value);
+  @$pb.TagNumber(105)
+  $core.bool hasSetAppSecret() => $_has(99);
+  @$pb.TagNumber(105)
+  void clearSetAppSecret() => $_clearField(105);
+  @$pb.TagNumber(105)
+  SetAppSecret ensureSetAppSecret() => $_ensure(99);
+
+  /// New colours for the person's avatar (Workspace.person).
+  @$pb.TagNumber(106)
+  ShuffleAvatar get shuffleAvatar => $_getN(100);
+  @$pb.TagNumber(106)
+  set shuffleAvatar(ShuffleAvatar value) => $_setField(106, value);
+  @$pb.TagNumber(106)
+  $core.bool hasShuffleAvatar() => $_has(100);
+  @$pb.TagNumber(106)
+  void clearShuffleAvatar() => $_clearField(106);
+  @$pb.TagNumber(106)
+  ShuffleAvatar ensureShuffleAvatar() => $_ensure(100);
 }
 
 enum ServerMessage_Body {
@@ -2006,6 +2153,7 @@ enum ServerMessage_Body {
   connectChoices,
   usageResetAnswer,
   usageReport,
+  appPermissions,
   notSet
 }
 
@@ -2044,6 +2192,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     ConnectChoices? connectChoices,
     UsageResetAnswer? usageResetAnswer,
     UsageReport? usageReport,
+    AppPermissions? appPermissions,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -2079,6 +2228,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (connectChoices != null) result.connectChoices = connectChoices;
     if (usageResetAnswer != null) result.usageResetAnswer = usageResetAnswer;
     if (usageReport != null) result.usageReport = usageReport;
+    if (appPermissions != null) result.appPermissions = appPermissions;
     return result;
   }
 
@@ -2125,6 +2275,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     35: ServerMessage_Body.connectChoices,
     36: ServerMessage_Body.usageResetAnswer,
     37: ServerMessage_Body.usageReport,
+    38: ServerMessage_Body.appPermissions,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -2163,7 +2314,8 @@ class ServerMessage extends $pb.GeneratedMessage {
       34,
       35,
       36,
-      37
+      37,
+      38
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -2230,6 +2382,8 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: UsageResetAnswer.$_createMessage)
     ..aOM<UsageReport>(37, _omitFieldNames ? '' : 'usageReport',
         subBuilder: UsageReport.$_createMessage)
+    ..aOM<AppPermissions>(38, _omitFieldNames ? '' : 'appPermissions',
+        subBuilder: AppPermissions.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2286,6 +2440,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(35)
   @$pb.TagNumber(36)
   @$pb.TagNumber(37)
+  @$pb.TagNumber(38)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -2319,6 +2474,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(35)
   @$pb.TagNumber(36)
   @$pb.TagNumber(37)
+  @$pb.TagNumber(38)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -2707,6 +2863,18 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearUsageReport() => $_clearField(37);
   @$pb.TagNumber(37)
   UsageReport ensureUsageReport() => $_ensure(32);
+
+  /// The answer to InstallLocalApp without `approve`, to the asker only.
+  @$pb.TagNumber(38)
+  AppPermissions get appPermissions => $_getN(33);
+  @$pb.TagNumber(38)
+  set appPermissions(AppPermissions value) => $_setField(38, value);
+  @$pb.TagNumber(38)
+  $core.bool hasAppPermissions() => $_has(33);
+  @$pb.TagNumber(38)
+  void clearAppPermissions() => $_clearField(38);
+  @$pb.TagNumber(38)
+  AppPermissions ensureAppPermissions() => $_ensure(33);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -4194,6 +4362,7 @@ class CreateAgent extends $pb.GeneratedMessage {
     $core.String? color,
     $core.String? folderId,
     $core.String? role,
+    $core.String? leadId,
   }) {
     final result = CreateAgent._();
     if (projectId != null) result.projectId = projectId;
@@ -4204,6 +4373,7 @@ class CreateAgent extends $pb.GeneratedMessage {
     if (color != null) result.color = color;
     if (folderId != null) result.folderId = folderId;
     if (role != null) result.role = role;
+    if (leadId != null) result.leadId = leadId;
     return result;
   }
 
@@ -4228,6 +4398,7 @@ class CreateAgent extends $pb.GeneratedMessage {
     ..aOS(6, _omitFieldNames ? '' : 'color')
     ..aOS(7, _omitFieldNames ? '' : 'folderId')
     ..aOS(8, _omitFieldNames ? '' : 'role')
+    ..aOS(9, _omitFieldNames ? '' : 'leadId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4328,6 +4499,17 @@ class CreateAgent extends $pb.GeneratedMessage {
   $core.bool hasRole() => $_has(7);
   @$pb.TagNumber(8)
   void clearRole() => $_clearField(8);
+
+  /// The agent it reports to (see Agent.lead_id); empty for none. Refused
+  /// (INVALID_REQUEST) unless it's in the same project or an admin agent.
+  @$pb.TagNumber(9)
+  $core.String get leadId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set leadId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasLeadId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearLeadId() => $_clearField(9);
 }
 
 /// Changes an agent's settings. Unset fields stay as they are. Takes effect
@@ -4349,6 +4531,7 @@ class UpdateAgent extends $pb.GeneratedMessage {
     $core.String? avatarShape,
     $core.String? avatarFace,
     $core.String? role,
+    $core.String? leadId,
   }) {
     final result = UpdateAgent._();
     if (agentId != null) result.agentId = agentId;
@@ -4365,6 +4548,7 @@ class UpdateAgent extends $pb.GeneratedMessage {
     if (avatarShape != null) result.avatarShape = avatarShape;
     if (avatarFace != null) result.avatarFace = avatarFace;
     if (role != null) result.role = role;
+    if (leadId != null) result.leadId = leadId;
     return result;
   }
 
@@ -4396,6 +4580,7 @@ class UpdateAgent extends $pb.GeneratedMessage {
     ..aOS(12, _omitFieldNames ? '' : 'avatarShape')
     ..aOS(13, _omitFieldNames ? '' : 'avatarFace')
     ..aOS(14, _omitFieldNames ? '' : 'role')
+    ..aOS(15, _omitFieldNames ? '' : 'leadId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4563,6 +4748,20 @@ class UpdateAgent extends $pb.GeneratedMessage {
   $core.bool hasRole() => $_has(13);
   @$pb.TagNumber(14)
   void clearRole() => $_clearField(14);
+
+  /// The agent it reports to (see Agent.lead_id); empty for none. Refused
+  /// (INVALID_REQUEST) unless it's another agent, in the same project or an
+  /// admin agent, that doesn't report to this one, directly or through
+  /// others. Moving the agent to another project drops a lead that no
+  /// longer fits, and the leads of agents that reported to it.
+  @$pb.TagNumber(15)
+  $core.String get leadId => $_getSZ(14);
+  @$pb.TagNumber(15)
+  set leadId($core.String value) => $_setString(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasLeadId() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearLeadId() => $_clearField(15);
 }
 
 /// Turns an extension on or off for an agent, and/or sets one of its options.
@@ -10425,6 +10624,50 @@ class UseUsageReset extends $pb.GeneratedMessage {
   void clearResetId() => $_clearField(3);
 }
 
+/// Picks new colours for the person's avatar, always different from the
+/// ones it had. Answered with Ack; the new avatar reaches every device with
+/// Workspace.
+class ShuffleAvatar extends $pb.GeneratedMessage {
+  factory ShuffleAvatar() => ShuffleAvatar._();
+
+  ShuffleAvatar._();
+
+  factory ShuffleAvatar.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ShuffleAvatar()..mergeFromBuffer(data, registry);
+  factory ShuffleAvatar.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ShuffleAvatar()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ShuffleAvatar',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ShuffleAvatar.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ShuffleAvatar clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ShuffleAvatar copyWith(void Function(ShuffleAvatar) updates) =>
+      super.copyWith((message) => updates(message as ShuffleAvatar))
+          as ShuffleAvatar;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ShuffleAvatar() / ShuffleAvatar.new instead')
+  static ShuffleAvatar create() => ShuffleAvatar._();
+  static $pb.GeneratedMessage $_createMessage() => ShuffleAvatar._();
+  @$core.override
+  ShuffleAvatar createEmptyInstance() => ShuffleAvatar._();
+  @$core.pragma('dart2js:noInline')
+  static ShuffleAvatar getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ShuffleAvatar>(
+          ShuffleAvatar.$_createMessage);
+  static ShuffleAvatar? _defaultInstance;
+}
+
 class Ack extends $pb.GeneratedMessage {
   factory Ack() => Ack._();
 
@@ -10650,6 +10893,9 @@ class Workspace extends $pb.GeneratedMessage {
     VaultState? vault,
     ClaktoryAccount? account,
     ClaktoryMap? map,
+    $core.Iterable<AppInfo>? apps,
+    Person? person,
+    $core.bool? appsAvailable,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -10674,6 +10920,9 @@ class Workspace extends $pb.GeneratedMessage {
     if (vault != null) result.vault = vault;
     if (account != null) result.account = account;
     if (map != null) result.map = map;
+    if (apps != null) result.apps.addAll(apps);
+    if (person != null) result.person = person;
+    if (appsAvailable != null) result.appsAvailable = appsAvailable;
     return result;
   }
 
@@ -10724,6 +10973,11 @@ class Workspace extends $pb.GeneratedMessage {
         subBuilder: ClaktoryAccount.$_createMessage)
     ..aOM<ClaktoryMap>(22, _omitFieldNames ? '' : 'map',
         subBuilder: ClaktoryMap.$_createMessage)
+    ..pPM<AppInfo>(23, _omitFieldNames ? '' : 'apps',
+        subBuilder: AppInfo.$_createMessage)
+    ..aOM<Person>(24, _omitFieldNames ? '' : 'person',
+        subBuilder: Person.$_createMessage)
+    ..aOB(25, _omitFieldNames ? '' : 'appsAvailable')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10951,6 +11205,162 @@ class Workspace extends $pb.GeneratedMessage {
   void clearMap() => $_clearField(22);
   @$pb.TagNumber(22)
   ClaktoryMap ensureMap() => $_ensure(21);
+
+  /// The apps installed, by name.
+  @$pb.TagNumber(23)
+  $pb.PbList<AppInfo> get apps => $_getList(22);
+
+  /// The person this Claktory belongs to: their name and avatar, the same on
+  /// every device. Always set.
+  @$pb.TagNumber(24)
+  Person get person => $_getN(23);
+  @$pb.TagNumber(24)
+  set person(Person value) => $_setField(24, value);
+  @$pb.TagNumber(24)
+  $core.bool hasPerson() => $_has(23);
+  @$pb.TagNumber(24)
+  void clearPerson() => $_clearField(24);
+  @$pb.TagNumber(24)
+  Person ensurePerson() => $_ensure(23);
+
+  /// This Claktory offers apps (AppInfo): Settings → Apps shows only then.
+  /// While false, `apps` is empty, the Map has none and their requests are
+  /// refused.
+  @$pb.TagNumber(25)
+  $core.bool get appsAvailable => $_getBF(24);
+  @$pb.TagNumber(25)
+  set appsAvailable($core.bool value) => $_setBool(24, value);
+  @$pb.TagNumber(25)
+  $core.bool hasAppsAvailable() => $_has(24);
+  @$pb.TagNumber(25)
+  void clearAppsAvailable() => $_clearField(25);
+}
+
+/// The person a Claktory belongs to, as every device shows them.
+class Person extends $pb.GeneratedMessage {
+  factory Person({
+    $core.String? name,
+    $core.String? initials,
+    $core.String? avatarFrom,
+    $core.String? avatarTo,
+    $core.String? identityId,
+    $core.String? email,
+  }) {
+    final result = Person._();
+    if (name != null) result.name = name;
+    if (initials != null) result.initials = initials;
+    if (avatarFrom != null) result.avatarFrom = avatarFrom;
+    if (avatarTo != null) result.avatarTo = avatarTo;
+    if (identityId != null) result.identityId = identityId;
+    if (email != null) result.email = email;
+    return result;
+  }
+
+  Person._();
+
+  factory Person.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Person()..mergeFromBuffer(data, registry);
+  factory Person.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Person()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'Person',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: Person.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'initials')
+    ..aOS(3, _omitFieldNames ? '' : 'avatarFrom')
+    ..aOS(4, _omitFieldNames ? '' : 'avatarTo')
+    ..aOS(5, _omitFieldNames ? '' : 'identityId')
+    ..aOS(6, _omitFieldNames ? '' : 'email')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Person clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Person copyWith(void Function(Person) updates) =>
+      super.copyWith((message) => updates(message as Person)) as Person;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use Person() / Person.new instead')
+  static Person create() => Person._();
+  static $pb.GeneratedMessage $_createMessage() => Person._();
+  @$core.override
+  Person createEmptyInstance() => Person._();
+  @$core.pragma('dart2js:noInline')
+  static Person getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<Person>(Person.$_createMessage);
+  static Person? _defaultInstance;
+
+  /// `user.name` (Settings.user_name); empty when not given.
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  /// Their avatar: a circle with these initials in white on a diagonal
+  /// gradient from `avatar_from` (top-left) to `avatar_to` (bottom-right).
+  /// "MS" for "Matt Smith", "M" for "Matt"; empty when there's no name (and
+  /// no email): draw a person glyph instead.
+  @$pb.TagNumber(2)
+  $core.String get initials => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set initials($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasInitials() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearInitials() => $_clearField(2);
+
+  /// "#RRGGBB": one of 12 pairs, from a seed kept in the backend, so the
+  /// avatar never changes by itself. ShuffleAvatar picks another.
+  @$pb.TagNumber(3)
+  $core.String get avatarFrom => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set avatarFrom($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAvatarFrom() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAvatarFrom() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get avatarTo => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set avatarTo($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasAvatarTo() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAvatarTo() => $_clearField(4);
+
+  /// Who they are beyond this Claktory, for signed devices and messaging
+  /// between Claktories later: "acct:<account id>@<service host>", and the
+  /// account's verified email. Empty unless this Claktory is signed in to
+  /// its account.
+  @$pb.TagNumber(5)
+  $core.String get identityId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set identityId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasIdentityId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearIdentityId() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get email => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set email($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasEmail() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearEmail() => $_clearField(6);
 }
 
 /// A Workspace as a change to the last one this app was sent (a Workspace or
@@ -16033,6 +16443,10 @@ class Agent extends $pb.GeneratedMessage {
     $core.String? role,
     ViewNode? layout,
     $core.String? defaultPrompt,
+    $core.Iterable<$fixnum.Int64>? waitingSeqs,
+    $core.String? leadId,
+    $core.String? usageWait,
+    $fixnum.Int64? usageWaitUntilMs,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -16069,6 +16483,10 @@ class Agent extends $pb.GeneratedMessage {
     if (role != null) result.role = role;
     if (layout != null) result.layout = layout;
     if (defaultPrompt != null) result.defaultPrompt = defaultPrompt;
+    if (waitingSeqs != null) result.waitingSeqs.addAll(waitingSeqs);
+    if (leadId != null) result.leadId = leadId;
+    if (usageWait != null) result.usageWait = usageWait;
+    if (usageWaitUntilMs != null) result.usageWaitUntilMs = usageWaitUntilMs;
     return result;
   }
 
@@ -16127,6 +16545,11 @@ class Agent extends $pb.GeneratedMessage {
     ..aOM<ViewNode>(30, _omitFieldNames ? '' : 'layout',
         subBuilder: ViewNode.$_createMessage)
     ..aOS(31, _omitFieldNames ? '' : 'defaultPrompt')
+    ..p<$fixnum.Int64>(
+        32, _omitFieldNames ? '' : 'waitingSeqs', $pb.PbFieldType.KU6)
+    ..aOS(33, _omitFieldNames ? '' : 'leadId')
+    ..aOS(34, _omitFieldNames ? '' : 'usageWait')
+    ..aInt64(35, _omitFieldNames ? '' : 'usageWaitUntilMs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -16476,6 +16899,56 @@ class Agent extends $pb.GeneratedMessage {
   $core.bool hasDefaultPrompt() => $_has(30);
   @$pb.TagNumber(31)
   void clearDefaultPrompt() => $_clearField(31);
+
+  /// The seqs of the entries in its conversation that wait for the person's
+  /// answer, oldest first: its pending SecretRequest, ConnectProposal and
+  /// Proposal (to Rivet) entries. Empty when nothing waits. The Workspace is
+  /// sent again whenever one is made, decided, withdrawn or expires.
+  @$pb.TagNumber(32)
+  $pb.PbList<$fixnum.Int64> get waitingSeqs => $_getList(31);
+
+  /// The agent it reports to, its lead, which can read how it's set up (its
+  /// settings, extensions, secrets by name, monitors; never its tools):
+  /// another agent in its project, or an admin agent. Empty when it has none.
+  /// Admin agents lead every agent anyway, without it.
+  @$pb.TagNumber(33)
+  $core.String get leadId => $_getSZ(32);
+  @$pb.TagNumber(33)
+  set leadId($core.String value) => $_setString(32, value);
+  @$pb.TagNumber(33)
+  $core.bool hasLeadId() => $_has(32);
+  @$pb.TagNumber(33)
+  void clearLeadId() => $_clearField(33);
+
+  /// Its run is held up because none of the accounts that can serve its model
+  /// can take a request now (all at their usage limit, or out of credit): what
+  /// it waits for, in one line, e.g. "Waiting for your Claude usage to reset
+  /// at Fri 18:00". Empty when it isn't held up. Meanwhile `status` stays
+  /// WORKING (its run is open; messages queue as usual, and Stop ends it), and
+  /// its character sleeps. It asks again by itself at `usage_wait_until_ms`, or
+  /// sooner when the person adds an account, uses a usage reset, tries a key
+  /// again or changes its model. Unrelated to `waiting_seqs`, which are
+  /// questions for the person.
+  @$pb.TagNumber(34)
+  $core.String get usageWait => $_getSZ(33);
+  @$pb.TagNumber(34)
+  set usageWait($core.String value) => $_setString(33, value);
+  @$pb.TagNumber(34)
+  $core.bool hasUsageWait() => $_has(33);
+  @$pb.TagNumber(34)
+  void clearUsageWait() => $_clearField(34);
+
+  /// When the agent asks again by itself, in ms since 1970 (the first account's
+  /// reset plus a few seconds' margin is when it actually does); 0 when it
+  /// waits for the person (out of credit) or isn't held up.
+  @$pb.TagNumber(35)
+  $fixnum.Int64 get usageWaitUntilMs => $_getI64(34);
+  @$pb.TagNumber(35)
+  set usageWaitUntilMs($fixnum.Int64 value) => $_setInt64(34, value);
+  @$pb.TagNumber(35)
+  $core.bool hasUsageWaitUntilMs() => $_has(34);
+  @$pb.TagNumber(35)
+  void clearUsageWaitUntilMs() => $_clearField(35);
 }
 
 class SlashCommand extends $pb.GeneratedMessage {
@@ -19286,11 +19759,13 @@ class SecretGrant extends $pb.GeneratedMessage {
     $core.String? agentId,
     $fixnum.Int64? grantedMs,
     $core.int? runningTasks,
+    $core.Iterable<$core.MapEntry<$core.String, $core.String>>? aliases,
   }) {
     final result = SecretGrant._();
     if (agentId != null) result.agentId = agentId;
     if (grantedMs != null) result.grantedMs = grantedMs;
     if (runningTasks != null) result.runningTasks = runningTasks;
+    if (aliases != null) result.aliases.addEntries(aliases);
     return result;
   }
 
@@ -19311,6 +19786,11 @@ class SecretGrant extends $pb.GeneratedMessage {
     ..aInt64(2, _omitFieldNames ? '' : 'grantedMs')
     ..aI(3, _omitFieldNames ? '' : 'runningTasks',
         fieldType: $pb.PbFieldType.OU3)
+    ..m<$core.String, $core.String>(4, _omitFieldNames ? '' : 'aliases',
+        entryClassName: 'SecretGrant.AliasesEntry',
+        keyFieldType: $pb.PbFieldType.OS,
+        valueFieldType: $pb.PbFieldType.OS,
+        packageName: const $pb.PackageName('factory.v1'))
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -19363,6 +19843,12 @@ class SecretGrant extends $pb.GeneratedMessage {
   $core.bool hasRunningTasks() => $_has(2);
   @$pb.TagNumber(3)
   void clearRunningTasks() => $_clearField(3);
+
+  /// Other names this agent's commands get the secret's values under, as
+  /// the request it answered asked (`CLOUDFLARE_API_TOKEN` → the secret's
+  /// `CF_CLAKTORY_DNS`); besides the secret's own names. Empty for most.
+  @$pb.TagNumber(4)
+  $pb.PbMap<$core.String, $core.String> get aliases => $_getMap(3);
 }
 
 /// A variable with its value, in requests from the app and in SecretValue.
@@ -20326,6 +20812,8 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     $core.String? secretId,
     $core.String? name,
     $core.String? description,
+    $core.Iterable<$core.MapEntry<$core.String, $core.String>>? aliases,
+    $core.bool? asIs,
   }) {
     final result = DecideSecretRequest._();
     if (agentId != null) result.agentId = agentId;
@@ -20337,6 +20825,8 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     if (secretId != null) result.secretId = secretId;
     if (name != null) result.name = name;
     if (description != null) result.description = description;
+    if (aliases != null) result.aliases.addEntries(aliases);
+    if (asIs != null) result.asIs = asIs;
     return result;
   }
 
@@ -20364,6 +20854,12 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     ..aOS(7, _omitFieldNames ? '' : 'secretId')
     ..aOS(8, _omitFieldNames ? '' : 'name')
     ..aOS(9, _omitFieldNames ? '' : 'description')
+    ..m<$core.String, $core.String>(10, _omitFieldNames ? '' : 'aliases',
+        entryClassName: 'DecideSecretRequest.AliasesEntry',
+        keyFieldType: $pb.PbFieldType.OS,
+        valueFieldType: $pb.PbFieldType.OS,
+        packageName: const $pb.PackageName('factory.v1'))
+    ..aOB(11, _omitFieldNames ? '' : 'asIs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -20468,6 +20964,27 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
   $core.bool hasDescription() => $_has(8);
   @$pb.TagNumber(9)
   void clearDescription() => $_clearField(9);
+
+  /// Giving an existing secret (`secret_id`) whose variables aren't the ones
+  /// the request named: the names the agent's commands also get, each the
+  /// value of one of the secret's variables (requested name → the secret's
+  /// variable, {"CLOUDFLARE_API_TOKEN": "CF_CLAKTORY_DNS"}). Kept with the
+  /// grant (SecretGrant.aliases).
+  @$pb.TagNumber(10)
+  $pb.PbMap<$core.String, $core.String> get aliases => $_getMap(9);
+
+  /// Give the existing secret with its own variable names only. With
+  /// neither this nor `aliases`, a single missing name and a single unused
+  /// variable are paired by themselves; any other mismatch is refused,
+  /// saying so.
+  @$pb.TagNumber(11)
+  $core.bool get asIs => $_getBF(10);
+  @$pb.TagNumber(11)
+  set asIs($core.bool value) => $_setBool(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasAsIs() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearAsIs() => $_clearField(11);
 }
 
 /// Who used a secret and when, newest first; `id` empty for every secret.
@@ -21220,6 +21737,7 @@ class SecretRequest extends $pb.GeneratedMessage {
     $core.String? comment,
     $core.String? givenSecretId,
     $core.String? givenSecretName,
+    $fixnum.Int64? updatedMs,
   }) {
     final result = SecretRequest._();
     if (id != null) result.id = id;
@@ -21233,6 +21751,7 @@ class SecretRequest extends $pb.GeneratedMessage {
     if (comment != null) result.comment = comment;
     if (givenSecretId != null) result.givenSecretId = givenSecretId;
     if (givenSecretName != null) result.givenSecretName = givenSecretName;
+    if (updatedMs != null) result.updatedMs = updatedMs;
     return result;
   }
 
@@ -21262,6 +21781,7 @@ class SecretRequest extends $pb.GeneratedMessage {
     ..aOS(9, _omitFieldNames ? '' : 'comment')
     ..aOS(10, _omitFieldNames ? '' : 'givenSecretId')
     ..aOS(11, _omitFieldNames ? '' : 'givenSecretName')
+    ..aInt64(12, _omitFieldNames ? '' : 'updatedMs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -21360,7 +21880,8 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(7)
   void clearState() => $_clearField(7);
 
-  /// When it was decided, or expired, in ms since 1970; 0 while pending.
+  /// When it was decided, expired or withdrawn, in ms since 1970; 0 while
+  /// pending.
   @$pb.TagNumber(8)
   $fixnum.Int64 get decidedMs => $_getI64(7);
   @$pb.TagNumber(8)
@@ -21370,7 +21891,8 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(8)
   void clearDecidedMs() => $_clearField(8);
 
-  /// The person's comment; may be empty.
+  /// The person's comment, or the agent's reason for withdrawing it; may be
+  /// empty.
   @$pb.TagNumber(9)
   $core.String get comment => $_getSZ(8);
   @$pb.TagNumber(9)
@@ -21398,6 +21920,17 @@ class SecretRequest extends $pb.GeneratedMessage {
   $core.bool hasGivenSecretName() => $_has(10);
   @$pb.TagNumber(11)
   void clearGivenSecretName() => $_clearField(11);
+
+  /// When the agent last changed it (its description, reason or variables),
+  /// in ms since 1970; 0 if never.
+  @$pb.TagNumber(12)
+  $fixnum.Int64 get updatedMs => $_getI64(11);
+  @$pb.TagNumber(12)
+  set updatedMs($fixnum.Int64 value) => $_setInt64(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasUpdatedMs() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearUpdatedMs() => $_clearField(12);
 }
 
 class NewSecret extends $pb.GeneratedMessage {
@@ -22052,6 +22585,7 @@ class MapNode extends $pb.GeneratedMessage {
     $core.Iterable<MapBadge>? badges,
     $core.String? refId,
     $core.String? projectId,
+    $core.String? icon,
   }) {
     final result = MapNode._();
     if (id != null) result.id = id;
@@ -22064,6 +22598,7 @@ class MapNode extends $pb.GeneratedMessage {
     if (badges != null) result.badges.addAll(badges);
     if (refId != null) result.refId = refId;
     if (projectId != null) result.projectId = projectId;
+    if (icon != null) result.icon = icon;
     return result;
   }
 
@@ -22092,6 +22627,7 @@ class MapNode extends $pb.GeneratedMessage {
         subBuilder: MapBadge.$_createMessage)
     ..aOS(9, _omitFieldNames ? '' : 'refId')
     ..aOS(10, _omitFieldNames ? '' : 'projectId')
+    ..aOS(11, _omitFieldNames ? '' : 'icon')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22117,7 +22653,8 @@ class MapNode extends $pb.GeneratedMessage {
   /// Unique in the map and the same every time: "workspace",
   /// "project:<project id>", "folder:<project id>/<folder id>",
   /// "agent:<agent id>", "secret:<secret id>", "data:records" (Claktory's
-  /// records) and "data:agent:<agent id>" (an agent's own database).
+  /// records), "data:agent:<agent id>" (an agent's own database) and
+  /// "app:<app id>".
   @$pb.TagNumber(1)
   $core.String get id => $_getSZ(0);
   @$pb.TagNumber(1)
@@ -22218,6 +22755,16 @@ class MapNode extends $pb.GeneratedMessage {
   $core.bool hasProjectId() => $_has(9);
   @$pb.TagNumber(10)
   void clearProjectId() => $_clearField(10);
+
+  /// An app's icon, as AppInfo.icon; empty for other nodes.
+  @$pb.TagNumber(11)
+  $core.String get icon => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set icon($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasIcon() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearIcon() => $_clearField(11);
 }
 
 /// An extension an agent has on that grants reach or power.
@@ -22313,12 +22860,14 @@ class MapEdge extends $pb.GeneratedMessage {
     $core.String? toId,
     MapEdgeKind? kind,
     $core.bool? bothWays,
+    $core.String? label,
   }) {
     final result = MapEdge._();
     if (fromId != null) result.fromId = fromId;
     if (toId != null) result.toId = toId;
     if (kind != null) result.kind = kind;
     if (bothWays != null) result.bothWays = bothWays;
+    if (label != null) result.label = label;
     return result;
   }
 
@@ -22340,6 +22889,7 @@ class MapEdge extends $pb.GeneratedMessage {
     ..aE<MapEdgeKind>(3, _omitFieldNames ? '' : 'kind',
         enumValues: MapEdgeKind.values)
     ..aOB(4, _omitFieldNames ? '' : 'bothWays')
+    ..aOS(5, _omitFieldNames ? '' : 'label')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22400,6 +22950,18 @@ class MapEdge extends $pb.GeneratedMessage {
   $core.bool hasBothWays() => $_has(3);
   @$pb.TagNumber(4)
   void clearBothWays() => $_clearField(4);
+
+  /// APP: the scopes given, by their labels ("Send you Telegram messages ·
+  /// Read your messages to the bot"); HEARS: the events heard, the same way.
+  /// Empty for other kinds.
+  @$pb.TagNumber(5)
+  $core.String get label => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set label($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasLabel() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLabel() => $_clearField(5);
 }
 
 /// A service Claktory can connect.
@@ -24973,6 +25535,1358 @@ class UsageBucket extends $pb.GeneratedMessage {
   void clearTokens() => $_clearField(2);
   @$pb.TagNumber(2)
   UsageTokens ensureTokens() => $_ensure(1);
+}
+
+class AppInfo extends $pb.GeneratedMessage {
+  factory AppInfo({
+    $core.String? id,
+    $core.String? name,
+    $core.String? version,
+    $core.String? publisher,
+    AppTier? tier,
+    $core.String? icon,
+    AppState? state,
+    $core.String? stateDetail,
+    $core.Iterable<AppScopeSpec>? scopes,
+    $core.Iterable<AppEventKind>? events,
+    $core.Iterable<$core.String>? hosts,
+    $core.Iterable<AppGrant>? grants,
+    $core.Iterable<AppSubscription>? subscriptions,
+    $core.Iterable<AppSetupItem>? setup,
+    $core.String? status,
+    $core.String? description,
+    $fixnum.Int64? installedMs,
+    $core.String? publisherKey,
+  }) {
+    final result = AppInfo._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (version != null) result.version = version;
+    if (publisher != null) result.publisher = publisher;
+    if (tier != null) result.tier = tier;
+    if (icon != null) result.icon = icon;
+    if (state != null) result.state = state;
+    if (stateDetail != null) result.stateDetail = stateDetail;
+    if (scopes != null) result.scopes.addAll(scopes);
+    if (events != null) result.events.addAll(events);
+    if (hosts != null) result.hosts.addAll(hosts);
+    if (grants != null) result.grants.addAll(grants);
+    if (subscriptions != null) result.subscriptions.addAll(subscriptions);
+    if (setup != null) result.setup.addAll(setup);
+    if (status != null) result.status = status;
+    if (description != null) result.description = description;
+    if (installedMs != null) result.installedMs = installedMs;
+    if (publisherKey != null) result.publisherKey = publisherKey;
+    return result;
+  }
+
+  AppInfo._();
+
+  factory AppInfo.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppInfo()..mergeFromBuffer(data, registry);
+  factory AppInfo.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppInfo()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppInfo',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppInfo.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'version')
+    ..aOS(4, _omitFieldNames ? '' : 'publisher')
+    ..aE<AppTier>(5, _omitFieldNames ? '' : 'tier', enumValues: AppTier.values)
+    ..aOS(6, _omitFieldNames ? '' : 'icon')
+    ..aE<AppState>(7, _omitFieldNames ? '' : 'state',
+        enumValues: AppState.values)
+    ..aOS(8, _omitFieldNames ? '' : 'stateDetail')
+    ..pPM<AppScopeSpec>(9, _omitFieldNames ? '' : 'scopes',
+        subBuilder: AppScopeSpec.$_createMessage)
+    ..pPM<AppEventKind>(10, _omitFieldNames ? '' : 'events',
+        subBuilder: AppEventKind.$_createMessage)
+    ..pPS(11, _omitFieldNames ? '' : 'hosts')
+    ..pPM<AppGrant>(12, _omitFieldNames ? '' : 'grants',
+        subBuilder: AppGrant.$_createMessage)
+    ..pPM<AppSubscription>(13, _omitFieldNames ? '' : 'subscriptions',
+        subBuilder: AppSubscription.$_createMessage)
+    ..pPM<AppSetupItem>(14, _omitFieldNames ? '' : 'setup',
+        subBuilder: AppSetupItem.$_createMessage)
+    ..aOS(15, _omitFieldNames ? '' : 'status')
+    ..aOS(16, _omitFieldNames ? '' : 'description')
+    ..aInt64(17, _omitFieldNames ? '' : 'installedMs')
+    ..aOS(18, _omitFieldNames ? '' : 'publisherKey')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppInfo clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppInfo copyWith(void Function(AppInfo) updates) =>
+      super.copyWith((message) => updates(message as AppInfo)) as AppInfo;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppInfo() / AppInfo.new instead')
+  static AppInfo create() => AppInfo._();
+  static $pb.GeneratedMessage $_createMessage() => AppInfo._();
+  @$core.override
+  AppInfo createEmptyInstance() => AppInfo._();
+  @$core.pragma('dart2js:noInline')
+  static AppInfo getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AppInfo>(AppInfo.$_createMessage);
+  static AppInfo? _defaultInstance;
+
+  /// Lowercase letters and digits ("telegram"); its tools' names start with
+  /// it and "_".
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get version => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set version($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasVersion() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearVersion() => $_clearField(3);
+
+  /// Who made it, as its manifest says ("claktory").
+  @$pb.TagNumber(4)
+  $core.String get publisher => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set publisher($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasPublisher() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPublisher() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  AppTier get tier => $_getN(4);
+  @$pb.TagNumber(5)
+  set tier(AppTier value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTier() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTier() => $_clearField(5);
+
+  /// A Lucide icon name; empty for the default.
+  @$pb.TagNumber(6)
+  $core.String get icon => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set icon($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasIcon() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearIcon() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  AppState get state => $_getN(6);
+  @$pb.TagNumber(7)
+  set state(AppState value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasState() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearState() => $_clearField(7);
+
+  /// About the state, a sentence for the person: why it's paused or couldn't
+  /// start (the last error); empty when there's nothing to say.
+  @$pb.TagNumber(8)
+  $core.String get stateDetail => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set stateDetail($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasStateDetail() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearStateDetail() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $pb.PbList<AppScopeSpec> get scopes => $_getList(8);
+
+  @$pb.TagNumber(10)
+  $pb.PbList<AppEventKind> get events => $_getList(9);
+
+  /// The hosts it may reach over HTTPS ("api.telegram.org").
+  @$pb.TagNumber(11)
+  $pb.PbList<$core.String> get hosts => $_getList(10);
+
+  /// The agents given scopes of it.
+  @$pb.TagNumber(12)
+  $pb.PbList<AppGrant> get grants => $_getList(11);
+
+  /// One for each of its event kinds that some agent hears.
+  @$pb.TagNumber(13)
+  $pb.PbList<AppSubscription> get subscriptions => $_getList(12);
+
+  /// What its setup asks for, done or not.
+  @$pb.TagNumber(14)
+  $pb.PbList<AppSetupItem> get setup => $_getList(13);
+
+  /// The app's own line for the person, as it sets it: how to finish its
+  /// setup, or what's wrong ("To link your Telegram, open
+  /// https://t.me/…"). Plain text; addresses in it are links. Empty for none.
+  @$pb.TagNumber(15)
+  $core.String get status => $_getSZ(14);
+  @$pb.TagNumber(15)
+  set status($core.String value) => $_setString(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasStatus() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearStatus() => $_clearField(15);
+
+  @$pb.TagNumber(16)
+  $core.String get description => $_getSZ(15);
+  @$pb.TagNumber(16)
+  set description($core.String value) => $_setString(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasDescription() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearDescription() => $_clearField(16);
+
+  @$pb.TagNumber(17)
+  $fixnum.Int64 get installedMs => $_getI64(16);
+  @$pb.TagNumber(17)
+  set installedMs($fixnum.Int64 value) => $_setInt64(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasInstalledMs() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearInstalledMs() => $_clearField(17);
+
+  /// Its publisher's signing key, as "ed25519:" and its first 16 base64
+  /// characters.
+  @$pb.TagNumber(18)
+  $core.String get publisherKey => $_getSZ(17);
+  @$pb.TagNumber(18)
+  set publisherKey($core.String value) => $_setString(17, value);
+  @$pb.TagNumber(18)
+  $core.bool hasPublisherKey() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearPublisherKey() => $_clearField(18);
+}
+
+class AppScopeSpec extends $pb.GeneratedMessage {
+  factory AppScopeSpec({
+    $core.String? id,
+    $core.String? label,
+    $core.Iterable<$core.String>? tools,
+  }) {
+    final result = AppScopeSpec._();
+    if (id != null) result.id = id;
+    if (label != null) result.label = label;
+    if (tools != null) result.tools.addAll(tools);
+    return result;
+  }
+
+  AppScopeSpec._();
+
+  factory AppScopeSpec.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppScopeSpec()..mergeFromBuffer(data, registry);
+  factory AppScopeSpec.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppScopeSpec()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppScopeSpec',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppScopeSpec.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..pPS(3, _omitFieldNames ? '' : 'tools')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppScopeSpec clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppScopeSpec copyWith(void Function(AppScopeSpec) updates) =>
+      super.copyWith((message) => updates(message as AppScopeSpec))
+          as AppScopeSpec;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppScopeSpec() / AppScopeSpec.new instead')
+  static AppScopeSpec create() => AppScopeSpec._();
+  static $pb.GeneratedMessage $_createMessage() => AppScopeSpec._();
+  @$core.override
+  AppScopeSpec createEmptyInstance() => AppScopeSpec._();
+  @$core.pragma('dart2js:noInline')
+  static AppScopeSpec getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppScopeSpec>(
+          AppScopeSpec.$_createMessage);
+  static AppScopeSpec? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// What it lets an agent do, for the person ("Send you Telegram messages").
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// The tools it gives.
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get tools => $_getList(2);
+}
+
+class AppEventKind extends $pb.GeneratedMessage {
+  factory AppEventKind({
+    $core.String? kind,
+    $core.String? label,
+    $core.String? scope,
+  }) {
+    final result = AppEventKind._();
+    if (kind != null) result.kind = kind;
+    if (label != null) result.label = label;
+    if (scope != null) result.scope = scope;
+    return result;
+  }
+
+  AppEventKind._();
+
+  factory AppEventKind.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppEventKind()..mergeFromBuffer(data, registry);
+  factory AppEventKind.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppEventKind()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppEventKind',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppEventKind.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'kind')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aOS(3, _omitFieldNames ? '' : 'scope')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppEventKind clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppEventKind copyWith(void Function(AppEventKind) updates) =>
+      super.copyWith((message) => updates(message as AppEventKind))
+          as AppEventKind;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppEventKind() / AppEventKind.new instead')
+  static AppEventKind create() => AppEventKind._();
+  static $pb.GeneratedMessage $_createMessage() => AppEventKind._();
+  @$core.override
+  AppEventKind createEmptyInstance() => AppEventKind._();
+  @$core.pragma('dart2js:noInline')
+  static AppEventKind getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppEventKind>(
+          AppEventKind.$_createMessage);
+  static AppEventKind? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get kind => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set kind($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKind() => $_clearField(1);
+
+  /// For the person ("A message you send the bot").
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// The scope an agent needs to hear it.
+  @$pb.TagNumber(3)
+  $core.String get scope => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set scope($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasScope() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearScope() => $_clearField(3);
+}
+
+class AppGrant extends $pb.GeneratedMessage {
+  factory AppGrant({
+    $core.String? agentId,
+    $core.Iterable<$core.String>? scopes,
+  }) {
+    final result = AppGrant._();
+    if (agentId != null) result.agentId = agentId;
+    if (scopes != null) result.scopes.addAll(scopes);
+    return result;
+  }
+
+  AppGrant._();
+
+  factory AppGrant.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppGrant()..mergeFromBuffer(data, registry);
+  factory AppGrant.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppGrant()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppGrant',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppGrant.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..pPS(2, _omitFieldNames ? '' : 'scopes')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppGrant clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppGrant copyWith(void Function(AppGrant) updates) =>
+      super.copyWith((message) => updates(message as AppGrant)) as AppGrant;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppGrant() / AppGrant.new instead')
+  static AppGrant create() => AppGrant._();
+  static $pb.GeneratedMessage $_createMessage() => AppGrant._();
+  @$core.override
+  AppGrant createEmptyInstance() => AppGrant._();
+  @$core.pragma('dart2js:noInline')
+  static AppGrant getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AppGrant>(AppGrant.$_createMessage);
+  static AppGrant? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get scopes => $_getList(1);
+}
+
+class AppSubscription extends $pb.GeneratedMessage {
+  factory AppSubscription({
+    $core.String? eventKind,
+    $core.Iterable<$core.String>? agentIds,
+  }) {
+    final result = AppSubscription._();
+    if (eventKind != null) result.eventKind = eventKind;
+    if (agentIds != null) result.agentIds.addAll(agentIds);
+    return result;
+  }
+
+  AppSubscription._();
+
+  factory AppSubscription.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppSubscription()..mergeFromBuffer(data, registry);
+  factory AppSubscription.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppSubscription()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppSubscription',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppSubscription.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'eventKind')
+    ..pPS(2, _omitFieldNames ? '' : 'agentIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppSubscription clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppSubscription copyWith(void Function(AppSubscription) updates) =>
+      super.copyWith((message) => updates(message as AppSubscription))
+          as AppSubscription;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppSubscription() / AppSubscription.new instead')
+  static AppSubscription create() => AppSubscription._();
+  static $pb.GeneratedMessage $_createMessage() => AppSubscription._();
+  @$core.override
+  AppSubscription createEmptyInstance() => AppSubscription._();
+  @$core.pragma('dart2js:noInline')
+  static AppSubscription getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppSubscription>(
+          AppSubscription.$_createMessage);
+  static AppSubscription? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get eventKind => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set eventKind($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasEventKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearEventKind() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get agentIds => $_getList(1);
+}
+
+class AppSetupItem extends $pb.GeneratedMessage {
+  factory AppSetupItem({
+    AppSetupKind? kind,
+    $core.String? name,
+    $core.String? label,
+    $core.String? description,
+    $core.bool? done,
+  }) {
+    final result = AppSetupItem._();
+    if (kind != null) result.kind = kind;
+    if (name != null) result.name = name;
+    if (label != null) result.label = label;
+    if (description != null) result.description = description;
+    if (done != null) result.done = done;
+    return result;
+  }
+
+  AppSetupItem._();
+
+  factory AppSetupItem.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppSetupItem()..mergeFromBuffer(data, registry);
+  factory AppSetupItem.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppSetupItem()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppSetupItem',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppSetupItem.$_createMessage)
+    ..aE<AppSetupKind>(1, _omitFieldNames ? '' : 'kind',
+        enumValues: AppSetupKind.values)
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'label')
+    ..aOS(4, _omitFieldNames ? '' : 'description')
+    ..aOB(5, _omitFieldNames ? '' : 'done')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppSetupItem clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppSetupItem copyWith(void Function(AppSetupItem) updates) =>
+      super.copyWith((message) => updates(message as AppSetupItem))
+          as AppSetupItem;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppSetupItem() / AppSetupItem.new instead')
+  static AppSetupItem create() => AppSetupItem._();
+  static $pb.GeneratedMessage $_createMessage() => AppSetupItem._();
+  @$core.override
+  AppSetupItem createEmptyInstance() => AppSetupItem._();
+  @$core.pragma('dart2js:noInline')
+  static AppSetupItem getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppSetupItem>(
+          AppSetupItem.$_createMessage);
+  static AppSetupItem? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  AppSetupKind get kind => $_getN(0);
+  @$pb.TagNumber(1)
+  set kind(AppSetupKind value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKind() => $_clearField(1);
+
+  /// A secret's name, as the manifest gives it ("bot_token").
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get label => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set label($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLabel() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLabel() => $_clearField(3);
+
+  /// How to get it, for the person.
+  @$pb.TagNumber(4)
+  $core.String get description => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set description($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDescription() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDescription() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get done => $_getBF(4);
+  @$pb.TagNumber(5)
+  set done($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDone() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDone() => $_clearField(5);
+}
+
+/// Installs an app from a .clapp: its bytes (`content`, at most 16 MiB), or
+/// a file on the Claktory's machine (`path`, when `content` is empty). Ask
+/// first without `approve` for AppPermissions; then again with the same
+/// file, `approve` and its sha256.
+class InstallLocalApp extends $pb.GeneratedMessage {
+  factory InstallLocalApp({
+    $core.String? path,
+    $core.bool? approve,
+    $core.String? sha256,
+    $core.List<$core.int>? content,
+  }) {
+    final result = InstallLocalApp._();
+    if (path != null) result.path = path;
+    if (approve != null) result.approve = approve;
+    if (sha256 != null) result.sha256 = sha256;
+    if (content != null) result.content = content;
+    return result;
+  }
+
+  InstallLocalApp._();
+
+  factory InstallLocalApp.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      InstallLocalApp()..mergeFromBuffer(data, registry);
+  factory InstallLocalApp.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      InstallLocalApp()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'InstallLocalApp',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: InstallLocalApp.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..aOB(2, _omitFieldNames ? '' : 'approve')
+    ..aOS(3, _omitFieldNames ? '' : 'sha256')
+    ..a<$core.List<$core.int>>(
+        4, _omitFieldNames ? '' : 'content', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  InstallLocalApp clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  InstallLocalApp copyWith(void Function(InstallLocalApp) updates) =>
+      super.copyWith((message) => updates(message as InstallLocalApp))
+          as InstallLocalApp;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use InstallLocalApp() / InstallLocalApp.new instead')
+  static InstallLocalApp create() => InstallLocalApp._();
+  static $pb.GeneratedMessage $_createMessage() => InstallLocalApp._();
+  @$core.override
+  InstallLocalApp createEmptyInstance() => InstallLocalApp._();
+  @$core.pragma('dart2js:noInline')
+  static InstallLocalApp getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<InstallLocalApp>(
+          InstallLocalApp.$_createMessage);
+  static InstallLocalApp? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get approve => $_getBF(1);
+  @$pb.TagNumber(2)
+  set approve($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasApprove() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearApprove() => $_clearField(2);
+
+  /// With `approve`: AppPermissions.sha256, so what's installed is the file
+  /// the person reviewed.
+  @$pb.TagNumber(3)
+  $core.String get sha256 => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set sha256($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSha256() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSha256() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get content => $_getN(3);
+  @$pb.TagNumber(4)
+  set content($core.List<$core.int> value) => $_setBytes(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasContent() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearContent() => $_clearField(4);
+}
+
+/// What an app can reach, for the person to approve before it's installed.
+class AppPermissions extends $pb.GeneratedMessage {
+  factory AppPermissions({
+    $core.String? path,
+    $core.String? sha256,
+    $core.String? id,
+    $core.String? name,
+    $core.String? version,
+    $core.String? publisher,
+    AppTier? tier,
+    $core.String? publisherKey,
+    $core.String? description,
+    $core.String? icon,
+    $core.Iterable<$core.String>? hosts,
+    $core.Iterable<AppScopeSpec>? scopes,
+    $core.Iterable<AppEventKind>? events,
+    $core.Iterable<AppSetupItem>? secrets,
+    $core.int? memoryMb,
+    $core.int? storageMb,
+    $core.String? installedVersion,
+    $core.Iterable<$core.String>? added,
+  }) {
+    final result = AppPermissions._();
+    if (path != null) result.path = path;
+    if (sha256 != null) result.sha256 = sha256;
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (version != null) result.version = version;
+    if (publisher != null) result.publisher = publisher;
+    if (tier != null) result.tier = tier;
+    if (publisherKey != null) result.publisherKey = publisherKey;
+    if (description != null) result.description = description;
+    if (icon != null) result.icon = icon;
+    if (hosts != null) result.hosts.addAll(hosts);
+    if (scopes != null) result.scopes.addAll(scopes);
+    if (events != null) result.events.addAll(events);
+    if (secrets != null) result.secrets.addAll(secrets);
+    if (memoryMb != null) result.memoryMb = memoryMb;
+    if (storageMb != null) result.storageMb = storageMb;
+    if (installedVersion != null) result.installedVersion = installedVersion;
+    if (added != null) result.added.addAll(added);
+    return result;
+  }
+
+  AppPermissions._();
+
+  factory AppPermissions.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppPermissions()..mergeFromBuffer(data, registry);
+  factory AppPermissions.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppPermissions()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppPermissions',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppPermissions.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..aOS(2, _omitFieldNames ? '' : 'sha256')
+    ..aOS(3, _omitFieldNames ? '' : 'id')
+    ..aOS(4, _omitFieldNames ? '' : 'name')
+    ..aOS(5, _omitFieldNames ? '' : 'version')
+    ..aOS(6, _omitFieldNames ? '' : 'publisher')
+    ..aE<AppTier>(7, _omitFieldNames ? '' : 'tier', enumValues: AppTier.values)
+    ..aOS(8, _omitFieldNames ? '' : 'publisherKey')
+    ..aOS(9, _omitFieldNames ? '' : 'description')
+    ..aOS(10, _omitFieldNames ? '' : 'icon')
+    ..pPS(11, _omitFieldNames ? '' : 'hosts')
+    ..pPM<AppScopeSpec>(12, _omitFieldNames ? '' : 'scopes',
+        subBuilder: AppScopeSpec.$_createMessage)
+    ..pPM<AppEventKind>(13, _omitFieldNames ? '' : 'events',
+        subBuilder: AppEventKind.$_createMessage)
+    ..pPM<AppSetupItem>(14, _omitFieldNames ? '' : 'secrets',
+        subBuilder: AppSetupItem.$_createMessage)
+    ..aI(15, _omitFieldNames ? '' : 'memoryMb', fieldType: $pb.PbFieldType.OU3)
+    ..aI(16, _omitFieldNames ? '' : 'storageMb', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(17, _omitFieldNames ? '' : 'installedVersion')
+    ..pPS(18, _omitFieldNames ? '' : 'added')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppPermissions clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppPermissions copyWith(void Function(AppPermissions) updates) =>
+      super.copyWith((message) => updates(message as AppPermissions))
+          as AppPermissions;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppPermissions() / AppPermissions.new instead')
+  static AppPermissions create() => AppPermissions._();
+  static $pb.GeneratedMessage $_createMessage() => AppPermissions._();
+  @$core.override
+  AppPermissions createEmptyInstance() => AppPermissions._();
+  @$core.pragma('dart2js:noInline')
+  static AppPermissions getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppPermissions>(
+          AppPermissions.$_createMessage);
+  static AppPermissions? _defaultInstance;
+
+  /// InstallLocalApp.path; empty for one sent as `content`.
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  /// The file's SHA-256, hex.
+  @$pb.TagNumber(2)
+  $core.String get sha256 => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set sha256($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSha256() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSha256() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get id => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set id($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearId() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get name => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set name($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasName() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearName() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.String get version => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set version($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasVersion() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearVersion() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get publisher => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set publisher($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasPublisher() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearPublisher() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  AppTier get tier => $_getN(6);
+  @$pb.TagNumber(7)
+  set tier(AppTier value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasTier() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearTier() => $_clearField(7);
+
+  /// As AppInfo.publisher_key.
+  @$pb.TagNumber(8)
+  $core.String get publisherKey => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set publisherKey($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasPublisherKey() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearPublisherKey() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get description => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set description($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasDescription() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearDescription() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.String get icon => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set icon($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasIcon() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearIcon() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $pb.PbList<$core.String> get hosts => $_getList(10);
+
+  @$pb.TagNumber(12)
+  $pb.PbList<AppScopeSpec> get scopes => $_getList(11);
+
+  @$pb.TagNumber(13)
+  $pb.PbList<AppEventKind> get events => $_getList(12);
+
+  /// The secrets its setup will ask for (`done` false).
+  @$pb.TagNumber(14)
+  $pb.PbList<AppSetupItem> get secrets => $_getList(13);
+
+  @$pb.TagNumber(15)
+  $core.int get memoryMb => $_getIZ(14);
+  @$pb.TagNumber(15)
+  set memoryMb($core.int value) => $_setUnsignedInt32(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasMemoryMb() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearMemoryMb() => $_clearField(15);
+
+  @$pb.TagNumber(16)
+  $core.int get storageMb => $_getIZ(15);
+  @$pb.TagNumber(16)
+  set storageMb($core.int value) => $_setUnsignedInt32(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasStorageMb() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearStorageMb() => $_clearField(16);
+
+  /// When a version of it is installed: that version, and what this one can
+  /// reach that it couldn't, a sentence each ("Reach example.com."); empty
+  /// otherwise.
+  @$pb.TagNumber(17)
+  $core.String get installedVersion => $_getSZ(16);
+  @$pb.TagNumber(17)
+  set installedVersion($core.String value) => $_setString(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasInstalledVersion() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearInstalledVersion() => $_clearField(17);
+
+  @$pb.TagNumber(18)
+  $pb.PbList<$core.String> get added => $_getList(17);
+}
+
+class SetAppRunning extends $pb.GeneratedMessage {
+  factory SetAppRunning({
+    $core.String? id,
+    $core.bool? running,
+  }) {
+    final result = SetAppRunning._();
+    if (id != null) result.id = id;
+    if (running != null) result.running = running;
+    return result;
+  }
+
+  SetAppRunning._();
+
+  factory SetAppRunning.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAppRunning()..mergeFromBuffer(data, registry);
+  factory SetAppRunning.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAppRunning()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetAppRunning',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetAppRunning.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOB(2, _omitFieldNames ? '' : 'running')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAppRunning clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAppRunning copyWith(void Function(SetAppRunning) updates) =>
+      super.copyWith((message) => updates(message as SetAppRunning))
+          as SetAppRunning;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetAppRunning() / SetAppRunning.new instead')
+  static SetAppRunning create() => SetAppRunning._();
+  static $pb.GeneratedMessage $_createMessage() => SetAppRunning._();
+  @$core.override
+  SetAppRunning createEmptyInstance() => SetAppRunning._();
+  @$core.pragma('dart2js:noInline')
+  static SetAppRunning getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetAppRunning>(
+          SetAppRunning.$_createMessage);
+  static SetAppRunning? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get running => $_getBF(1);
+  @$pb.TagNumber(2)
+  set running($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRunning() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRunning() => $_clearField(2);
+}
+
+class UninstallApp extends $pb.GeneratedMessage {
+  factory UninstallApp({
+    $core.String? id,
+    $core.bool? keepData,
+  }) {
+    final result = UninstallApp._();
+    if (id != null) result.id = id;
+    if (keepData != null) result.keepData = keepData;
+    return result;
+  }
+
+  UninstallApp._();
+
+  factory UninstallApp.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UninstallApp()..mergeFromBuffer(data, registry);
+  factory UninstallApp.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UninstallApp()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UninstallApp',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UninstallApp.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOB(2, _omitFieldNames ? '' : 'keepData')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UninstallApp clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UninstallApp copyWith(void Function(UninstallApp) updates) =>
+      super.copyWith((message) => updates(message as UninstallApp))
+          as UninstallApp;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UninstallApp() / UninstallApp.new instead')
+  static UninstallApp create() => UninstallApp._();
+  static $pb.GeneratedMessage $_createMessage() => UninstallApp._();
+  @$core.override
+  UninstallApp createEmptyInstance() => UninstallApp._();
+  @$core.pragma('dart2js:noInline')
+  static UninstallApp getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UninstallApp>(
+          UninstallApp.$_createMessage);
+  static UninstallApp? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// Keep its stored data, for a later install.
+  @$pb.TagNumber(2)
+  $core.bool get keepData => $_getBF(1);
+  @$pb.TagNumber(2)
+  set keepData($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasKeepData() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearKeepData() => $_clearField(2);
+}
+
+/// Gives the agent these scopes of the app, in place of what it had; none
+/// takes the app away from it (and its subscriptions).
+class GrantApp extends $pb.GeneratedMessage {
+  factory GrantApp({
+    $core.String? appId,
+    $core.String? agentId,
+    $core.Iterable<$core.String>? scopes,
+  }) {
+    final result = GrantApp._();
+    if (appId != null) result.appId = appId;
+    if (agentId != null) result.agentId = agentId;
+    if (scopes != null) result.scopes.addAll(scopes);
+    return result;
+  }
+
+  GrantApp._();
+
+  factory GrantApp.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GrantApp()..mergeFromBuffer(data, registry);
+  factory GrantApp.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GrantApp()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GrantApp',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: GrantApp.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'appId')
+    ..aOS(2, _omitFieldNames ? '' : 'agentId')
+    ..pPS(3, _omitFieldNames ? '' : 'scopes')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantApp clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GrantApp copyWith(void Function(GrantApp) updates) =>
+      super.copyWith((message) => updates(message as GrantApp)) as GrantApp;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use GrantApp() / GrantApp.new instead')
+  static GrantApp create() => GrantApp._();
+  static $pb.GeneratedMessage $_createMessage() => GrantApp._();
+  @$core.override
+  GrantApp createEmptyInstance() => GrantApp._();
+  @$core.pragma('dart2js:noInline')
+  static GrantApp getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GrantApp>(GrantApp.$_createMessage);
+  static GrantApp? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get appId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set appId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAppId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAppId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get agentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set agentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAgentId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get scopes => $_getList(2);
+}
+
+/// The agents that hear the app's events of `event_kind`, in place of those
+/// that did; each needs the event's scope.
+class SubscribeApp extends $pb.GeneratedMessage {
+  factory SubscribeApp({
+    $core.String? appId,
+    $core.String? eventKind,
+    $core.Iterable<$core.String>? agentIds,
+  }) {
+    final result = SubscribeApp._();
+    if (appId != null) result.appId = appId;
+    if (eventKind != null) result.eventKind = eventKind;
+    if (agentIds != null) result.agentIds.addAll(agentIds);
+    return result;
+  }
+
+  SubscribeApp._();
+
+  factory SubscribeApp.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SubscribeApp()..mergeFromBuffer(data, registry);
+  factory SubscribeApp.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SubscribeApp()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SubscribeApp',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SubscribeApp.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'appId')
+    ..aOS(2, _omitFieldNames ? '' : 'eventKind')
+    ..pPS(3, _omitFieldNames ? '' : 'agentIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SubscribeApp clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SubscribeApp copyWith(void Function(SubscribeApp) updates) =>
+      super.copyWith((message) => updates(message as SubscribeApp))
+          as SubscribeApp;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SubscribeApp() / SubscribeApp.new instead')
+  static SubscribeApp create() => SubscribeApp._();
+  static $pb.GeneratedMessage $_createMessage() => SubscribeApp._();
+  @$core.override
+  SubscribeApp createEmptyInstance() => SubscribeApp._();
+  @$core.pragma('dart2js:noInline')
+  static SubscribeApp getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SubscribeApp>(
+          SubscribeApp.$_createMessage);
+  static SubscribeApp? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get appId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set appId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAppId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAppId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get eventKind => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set eventKind($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasEventKind() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearEventKind() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get agentIds => $_getList(2);
+}
+
+/// Keeps the value in the vault as a secret given to the app (never to an
+/// agent), replacing what it had; it never comes back to a client.
+class SetAppSecret extends $pb.GeneratedMessage {
+  factory SetAppSecret({
+    $core.String? appId,
+    $core.String? name,
+    $core.String? value,
+  }) {
+    final result = SetAppSecret._();
+    if (appId != null) result.appId = appId;
+    if (name != null) result.name = name;
+    if (value != null) result.value = value;
+    return result;
+  }
+
+  SetAppSecret._();
+
+  factory SetAppSecret.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAppSecret()..mergeFromBuffer(data, registry);
+  factory SetAppSecret.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetAppSecret()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetAppSecret',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetAppSecret.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'appId')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'value')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAppSecret clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetAppSecret copyWith(void Function(SetAppSecret) updates) =>
+      super.copyWith((message) => updates(message as SetAppSecret))
+          as SetAppSecret;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetAppSecret() / SetAppSecret.new instead')
+  static SetAppSecret create() => SetAppSecret._();
+  static $pb.GeneratedMessage $_createMessage() => SetAppSecret._();
+  @$core.override
+  SetAppSecret createEmptyInstance() => SetAppSecret._();
+  @$core.pragma('dart2js:noInline')
+  static SetAppSecret getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetAppSecret>(
+          SetAppSecret.$_createMessage);
+  static SetAppSecret? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get appId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set appId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAppId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAppId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get value => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set value($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasValue() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearValue() => $_clearField(3);
 }
 
 const $core.bool _omitFieldNames =

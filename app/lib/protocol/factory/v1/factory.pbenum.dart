@@ -563,7 +563,9 @@ class CharacterMood extends $pb.ProtobufEnum {
   static const CharacterMood CHARACTER_MOOD_NO_MODEL =
       CharacterMood._(6, _omitEnumNames ? '' : 'CHARACTER_MOOD_NO_MODEL');
 
-  /// Idle for 15 minutes or more. Only a look: it wakes at once for anything.
+  /// Idle for 15 minutes or more, or running but waiting out its accounts'
+  /// usage limits (Agent.usage_wait). Only a look: it wakes at once for
+  /// anything.
   static const CharacterMood CHARACTER_MOOD_ASLEEP =
       CharacterMood._(7, _omitEnumNames ? '' : 'CHARACTER_MOOD_ASLEEP');
 
@@ -648,16 +650,21 @@ class EventSource extends $pb.ProtobufEnum {
   static const EventSource EVENT_SOURCE_MONITOR =
       EventSource._(4, _omitEnumNames ? '' : 'EVENT_SOURCE_MONITOR');
 
+  /// An app (see AppInfo): `from` is its name, `from_id` its id.
+  static const EventSource EVENT_SOURCE_APP =
+      EventSource._(5, _omitEnumNames ? '' : 'EVENT_SOURCE_APP');
+
   static const $core.List<EventSource> values = <EventSource>[
     EVENT_SOURCE_UNSPECIFIED,
     EVENT_SOURCE_FACTORY,
     EVENT_SOURCE_AGENT,
     EVENT_SOURCE_TASK,
     EVENT_SOURCE_MONITOR,
+    EVENT_SOURCE_APP,
   ];
 
   static final $core.List<EventSource?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 4);
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
   static EventSource? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -730,11 +737,18 @@ class SecretRequestState extends $pb.ProtobufEnum {
       SecretRequestState._(
           3, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_DISMISSED');
 
-  /// Left unanswered too long (12 hours, or 10 of the agent's runs): it can't
-  /// be answered any more, and the agent was told. decided_ms says when.
+  /// Left unanswered 12 hours since it was made or last changed: it can't be
+  /// answered any more, and the agent was told. decided_ms says when.
   static const SecretRequestState SECRET_REQUEST_STATE_EXPIRED =
       SecretRequestState._(
           4, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_EXPIRED');
+
+  /// The agent took it back (secrets_request_cancel): it can't be answered
+  /// any more. decided_ms says when, and `comment` holds the agent's reason,
+  /// if it gave one.
+  static const SecretRequestState SECRET_REQUEST_STATE_WITHDRAWN =
+      SecretRequestState._(
+          5, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_WITHDRAWN');
 
   static const $core.List<SecretRequestState> values = <SecretRequestState>[
     SECRET_REQUEST_STATE_UNSPECIFIED,
@@ -742,10 +756,11 @@ class SecretRequestState extends $pb.ProtobufEnum {
     SECRET_REQUEST_STATE_GRANTED,
     SECRET_REQUEST_STATE_DISMISSED,
     SECRET_REQUEST_STATE_EXPIRED,
+    SECRET_REQUEST_STATE_WITHDRAWN,
   ];
 
   static final $core.List<SecretRequestState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 4);
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
   static SecretRequestState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -816,6 +831,11 @@ class MapNodeKind extends $pb.ProtobufEnum {
   static const MapNodeKind MAP_NODE_KIND_DATA =
       MapNodeKind._(6, _omitEnumNames ? '' : 'MAP_NODE_KIND_DATA');
 
+  /// An app installed (see AppInfo): label its name, detail its description
+  /// (or why it's in trouble), ref_id its id; at the top.
+  static const MapNodeKind MAP_NODE_KIND_APP =
+      MapNodeKind._(7, _omitEnumNames ? '' : 'MAP_NODE_KIND_APP');
+
   static const $core.List<MapNodeKind> values = <MapNodeKind>[
     MAP_NODE_KIND_UNSPECIFIED,
     MAP_NODE_KIND_WORKSPACE,
@@ -824,10 +844,11 @@ class MapNodeKind extends $pb.ProtobufEnum {
     MAP_NODE_KIND_AGENT,
     MAP_NODE_KIND_SECRET,
     MAP_NODE_KIND_DATA,
+    MAP_NODE_KIND_APP,
   ];
 
   static final $core.List<MapNodeKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 6);
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
   static MapNodeKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -843,7 +864,7 @@ class MapEdgeKind extends $pb.ProtobufEnum {
   static const MapEdgeKind MAP_EDGE_KIND_MESSAGES =
       MapEdgeKind._(1, _omitEnumNames ? '' : 'MAP_EDGE_KIND_MESSAGES');
 
-  /// From a secret to an agent that has it.
+  /// From a secret to an agent that has it, or to an app.
   static const MapEdgeKind MAP_EDGE_KIND_SECRET =
       MapEdgeKind._(2, _omitEnumNames ? '' : 'MAP_EDGE_KIND_SECRET');
 
@@ -858,16 +879,32 @@ class MapEdgeKind extends $pb.ProtobufEnum {
   static const MapEdgeKind MAP_EDGE_KIND_WRITES =
       MapEdgeKind._(4, _omitEnumNames ? '' : 'MAP_EDGE_KIND_WRITES');
 
+  /// From an app to an agent given scopes of it.
+  static const MapEdgeKind MAP_EDGE_KIND_APP =
+      MapEdgeKind._(5, _omitEnumNames ? '' : 'MAP_EDGE_KIND_APP');
+
+  /// From an app to an agent that hears its events.
+  static const MapEdgeKind MAP_EDGE_KIND_HEARS =
+      MapEdgeKind._(6, _omitEnumNames ? '' : 'MAP_EDGE_KIND_HEARS');
+
+  /// From an agent to its lead (Agent.lead_id). Only leads set in agents'
+  /// settings: an admin agent leading everyone isn't drawn.
+  static const MapEdgeKind MAP_EDGE_KIND_LEAD =
+      MapEdgeKind._(7, _omitEnumNames ? '' : 'MAP_EDGE_KIND_LEAD');
+
   static const $core.List<MapEdgeKind> values = <MapEdgeKind>[
     MAP_EDGE_KIND_UNSPECIFIED,
     MAP_EDGE_KIND_MESSAGES,
     MAP_EDGE_KIND_SECRET,
     MAP_EDGE_KIND_READS,
     MAP_EDGE_KIND_WRITES,
+    MAP_EDGE_KIND_APP,
+    MAP_EDGE_KIND_HEARS,
+    MAP_EDGE_KIND_LEAD,
   ];
 
   static final $core.List<MapEdgeKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 4);
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
   static MapEdgeKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1015,6 +1052,108 @@ class ConnectionStatus extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const ConnectionStatus._(super.value, super.name);
+}
+
+class AppTier extends $pb.ProtobufEnum {
+  static const AppTier APP_TIER_UNSPECIFIED =
+      AppTier._(0, _omitEnumNames ? '' : 'APP_TIER_UNSPECIFIED');
+
+  /// Made by Claktory: signed with Claktory's key.
+  static const AppTier APP_TIER_CLAKTORY =
+      AppTier._(1, _omitEnumNames ? '' : 'APP_TIER_CLAKTORY');
+  static const AppTier APP_TIER_VERIFIED =
+      AppTier._(2, _omitEnumNames ? '' : 'APP_TIER_VERIFIED');
+  static const AppTier APP_TIER_COMMUNITY =
+      AppTier._(3, _omitEnumNames ? '' : 'APP_TIER_COMMUNITY');
+
+  /// Installed from a file, signed by its own developer's key.
+  static const AppTier APP_TIER_LOCAL =
+      AppTier._(4, _omitEnumNames ? '' : 'APP_TIER_LOCAL');
+
+  static const $core.List<AppTier> values = <AppTier>[
+    APP_TIER_UNSPECIFIED,
+    APP_TIER_CLAKTORY,
+    APP_TIER_VERIFIED,
+    APP_TIER_COMMUNITY,
+    APP_TIER_LOCAL,
+  ];
+
+  static final $core.List<AppTier?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static AppTier? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppTier._(super.value, super.name);
+}
+
+class AppState extends $pb.ProtobufEnum {
+  static const AppState APP_STATE_UNSPECIFIED =
+      AppState._(0, _omitEnumNames ? '' : 'APP_STATE_UNSPECIFIED');
+
+  /// Turned off (SetAppRunning).
+  static const AppState APP_STATE_STOPPED =
+      AppState._(1, _omitEnumNames ? '' : 'APP_STATE_STOPPED');
+  static const AppState APP_STATE_STARTING =
+      AppState._(2, _omitEnumNames ? '' : 'APP_STATE_STARTING');
+  static const AppState APP_STATE_RUNNING =
+      AppState._(3, _omitEnumNames ? '' : 'APP_STATE_RUNNING');
+
+  /// Waiting for something in `setup`; it starts once that's done.
+  static const AppState APP_STATE_NEEDS_SETUP =
+      AppState._(4, _omitEnumNames ? '' : 'APP_STATE_NEEDS_SETUP');
+
+  /// It crashed three times in ten minutes: off until the person starts it
+  /// again (`state_detail` says why).
+  static const AppState APP_STATE_PAUSED_CRASHED =
+      AppState._(5, _omitEnumNames ? '' : 'APP_STATE_PAUSED_CRASHED');
+
+  /// It crashed and starts again shortly.
+  static const AppState APP_STATE_RESTARTING =
+      AppState._(6, _omitEnumNames ? '' : 'APP_STATE_RESTARTING');
+
+  /// Claktory can't run it here: the apps host is missing or failed
+  /// (`state_detail` says why).
+  static const AppState APP_STATE_UNAVAILABLE =
+      AppState._(7, _omitEnumNames ? '' : 'APP_STATE_UNAVAILABLE');
+
+  static const $core.List<AppState> values = <AppState>[
+    APP_STATE_UNSPECIFIED,
+    APP_STATE_STOPPED,
+    APP_STATE_STARTING,
+    APP_STATE_RUNNING,
+    APP_STATE_NEEDS_SETUP,
+    APP_STATE_PAUSED_CRASHED,
+    APP_STATE_RESTARTING,
+    APP_STATE_UNAVAILABLE,
+  ];
+
+  static final $core.List<AppState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static AppState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppState._(super.value, super.name);
+}
+
+class AppSetupKind extends $pb.ProtobufEnum {
+  static const AppSetupKind APP_SETUP_KIND_UNSPECIFIED =
+      AppSetupKind._(0, _omitEnumNames ? '' : 'APP_SETUP_KIND_UNSPECIFIED');
+
+  /// A secret to paste: SetAppSecret.
+  static const AppSetupKind APP_SETUP_KIND_SECRET =
+      AppSetupKind._(1, _omitEnumNames ? '' : 'APP_SETUP_KIND_SECRET');
+
+  static const $core.List<AppSetupKind> values = <AppSetupKind>[
+    APP_SETUP_KIND_UNSPECIFIED,
+    APP_SETUP_KIND_SECRET,
+  ];
+
+  static final $core.List<AppSetupKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 1);
+  static AppSetupKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppSetupKind._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

@@ -346,8 +346,10 @@ class MainFlutterWindow: NSWindow {
   }
 
   @objc func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-    guard takesFiles, !files(in: sender).isEmpty else { return [] }
-    windowChannel?.invokeMethod("filesOver", arguments: true)
+    let count = files(in: sender).count
+    guard takesFiles, count > 0 else { return [] }
+    // How many, for the conversation's drop overlay to say.
+    windowChannel?.invokeMethod("filesOver", arguments: count)
     return .copy
   }
 
@@ -356,13 +358,13 @@ class MainFlutterWindow: NSWindow {
   }
 
   @objc func draggingExited(_ sender: NSDraggingInfo?) {
-    windowChannel?.invokeMethod("filesOver", arguments: false)
+    windowChannel?.invokeMethod("filesOver", arguments: 0)
   }
 
   @objc func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
     let paths = files(in: sender)
     guard takesFiles, !paths.isEmpty else {
-      windowChannel?.invokeMethod("filesOver", arguments: false)
+      windowChannel?.invokeMethod("filesOver", arguments: 0)
       return false
     }
     windowChannel?.invokeMethod("filesDropped", arguments: paths)

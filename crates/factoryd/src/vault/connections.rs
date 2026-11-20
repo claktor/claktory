@@ -150,11 +150,12 @@ impl Vault {
         Ok(public_of(&kind, &meta))
     }
 
-    /// Keeps a newly connected service; returns its id and name, made from
-    /// `name` (" 2" if it's taken).
+    /// Keeps a newly connected service, described as what it reaches;
+    /// returns its id and name, made from `name` (" 2" if it's taken).
     pub(crate) fn add_connection(
         &self,
         name: &str,
+        description: &str,
         connector: &str,
         meta: &ConnectionMeta,
         control: &Control,
@@ -165,8 +166,8 @@ impl Vault {
             let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, &[])?;
             let now = now_ms();
             transaction.execute(
-                "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, meta)\n             VALUES (?1, ?2, '', 1, ?3, '', ?4, ?4, ?5, ?6, ?7)",
-                params![id, name, sealed_dek, now, KIND_CONNECTION, connector, json(meta)?],
+                "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, meta)\n             VALUES (?1, ?2, ?8, 1, ?3, '', ?4, ?4, ?5, ?6, ?7)",
+                params![id, name, sealed_dek, now, KIND_CONNECTION, connector, json(meta)?, description],
             )?;
             write_control(transaction, vault_id, vmk, &id, connector, control)?;
             Ok((id, name))

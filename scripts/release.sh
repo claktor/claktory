@@ -53,7 +53,7 @@ while (($#)); do
     *) usage ;;
   esac
 done
-if [[ "$APP_NAME" == "Factory Dev.app" && ( "$RELEASES" != "$HOME/.factory-dev/releases" || $ADHOC ) ]]; then usage; fi
+if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC; }; then usage; fi
 if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && [[ "$(signing_mode)" == adhoc ]]; then
   echo "a real release is signed with the Developer ID and notarized, and this Mac can't now: it needs the \"Developer ID Application\" identity and the App Store Connect key (scripts/sign-release.sh says where). An ad hoc app is another app to macOS, and can't read what the person's app keeps in the Keychain. Build it ad hoc anyway only on purpose, with --adhoc." >&2
   exit 1
@@ -97,13 +97,15 @@ PREVIOUS=""
 if [[ -f "$RELEASES/latest" ]]; then
   PREVIOUS="$RELEASES/$(cat "$RELEASES/latest")"
 fi
-if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]]; then
-  BACKEND="$PREVIOUS/factoryd"
+# The backend is factoryd and the apps host beside it (claktory-apps, which
+# factoryd runs from its own folder): they're built, reused and shipped together.
+if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]]; then
+  BACKEND="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
 else
-  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p factoryd
-  BACKEND="$ROOT/target/release/factoryd"
+  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p factoryd -p claktory-apps
+  BACKEND="$ROOT/target/release"
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
 # Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
@@ -114,7 +116,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-0.0.0}"
 partial="$RELEASES/$FACTORY_VERSION.partial"
 rm -rf "$partial"
 mkdir -p "$partial"
-cp "$BACKEND" "$partial/factoryd"
+cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$partial/"
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the

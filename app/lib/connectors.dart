@@ -5,6 +5,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
@@ -1117,29 +1118,41 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
         proposal.state == ConnectProposalState.CONNECT_PROPOSAL_STATE_DISMISSED;
     final decided = proposal.decidedMs.toInt();
     return [
-      Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: dismissed
-                  ? 'Dismissed'
-                  : proposal.secretName.isEmpty
-                  ? 'Connected $service'
-                  : 'Connected $service as ${proposal.secretName}',
-              style: TextStyle(
-                color: dismissed ? palette.textMuted : color,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            if (decided > 0)
-              TextSpan(
-                text:
-                    ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
-                style: TextStyle(color: palette.textFaint),
-              ),
+      // Who decided: the person.
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (true) ...[
+            const PersonAvatar(size: 16),
+            const SizedBox(width: Space.xs + 2),
           ],
-        ),
-        style: TextStyles.caption,
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: dismissed
+                        ? 'Dismissed'
+                        : proposal.secretName.isEmpty
+                        ? 'Connected $service'
+                        : 'Connected $service as ${proposal.secretName}',
+                    style: TextStyle(
+                      color: dismissed ? palette.textMuted : color,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (decided > 0)
+                    TextSpan(
+                      text:
+                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                      style: TextStyle(color: palette.textFaint),
+                    ),
+                ],
+              ),
+              style: TextStyles.caption,
+            ),
+          ),
+        ],
       ),
       if (proposal.comment.isNotEmpty) ...[
         const SizedBox(height: Space.xs),

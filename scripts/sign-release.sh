@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Signs a release of the real Claktory so macOS trusts it: the app
-# (Factory.app), the backend (factoryd) and the supervisor's app
-# (supervisor/Claktory Agents.app),
+# (Factory.app), the backend (factoryd), the apps host beside it
+# (claktory-apps) and the supervisor's app (supervisor/Claktory Agents.app),
 # with the Developer ID, the hardened runtime and a secure timestamp. Then it
 # notarizes both with Apple and staples the ticket to the app.
 # scripts/release.sh runs it on each release it builds; --dev releases stay
@@ -41,6 +41,8 @@ APP="$(find "$DIR" -maxdepth 1 -name '*.app' -type d | head -1)"
 [[ -n "$APP" ]] || { echo "$DIR has no app" >&2; exit 2; }
 SUPERVISOR="$DIR/supervisor/Claktory Agents.app"
 [[ -d "$SUPERVISOR" ]] || SUPERVISOR=""
+APPS_HOST="$DIR/claktory-apps"
+[[ -f "$APPS_HOST" ]] || APPS_HOST=""
 
 IDENTITY="$(developer_id_identity)"
 KEY=false
@@ -71,6 +73,12 @@ sign --entitlements "$ROOT/app/macos/Runner/Release.entitlements" "$APP"
 # The backend: a stable identifier (the linker's changes with every build),
 # so its designated requirement, which keychain items trust, survives updates.
 sign --identifier dev.factory.factoryd "$DIR/factoryd"
+# The apps host compiles apps to machine code as it loads them, which the
+# hardened runtime allows only with its entitlement (scripts/claktory-apps.entitlements).
+if [[ -n "$APPS_HOST" ]]; then
+  sign --identifier dev.factory.claktory-apps --entitlements "$ROOT/scripts/claktory-apps.entitlements" "$APPS_HOST"
+  codesign --verify --strict "$APPS_HOST"
+fi
 # The supervisor's app: its identity is its bundle's (dev.factory.supervisor),
 # which a Developer Tools grant keeps across reinstalls.
 if [[ -n "$SUPERVISOR" ]]; then
@@ -88,6 +96,7 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir "$STAGE/release"
 ditto "$APP" "$STAGE/release/$(basename "$APP")"
 cp "$DIR/factoryd" "$STAGE/release/factoryd"
+if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$STAGE/release/claktory-apps"; fi
 if [[ -n "$SUPERVISOR" ]]; then
   ditto "$SUPERVISOR" "$STAGE/release/supervisor/$(basename "$SUPERVISOR")"
 fi

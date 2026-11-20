@@ -446,9 +446,7 @@ fn store_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>) -> R
 
 /// SetLayout: the person arranged the agent's panes.
 pub(crate) fn set_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>) -> Result<(), RequestError> {
-    if factory.lock().config.agent(agent).is_none() {
-        return Err(RequestError::UnknownAgent(agent.to_owned()));
-    }
+    factory.known_agent(agent)?;
     if let Some(root) = &root {
         validate(root).map_err(RequestError::Layout)?;
     }

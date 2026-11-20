@@ -23,7 +23,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::factory::{Factory, RequestError, write_atomic};
+use crate::factory::{Factory, RequestError};
 use crate::home::Home;
 
 /// This build's version, stamped by the build scripts; "dev" otherwise.
@@ -41,13 +41,18 @@ const RESTART_DELAY: Duration = Duration::from_millis(300);
 /// How long a new backend has to serve an app that's trying to connect.
 const TRIAL: Duration = Duration::from_secs(30);
 
-/// Waits for the app to quit (forcing it after 10s), swaps the bundle, and
-/// reopens it; Factory Dev in the background, as always.
+/// Waits for the app to quit (forcing it after 10s), swaps the bundle (the
+/// old one moved aside until the new one is in place), and reopens it;
+/// Factory Dev in the background, as always.
 const SWAP_APP: &str = r#"app="$1"; new="$2"
 (
   for _ in $(seq 100); do pgrep -f "$app/Contents/MacOS/" >/dev/null || break; sleep 0.1; done
   pkill -f "$app/Contents/MacOS/"
-  rm -rf "$app.updating" && ditto "$new" "$app.updating" && rm -rf "$app" && mv "$app.updating" "$app" || exit 1
+  rm -rf "$app.updating" "$app.previous" && ditto "$new" "$app.updating" || exit 1
+  # Moved aside, not deleted first: there's always an app, but for the
+  # instant between two renames.
+  mv "$app" "$app.previous" && mv "$app.updating" "$app" || { [ -d "$app" ] || mv "$app.previous" "$app"; exit 1; }
+  rm -rf "$app.previous"
   case "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" in
     *.dev) open -g "$app" ;;
     *) open "$app" ;;
@@ -353,10 +358,7 @@ pub fn update_failed(home: &Home) -> bool {
 /// Puts the previous backend back after a failed update, and records why.
 pub fn roll_back(home: &Home, how_it_ended: &str) -> std::io::Result<()> {
     let trial = read_trial(home);
-    let previous = home.previous_backend();
-    let tmp = home.backend().with_extension("restoring");
-    std::fs::copy(&previous, &tmp)?;
-    std::fs::rename(&tmp, home.backend())?;
+    restore_previous(home)?;
     if let Some(trial) = trial {
         let reason = trial.reason.unwrap_or_else(|| how_it_ended.to_owned());
         tracing::warn!(version = %trial.to, back_to = %trial.from, %reason, "update failed; went back");
@@ -369,6 +371,9 @@ pub fn roll_back(home: &Home, how_it_ended: &str) -> std::io::Result<()> {
 pub fn failure_message(home: &Home) -> String {
     let Ok(bytes) = std::fs::read(home.update_failed_path()) else { return String::new() };
     match serde_json::from_slice::<Failed>(&bytes) {
+        Ok(failed) if failed.version.is_empty() => {
+            format!("Claktory's backend kept stopping, so it went back to the one before. {}", failed.reason)
+        }
         Ok(failed) => {
             format!("Claktory {} didn't start, so you're still on {}. {}", failed.version, failed.back_to, failed.reason)
         }
@@ -460,12 +465,14 @@ impl Factory {
         let release = self.home.releases().join(&latest.version);
         if !app_path.is_empty() {
             let app = Path::new(app_path);
-            let new_app = match app.file_name() {
-                Some(name) if app.extension().is_some_and(|extension| extension == "app") && app.is_dir() => release.join(name),
-                _ => return Err(RequestError::NotAnApp(app_path.to_owned())),
-            };
-            if !new_app.is_dir() {
+            if !app.extension().is_some_and(|extension| extension == "app") || !app.is_dir() {
                 return Err(RequestError::NotAnApp(app_path.to_owned()));
+            }
+            let Some(new_app) = release_app(&release, app) else { return Err(RequestError::NotAnApp(app_path.to_owned())) };
+            // Checked before anything moves, so an app it can't replace stays as it is.
+            let folder = app.parent().unwrap_or(Path::new("/"));
+            if !writable(folder) {
+                return Err(RequestError::AppNotWritable(folder.display().to_string()));
             }
             let status = tokio::process::Command::new("/bin/sh")
                 .args(["-c", SWAP_APP, "sh"])
@@ -486,15 +493,26 @@ impl Factory {
         let backend = self.home.backend();
         let new_backend = tokio::fs::read(release.join("factoryd")).await?;
         let supervised = std::env::var_os(SUPERVISED).is_some();
-        if supervised {
-            let running = tokio::fs::read(std::env::current_exe()?).await?;
-            write_atomic(&self.home.previous_backend(), &running).await?;
-            set_executable(&self.home.previous_backend()).await?;
-            let trial = Trial { from: VERSION.to_owned(), to: latest.backend.clone(), started: false, reason: None };
-            write_json(&self.home.trial_path(), &trial)?;
+        // The apps host first: the backend going in is what makes it count.
+        let home = self.home.clone();
+        let host = release.join(APPS_HOST);
+        tokio::task::spawn_blocking(move || stage_apps_host(&home, &host)).await.map_err(std::io::Error::other)??;
+        let replaced = async {
+            if supervised {
+                let running = tokio::fs::read(std::env::current_exe()?).await?;
+                write_durably(self.home.previous_backend(), running).await?;
+                let trial = Trial { from: VERSION.to_owned(), to: latest.backend.clone(), started: false, reason: None };
+                write_json(&self.home.trial_path(), &trial)?;
+            }
+            write_durably(backend.clone(), new_backend).await
+        };
+        if let Err(error) = replaced.await {
+            // The backend stays as it was, so its host goes back too.
+            if let Err(error) = restore_apps_host(&self.home) {
+                tracing::error!(%error, "could not put the apps host back");
+            }
+            return Err(error.into());
         }
-        write_atomic(&backend, &new_backend).await?;
-        set_executable(&backend).await?;
         tracing::info!(from = VERSION, to = %latest.backend, supervised, "updating");
         let factory = self.clone();
         tokio::spawn(async move {
@@ -521,7 +539,276 @@ impl Factory {
     }
 }
 
-async fn set_executable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await
+/// The release's app that replaces `installed`: the one with its name, or
+/// else the one with its bundle id, so an app renamed where it's installed
+/// (Claktory.app from the disk image, where releases have Factory.app)
+/// still updates.
+fn release_app(release: &Path, installed: &Path) -> Option<std::path::PathBuf> {
+    let same_name = release.join(installed.file_name()?);
+    if same_name.is_dir() {
+        return Some(same_name);
+    }
+    let id = bundle_id(installed)?;
+    let apps = std::fs::read_dir(release).ok()?.filter_map(Result::ok).map(|entry| entry.path());
+    apps.filter(|path| path.extension().is_some_and(|extension| extension == "app") && path.is_dir())
+        .find(|app| bundle_id(app).as_deref() == Some(id.as_str()))
+}
+
+/// The app's CFBundleIdentifier.
+fn bundle_id(app: &Path) -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"])
+        .arg(app.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    let id = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (output.status.success() && !id.is_empty()).then_some(id)
+}
+
+/// Whether this user may change what's in `folder` (/Applications isn't
+/// for one who isn't an administrator).
+fn writable(folder: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(folder.as_os_str().as_bytes()) else { return false };
+    // SAFETY: a valid C string, for the duration of the call.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Writes an executable that has to survive a power cut: the bytes and
+/// the rename reach the disk (`sync_all` is F_FULLFSYNC on macOS) before
+/// it counts as written, so `bin/factoryd` is never left empty.
+pub fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+async fn write_durably(path: std::path::PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || write_executable(&path, &bytes)).await.map_err(std::io::Error::other)?
+}
+
+/// Puts `bin/factoryd.previous` back as `bin/factoryd`, durably, and the
+/// apps host that went with it.
+fn restore_previous(home: &Home) -> std::io::Result<()> {
+    let previous = std::fs::read(home.previous_backend())?;
+    write_executable(&home.backend(), &previous)?;
+    restore_apps_host(home)
+}
+
+/// The host that runs apps, in a release and in `<home>/bin`, beside
+/// factoryd (where the backend looks for it).
+pub const APPS_HOST: &str = "claktory-apps";
+
+fn apps_host(home: &Home) -> std::path::PathBuf {
+    home.root().join("bin").join(APPS_HOST)
+}
+
+fn previous_apps_host(home: &Home) -> std::path::PathBuf {
+    home.root().join("bin").join(format!("{APPS_HOST}.previous"))
+}
+
+/// Before an update's backend goes in: the release's apps host (`new`, if
+/// it carries one) replaces `bin/claktory-apps`, which is kept as
+/// `bin/claktory-apps.previous` for a roll-back. A release without one
+/// leaves the host alone, and forgets an older `.previous` so a roll-back
+/// doesn't put back a host from before.
+fn stage_apps_host(home: &Home, new: &Path) -> std::io::Result<()> {
+    let (current, previous) = (apps_host(home), previous_apps_host(home));
+    if !new.is_file() {
+        return remove(&previous);
+    }
+    match std::fs::read(&current) {
+        Ok(bytes) => write_executable(&previous, &bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => remove(&previous)?,
+        Err(error) => return Err(error),
+    }
+    write_executable(&current, &std::fs::read(new)?)
+}
+
+/// Puts `bin/claktory-apps.previous` back, if the update kept one.
+fn restore_apps_host(home: &Home) -> std::io::Result<()> {
+    match std::fs::read(previous_apps_host(home)) {
+        Ok(bytes) => write_executable(&apps_host(home), &bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// For the supervisor, when the backend keeps failing to start outside an
+/// update's trial (a backend a power cut left broken, say): puts the
+/// previous one back, once, when there is one that differs. True if it did.
+pub fn fall_back(home: &Home, how_it_ended: &str) -> bool {
+    let (Ok(current), Ok(previous)) = (std::fs::read(home.backend()), std::fs::read(home.previous_backend())) else { return false };
+    if previous.is_empty() || current == previous {
+        return false;
+    }
+    if let Err(error) = restore_previous(home) {
+        tracing::error!(%error, "could not go back to the previous backend");
+        return false;
+    }
+    tracing::warn!(reason = %how_it_ended, "the backend kept stopping; went back to the previous one");
+    // Which version broke, the supervisor can't tell: it isn't the backend.
+    let failed = Failed { version: String::new(), back_to: String::new(), reason: how_it_ended.to_owned() };
+    if let Err(error) = write_json(&home.update_failed_path(), &failed) {
+        tracing::error!(%error, "could not record why it went back");
+    }
+    true
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    fn bundle(at: &Path, marker: &str) {
+        std::fs::create_dir_all(at.join("Contents")).expect("dir");
+        let info = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>test.swap.dev</string></dict></plist>"#;
+        std::fs::write(at.join("Contents/Info.plist"), info).expect("plist");
+        std::fs::write(at.join("Contents/which"), marker).expect("marker");
+    }
+
+    #[test]
+    fn the_app_is_swapped_with_the_old_one_moved_aside_until_the_new_one_is_in() {
+        let dir = std::env::temp_dir().join(format!("factoryd-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (app, new) = (dir.join("Applications/Fake.app"), dir.join("release/Fake.app"));
+        bundle(&app, "old");
+        bundle(&new, "new");
+        // `open` stands in, so nothing is launched.
+        std::fs::create_dir_all(dir.join("stub")).expect("stub");
+        let opened = dir.join("opened");
+        std::fs::write(dir.join("stub/open"), format!("#!/bin/sh\necho \"$@\" > \"{}\"\n", opened.display())).expect("open");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("stub/open"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = format!("{}:{}", dir.join("stub").display(), std::env::var("PATH").unwrap_or_default());
+        let status = std::process::Command::new("/bin/sh").args(["-c", SWAP_APP, "sh"]).arg(&app).arg(&new).env("PATH", path).status();
+        assert!(status.expect("sh").success());
+        for _ in 0..200 {
+            if opened.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&opened).expect("reopened"), format!("-g {}\n", app.display()));
+        assert_eq!(std::fs::read_to_string(app.join("Contents/which")).expect("swapped"), "new");
+        let left: Vec<_> =
+            std::fs::read_dir(dir.join("Applications")).expect("dir").map(|entry| entry.expect("entry").file_name()).collect();
+        assert_eq!(left, ["Fake.app"], "nothing left beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn app_with_id(at: &Path, id: &str) {
+        std::fs::create_dir_all(at.join("Contents")).expect("dir");
+        let info = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string></dict></plist>"#
+        );
+        std::fs::write(at.join("Contents/Info.plist"), info).expect("plist");
+    }
+
+    #[test]
+    fn an_app_renamed_where_it_is_installed_is_updated_by_the_release_app_with_its_bundle_id() {
+        let dir = std::env::temp_dir().join(format!("factoryd-release-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (installed, release) = (dir.join("Applications/Claktory.app"), dir.join("release"));
+        app_with_id(&installed, "dev.factory.app");
+        app_with_id(&release.join("Other.app"), "dev.other");
+        app_with_id(&release.join("Factory.app"), "dev.factory.app");
+        std::fs::create_dir_all(release.join("supervisor/Claktory Agents.app")).expect("supervisor");
+        assert_eq!(release_app(&release, &installed), Some(release.join("Factory.app")));
+        // The same name, as before, first.
+        app_with_id(&release.join("Claktory.app"), "dev.factory.app");
+        assert_eq!(release_app(&release, &installed), Some(release.join("Claktory.app")));
+        // Nothing of its own in the release.
+        let stranger = dir.join("Applications/Stranger.app");
+        app_with_id(&stranger, "dev.stranger");
+        assert_eq!(release_app(&release, &stranger), None);
+
+        // A folder this user can't change is found out before anything moves.
+        let applications = dir.join("Applications");
+        assert!(writable(&applications));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&applications, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let locked = writable(&applications);
+        std::fs::set_permissions(&applications, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(!locked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod apps_host_tests {
+    use super::*;
+
+    fn home(name: &str) -> (Home, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("factoryd-apps-host-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("home/bin")).expect("bin");
+        std::fs::create_dir_all(dir.join("release")).expect("release");
+        (Home::new(dir.join("home")), dir)
+    }
+
+    fn read(path: &Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    #[test]
+    fn an_update_replaces_the_host_and_a_roll_back_puts_it_back_with_the_backend() {
+        let (home, dir) = home("replace");
+        std::fs::write(apps_host(&home), "host 1").expect("host");
+        std::fs::write(home.backend(), "backend 2").expect("backend");
+        std::fs::write(home.previous_backend(), "backend 1").expect("previous");
+        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("new host");
+
+        stage_apps_host(&home, &dir.join("release/claktory-apps")).expect("staged");
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 2"));
+        assert_eq!(read(&previous_apps_host(&home)).as_deref(), Some("host 1"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(apps_host(&home)).expect("meta").permissions().mode() & 0o777, 0o755);
+
+        roll_back(&home, "It stopped.").expect("rolled back");
+        assert_eq!(read(&home.backend()).as_deref(), Some("backend 1"));
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"), "the host that went with it");
+
+        // The supervisor's fall-back does the same.
+        std::fs::write(home.backend(), "backend 2").expect("backend");
+        std::fs::write(apps_host(&home), "host 2").expect("host");
+        assert!(fall_back(&home, "It stopped by itself."));
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_host_has_nothing_to_go_back_to_and_a_release_without_one_leaves_it_alone() {
+        let (home, dir) = home("first");
+        std::fs::write(home.previous_backend(), "backend 1").expect("previous");
+        std::fs::write(dir.join("release/claktory-apps"), "host 1").expect("new host");
+        stage_apps_host(&home, &dir.join("release/claktory-apps")).expect("staged");
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        assert!(!previous_apps_host(&home).exists());
+        restore_previous(&home).expect("restored");
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"), "nothing kept to put back");
+
+        // A release without a host: the installed one stays, and an old
+        // `.previous` is forgotten so a roll-back can't bring it back.
+        std::fs::write(previous_apps_host(&home), "host 0").expect("stale");
+        stage_apps_host(&home, &dir.join("release/none")).expect("staged");
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        assert!(!previous_apps_host(&home).exists());
+        restore_previous(&home).expect("restored");
+        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

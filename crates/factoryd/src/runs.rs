@@ -49,7 +49,6 @@ impl Factory {
             Ok(None) => {}
             Err(error) => tracing::error!(run, %error, "could not record the end of a run"),
         }
-        crate::vault::requests::run_ended();
         true
     }
 
@@ -100,6 +99,20 @@ impl Factory {
         crate::extensions::tasks::refresh_view(self);
     }
 
+    /// Before the backend stops (on SIGTERM, from its supervisor at a
+    /// restart or shutdown): lets the transcript writes under way finish,
+    /// for up to `within`. What's left is picked up at the next start.
+    pub async fn finish_writes(&self, within: std::time::Duration) {
+        let writes: Vec<_> = self.lock().agents.values().map(|runtime| runtime.writes.clone()).collect();
+        let deadline = tokio::time::Instant::now() + within;
+        for write in writes {
+            if tokio::time::timeout_at(deadline, write.lock()).await.is_err() {
+                tracing::warn!("stopping before every transcript was written");
+                return;
+            }
+        }
+    }
+
     /// Picks up where the last Factory stopped: agents carry on with what
     /// they were doing and what was waiting for them, and background tasks
     /// are watched until they end.
@@ -109,6 +122,7 @@ impl Factory {
         let mut agents: BTreeSet<String> = interrupted.keys().cloned().collect();
         agents.extend(waiting.keys().cloned());
         let mut inner = self.lock();
+        let mut resuming = Vec::new();
         for id in agents {
             let messages = waiting.remove(&id).unwrap_or_default();
             if inner.config.agent(&id).is_none() {
@@ -116,8 +130,9 @@ impl Factory {
                 continue;
             }
             let mut queue = Vec::with_capacity(messages.len() + 1);
-            if let Some(stopped_on) = interrupted.get(&id) {
-                let (text, event) = resume_note(stopped_on);
+            if let Some((stopped_on, started)) = interrupted.get(&id) {
+                let rebooted = factory_agent::tools::bash::started_before_boot(u64::try_from(*started).unwrap_or(0));
+                let (text, event) = resume_note(stopped_on, rebooted);
                 let mut note = Queued::event(text, event);
                 note.id = self.store.add_message(&id, &note)?;
                 queue.push(note);
@@ -127,9 +142,18 @@ impl Factory {
             let runtime = inner.agents.entry(id.clone()).or_default();
             runtime.queue = queue;
             runtime.running = true;
-            tokio::spawn(self.clone().run(id));
+            resuming.push(id);
         }
         drop(inner);
+        // Started with the computer, the network may not be up yet: they
+        // carry on once it is, rather than fail their first call.
+        let factory = self.clone();
+        tokio::spawn(async move {
+            crate::network::ready().await;
+            for id in resuming {
+                tokio::spawn(factory.clone().run(id));
+            }
+        });
         for (agent, task) in self.store.running_tasks()? {
             let factory = Arc::downgrade(self);
             let redaction = self.redaction.clone();
@@ -144,9 +168,12 @@ impl Factory {
     }
 }
 
-/// What a resumed agent is told first: an event from Factory.
-fn resume_note(stopped_on: &str) -> (String, factory_agent::Event) {
-    let summary = if stopped_on.is_empty() || stopped_on == VERSION {
+/// What a resumed agent is told first: an event from Factory. `rebooted`:
+/// its run began before the computer last started.
+fn resume_note(stopped_on: &str, rebooted: bool) -> (String, factory_agent::Event) {
+    let summary = if rebooted {
+        "The computer restarted".to_owned()
+    } else if stopped_on.is_empty() || stopped_on == VERSION {
         "Claktory restarted".to_owned()
     } else {
         format!("Claktory restarted: updated from {stopped_on} to {VERSION}")

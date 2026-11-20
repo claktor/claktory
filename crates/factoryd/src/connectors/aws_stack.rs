@@ -1149,10 +1149,13 @@ async fn session(recipe: &AwsStack, http: &Http, broker: &Broker, made: &Made) -
         }
     };
     let (permissions, resources) = (list("Action"), list("Resource"));
+    let account = format!("AWS account {} in {}", broker.account, broker.region);
     let access = if made.policy.is_empty() {
-        format!("Everything this connection allows in AWS account {} ({})", broker.account, broker.region)
+        format!("Everything this connection allows in {account}")
     } else {
-        format!("Part of what this connection allows in AWS account {} ({})", broker.account, broker.region)
+        let on = if resources.is_empty() { "*".to_owned() } else { resources.join(", ") };
+        let what = if permissions.is_empty() { "Every permission it allows".to_owned() } else { permissions.join(", ") };
+        format!("{what} on {on} in {account}")
     };
     Ok(Derived {
         values: Some(vec![

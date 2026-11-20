@@ -6,6 +6,20 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.10
+Released 2026-11-20 16:55 UTC.
+- Added: When an agent is waiting for your answer, such as a secret it asked for, its row in the sidebar shows an orange badge with how many. Click the agent to go straight to the oldest one.
+- Added: An agent can lead others: it sees how the agents under it are set up, so you don't have to explain. Choose an agent's lead in its settings.
+- Added: An avatar for you, your initials on a color, beside your messages and comments on every device. Shuffle its colors in Settings → Profile.
+- Changed: When all of an agent's accounts reach their usage limits, it now waits instead of failing, and carries on by itself when the first one resets. Its row in the sidebar says what it's waiting for, and messages sent meanwhile wait with it. Adding an account or using a usage reset gets it going sooner.
+- Changed: A secret now says exactly what it can do, and the Map shows it. If a secret's names differ from the ones an agent asked for, you can give it under the agent's names too. Agents can also change or withdraw a request they've made.
+- Changed: Messages from other agents read like any other: clicking one selects text and follows links. To open that agent's conversation, click its name above the message.
+- Changed: Dragging files over a conversation now shows where they'll go: it dims, takes the agent's color and says who gets them.
+- Fixed: After your computer restarted, agents' first tries could fail, and some waited forever for background tasks the restart had ended. Claktory now waits for the network first, and tells agents their tasks ended.
+- Fixed: An agent's request for a secret could expire while the agent kept working. It now waits 12 hours for you, however busy the agent is.
+- Fixed: Agents can't be fooled by a message or a task's output that pretends to be from you or another agent.
+- Fixed: Messages agents send each other, and their Talk to suggestions, show quotes, ampersands and angle brackets as they are, instead of codes like &quot;.
+
 ## v0.1.9
 Released 2026-11-20 15:04 UTC.
 - Added: Give agents their own Cloudflare access, with only what their work needs. Connect Cloudflare in Settings → Secrets, or when an agent suggests it: make a token on the page Claktory opens, then paste it back. No agent gets anything until you or Rivet give it a secret made from the connection.

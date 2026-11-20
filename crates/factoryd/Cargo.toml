@@ -53,10 +53,13 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync", "process", "signal"] }
 tokio-tungstenite = "0.30.0"
+# The person's initials (person.rs), by grapheme; already linked through iroh.
+unicode-segmentation = "1"
 tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
+toml = "1.2.1"
 
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).

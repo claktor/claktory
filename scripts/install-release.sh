@@ -5,6 +5,7 @@
 # this script that comes in each published release, so it needs nothing else
 # from the repo.
 #   ~/.factory/bin/factoryd     the backend, which updates replace
+#   ~/.factory/bin/claktory-apps  the apps host beside it, which runs apps
 #   ~/.factory/bin/Claktory Agents.app  the supervisor, which keeps it
 #                               running and undoes updates that don't start; a
 #                               LaunchAgent runs it. An app, so it can be added
@@ -33,16 +34,33 @@ if [[ ! -f "$RELEASE/factoryd" || ! -d "$RELEASE/Factory.app" ]]; then
   exit 1
 fi
 
+# Puts the bundle NEW where OLD is. The old one moves aside first, so a power
+# cut leaves one of them in place; a bundle left aside by an earlier cut comes
+# back if nothing took its place.
+swap_in() {
+  local new="$1" old="$2"
+  [[ -e "$old" || ! -e "$old.old" ]] || mv "$old.old" "$old"
+  rm -rf "$old.old"
+  [[ ! -e "$old" ]] || mv "$old" "$old.old"
+  mv "$new" "$old"
+  rm -rf "$old.old"
+}
+
 mkdir -p "$HOME_DIR/bin" "$HOME/Applications" "$HOME/Library/LaunchAgents"
 cp "$RELEASE/factoryd" "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
+# The apps host, beside the backend (releases before apps have none).
+if [[ -f "$RELEASE/claktory-apps" ]]; then
+  cp "$RELEASE/claktory-apps" "$HOME_DIR/bin/claktory-apps.new"
+  chmod 755 "$HOME_DIR/bin/claktory-apps.new"
+  mv -f "$HOME_DIR/bin/claktory-apps.new" "$HOME_DIR/bin/claktory-apps"
+fi
 SUPERVISOR_APP="$HOME_DIR/bin/Claktory Agents.app"
 if [[ -d "$RELEASE/supervisor/Claktory Agents.app" ]]; then
   rm -rf "$SUPERVISOR_APP.new"
   ditto "$RELEASE/supervisor/Claktory Agents.app" "$SUPERVISOR_APP.new"
-  rm -rf "$SUPERVISOR_APP"
-  mv "$SUPERVISOR_APP.new" "$SUPERVISOR_APP"
+  swap_in "$SUPERVISOR_APP.new" "$SUPERVISOR_APP"
   SUPERVISOR="$SUPERVISOR_APP/Contents/MacOS/factoryd-supervisor"
 else
   cp "$RELEASE/factoryd" "$BIN-supervisor.new"
@@ -67,8 +85,7 @@ if pgrep -f "$APP/Contents/MacOS/" >/dev/null; then
 fi
 rm -rf "$APP.new"
 ditto "$RELEASE/Factory.app" "$APP.new"
-rm -rf "$APP"
-mv "$APP.new" "$APP"
+swap_in "$APP.new" "$APP"
 
 # Agents run shell commands through factoryd, so it needs this shell's PATH
 # (cargo, flutter, git, ...), not launchd's minimal one. Interactive: without a

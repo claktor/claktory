@@ -20,7 +20,7 @@ APP_ID="dev.factory.app.dev"
 APP="$ROOT/app/build/Factory Dev.app"
 
 backend() {
-  cargo build --manifest-path "$ROOT/Cargo.toml" -p factoryd
+  cargo build --manifest-path "$ROOT/Cargo.toml" -p factoryd -p claktory-apps
   mkdir -p "$DEV_HOME/bin"
   local pidfile="$DEV_HOME/factoryd.pid"
   if [[ -f "$pidfile" ]]; then
@@ -36,6 +36,9 @@ backend() {
   # The supervisor runs ~/.factory-dev/bin/factoryd, which updates replace.
   cp "$ROOT/target/debug/factoryd" "$DEV_HOME/bin/factoryd.new"
   mv -f "$DEV_HOME/bin/factoryd.new" "$DEV_HOME/bin/factoryd"
+  # The host that runs apps, which factoryd finds beside itself.
+  cp "$ROOT/target/debug/claktory-apps" "$DEV_HOME/bin/claktory-apps.new"
+  mv -f "$DEV_HOME/bin/claktory-apps.new" "$DEV_HOME/bin/claktory-apps"
   rm -f "$DEV_HOME/bin/trial.json"
   # Own session: the backend outlives this script and whatever ran it.
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$ROOT/target/debug/factoryd" --dev supervise \

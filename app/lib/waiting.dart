@@ -1,0 +1,84 @@
+import 'package:flutter/widgets.dart';
+
+import 'identity.dart';
+import 'protocol/factory/v1/factory.pb.dart';
+
+/// What waits for the person's answer in agents' conversations: pending
+/// secret requests, connections to make and proposals to Rivet
+/// (Agent.waiting_seqs, the backend's).
+int waitingIn(Iterable<Agent> agents) =>
+    agents.fold(0, (sum, agent) => sum + agent.waitingSeqs.length);
+
+/// How a count of what waits reads on a mark: "9+" past nine.
+String waitingCount(int count) => count > 9 ? '9+' : '$count';
+
+/// What a needs-you mark says to a screen reader.
+String waitingLabel(String who, int count) => count == 1
+    ? '$who has something waiting for your answer'
+    : '$who has $count things waiting for your answer';
+
+/// Something waits for the person's answer: a 16px `signal` pill with how
+/// many, in black. It speaks for an agent's row, a folded folder or agent,
+/// what's out of sight, and a Claktory's tile.
+class NeedsYouMark extends StatelessWidget {
+  const NeedsYouMark({super.key, required this.count, required this.label});
+
+  final int count;
+
+  /// What it says to a screen reader, such as [waitingLabel]'s.
+  final String label;
+
+  /// Text on a `signal` fill is black, in both themes (IDENTITY.md).
+  static const _ink = Color(0xFF000000);
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Semantics(
+      label: label,
+      excludeSemantics: true,
+      child: Container(
+        height: 16,
+        constraints: const BoxConstraints(minWidth: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: palette.signal,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          waitingCount(count),
+          style: TextStyles.caption.copyWith(
+            color: _ink,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            height: 1,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// An entry of an agent's conversation to open it at.
+typedef EntryTarget = ({String agentId, int seq});
+
+/// Where the next conversation to show should open: set when the person
+/// opens an agent with something waiting, so its conversation opens at the
+/// oldest waiting card rather than at the end. The conversation clears it
+/// once it's there, so it's used once.
+class EntryReveal extends ValueNotifier<EntryTarget?> {
+  EntryReveal() : super(null);
+
+  /// Opens [agent]'s conversation at what waits there first, if anything.
+  void oldestWaiting(Agent agent) {
+    if (agent.waitingSeqs.isEmpty) return;
+    value = (agentId: agent.id, seq: agent.waitingSeqs.first.toInt());
+  }
+
+  /// Done with [target]: the conversation is there, or it can't be.
+  void used(EntryTarget target) {
+    if (value == target) value = null;
+  }
+}

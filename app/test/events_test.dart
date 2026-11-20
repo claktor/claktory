@@ -1,3 +1,4 @@
+import 'package:factory_app/characters/character.dart' show AgentCharacter;
 import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/forms.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -176,7 +177,11 @@ void main() {
           tester.widget<Text>(name()).style?.decoration;
       expect(decoration(), isNot(TextDecoration.underline));
       final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      // Not over the bubble any more: only the name links.
       await mouse.addPointer(location: tester.getCenter(bubble()));
+      await tester.pump();
+      expect(decoration(), isNot(TextDecoration.underline));
+      await mouse.moveTo(tester.getCenter(name()));
       await tester.pump();
       expect(decoration(), TextDecoration.underline);
       expect(
@@ -189,26 +194,13 @@ void main() {
       await mouse.removePointer();
     });
 
-    testWidgets('a click on the bubble opens it; a double click selects', (
-      tester,
-    ) async {
+    testWidgets('the bubble is only a bubble: a click there opens nothing, '
+        'and its text selects', (tester) async {
       final harness = await showMessage(tester);
-      await tester.tap(bubble());
-      await tester.pump();
-      expect(opened(harness), isEmpty, reason: 'it may be a double click');
-      await tester.pump(kDoubleTapTimeout);
-      expect(opened(harness), ['a2']);
-
-      harness.backend.sent.clear();
-      await tester.tap(bubble());
-      await tester.pump(const Duration(milliseconds: 80));
       await tester.tap(bubble());
       await tester.pump(kDoubleTapTimeout * 2);
       expect(opened(harness), isEmpty);
-    });
 
-    testWidgets('dragging across the bubble selects instead', (tester) async {
-      final harness = await showMessage(tester);
       final box = tester.getRect(bubble());
       final mouse = await tester.startGesture(
         box.centerLeft + const Offset(14, 0),
@@ -218,14 +210,18 @@ void main() {
       await mouse.up();
       await tester.pump(kDoubleTapTimeout * 2);
       expect(opened(harness), isEmpty);
+    });
 
-      // The text is selected, so the next click only clears it.
-      await tester.tap(bubble(), kind: PointerDeviceKind.mouse);
-      await tester.pump(kDoubleTapTimeout * 2);
-      expect(opened(harness), isEmpty);
-      // And the one after that opens the sender.
-      await tester.tap(bubble(), kind: PointerDeviceKind.mouse);
-      await tester.pump(kDoubleTapTimeout * 2);
+    testWidgets('the character opens the sender too, by touch as well', (
+      tester,
+    ) async {
+      final harness = await showMessage(tester);
+      final character = find.descendant(
+        of: find.byType(TranscriptView),
+        matching: find.byType(AgentCharacter),
+      );
+      await tester.tap(character.first, kind: PointerDeviceKind.touch);
+      await tester.pump();
       expect(opened(harness), ['a2']);
     });
 

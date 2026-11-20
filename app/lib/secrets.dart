@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'account.dart' show signInPutOff;
+import 'apps.dart' show appOfGrantee;
+import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'connectors.dart';
@@ -25,9 +27,21 @@ const secretCopiedFor = Duration(minutes: 1);
 
 VaultState _vault(Backend backend) => backend.workspace.workspace.vault;
 
-/// An agent's name, or its id when the app doesn't know it.
+/// A secret's description asks what it grants: agents, the Map and the
+/// Secrets panel show it, and a vague one ("a Cloudflare secret") reads as
+/// more than it is.
+const secretGrantsLabel = 'What it can do';
+const secretGrantsNote =
+    'Say exactly what it grants: its permissions and what they reach. Agents '
+    'and the Map show it.';
+const secretGrantsExample = 'Cloudflare: DNS Edit on claktory.com';
+
+/// An agent's name, or an app's for a secret given to one ("app:telegram"),
+/// or the id when the app doesn't know it.
 String _agentName(Backend backend, String id) =>
-    backend.workspace.agent(id)?.name ?? id;
+    backend.workspace.agent(id)?.name ??
+    appOfGrantee(backend.workspace.workspace, id)?.name ??
+    id;
 
 /// Settings → Secrets: the secrets with what's given to whom, and adding
 /// them (agents' requests show only in their conversations). The backend keeps
@@ -718,9 +732,18 @@ class _GrantRow extends StatelessWidget {
               TextSpan(
                 children: [
                   TextSpan(
-                    text: agent?.name ?? grant.agentId,
+                    text: _agentName(backend, grant.agentId),
                     style: TextStyle(color: palette.text),
                   ),
+                  // The names it gets it under too, as its request asked.
+                  if (grant.aliases.isNotEmpty)
+                    TextSpan(
+                      text: '  also as ${grant.aliases.keys.join(', ')}',
+                      style: TextStyles.caption.copyWith(
+                        color: palette.textMuted,
+                        fontFamily: TextStyles.mono,
+                      ),
+                    ),
                   if (grant.runningTasks > 0)
                     TextSpan(
                       text:
@@ -1138,11 +1161,11 @@ class _SecretFormState extends State<SecretForm> {
           ),
         ),
         Field(
-          label: 'Description',
-          note: 'Agents read this to know what it’s for.',
+          label: secretGrantsLabel,
+          note: secretGrantsNote,
           child: TextField(
             controller: _description,
-            placeholder: 'Token for the claktory.com zone',
+            placeholder: secretGrantsExample,
             maxLines: 3,
             minLines: 1,
           ),
@@ -1426,11 +1449,11 @@ class _EnvFormState extends State<EnvForm> {
             child: TextField(controller: _name, placeholder: 'Cloudflare'),
           ),
           Field(
-            label: 'Description',
-            note: 'Agents read this to know what it’s for.',
+            label: secretGrantsLabel,
+            note: secretGrantsNote,
             child: TextField(
               controller: _description,
-              placeholder: 'Token for the claktory.com zone',
+              placeholder: secretGrantsExample,
               maxLines: 3,
               minLines: 1,
             ),
@@ -1727,9 +1750,11 @@ class _GivenSecret extends StatelessWidget {
                   ),
                 if (secret.variables.isNotEmpty)
                   Text(
-                    secret.variables
-                        .map((variable) => variable.name)
-                        .join(', '),
+                    [
+                      for (final variable in secret.variables) variable.name,
+                      // The names it gets it under too, as it asked.
+                      for (final alias in grant.aliases.keys) 'also as $alias',
+                    ].join(', '),
                     style: TextStyles.code.copyWith(
                       fontSize: 11,
                       color: palette.textMuted,
@@ -1905,6 +1930,33 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   var _deciding = false;
   String? _error;
 
+  /// When the chosen secret doesn't set every name asked for: give it under
+  /// those names too (the default), each the variable picked for it here
+  /// (asked name → the secret's variable; empty leaves it out), or as it is.
+  var _alias = true;
+  final _aliases = <String, String>{};
+
+  @override
+  void didUpdateWidget(SecretRequestCard old) {
+    super.didUpdateWidget(old);
+    // The agent changed what it asks for: the form starts from that.
+    if (old.request.updatedMs != widget.request.updatedMs) {
+      final wanted = widget.request.newSecret;
+      _name.text = wanted.name;
+      _description.text = wanted.description;
+      for (final value in _values) {
+        value.dispose();
+      }
+      _values
+        ..clear()
+        ..addAll([
+          for (final variable in wanted.variables)
+            _VariableEdit(name: variable.name, file: variable.file),
+        ]);
+      _aliases.clear();
+    }
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -1937,6 +1989,17 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       setState(() => _error = 'Enter a value for each variable.');
       return;
     }
+    final secret = secrets.where((secret) => secret.id == _chosen).firstOrNull;
+    final missing = !_names && !adding && secret != null
+        ? _missing(secret)
+        : const <String>[];
+    final aliases = {
+      if (_alias)
+        for (final name in missing)
+          if (_aliasFor(name, secret!) case final variable
+              when variable.isNotEmpty)
+            name: variable,
+    };
     await _decide(
       () => AppScope.of(context).decideSecretRequest(
         request.agentId,
@@ -1945,6 +2008,8 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         secretId: _names || adding ? '' : _chosen,
         name: adding ? _name.text.trim() : '',
         description: adding ? _description.text.trim() : '',
+        aliases: aliases,
+        asIs: missing.isNotEmpty && aliases.isEmpty,
         entries: [
           if (adding)
             for (final value in _values)
@@ -1956,6 +2021,33 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         ],
       ),
     );
+  }
+
+  /// The names asked for that [secret] doesn't set.
+  List<String> _missing(SecretInfo secret) {
+    final has = {for (final variable in secret.variables) variable.name};
+    return [
+      for (final variable in request.newSecret.variables)
+        if (!has.contains(variable.name)) variable.name,
+    ];
+  }
+
+  /// The variable of [secret] that [name] is given as: the one picked, or
+  /// to start with, when one name is missing and one variable unused, that
+  /// one; or the secret's only variable.
+  String _aliasFor(String name, SecretInfo secret) {
+    final picked = _aliases[name];
+    if (picked != null) return picked;
+    final asked = {for (final v in request.newSecret.variables) v.name};
+    final unused = [
+      for (final variable in secret.variables)
+        if (!asked.contains(variable.name)) variable.name,
+    ];
+    if (unused.length == 1 && _missing(secret).length == 1) {
+      return unused.single;
+    }
+    if (secret.variables.length == 1) return secret.variables.single.name;
+    return '';
   }
 
   Future<void> _dismiss() => _decide(
@@ -2002,7 +2094,8 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     final pending =
         request.state != SecretRequestState.SECRET_REQUEST_STATE_GRANTED &&
         request.state != SecretRequestState.SECRET_REQUEST_STATE_DISMISSED &&
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_EXPIRED;
+        request.state != SecretRequestState.SECRET_REQUEST_STATE_EXPIRED &&
+        request.state != SecretRequestState.SECRET_REQUEST_STATE_WITHDRAWN;
     final description = _names
         ? [
                 for (final secret in secrets)
@@ -2046,6 +2139,15 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                   ),
                 ),
               ),
+              // The agent changed what it asks for since it asked.
+              if (pending && request.updatedMs > 0) ...[
+                const SizedBox(width: Space.s),
+                Text(
+                  'Updated '
+                  '${logTime(DateTime.fromMillisecondsSinceEpoch(request.updatedMs.toInt()))}',
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                ),
+              ],
             ],
           ),
           if (description.isNotEmpty) ...[
@@ -2136,10 +2238,15 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                     onChanged: (id) => setState(() {
                       _chosen = id;
                       _error = null;
+                      _aliases.clear();
                     }),
                   ),
-                )
-        else ...[
+                ),
+        if (!adding)
+          if (secrets.where((s) => s.id == _chosen).firstOrNull
+              case final secret? when _missing(secret).isNotEmpty)
+            _mismatch(palette, agent, secret),
+        if (adding) ...[
           Padding(
             padding: const EdgeInsets.only(bottom: Space.m),
             child: Text(
@@ -2152,8 +2259,13 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             child: TextField(controller: _name),
           ),
           Field(
-            label: 'Description',
-            child: TextField(controller: _description, maxLines: 3),
+            label: secretGrantsLabel,
+            note: secretGrantsNote,
+            child: TextField(
+              controller: _description,
+              placeholder: secretGrantsExample,
+              maxLines: 3,
+            ),
           ),
           for (final value in _values)
             Padding(
@@ -2223,40 +2335,122 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     ];
   }
 
+  /// The chosen secret doesn't set every name the agent asked for: what
+  /// it sets, and whether to give it under those names too, each as which
+  /// of its variables, or as it is.
+  Widget _mismatch(Palette palette, String agent, SecretInfo secret) {
+    final missing = _missing(secret);
+    final caption = TextStyles.caption.copyWith(color: palette.textMuted);
+    final mono = TextStyles.caption.copyWith(
+      fontFamily: TextStyles.mono,
+      color: palette.text,
+    );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '$agent asked for ${missing.join(', ')}, but ${secret.name} sets '
+            '${secret.variables.map((v) => v.name).join(', ')}.',
+            style: caption,
+          ),
+          const SizedBox(height: Space.s),
+          _ToggleRow(
+            label: missing.length == 1
+                ? 'Also give it as ${missing.single}'
+                : 'Also give it under the names $agent asked for',
+            note: _alias
+                ? null
+                : secret.variables.length == 1
+                ? '$agent gets it only as ${secret.variables.single.name}.'
+                : '$agent gets it under its own names only.',
+            value: _alias,
+            onChanged: (on) => setState(() => _alias = on),
+          ),
+          if (_alias && (missing.length > 1 || secret.variables.length > 1))
+            for (final name in missing)
+              Padding(
+                padding: const EdgeInsets.only(top: Space.s),
+                child: Row(
+                  children: [
+                    Expanded(child: Text(name, style: mono)),
+                    const SizedBox(width: Space.s),
+                    SizedBox(
+                      width: 220,
+                      child: Select<String>(
+                        value: _aliasFor(name, secret),
+                        options: [
+                          for (final variable in secret.variables)
+                            SelectOption(variable.name, 'is ${variable.name}'),
+                          const SelectOption('', 'Leave it out'),
+                        ],
+                        onChanged: (variable) =>
+                            setState(() => _aliases[name] = variable),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+
   List<Widget> _decided(Palette palette, Color color, String agent) {
     final dismissed =
         request.state == SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
     // Left unanswered too long: the agent was told and can ask again.
     final expired =
         request.state == SecretRequestState.SECRET_REQUEST_STATE_EXPIRED;
+    // The agent took it back (its reason is the comment).
+    final withdrawn =
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_WITHDRAWN;
     final decided = request.decidedMs.toInt();
     final given = request.givenSecretName.isNotEmpty
         ? request.givenSecretName
         : request.secretName;
     return [
-      Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: expired
-                  ? 'Expired'
-                  : dismissed
-                  ? 'Dismissed'
-                  : 'Gave $given to $agent',
-              style: TextStyle(
-                color: dismissed || expired ? palette.textMuted : color,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            if (decided > 0)
-              TextSpan(
-                text:
-                    ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
-                style: TextStyle(color: palette.textFaint),
-              ),
+      // Who decided: the person (not when it expired or the agent took it
+      // back).
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!expired && !withdrawn) ...[
+            const PersonAvatar(size: 16),
+            const SizedBox(width: Space.xs + 2),
           ],
-        ),
-        style: TextStyles.caption,
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: withdrawn
+                        ? 'Withdrawn by $agent'
+                        : expired
+                        ? 'Expired'
+                        : dismissed
+                        ? 'Dismissed'
+                        : 'Gave $given to $agent',
+                    style: TextStyle(
+                      color: dismissed || expired || withdrawn
+                          ? palette.textMuted
+                          : color,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (decided > 0)
+                    TextSpan(
+                      text:
+                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                      style: TextStyle(color: palette.textFaint),
+                    ),
+                ],
+              ),
+              style: TextStyles.caption,
+            ),
+          ),
+        ],
       ),
       if (request.comment.isNotEmpty) ...[
         const SizedBox(height: Space.xs),

@@ -18,16 +18,23 @@ import 'outbox.dart';
 import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
+import 'waiting.dart' show EntryReveal;
 import 'workspace_patch.dart';
 
 /// Must match `PROTOCOL_VERSION` in the backend's factory-protocol crate.
 const _protocolVersion = 1;
 const _clientVersion = '0.1.0';
 
-/// This Mac's Factory. Dev builds pass `--dart-define=FACTORY_PORT=7421` to
-/// talk to the dev backend.
-const _port = String.fromEnvironment('FACTORY_PORT', defaultValue: '7420');
-const _localEndpoint = 'ws://127.0.0.1:$_port';
+/// This Mac's Factory's port. Only a release build talks to the real one
+/// (7420) unless told otherwise; debug and profile builds and tests default
+/// to the dev one (7421), so a stray run never knocks on the person's
+/// Claktory. `--dart-define=FACTORY_PORT=…` picks one either way.
+@visibleForTesting
+const localPort = String.fromEnvironment(
+  'FACTORY_PORT',
+  defaultValue: kReleaseMode ? '7420' : '7421',
+);
+const _localEndpoint = 'ws://127.0.0.1:$localPort';
 
 /// This Mac's Factory's own pairing code, which its backend keeps in its
 /// data folder (the dev one's for dev builds): the app reaches it through
@@ -115,6 +122,10 @@ class Backend {
   /// Comments on files, by path, as the backend last sent them
   /// (annotations.dart).
   final threads = ThreadStore();
+
+  /// Where the next conversation shown opens, when it's not at its end:
+  /// at what waits for the person (waiting.dart).
+  final reveal = EntryReveal();
 
   /// The last file in any agent's panes the backend said changed.
   final fileChanged = ValueNotifier<FileChanged?>(null);
@@ -324,6 +335,7 @@ class Backend {
     }
     return open.forwardPort(port);
   }
+
   Timer? _tunnelWatch;
 
   Future<void> run() async {
@@ -699,13 +711,26 @@ class Backend {
   /// Loads the entries before the first one [transcript] holds, when it's
   /// [agentId]'s: the backend sends only the latest at first. Throws
   /// [RequestFailure] when it can't.
-  Future<void> loadEarlier(String agentId) async {
+  Future<void> loadEarlier(String agentId) => _loadBefore(agentId);
+
+  /// Loads every entry from [seq] up to the first one [transcript] holds,
+  /// when it's [agentId]'s, so the view can go to an older entry with no
+  /// gap after it. Throws [RequestFailure] when it can't.
+  Future<void> loadFrom(String agentId, int seq) =>
+      _loadBefore(agentId, from: seq);
+
+  Future<void> _loadBefore(String agentId, {int? from}) async {
     if (transcript.agentId != agentId || transcript.length == 0) return;
     final loads = transcript.loads;
     final first = transcript[0].entry.seq;
+    if (from != null && from >= first.toInt()) return;
     final reply = await _call(
       ClientMessage(
-        loadEntries: LoadEntries(agentId: agentId, beforeSeq: first),
+        loadEntries: LoadEntries(
+          agentId: agentId,
+          beforeSeq: first,
+          fromSeq: from == null ? null : Int64(from),
+        ),
       ),
     );
     // A new snapshot meanwhile starts somewhere else: this page may not
@@ -920,6 +945,8 @@ class Backend {
     String secretId = '',
     String name = '',
     String description = '',
+    Map<String, String> aliases = const {},
+    bool asIs = false,
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -931,6 +958,8 @@ class Backend {
         secretId: secretId,
         name: name,
         description: description,
+        aliases: aliases.entries,
+        asIs: asIs,
       ),
     ),
   );
@@ -1039,6 +1068,77 @@ class Backend {
     }
     return reply.usageReport;
   }
+
+  /// Installs an app from a .clapp's [content]: without [approve], what it
+  /// can reach, for the person to review; approved, with that review's
+  /// [sha256], installed (and null).
+  Future<AppPermissions?> installLocalApp(
+    List<int> content, {
+    bool approve = false,
+    String sha256 = '',
+  }) async {
+    final message = ClientMessage(
+      installLocalApp: InstallLocalApp(
+        content: content,
+        approve: approve,
+        sha256: sha256,
+      ),
+    );
+    if (approve) {
+      await _request(message);
+      return null;
+    }
+    final reply = await _call(message);
+    if (!reply.hasAppPermissions()) {
+      throw const RequestFailure('Claktory sent nothing to review.');
+    }
+    return reply.appPermissions;
+  }
+
+  Future<void> setAppRunning(String id, bool running) => _request(
+    ClientMessage(
+      setAppRunning: SetAppRunning(id: id, running: running),
+    ),
+  );
+
+  Future<void> uninstallApp(String id, {bool keepData = false}) => _request(
+    ClientMessage(
+      uninstallApp: UninstallApp(id: id, keepData: keepData),
+    ),
+  );
+
+  /// Gives [agentId] these [scopes] of the app, in place of what it had;
+  /// none takes the app away from it.
+  Future<void> grantApp(String appId, String agentId, List<String> scopes) =>
+      _request(
+        ClientMessage(
+          grantApp: GrantApp(appId: appId, agentId: agentId, scopes: scopes),
+        ),
+      );
+
+  /// The agents that hear the app's events of [eventKind], in place of
+  /// those that did.
+  Future<void> subscribeApp(
+    String appId,
+    String eventKind,
+    List<String> agentIds,
+  ) => _request(
+    ClientMessage(
+      subscribeApp: SubscribeApp(
+        appId: appId,
+        eventKind: eventKind,
+        agentIds: agentIds,
+      ),
+    ),
+  );
+
+  /// One of the secrets the app's setup asks for.
+  Future<void> setAppSecret(String appId, String name, String value) =>
+      _request(
+        ClientMessage(
+          setAppSecret: SetAppSecret(appId: appId, name: name, value: value),
+        ),
+      );
 
   /// Emails a code to sign this Claktory in to [email].
   Future<void> accountSignIn(String email) =>
@@ -1177,6 +1277,11 @@ class Backend {
   /// for this device only (`Settings.zoom`, see zoom.dart).
   Future<void> setZoom(double zoom) =>
       _request(ClientMessage(setZoom: SetZoom(zoom: zoom)));
+
+  /// Gives the person's avatar new colors (Workspace.person), the same on
+  /// every device.
+  Future<void> shuffleAvatar() =>
+      _request(ClientMessage(shuffleAvatar: ShuffleAvatar()));
 
   /// This device's key in `Settings.zoom`: its paired id, or "local" for
   /// this machine's own app.
@@ -1479,6 +1584,7 @@ class Backend {
       case ServerMessage_Body.connectChoices:
       case ServerMessage_Body.usageReport:
       case ServerMessage_Body.usageResetAnswer:
+      case ServerMessage_Body.appPermissions:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.threadList:
         threads.apply(message.threadList);

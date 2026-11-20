@@ -450,7 +450,14 @@ async fn rivet_reads_a_connection_and_gives_an_agent_only_a_narrow_secret_made_f
     assert!(said.contains("No secret has been made from it yet."), "{said}");
     assert!(!said.contains("cf-access-") && !said.contains("cf-refresh-"), "no token: {said}");
     let listed = call(&mut client, &mut view, "rivet", "secrets_list", "{}").await;
-    assert_eq!(listed, format!("{name} (a connected Cloudflare service, given to no one: make a secret from it with secrets_derive)"));
+    assert_eq!(
+        listed,
+        format!(
+            "{name} (a connected Cloudflare service, given to no one: make a secret from it with secrets_derive): \
+             Cloudflare: Make and delete API tokens in your accounts; See your zones (domains); Account Read"
+        ),
+        "described as what it reaches"
+    );
 
     // It can't be given, only what's made from it.
     let given = call(&mut client, &mut view, "rivet", "secrets_grant", &json!({"secret": name, "agents": ["builder"]}).to_string()).await;
@@ -559,7 +566,9 @@ async fn cloudflare_connects_with_a_pasted_token_that_mints_narrow_ones_and_is_d
         expires_ms: 0,
     });
     ok(&mut client, &mut view, derive).await;
-    assert_eq!(secret(&view, "Cloudflare DNS").export.expect("made from it").access, ["DNS Write on claktory.com"]);
+    let made = secret(&view, "Cloudflare DNS");
+    assert_eq!(made.export.expect("made from it").access, ["DNS Write on claktory.com"]);
+    assert_eq!(made.description, "Cloudflare: DNS Write on claktory.com", "it says what it grants");
     assert_eq!(cloud.lock().expect("lock").tokens.len(), 1);
     assert!(
         stand_in.requests().iter().any(|call| call.method == "POST" && call.header("authorization") == Some(&format!("Bearer {PASTED}"))),

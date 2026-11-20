@@ -46,7 +46,7 @@ static CONNECTING: Manifest = Manifest {
 
 const ASK: &str = "## Asking for secrets
 
-You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe what you need (a short name, which service and what access, and the environment variables you expect, never values) and say why. The person gives you one of theirs that fits, adds a new one, or dismisses the request, and you're told what you got.
+You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe what you need (a short name, which service and what access, and the environment variables you expect, never values) and say why. The person gives you one of theirs that fits, adds a new one, or dismisses the request, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it.
 ";
 
 const CONNECT: &str = "## Connecting services
@@ -67,6 +67,9 @@ A connected service (Cloudflare, AWS) is given to no one. When the person connec
 ";
 
 const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service and what access; variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when they decide.";
+const REQUESTS: &str = "Your requests for secrets: the ones waiting for the person, and your latest decided ones, each with its id, name, state, variables and reason.";
+const UPDATE: &str = "Change a request of yours that's still waiting, rather than asking again: id from secrets_requests; give only what changes: description, variables ([{name, file}], all of them) or reason. The person sees it changed.";
+const CANCEL: &str = "Withdraw a request of yours that's still waiting, once you no longer need it: id from secrets_requests; reason, optional, why. The person sees it withdrawn.";
 const LIST: &str = "The vault's secrets: each one's name, description, the variables it sets and the agents that have it, never a value. q filters by name or description.";
 const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step.";
 const REVOKE: &str = "Take a secret back from agents: secret is its name, agents their ids or names. stop_tasks: also stop their background tasks that got it.";
@@ -120,7 +123,51 @@ impl Extension for Secrets {
             let config = inner.config.agent(agent);
             (config.is_some_and(is_admin), config.is_some_and(|config| super::switch(config, ID, crate::connectors::proposals::OPTION)))
         };
-        let mut tools = vec![ask];
+        let variables = json!({"type": "array", "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}, "file": {"type": "boolean"}},
+            "additionalProperties": false,
+        }});
+        let mut tools = vec![
+            ask,
+            super::tool(
+                "secrets_requests",
+                "List your requests for secrets",
+                REQUESTS,
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+                super::typed_handler(factory, agent, requests),
+            ),
+            super::tool(
+                "secrets_request_update",
+                "Change a request for a secret",
+                UPDATE,
+                json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "description": {"type": "string"},
+                        "variables": variables,
+                        "reason": {"type": "string"},
+                    },
+                    "additionalProperties": false,
+                }),
+                super::typed_handler(factory, agent, update_request),
+            ),
+            super::tool(
+                "secrets_request_cancel",
+                "Withdraw a request for a secret",
+                CANCEL,
+                json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {"id": {"type": "string"}, "reason": {"type": "string"}},
+                    "additionalProperties": false,
+                }),
+                super::typed_handler(factory, agent, cancel_request),
+            ),
+        ];
         if connect && crate::connectors::offered() {
             tools.push(crate::connectors::proposals::tool(factory, agent));
         }
@@ -249,6 +296,78 @@ fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult,
     let person = factory.lock().config.person().to_owned();
     let said = format!("Asked for {}; {person} will give it to you or dismiss the request, and you'll be told.", request.secret_name);
     Ok(ToolResult::text(said, crate::vault::asks::details(&request)))
+}
+
+#[derive(Deserialize)]
+struct NoArgs {}
+
+#[derive(Deserialize)]
+struct UpdateArgs {
+    id: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    variables: Option<Vec<crate::vault::asks::WantedVariable>>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CancelArgs {
+    id: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// A request in a line, for its agent.
+fn request_line(request: &factory_protocol::v1::SecretRequest) -> String {
+    use factory_protocol::v1::SecretRequestState;
+    let state = match request.state() {
+        SecretRequestState::Pending => "waiting".to_owned(),
+        SecretRequestState::Granted => format!("given: {}", request.given_secret_name),
+        SecretRequestState::Dismissed => "dismissed".to_owned(),
+        SecretRequestState::Expired => "expired".to_owned(),
+        SecretRequestState::Withdrawn => "withdrawn".to_owned(),
+        SecretRequestState::Unspecified => "unknown".to_owned(),
+    };
+    let wanted = request.new_secret.clone().unwrap_or_default();
+    let variables: Vec<&str> = wanted.variables.iter().map(|variable| variable.name.as_str()).collect();
+    let mut line = format!("{} {} ({state})", request.id, request.secret_name);
+    if !variables.is_empty() {
+        line.push_str(&format!(", variables {}", variables.join(", ")));
+    }
+    if !wanted.description.is_empty() {
+        line.push_str(&format!(": {}", wanted.description));
+    }
+    line.push_str(&format!(". Why: {}", request.reason));
+    line
+}
+
+fn requests(factory: &Arc<Factory>, asker: &str, _args: NoArgs) -> Result<ToolResult, String> {
+    let requests = factory.vault.recent_requests(asker, 10).map_err(|error| error.to_string())?;
+    if requests.is_empty() {
+        return Ok(ToolResult::text("You have no requests for secrets.", json!({"requests": []})));
+    }
+    let lines: Vec<String> = requests.iter().map(request_line).collect();
+    let details: Vec<serde_json::Value> = requests.iter().map(crate::vault::asks::details).collect();
+    Ok(ToolResult::text(lines.join("\n"), json!({"requests": details})))
+}
+
+fn update_request(factory: &Arc<Factory>, asker: &str, args: UpdateArgs) -> Result<ToolResult, String> {
+    let change = crate::vault::asks::Change { description: args.description, reason: args.reason, variables: args.variables };
+    let request = factory.vault.update_request(asker, &args.id, change).map_err(|error| error.to_string())?;
+    factory.vault_changed();
+    let said = format!("Changed your request {}; it's still waiting for {}.", request.id, factory.lock().config.person());
+    crate::vault::requests::show(factory, request.clone());
+    Ok(ToolResult::text(said, json!({"request_id": request.id})))
+}
+
+fn cancel_request(factory: &Arc<Factory>, asker: &str, args: CancelArgs) -> Result<ToolResult, String> {
+    let request = factory.vault.withdraw_request(asker, &args.id, &args.reason).map_err(|error| error.to_string())?;
+    factory.vault_changed();
+    let said = format!("Withdrew your request {} for {}.", request.id, request.secret_name);
+    crate::vault::requests::show(factory, request.clone());
+    Ok(ToolResult::text(said, json!({"request_id": request.id})))
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.

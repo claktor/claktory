@@ -524,9 +524,7 @@ impl Factory {
     /// Pauses, resumes or cancels one of an agent's monitors for the person
     /// (the Monitors panel's buttons).
     pub fn change_monitor(self: &Arc<Self>, agent: &str, id: u32, action: v1::MonitorAction) -> Result<(), RequestError> {
-        if self.lock().config.agent(agent).is_none() {
-            return Err(RequestError::UnknownAgent(agent.to_owned()));
-        }
+        self.known_agent(agent)?;
         let action = match action {
             v1::MonitorAction::Pause => "pause",
             v1::MonitorAction::Resume => "resume",
@@ -735,6 +733,15 @@ fn list(factory: &Factory, agent: &str, all: bool) -> Result<(String, usize), St
         return Ok(("No monitors.".to_owned(), 0));
     }
     Ok((lines.join("\n"), monitors.len()))
+}
+
+/// The agent's monitors that haven't ended, one line each, as monitors_list
+/// shows them: for an agent that leads it (agents_inspect).
+pub(crate) fn lines(factory: &Factory, agent: &str) -> Result<Vec<String>, String> {
+    let now = factory.monitors.now();
+    let monitors = query(&factory.store, &Query { agent: Some(agent), ..Query::default() }).map_err(db_error)?;
+    let person = factory.lock().config.person().to_owned();
+    Ok(monitors.iter().map(|monitor| line(monitor, agent, &person, now)).collect())
 }
 
 /// "m3 deploy check — check `gh run view…` every 5m, fires on match \"success\" · next 14:10 · fired 0".

@@ -847,13 +847,17 @@ class _FirstLineState extends State<FirstLine> {
   /// The first line with something on it, without its Markdown.
   static String _first(String text) {
     for (final line in text.split('\n')) {
-      final plain = md.Document(extensionSet: md.ExtensionSet.gitHubFlavored)
-          .parseInline(
-            line.trim().replaceFirst(RegExp(r'^(#+|[-*+>]|\d+\.)\s+'), ''),
-          )
-          .map((node) => node.textContent)
-          .join()
-          .trim();
+      final plain =
+          md.Document(
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                encodeHtml: false,
+              )
+              .parseInline(
+                line.trim().replaceFirst(RegExp(r'^(#+|[-*+>]|\d+\.)\s+'), ''),
+              )
+              .map((node) => node.textContent)
+              .join()
+              .trim();
       if (plain.isNotEmpty) return plain;
     }
     return text.trim();

@@ -320,6 +320,7 @@ async fn aws_connects_with_the_proposals_exact_statements_and_gives_narrowed_ses
     assert_eq!(connection.name, "AWS (123456789012 in eu-central-1)");
     assert_eq!(info.account, "123456789012 in eu-central-1");
     assert_eq!(info.access.len(), 2);
+    assert!(connection.description.starts_with("AWS: ec2:DescribeInstances, ec2:DescribeImages on * when "), "{}", connection.description);
     assert!(info.access[1].starts_with("ec2:RunInstances on arn:aws:ec2:eu-central-1:*:instance/* when "), "{:?}", info.access);
     for file in ["home/vault/vault.db", "home/factory.db", "home/config.json"] {
         let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
@@ -364,6 +365,7 @@ async fn aws_connects_with_the_proposals_exact_statements_and_gives_narrowed_ses
     let made = vault(&view).secrets.into_iter().find(|secret| secret.name == "AWS describe").expect("made");
     let export = made.export.clone().expect("export");
     assert_eq!(export.permissions, ["ec2:DescribeInstances"]);
+    assert_eq!(made.description, "AWS: ec2:DescribeInstances on * in AWS account 123456789012 in eu-central-1");
     apply_request(
         &mut client,
         &mut view,

@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_view.dart' show SettingsView;
 
 import 'harness.dart';
 
@@ -311,6 +312,17 @@ void main() {
     harness.page.value = AppPage.settings;
     await settle(tester);
 
+    await tester.scrollUntilVisible(
+      find.text('Opus 5.5'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await settle(tester);
     await tester.tap(find.text('Opus 5.5'));
     await settle(tester);
     await tester.tap(find.text('GPT-6').last);
@@ -329,6 +341,38 @@ void main() {
     expect(harness.last.updateSettings.compactAtTokens, Int64(300000));
   });
 
+  testWidgets('Settings shows Apps only where the backend runs apps', (
+    tester,
+  ) async {
+    final harness = await showApp(tester, workspace());
+    harness.page.value = AppPage.settings;
+    await settle(tester);
+    final settings = find
+        .descendant(
+          of: find.byType(SettingsView),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+
+    await tester.scrollUntilVisible(
+      find.text('Opus 5.5'),
+      200,
+      scrollable: settings,
+    );
+    await settle(tester);
+    expect(find.text('Apps'), findsNothing);
+    expect(find.text('Install from a file…'), findsNothing);
+
+    harness.backend.workspace.apply(workspace()..appsAvailable = true);
+    await settle(tester);
+    await tester.scrollUntilVisible(
+      find.text('Install from a file…'),
+      -200,
+      scrollable: settings,
+    );
+    expect(find.text('Apps'), findsOneWidget);
+  });
+
   testWidgets('agent settings move, change model, and delete', (tester) async {
     final harness = await showApp(tester, workspace());
 
@@ -340,6 +384,8 @@ void main() {
     await tester.tap(find.text('Opus 5.5').last);
     await settle(tester);
     await tester.tap(find.text('GPT-6').last);
+    await settle(tester);
+    await tester.ensureVisible(find.text('Factory').last);
     await settle(tester);
     await tester.tap(find.text('Factory').last);
     await settle(tester);

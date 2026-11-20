@@ -3,6 +3,8 @@
 
 const SCHEMA_ROOT: &str = "../../proto";
 const SCHEMA: &str = "../../proto/factory/v1/factory.proto";
+/// factoryd ↔ claktory-apps, internal.
+const APPS: &str = "../../proto/factory/apps/v1/host.proto";
 
 #[derive(Debug, thiserror::Error)]
 enum BuildError {
@@ -14,7 +16,7 @@ enum BuildError {
 
 fn main() -> Result<(), BuildError> {
     println!("cargo:rerun-if-changed={SCHEMA_ROOT}");
-    let descriptors = protox::compile([SCHEMA], [SCHEMA_ROOT])?;
+    let descriptors = protox::compile([SCHEMA, APPS], [SCHEMA_ROOT])?;
     // Maps as BTreeMap: the same state always encodes to the same bytes, so
     // a connection can tell what changed (WorkspacePatch).
     prost_build::Config::new().btree_map(["."]).compile_fds(descriptors)?;

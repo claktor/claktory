@@ -42,6 +42,8 @@ const PREVIEW_HEAD: usize = 2_000;
 const PREVIEW_TAIL: usize = 10_000;
 /// A background task's status when it ran past its time limit.
 const TIME_LIMIT: &str = "stopped at its time limit";
+/// The status of a task the computer's restart ended.
+const RESTARTED: &str = "the computer restarted";
 /// How often a running command's log is read for its output.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -86,7 +88,14 @@ impl Task {
     /// before a restart): until it records its exit code, or its process
     /// group is gone because it was killed. `redaction` hides secrets in
     /// the end of its output.
+    /// A task started before the computer last started was ended by its
+    /// restart, whatever process has its pid now.
     pub async fn wait_detached(self, redaction: &Redaction) -> Finished {
+        if self.recorded_exit().is_none() && started_before_boot(self.started) {
+            let mut done = self.finished(RESTARTED.to_owned(), &redaction.current());
+            done.seconds = None;
+            return done;
+        }
         while self.recorded_exit().is_none() && group_alive(self.pid) {
             sleep(Duration::from_secs(1)).await;
         }
@@ -147,6 +156,8 @@ impl Finished {
     pub fn text(&self) -> String {
         let limit = if self.status.starts_with(TIME_LIMIT) {
             "\nIt ran past its time limit, so it was stopped. Run it again (with run_in_background and a longer timeout, up to 7200 seconds) only if the work still needs it; better, find out why it's so slow and fix that."
+        } else if self.status == RESTARTED {
+            "\nThe computer restarted while it ran, which ended it. Start it again if the work still needs it."
         } else {
             ""
         };
@@ -182,6 +193,31 @@ const FILTERED_TASK_WRAPPER: &str = concat!(
     "CLAKTORY_REDACT",
     r#"; exec bash --noprofile --norc -e -o pipefail -c "$1" ) 2>&1 | "${@:3}"; echo "${PIPESTATUS[0]}" > "$2""#
 );
+
+/// When this computer last started, in ms since 1970; None if unknown.
+pub fn boot_time_ms() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut boot = libc::timeval { tv_sec: 0, tv_usec: 0 };
+        let mut size = std::mem::size_of::<libc::timeval>();
+        // SAFETY: kern.boottime is a timeval, and size says how big ours is.
+        let result =
+            unsafe { libc::sysctlbyname(c"kern.boottime".as_ptr(), (&raw mut boot).cast(), &raw mut size, std::ptr::null_mut(), 0) };
+        (result == 0 && boot.tv_sec > 0).then(|| boot.tv_sec as u64 * 1000 + boot.tv_usec as u64 / 1000)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        let seconds: u64 = stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()?;
+        Some(seconds * 1000)
+    }
+}
+
+/// Whether something that started at `started` (ms since 1970; 0 if
+/// unknown) began before the computer last started, so a restart ended it.
+pub fn started_before_boot(started: u64) -> bool {
+    started > 0 && boot_time_ms().is_some_and(|boot| started < boot)
+}
 
 /// Whether any process of the group is still there.
 pub fn group_alive(pid: u32) -> bool {

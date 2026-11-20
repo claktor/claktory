@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use parking_lot::Mutex;
 
 use crate::accounts::{
-    account_name, account_noun, exhausted_message, key_label, mark_answered_by, out_of_credit, switch_note, usage_limit,
+    account_name, account_noun, exhausted_message, key_label, mark_answered_by, mark_none_left, out_of_credit, switch_note, usage_limit,
 };
 use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
@@ -655,7 +655,7 @@ impl Registry {
                     };
                     let chosen = with_capacity(&accounts, &tried, now_ms()).map(|(_, account)| account.clone());
                     if chosen.is_none() && !accounts.is_empty() {
-                        sink.push(failed(&model, registry.exhausted(&model.provider, &accounts)));
+                        sink.push(registry.none_left(&model, &accounts));
                         return;
                     }
                     let account = chosen.as_ref().map(|account| account.id.clone());
@@ -725,13 +725,28 @@ impl Registry {
                             accounts
                         }
                     };
+                    // In the log too, so it can be seen and watched for.
+                    let why = match gone {
+                        Spent::Limit(_) => {
+                            let until = accounts.iter().find(|stored| stored.id == account).map_or(0, |stored| stored.exhausted_until);
+                            let resets = if until > now_ms() { crate::clock::iso_from_ms(until) } else { "unknown".to_owned() };
+                            tracing::info!(provider = %model.provider, %account, %resets, "account reached its usage limit");
+                            format!("usage limit, resets {resets}")
+                        }
+                        Spent::Credit => {
+                            tracing::info!(provider = %model.provider, %account, "account ran out of credit");
+                            "out of credit".to_owned()
+                        }
+                    };
                     let Some((position, next)) = with_capacity(&accounts, &tried, now_ms()) else {
+                        tracing::info!(provider = %model.provider, "no account left with capacity ({why} on account {account})");
                         if let Some(notes) = &notes {
                             notes(AccountNote::Exhausted);
                         }
-                        sink.push(failed(&model, registry.exhausted(&model.provider, &accounts)));
+                        sink.push(registry.none_left(&model, &accounts));
                         return;
                     };
+                    tracing::info!(provider = %model.provider, "moved from account {account} to {} ({why})", next.id);
                     if let Some(notes) = &notes {
                         let noun = registry.noun(&model.provider);
                         let from = accounts.iter().position(|stored| stored.id == account);
@@ -743,6 +758,19 @@ impl Registry {
             });
             Ok(stream)
         })
+    }
+
+    /// The error a request ends with when no account can take it: saying
+    /// why, marked with when the first account to reset does (none when
+    /// they're out of credit, which waits for the person).
+    fn none_left(&self, model: &Model, accounts: &[Account]) -> StreamEvent {
+        let now = now_ms();
+        let until = accounts.iter().map(|account| account.exhausted_until).filter(|at| *at > now).min();
+        let mut event = failed(model, self.exhausted(&model.provider, accounts));
+        if let StreamEvent::Error { error, .. } = &mut event {
+            mark_none_left(error, until);
+        }
+        event
     }
 
     /// What people call the provider's accounts: "Claude".

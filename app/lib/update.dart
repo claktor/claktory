@@ -11,6 +11,7 @@ import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'tell_rivet.dart';
+import 'usage_wait.dart';
 
 /// What this app knows about its own build, for offering and installing
 /// updates.
@@ -243,7 +244,9 @@ class _UpdateBannerState extends State<UpdateBanner> {
         }
         var working = 0;
         for (final agent in workspace.agents) {
-          if (agent.status == AgentStatus.AGENT_STATUS_WORKING) working++;
+          // One waiting out its usage limits isn't busy: it waits again
+          // after the restart, as it would have.
+          if (atWork(agent)) working++;
         }
         return _Strip(
           release: latest,

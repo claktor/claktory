@@ -621,13 +621,6 @@ impl Factory {
         Ok(list)
     }
 
-    fn known_agent(&self, agent: &str) -> Result<(), RequestError> {
-        if self.lock().config.agent(agent).is_none() {
-            return Err(RequestError::UnknownAgent(agent.to_owned()));
-        }
-        Ok(())
-    }
-
     /// CreateThread: the person starts a thread.
     pub(crate) fn create_thread(self: &Arc<Self>, request: &v1::CreateThread) -> Result<v1::Thread, RequestError> {
         self.known_agent(&request.agent_id)?;

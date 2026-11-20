@@ -165,6 +165,14 @@ pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -
     Ok(())
 }
 
+/// Whether the agent has a proposal waiting for the person.
+pub(crate) fn pending_of(store: &Store, agent: &str) -> bool {
+    store
+        .db()
+        .query_row("SELECT EXISTS (SELECT 1 FROM proposals WHERE agent = ?1 AND state = 'pending')", [agent], |row| row.get(0))
+        .unwrap_or(false)
+}
+
 /// An agent is deleted, and its proposals with it.
 pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     store.db().execute("DELETE FROM proposals WHERE agent = ?1", [agent])?;
@@ -243,6 +251,8 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
             .and_then(|transcript| transcript.set_proposal(row.to_proto()));
         if let Some(entry) = entry {
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+            // It no longer waits for the person (Agent.waiting_seqs).
+            factory.broadcast_workspace(&inner);
         }
     }
     let mut summary = format!("{person} {state} your proposal to {rivet_name}");

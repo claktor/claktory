@@ -5,7 +5,7 @@
 //! a new segment whose first message is the summary, so older segments stay as
 //! read-only history and only the current one is rewritten.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -89,6 +89,9 @@ pub struct Frame {
     /// The vault's secrets it may use (id → "Name (sets A, B): description").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, String>,
+    /// The apps it was given scopes of (id → "Telegram (send, read)").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, String>,
     /// Tools the agent was told it can call through extension_call, since
     /// they're not among `tools` (an extension turned on meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -129,7 +132,8 @@ pub struct Persist {
 pub struct Applied {
     pub changes: Vec<Change>,
     pub persist: Option<Persist>,
-    /// The context size changed, so the workspace snapshot is stale.
+    /// The context size changed, or what waits for the person, so the
+    /// workspace snapshot is stale.
     pub context_changed: bool,
     /// A message the agent was given (the person's or an event) is now in the
     /// conversation, and in `persist`.
@@ -164,6 +168,8 @@ pub struct Transcript {
     cleared: Option<i64>,
     frame: Option<Frame>,
     context_tokens: u64,
+    /// The entries waiting for the person's answer (see `waits`).
+    waiting: BTreeSet<u64>,
     live: Live,
 }
 
@@ -198,6 +204,7 @@ impl Transcript {
             cleared: None,
             frame: None,
             context_tokens: 0,
+            waiting: BTreeSet::new(),
             live: Live::default(),
         };
         let mut numbers = Vec::new();
@@ -246,6 +253,7 @@ impl Transcript {
             cleared: Some(now),
             frame: None,
             context_tokens: 0,
+            waiting: BTreeSet::new(),
             live: Live::default(),
         };
         transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
@@ -329,13 +337,30 @@ impl Transcript {
         self.context_tokens
     }
 
+    /// The seqs of the entries waiting for the person's answer, oldest
+    /// first: requests for secrets and proposals still pending.
+    pub fn waiting_seqs(&self) -> Vec<u64> {
+        self.waiting.iter().copied().collect()
+    }
+
+    /// Notes whether `entry` waits for the person now.
+    fn track(&mut self, entry: &Entry) {
+        if waits(entry.kind.as_ref()) {
+            self.waiting.insert(entry.seq);
+        } else {
+            self.waiting.remove(&entry.seq);
+        }
+    }
+
     /// Shows a proposal to Rivet as it is now (decided, say); the changed
     /// entry, or None if the conversation doesn't show it.
     pub fn set_proposal(&mut self, proposal: v1::Proposal) -> Option<Entry> {
         let entry =
             self.entries.iter_mut().rev().find(|entry| matches!(&entry.kind, Some(Kind::Proposal(shown)) if shown.id == proposal.id))?;
         entry.kind = Some(Kind::Proposal(proposal));
-        Some(entry.clone())
+        let entry = entry.clone();
+        self.track(&entry);
+        Some(entry)
     }
 
     /// Shows an agent's request for a secret as it is now (decided, say); the
@@ -347,7 +372,9 @@ impl Transcript {
             .rev()
             .find(|entry| matches!(&entry.kind, Some(Kind::SecretRequest(shown)) if shown.id == request.id))?;
         entry.kind = Some(Kind::SecretRequest(request));
-        Some(entry.clone())
+        let entry = entry.clone();
+        self.track(&entry);
+        Some(entry)
     }
 
     /// Shows an agent's proposal to connect a service as it is now; the
@@ -359,7 +386,9 @@ impl Transcript {
             .rev()
             .find(|entry| matches!(&entry.kind, Some(Kind::ConnectProposal(shown)) if shown.id == proposal.id))?;
         entry.kind = Some(Kind::ConnectProposal(proposal));
-        Some(entry.clone())
+        let entry = entry.clone();
+        self.track(&entry);
+        Some(entry)
     }
 
     /// Adds a harness notice. Notices are for display only and aren't saved.
@@ -382,9 +411,12 @@ impl Transcript {
             }
             AgentEvent::MessageUpdate { assistant_message_event, .. } => self.stream(*assistant_message_event, &mut applied.changes),
             AgentEvent::MessageEnd { message } => {
+                let waiting = self.waiting.len();
                 for entry in self.show(&message) {
                     applied.changes.push(Change::Entry(entry));
                 }
+                // A request or proposal now waits for the person.
+                applied.context_changed |= self.waiting.len() != waiting;
                 if let Message::Assistant(assistant) = &message {
                     let tokens = context_tokens(assistant);
                     if tokens > 0 && tokens != self.context_tokens {
@@ -430,6 +462,12 @@ impl Transcript {
                 let seconds = delay_ms.div_ceil(1000);
                 let text = format!("The model request failed. Retrying in {seconds}s (attempt {attempt}).");
                 applied.changes.push(Change::Entry(self.push(now_ms(), notice(text, NoticeLevel::Info))));
+            }
+            // The response failed for want of an account with capacity: the
+            // run waits (`crate::waits` says so) and asks again.
+            AgentEvent::Waiting { .. } => {
+                self.live.parts.clear();
+                self.live.reply = None;
             }
             AgentEvent::Compacted { summary, tokens_before, messages, usage, reason } => {
                 let idle = reason == factory_agent::compaction::Reason::Idle;
@@ -680,6 +718,7 @@ impl Transcript {
     fn push(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
         let entry = Entry { seq: self.entries.len() as u64, timestamp_ms, kind: Some(kind), reply: 0 };
         self.entries.push(entry.clone());
+        self.track(&entry);
         entry
     }
 
@@ -718,6 +757,17 @@ fn context_tokens(message: &AssistantMessage) -> u64 {
     usage.input + usage.cache_read + usage.cache_write + usage.output
 }
 
+/// Whether an entry waits for the person's answer: a request for a secret
+/// or a proposal (to connect a service, or to Rivet) still pending.
+fn waits(kind: Option<&Kind>) -> bool {
+    match kind {
+        Some(Kind::SecretRequest(request)) => request.state() == v1::SecretRequestState::Pending,
+        Some(Kind::ConnectProposal(proposal)) => proposal.state() == v1::ConnectProposalState::Pending,
+        Some(Kind::Proposal(proposal)) => proposal.state() == v1::ProposalState::Pending,
+        _ => false,
+    }
+}
+
 fn notice(text: String, level: NoticeLevel) -> Kind {
     Kind::Notice(v1::Notice { text, level: level.into() })
 }
@@ -740,6 +790,7 @@ fn user_kind(message: &UserMessage) -> Kind {
         EventSource::Agent => v1::EventSource::Agent,
         EventSource::Task => v1::EventSource::Task,
         EventSource::Monitor => v1::EventSource::Monitor,
+        EventSource::App => v1::EventSource::App,
     };
     Kind::Event(v1::Event {
         source: source.into(),

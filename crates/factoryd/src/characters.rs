@@ -97,6 +97,8 @@ pub(crate) struct Facts {
     pub running: bool,
     /// A tool of its (not a background task) is running.
     pub tool: bool,
+    /// Its run waits out its accounts' usage limits (`crate::waits`).
+    pub waiting: bool,
     pub model_available: bool,
     pub unseen: bool,
     pub presence: Presence,
@@ -106,7 +108,13 @@ pub(crate) struct Facts {
 /// no model, failed, news, asleep, idle.
 pub(crate) fn mood(facts: Facts, now: i64, sleep_after: Duration) -> Mood {
     if facts.running {
-        if facts.tool { Mood::Working } else { Mood::Thinking }
+        if facts.tool {
+            Mood::Working
+        } else if facts.waiting {
+            Mood::Asleep
+        } else {
+            Mood::Thinking
+        }
     } else if !facts.model_available {
         Mood::NoModel
     } else if facts.presence.failed {
@@ -216,6 +224,7 @@ impl Factory {
         Facts {
             running: runtime.is_some_and(|runtime| runtime.running),
             tool: runtime.is_some_and(|runtime| runtime.doing.is_some()),
+            waiting: runtime.is_some_and(|runtime| runtime.usage_wait.is_some()),
             model_available: inner.models.iter().any(|model| model.id == agent.model),
             unseen: inner.state.unseen.contains(&agent.id),
             // One not seen yet (just added) became idle now.
@@ -229,12 +238,18 @@ impl Factory {
         let facts = self.facts(inner, agent, now);
         let sleep_after = self.sleep_after();
         let mood = mood(facts, now, sleep_after);
+        // Waiting out a usage limit, it fell asleep when the wait began, not
+        // a while after it was last idle.
+        let presence = match facts.waiting {
+            true => Presence { idle_since: now.saturating_sub(i64::try_from(sleep_after.as_millis()).unwrap_or(0)), ..facts.presence },
+            false => facts.presence,
+        };
         let chosen = |choice: &str| (!choice.is_empty()).then(|| choice.to_owned());
         View {
             shape: identity.shape.to_owned(),
             seed: identity.seed,
             mood: mood.proto(),
-            since: self.characters.shown.since(&agent.id, mood, facts.presence, now, sleep_after),
+            since: self.characters.shown.since(&agent.id, mood, presence, now, sleep_after),
             shape_override: chosen(&agent.avatar.shape),
         }
     }
@@ -397,11 +412,14 @@ mod tests {
         let idle = Presence { idle_since: now - 60_000, failed: false };
         let long_idle = Presence { idle_since: now - 20 * 60_000, failed: false };
         let failed = Presence { failed: true, ..idle };
-        let facts = |running, tool, model_available, unseen, presence| Facts { running, tool, model_available, unseen, presence };
+        let facts =
+            |running, tool, model_available, unseen, presence| Facts { running, tool, waiting: false, model_available, unseen, presence };
         for (facts, expected) in [
             (facts(false, false, true, false, idle), Mood::Idle),
             (facts(true, false, true, false, idle), Mood::Thinking),
             (facts(true, true, true, false, idle), Mood::Working),
+            // Waiting out a usage limit, it sleeps.
+            (Facts { waiting: true, ..facts(true, false, true, false, idle) }, Mood::Asleep),
             // Running wins over an old failure, no model, news and sleep.
             (facts(true, false, false, true, failed), Mood::Thinking),
             (facts(false, false, false, false, failed), Mood::NoModel),

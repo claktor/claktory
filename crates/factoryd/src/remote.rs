@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -334,6 +334,13 @@ fn identity(home: &Home) -> Identity {
 pub(crate) fn key_color(home: &Home) -> &'static str {
     let index = secret_key(home).map_or(0, |key| usize::from(Sha256::digest(key.public().as_bytes())[0]));
     crate::config::AGENT_COLORS[index % crate::config::AGENT_COLORS.len()]
+}
+
+/// The seed of the person's avatar until they shuffle it: from this
+/// Claktory's key, as its color is, so it stays the same without being
+/// written anywhere.
+pub(crate) fn key_seed(home: &Home) -> String {
+    secret_key(home).map(|key| key.public().to_string()).unwrap_or_default()
 }
 
 /// Pairs a device away from the running Factory (`factoryd pair`): the code
@@ -870,7 +877,10 @@ impl Factory {
                 let last = lock(&self.remote.failures).insert(peer.endpoint_id.clone(), now);
                 last.map(|last| FAILURE_PAUSE.saturating_sub(now.duration_since(last))).unwrap_or_default()
             };
-            tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
+            // The loopback port's refusals are logged where they're known.
+            if !peer.endpoint_id.is_empty() {
+                tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
+            }
             tokio::time::sleep(wait).await;
             return Authorized::Refused;
         };
@@ -1467,18 +1477,29 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
     }
     let compress = connection.alpn() == ALPN_COMPRESSED;
     tracing::info!(endpoint = %endpoint_id, compressed = compress, "tunnel connection opened");
+    // A connection that drops (the device slept, or its network changed)
+    // ends all its streams at once: said once, not once each.
+    let dropped = Arc::new(AtomicBool::new(false));
     while let Ok((send, receive)) = connection.accept_bi().await {
         let Some(strong) = factory.upgrade() else { break };
         let address = path_of(&connection).1;
         let peer = Peer { endpoint_id: endpoint_id.clone(), loopback: from_this_machine(address), address };
+        let (link, dropped) = (connection.clone(), dropped.clone());
         tokio::spawn(async move {
+            let endpoint = peer.endpoint_id.clone();
             let served = if compress {
                 crate::connection::serve_stream(compressed(receive, send), strong, Some(peer)).await
             } else {
                 crate::connection::serve_stream(tokio::io::join(receive, send), strong, Some(peer)).await
             };
-            if let Err(error) = served {
-                tracing::warn!(%error, "tunnel connection failed");
+            match served {
+                Ok(()) => {}
+                Err(error) if link.close_reason().is_some() || error.to_string().contains("connection lost") => {
+                    if !dropped.swap(true, Ordering::Relaxed) {
+                        tracing::info!(%endpoint, %error, "a device's tunnel connection dropped");
+                    }
+                }
+                Err(error) => tracing::warn!(%endpoint, %error, "tunnel connection failed"),
             }
         });
     }

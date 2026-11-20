@@ -48,6 +48,13 @@ pub struct Settings {
     pub tools: Option<Vec<Tool>>,
 }
 
+/// Waits out a time when none of the provider's accounts can take a request
+/// (`accounts::none_left`): until the time given (ms since 1970) or, when
+/// None, until the person changes something; the text says why. It may end
+/// early, when something changed, and the request goes again. False when the
+/// agent shouldn't wait: the request fails as it is.
+pub type WaitOut = Arc<dyn Fn(Option<u64>, String) -> BoxFuture<bool> + Send + Sync>;
+
 /// What a new context starts with: its system prompt and tools.
 pub struct NewContext {
     pub system_prompt: String,
@@ -159,6 +166,7 @@ pub struct Agent {
     inbox: Option<Inbox>,
     after_compaction: Option<AfterCompaction>,
     secrets: Option<Secrets>,
+    wait_out: Option<WaitOut>,
     listeners: Vec<Listener>,
     active: AbortHandle,
     detaching: DetachHandle,
@@ -204,6 +212,7 @@ impl Agent {
             inbox: options.inbox,
             after_compaction: options.after_compaction,
             secrets: options.secrets,
+            wait_out: None,
             listeners: Vec::new(),
             active: AbortHandle::default(),
             detaching: DetachHandle::default(),
@@ -213,6 +222,11 @@ impl Agent {
 
     pub fn subscribe(&mut self, listener: Listener) {
         self.listeners.push(listener);
+    }
+
+    /// Lets the agent wait out its accounts' usage limits instead of failing.
+    pub fn wait_out_with(&mut self, wait: WaitOut) {
+        self.wait_out = Some(wait);
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
@@ -338,7 +352,7 @@ impl Agent {
             }
             self.compact_if_needed(&mut context, fresh, mid_task, token).await?;
             first_turn = false;
-            let message = self.respond(&mut context, token).await?;
+            let message = self.respond(&mut context, &mut produced, token).await?;
             produced.push(assistant(message.clone()));
             if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
                 self.emit(AgentEvent::TurnEnd { message: assistant(message.clone()), tool_results: Vec::new() }).await?;
@@ -372,24 +386,31 @@ impl Agent {
             }
             // Between steps: what arrived while the model and tools worked
             // goes in now, so the next call sees it.
-            let arrived = match &self.inbox {
-                Some(inbox) => inbox().await,
-                None => Arrived::default(),
-            };
-            self.apply_settings(arrived.settings);
-            fresh = arrived.messages.len();
-            for message in arrived.messages {
-                let message = Message::User(message);
-                context.push(message.clone());
-                produced.push(message.clone());
-                self.emit_message(message).await?;
-            }
+            fresh = self.take_inbox(&mut context, &mut produced).await?;
             mid_task = !calls.is_empty();
             if !mid_task && fresh == 0 {
                 break;
             }
         }
         self.emit(AgentEvent::AgentEnd { messages: produced }).await
+    }
+
+    /// Takes what arrived: its settings apply from the next model call, and
+    /// its messages join the context. How many messages came.
+    async fn take_inbox(&mut self, context: &mut Vec<Message>, produced: &mut Vec<Message>) -> Result<usize, Error> {
+        let arrived = match &self.inbox {
+            Some(inbox) => inbox().await,
+            None => Arrived::default(),
+        };
+        self.apply_settings(arrived.settings);
+        let count = arrived.messages.len();
+        for message in arrived.messages {
+            let message = Message::User(message);
+            context.push(message.clone());
+            produced.push(message.clone());
+            self.emit_message(message).await?;
+        }
+        Ok(count)
     }
 
     fn apply_settings(&mut self, settings: Settings) {
@@ -445,13 +466,48 @@ impl Agent {
             .then(|| Duration::from_millis(self.policy.retry_delay_ms * u64::from(attempt)))
     }
 
+    /// Waits out `response`'s failure when it's for want of an account with
+    /// capacity and the agent can wait: true when it waited, so the request
+    /// goes again.
+    async fn wait_out(&self, response: &AssistantMessage, token: &CancellationToken) -> Result<bool, Error> {
+        let (Some(wait), Some(until)) = (&self.wait_out, crate::accounts::none_left(response)) else { return Ok(false) };
+        if token.is_cancelled() {
+            return Ok(false);
+        }
+        let why = response.error_message.clone().unwrap_or_default();
+        tokio::select! {
+            waited = wait(until, why) => Ok(waited),
+            () = token.cancelled() => Err(Error::Aborted),
+        }
+    }
+
     /// One model response. Every attempt streams to listeners; one that fails transiently ends with `Retrying`
-    /// instead of `MessageEnd`, leaves the context, and the request is sent again.
-    async fn respond(&mut self, context: &mut Vec<Message>, token: &CancellationToken) -> Result<AssistantMessage, Error> {
+    /// instead of `MessageEnd`, leaves the context, and the request is sent again. One that fails for want of an
+    /// account with capacity ends with `Waiting`, and the request goes again once the wait is over, with what
+    /// arrived meanwhile.
+    async fn respond(
+        &mut self,
+        context: &mut Vec<Message>,
+        produced: &mut Vec<Message>,
+        token: &CancellationToken,
+    ) -> Result<AssistantMessage, Error> {
         let mut attempt = 0;
         loop {
             let message = self.stream_assistant_response(context, token).await?;
             attempt += 1;
+            if let (Some(_), Some(until_ms)) = (&self.wait_out, crate::accounts::none_left(&message))
+                && !token.is_cancelled()
+            {
+                context.pop();
+                self.emit(AgentEvent::Waiting { message: assistant(message.clone()), until_ms }).await?;
+                if self.wait_out(&message, token).await? {
+                    tracing::info!(until_ms, "waited out the accounts' usage limits");
+                    attempt = 0;
+                    self.take_inbox(context, produced).await?;
+                    continue;
+                }
+                context.push(assistant(message.clone()));
+            }
             let Some(delay) = self.retry_delay(&message, attempt, token) else {
                 self.emit(AgentEvent::MessageEnd { message: assistant(message.clone()) }).await?;
                 return Ok(message);
@@ -548,6 +604,10 @@ impl Agent {
         loop {
             let response = self.complete(messages.clone(), token).await?;
             attempt += 1;
+            if self.wait_out(&response, token).await? {
+                attempt = 0;
+                continue;
+            }
             if let Some(delay) = self.retry_delay(&response, attempt, token) {
                 tracing::warn!(attempt, error = response.error_message.as_deref(), "retrying compaction");
                 pause(delay, token).await?;

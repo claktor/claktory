@@ -963,3 +963,59 @@ async fn chatgpt_resets_are_read_with_the_usage_and_used_by_id() {
     assert_eq!(consumed[0]["credit_id"], "sooner");
     assert!(consumed[0]["redeem_request_id"].as_str().is_some_and(|id| !id.is_empty()));
 }
+
+/// What this test binary has logged: tests run in parallel, on threads of
+/// their own, so one subscriber takes it all and each test looks for its own
+/// accounts' lines.
+fn logged() -> String {
+    static LOGGED: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    let buffer = LOGGED.get_or_init(|| {
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let shared = buffer.clone();
+        let subscriber = tracing_subscriber::fmt().with_writer(move || Writer(shared.clone())).with_ansi(false).finish();
+        tracing::subscriber::set_global_default(subscriber).expect("the only subscriber");
+        buffer
+    });
+    String::from_utf8_lossy(&buffer.lock()).into_owned()
+}
+
+/// #183: moving to another account was only a notice in one agent's
+/// conversation, so nothing watching the log ever saw it.
+#[tokio::test]
+async fn reaching_a_limit_and_moving_to_the_next_account_are_logged() {
+    logged();
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 2 * 3600;
+    let server = mock(Arc::new(move |seen| match seen.token.as_str() {
+        token if token == claude_token("first-183") => claude_limit(resets),
+        _ => claude_reply(),
+    }))
+    .await;
+    store_accounts(
+        &file,
+        "anthropic",
+        vec![account("first-183", "a@x.com", &claude_token("first-183")), account("second-183", "b@x.com", &claude_token("second-183"))],
+    );
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let reply = ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await;
+    assert_eq!(reply, Ok("hi".into()));
+    let resets = factory_agent::clock::iso_from_ms(resets * 1000);
+    let logged = logged();
+    assert!(logged.contains(&format!("account reached its usage limit provider=anthropic account=first-183 resets={resets}")), "{logged}");
+    assert!(
+        logged.contains(&format!("moved from account first-183 to second-183 (usage limit, resets {resets}) provider=anthropic")),
+        "{logged}"
+    );
+}

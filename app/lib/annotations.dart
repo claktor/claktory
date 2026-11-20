@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'avatar.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
@@ -1531,6 +1532,10 @@ class _Comment extends StatelessWidget {
         Unselectable(
           child: Row(
             children: [
+              if (mine) ...[
+                const PersonAvatar(size: 16),
+                const SizedBox(width: Space.xs + 2),
+              ],
               Text(
                 author,
                 style: TextStyles.caption.copyWith(

@@ -15,11 +15,18 @@ use factory_protocol::v1::{self, ErrorCode, client_message::Body as Request, ser
 use factoryd::factory::Factory;
 use serde_json::{Value, json};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Anthropic's endpoints: the account's token decides the answer.
 async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    anthropic_with(resets_at_seconds, Arc::new(AtomicBool::new(true))).await
+}
+
+/// `anthropic`, with account "a" over its limit only while `limited`.
+async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -27,7 +34,7 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else { return };
-            let recorded = recorded.clone();
+            let (recorded, limited) = (recorded.clone(), limited.load(Ordering::SeqCst));
             tokio::spawn(async move {
                 let mut raw = Vec::new();
                 let head_end = loop {
@@ -64,7 +71,7 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
                     recorded.push((path.clone(), account.clone()));
                     recorded.iter().any(|(path, _)| path.ends_with("/reset_rate_limits"))
                 };
-                let (status, extra, content_type, body) = answer(&path, &account, resets_at_seconds, claimed);
+                let (status, extra, content_type, body) = answer(&path, &account, resets_at_seconds, claimed, limited);
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n",
                     body.len()
@@ -82,8 +89,9 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
 
 /// Account "a" is over its limit, with a full reset to use; "b" answers
 /// "hi". Each has its own usage and plan, and says who it is. Once the reset
-/// is `claimed`, a has no limit reached and no reset left.
-fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool) -> (u16, String, &'static str, String) {
+/// is `claimed`, or when it's not `limited`, a has no limit reached (and no
+/// reset left once claimed).
+fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool, limited: bool) -> (u16, String, &'static str, String) {
     let json = |body: Value| (200, String::new(), "application/json", body.to_string());
     if path == "/api/oauth/usage?cedar_ember=1&skip_spend=1" {
         let used = if account == "b" {
@@ -114,7 +122,7 @@ fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool) -> (
             "organization": {"uuid": format!("org-{account}"), "organization_type": "claude_max", "rate_limit_tier": tier},
         }));
     }
-    if account == "a" {
+    if account == "a" && limited && !claimed {
         let headers = format!("anthropic-ratelimit-unified-status: rejected\r\nanthropic-ratelimit-unified-reset: {resets_at_seconds}\r\n");
         let body = json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}});
         return (429, headers, "application/json", body.to_string());
@@ -323,4 +331,123 @@ async fn the_person_uses_a_usage_reset_and_the_usage_is_read_again() {
         }
     }
     assert_eq!(seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/reset_rate_limits")).count(), 1);
+}
+
+/// The real providers on `base_url`, with Anthropic signed in to account a
+/// alone.
+fn only_a(dir: &std::path::Path, base_url: &str) -> Registry {
+    let registry = registry(dir, base_url);
+    std::fs::write(dir.join("auth.json"), json!({"anthropic": account("a")}).to_string()).expect("credentials");
+    registry
+}
+
+fn builder(view: &View) -> v1::Agent {
+    view.agent("builder").clone()
+}
+
+async fn serve(factory: &Arc<Factory>) -> (Client, View) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(factoryd::serve(listener, factory.clone()));
+    let (client, workspace, transcript) = Client::connect(addr).await;
+    let entries = transcript.map(|transcript| transcript.entries).unwrap_or_default();
+    (client, View { workspace, entries, ..View::default() })
+}
+
+async fn create_builder(client: &mut Client, view: &mut View) {
+    let model = factory_agent::providers::catalog::models("anthropic").into_iter().next().expect("a Claude model").id;
+    let create = Request::CreateAgent(v1::CreateAgent {
+        name: "Builder".into(),
+        model: format!("anthropic/{model}"),
+        effort: "off".into(),
+        ..Default::default()
+    });
+    assert!(matches!(apply_request(client, view, create).await, Body::Ack(_)));
+    let select = Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() });
+    apply_request(client, view, select).await;
+}
+
+fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
+    seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/v1/messages")).count()
+}
+
+/// With its only account at its usage limit, an agent doesn't fail: it
+/// waits, says so in its conversation and its status, sleeps, takes messages
+/// meanwhile, and carries on by itself once the limit resets, with them.
+#[tokio::test]
+async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
+    let dir = temp_dir();
+    let resets = now_ms() / 1000 + 2;
+    let limited = Arc::new(AtomicBool::new(true));
+    let (base_url, seen) = anthropic_with(resets, limited.clone()).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    factory.set_usage_wait_margin(Duration::ZERO);
+    let (mut client, mut view) = serve(&factory).await;
+    create_builder(&mut client, &mut view).await;
+
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
+    let agent = builder(&view);
+    assert!(agent.usage_wait.starts_with("Waiting for your Claude usage to reset at "), "{}", agent.usage_wait);
+    assert_eq!(agent.usage_wait_until_ms, i64::try_from(resets * 1000).expect("ms"));
+    assert_eq!((agent.status(), agent.character_mood()), (v1::AgentStatus::Working, v1::CharacterMood::Asleep));
+    view.follow(&mut client, |view| describe(&view.entries).len() == 2).await;
+    let shown = describe(&view.entries);
+    assert_eq!(shown[0], "user: hello");
+    assert!(
+        shown[1].starts_with("notice: Your Claude account reached its usage limit; it resets ")
+            && shown[1].ends_with("Builder will carry on by itself then."),
+        "{}",
+        shown[1]
+    );
+
+    // A message meanwhile waits with it; then the limit resets.
+    apply_request(&mut client, &mut view, send_message("builder", "meanwhile")).await;
+    limited.store(false, Ordering::SeqCst);
+    view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
+    view.follow(&mut client, |view| builder(view).status() == v1::AgentStatus::Idle).await;
+    assert_eq!(describe(&view.entries)[2..], ["user: meanwhile", "assistant: hi"]);
+    assert_eq!((builder(&view).usage_wait.as_str(), builder(&view).usage_wait_until_ms), ("", 0));
+    assert_eq!(model_requests(&seen), 2, "one at the limit, one after it reset");
+    assert!(now_ms() >= resets * 1000, "not before the reset");
+}
+
+/// A wait ends early when the person uses a usage reset, and a backend
+/// restart in the middle of one resumes the run, which waits again.
+#[tokio::test]
+async fn a_wait_survives_a_restart_and_ends_early_with_a_usage_reset() {
+    let dir = temp_dir();
+    let resets = now_ms() / 1000 + 3 * 3600;
+    let (base_url, seen) = anthropic(resets).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    let (mut client, mut view) = serve(&factory).await;
+    create_builder(&mut client, &mut view).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| builder(view).usage_wait_until_ms == i64::try_from(resets * 1000).expect("ms")).await;
+
+    // Restarted: the open run resumes, finds no account free, and waits again, asking nothing.
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a_again(&dir, &base_url))).await.expect("open again");
+    let (mut client, mut view) = serve(&factory).await;
+    view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
+    assert_eq!(model_requests(&seen), 1);
+
+    // The person uses a reset: it asks again at once, and the answer comes.
+    view.follow(&mut client, |view| claude(view).accounts[0].usage.as_ref().is_some_and(|usage| !usage.resets.is_empty())).await;
+    let use_it =
+        Request::UseUsageReset(v1::UseUsageReset { provider_id: "anthropic".into(), account_id: "a".into(), reset_id: "full_1".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, use_it).await, Body::UsageResetAnswer(_)));
+    let select = Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() });
+    apply_request(&mut client, &mut view, select).await;
+    view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
+    view.follow(&mut client, |view| builder(view).status() == v1::AgentStatus::Idle && builder(view).usage_wait.is_empty()).await;
+    assert_eq!(model_requests(&seen), 2);
+}
+
+/// `only_a`'s registry, over the credentials file as it is now (account a
+/// marked as at its limit).
+fn only_a_again(dir: &std::path::Path, base_url: &str) -> Registry {
+    let credentials = std::fs::read_to_string(dir.join("auth.json")).expect("credentials");
+    let registry = registry(dir, base_url);
+    std::fs::write(dir.join("auth.json"), credentials).expect("credentials");
+    registry
 }

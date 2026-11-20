@@ -32,6 +32,10 @@ fn agent_node(id: &str) -> String {
     format!("agent:{id}")
 }
 
+fn app_node(id: &str) -> String {
+    format!("app:{id}")
+}
+
 fn database_node(agent: &str) -> String {
     format!("data:agent:{agent}")
 }
@@ -61,11 +65,12 @@ fn path(path: &Path) -> String {
 }
 
 fn edge(from: &str, to: &str, kind: v1::MapEdgeKind) -> v1::MapEdge {
-    v1::MapEdge { from_id: from.to_owned(), to_id: to.to_owned(), kind: kind.into(), both_ways: false }
+    v1::MapEdge { from_id: from.to_owned(), to_id: to.to_owned(), kind: kind.into(), both_ways: false, label: String::new() }
 }
 
-/// The map of `config`, with the secrets in `vault` (names and grants only).
-pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1::ClaktoryMap {
+/// The map of `config`, with the secrets in `vault` (names and grants only)
+/// and the apps installed.
+pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState, apps: &[v1::AppInfo]) -> v1::ClaktoryMap {
     let mut nodes = vec![v1::MapNode {
         id: WORKSPACE.to_owned(),
         kind: v1::MapNodeKind::Workspace.into(),
@@ -123,6 +128,7 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
             badges: badges(agent),
             ref_id: agent.id.clone(),
             project_id: project_id.clone(),
+            icon: String::new(),
         });
         edges.push(edge(&id, &place, v1::MapEdgeKind::Writes));
         if let Some(project) = project {
@@ -160,6 +166,9 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
             }
             edges.push(v1::MapEdge { both_ways: back, ..edge(&id, &agent_node(&to.id), v1::MapEdgeKind::Messages) });
         }
+        if let Some(lead) = config.lead(agent).filter(|lead| !config.archived(lead)) {
+            edges.push(edge(&id, &agent_node(&lead.id), v1::MapEdgeKind::Lead));
+        }
     }
     if records {
         nodes.push(v1::MapNode {
@@ -182,6 +191,46 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
         });
         let holders = secret.grants.iter().filter(|grant| config.agent(&grant.agent_id).is_some_and(|agent| !config.archived(agent)));
         edges.extend(holders.map(|grant| edge(&id, &agent_node(&grant.agent_id), v1::MapEdgeKind::Secret)));
+        // Given to an app: to the app.
+        let apps_given = secret
+            .grants
+            .iter()
+            .filter_map(|grant| grant.agent_id.strip_prefix("app:"))
+            .filter(|app| apps.iter().any(|info| info.id == *app));
+        edges.extend(apps_given.map(|app| edge(&id, &app_node(app), v1::MapEdgeKind::Secret)));
+    }
+    let shown = |agent: &str| config.agent(agent).is_some_and(|agent| !config.archived(agent));
+    for app in apps {
+        let id = app_node(&app.id);
+        let troubled = matches!(app.state(), v1::AppState::PausedCrashed | v1::AppState::Unavailable) && !app.state_detail.is_empty();
+        nodes.push(v1::MapNode {
+            id: id.clone(),
+            kind: v1::MapNodeKind::App.into(),
+            label: app.name.clone(),
+            detail: if troubled { app.state_detail.clone() } else { app.description.clone() },
+            ref_id: app.id.clone(),
+            icon: app.icon.clone(),
+            ..Default::default()
+        });
+        let label_of = |scope: &str| app.scopes.iter().find(|spec| spec.id == scope).map_or(scope, |spec| spec.label.as_str()).to_owned();
+        for grant in app.grants.iter().filter(|grant| shown(&grant.agent_id)) {
+            let label = grant.scopes.iter().map(|scope| label_of(scope)).collect::<Vec<_>>().join(" · ");
+            edges.push(v1::MapEdge { label, ..edge(&id, &agent_node(&grant.agent_id), v1::MapEdgeKind::App) });
+        }
+        let mut hears: std::collections::BTreeMap<&str, Vec<String>> = std::collections::BTreeMap::new();
+        for subscription in &app.subscriptions {
+            let label = app
+                .events
+                .iter()
+                .find(|event| event.kind == subscription.event_kind)
+                .map_or(subscription.event_kind.clone(), |event| event.label.clone());
+            for agent in subscription.agent_ids.iter().filter(|agent| shown(agent)) {
+                hears.entry(agent.as_str()).or_default().push(label.clone());
+            }
+        }
+        for (agent, labels) in hears {
+            edges.push(v1::MapEdge { label: labels.join(" · "), ..edge(&id, &agent_node(agent), v1::MapEdgeKind::Hears) });
+        }
     }
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     edges.sort_by(|a, b| (&a.from_id, &a.to_id, a.kind).cmp(&(&b.from_id, &b.to_id, b.kind)));

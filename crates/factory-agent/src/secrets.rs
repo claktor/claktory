@@ -130,11 +130,6 @@ impl Redactor {
 
     /// This redactor, also hiding `variables`.
     pub fn with(&self, variables: &[SecretVariable]) -> Redactor {
-        eprintln!(
-            "WITH {:?} have {:?}",
-            variables.iter().map(|v| (v.variable.clone(), v.public)).collect::<Vec<_>>(),
-            self.values.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>()
-        );
         if variables.is_empty() {
             return Redactor::build(self.values.clone());
         }

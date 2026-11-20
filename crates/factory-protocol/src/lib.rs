@@ -9,3 +9,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/factory.v1.rs"));
 }
+
+/// factoryd ↔ claktory-apps, the host that runs apps: internal, tied to
+/// factoryd's version (`proto/factory/apps/v1/host.proto`).
+pub mod apps {
+    include!(concat!(env!("OUT_DIR"), "/factory.apps.v1.rs"));
+}

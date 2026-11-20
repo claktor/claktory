@@ -18,6 +18,7 @@ import 'scope.dart';
 import 'settings_view.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
+import 'usage_wait.dart';
 
 /// The wash behind [agent]'s conversation, in its color.
 Color conversationTint(Agent agent) =>
@@ -102,6 +103,8 @@ class _AgentViewState extends State<AgentView> {
                   outbox: backend.outbox,
                   loadEarlier: () => backend.loadEarlier(agent.id),
                   agentId: agent.id,
+                  reveal: backend.reveal,
+                  loadFrom: (seq) => backend.loadFrom(agent.id, seq),
                 );
               },
             ),
@@ -112,10 +115,17 @@ class _AgentViewState extends State<AgentView> {
         // starts and stops: reconnecting, else working with Stop.
         ReconnectingLine(
           otherwise: _working
-              ? WorkingLine(onStop: _stop)
+              ? WorkingLine(onStop: _stop, wait: usageWaitLine(agent))
               : const SizedBox.shrink(),
         ),
         _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
+      ],
+    );
+    // Files dragged over the window go to this agent: the pane says so.
+    final chatWithDrop = Stack(
+      children: [
+        Positioned.fill(child: chat),
+        Positioned.fill(child: FileDropOverlay(agent: agent)),
       ],
     );
     return CallbackShortcuts(
@@ -128,10 +138,113 @@ class _AgentViewState extends State<AgentView> {
           // screen, and its viewers open from "…".
           Expanded(
             child: widget.onBack != null
-                ? chat
-                : PaneLayout(agent: agent, chat: chat),
+                ? chatWithDrop
+                : PaneLayout(agent: agent, chat: chatWithDrop),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Over an agent's conversation while files are dragged over the window
+/// (they'll go to its message box): the pane dims, its edge takes the
+/// agent's color, and a card in the middle says where they go and how
+/// many. It never takes the pointer; the window's drag is native, so it
+/// doesn't flicker as the pointer crosses what's under it.
+class FileDropOverlay extends StatefulWidget {
+  const FileDropOverlay({super.key, required this.agent});
+
+  final Agent agent;
+
+  @override
+  State<FileDropOverlay> createState() => _FileDropOverlayState();
+}
+
+class _FileDropOverlayState extends State<FileDropOverlay> {
+  /// How many files it last said, kept while it fades out.
+  var _count = 0;
+
+  /// In the tree: shown, or fading out.
+  var _present = false;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: ValueListenableBuilder<int>(
+      valueListenable: FileDrop.count,
+      builder: (context, count, _) {
+        final shown = count > 0 && widget.agent.modelAvailable;
+        if (shown) {
+          _count = count;
+          _present = true;
+        }
+        if (!_present) return const SizedBox.shrink();
+        return TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: shown ? 1 : 0),
+          duration: Motion.fast,
+          curve: Curves.easeOut,
+          onEnd: () {
+            if (!shown && mounted) setState(() => _present = false);
+          },
+          builder: (context, t, child) => Opacity(opacity: t, child: child),
+          child: _card(context, _count),
+        );
+      },
+    ),
+  );
+
+  Widget _card(BuildContext context, int count) {
+    final palette = Palette.of(context);
+    final agent = widget.agent;
+    final color = agentColor(agent.color);
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0x4D000000),
+        border: Border.all(color: color, width: 2),
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      alignment: Alignment.center,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Space.xl,
+          vertical: Space.l,
+        ),
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.floating),
+          boxShadow: floatingShadow,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.14),
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: ExtensionGlyph(
+                icon: 'upload',
+                name: 'Upload',
+                color: color,
+                size: 22,
+              ),
+            ),
+            const SizedBox(height: Space.m),
+            Text(
+              'Drop to add to your message to ${agent.name}',
+              style: TextStyles.emphasis.copyWith(color: palette.text),
+            ),
+            if (count > 1)
+              Text(
+                '$count files',
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -161,7 +274,8 @@ class _Header extends StatelessWidget {
           ].join(' · ')
         : 'No model available';
     final color = agentColor(agent.color);
-    final working = agent.status == AgentStatus.AGENT_STATUS_WORKING;
+    // Held up by usage limits, it sleeps rather than works: no wave.
+    final working = atWork(agent);
     final header = DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -1079,11 +1193,15 @@ class _ReconnectingLineState extends State<ReconnectingLine> {
 /// While the agent works, a line above the message box at its end: the
 /// live dot, "Working", and Stop (Esc on a Mac). Above the box rather than
 /// in it, so the text being typed never moves as the agent starts and
-/// stops.
+/// stops. While usage limits hold it up, what it waits for instead, with
+/// no dot: it isn't working meanwhile.
 class WorkingLine extends StatelessWidget {
-  const WorkingLine({super.key, required this.onStop});
+  const WorkingLine({super.key, required this.onStop, this.wait = ''});
 
   final VoidCallback onStop;
+
+  /// What it waits for (Agent.usage_wait); empty while it works.
+  final String wait;
 
   @override
   Widget build(BuildContext context) {
@@ -1104,11 +1222,15 @@ class WorkingLine extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              const LiveDot(),
-              const SizedBox(width: Space.s),
-              Text(
-                'Working',
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              if (wait.isEmpty) ...[
+                const LiveDot(),
+                const SizedBox(width: Space.s),
+              ],
+              Flexible(
+                child: Text(
+                  wait.isEmpty ? 'Working' : wait,
+                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                ),
               ),
               const SizedBox(width: Space.s),
               Button(label: phone ? 'Stop' : 'Stop  esc', onPressed: onStop),

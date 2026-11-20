@@ -231,15 +231,46 @@ fn changes(
     (!said.is_empty()).then(|| said.join("\n"))
 }
 
+/// The apps given or taken back since the agent was told, in one note; None
+/// if none. `sections` are the apps' sections of its system prompt, by id.
+fn app_changes(frame: &Frame, apps: &BTreeMap<String, String>, sections: &BTreeMap<String, String>) -> Option<String> {
+    let mut said = Vec::new();
+    let gained: Vec<&String> = apps.iter().filter(|(id, label)| frame.apps.get(*id) != Some(*label)).map(|(id, _)| id).collect();
+    if !gained.is_empty() {
+        let labels: Vec<&str> = gained.iter().map(|id| apps[*id].as_str()).collect();
+        let mut text = format!(
+            "You can now use the apps: {}. What they're for, which your system prompt has from your next context:",
+            labels.join("; ")
+        );
+        for id in gained {
+            if let Some(section) = sections.get(id) {
+                text.push_str("\n\n");
+                text.push_str(section);
+            }
+        }
+        said.push(text);
+    }
+    let lost: Vec<String> = frame
+        .apps
+        .iter()
+        .filter(|(id, _)| !apps.contains_key(*id))
+        .map(|(_, label)| label.split(" (").next().unwrap_or_default().to_owned())
+        .collect();
+    if !lost.is_empty() {
+        said.push(format!("You can no longer use the apps: {}.", lost.join(", ")));
+    }
+    (!said.is_empty()).then(|| said.join("\n"))
+}
+
 /// The tools a frame lists, with its specs, in its order. Tools it doesn't
 /// list wait for the next segment; those it lists that are gone, such as an
 /// extension's that was turned off, are refused, saying why.
-fn fit(mut tools: Vec<Tool>, specs: &[ToolSpec], agent: &AgentConfig) -> Vec<Tool> {
+fn fit(factory: &Factory, mut tools: Vec<Tool>, specs: &[ToolSpec], agent: &AgentConfig) -> Vec<Tool> {
     let mut fitted = Vec::with_capacity(specs.len());
     for spec in specs {
         let mut tool = match tools.iter().position(|tool| tool.spec.name == spec.name) {
             Some(index) => tools.swap_remove(index),
-            None => refused(spec, agent),
+            None => refused(spec, agent, crate::apps::tool_app(factory, &spec.name)),
         };
         tool.spec = spec.clone();
         fitted.push(tool);
@@ -248,10 +279,13 @@ fn fit(mut tools: Vec<Tool>, specs: &[ToolSpec], agent: &AgentConfig) -> Vec<Too
 }
 
 /// A tool of the frame that's gone: calling it says why.
-fn refused(spec: &ToolSpec, agent: &AgentConfig) -> Tool {
+fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>) -> Tool {
     let name = spec.name.to_string();
     let owner = crate::extensions::ALL.into_iter().find(|extension| extension.owns_tool(&name)).map(|extension| extension.manifest());
     let reason = match owner {
+        _ if app.is_some() => {
+            format!("You no longer have {name} of the {} app, so it doesn't work any more.", app.unwrap_or_default())
+        }
         Some(manifest) if !crate::extensions::enabled(agent, manifest.id) => {
             format!("The {} extension is turned off for you, so {name} doesn't work any more.", manifest.name)
         }
@@ -589,6 +623,7 @@ impl Factory {
         let runtime = inner.agents.get_mut(id)?;
         // A new run: a stop before now was of the one that ended.
         runtime.stopped = false;
+        runtime.wait_said = None;
         let mut prompts = std::mem::take(&mut runtime.queue);
         prompts.splice(0..0, note.into_iter().chain(cleared));
         let (epoch, compact) = (runtime.epoch, runtime.compact.take());
@@ -622,6 +657,7 @@ impl Factory {
         let folders = folder_lines(&inner.config, &agent);
         let names = model_lines(&inner.models);
         let secrets = self.vault.granted(id);
+        let apps = crate::apps::granted(self, &inner.config, id);
         // tree_land in its tools, or reached through extension_call.
         let can_land = frame.tools.iter().any(|tool| tool.name == "tree_land" || tool.name == EXTENSION_CALL);
         let (settings, turned_on) = match settings_note(frame.told(), &self.home, &inner.config, &agent, &folder, can_land, &frame.tools) {
@@ -635,7 +671,9 @@ impl Factory {
             (Some(settings), Some(news)) => Some(format!("{settings}\n\n{news}")),
             (settings, news) => settings.or(news),
         };
-        let notes: Vec<String> = [settings, changes(&frame, &roster, &names, &folders, &secrets)].into_iter().flatten().collect();
+        let apps_note = app_changes(&frame, &apps, &crate::apps::sections_by_app(self, &inner.config, id));
+        let notes: Vec<String> =
+            [settings, changes(&frame, &roster, &names, &folders, &secrets), apps_note].into_iter().flatten().collect();
         if notes.is_empty() {
             return None;
         }
@@ -644,6 +682,7 @@ impl Factory {
         frame.models = names;
         frame.folders = folders;
         frame.secrets = secrets;
+        frame.apps = apps;
         // Left out of compaction: the next frame says it all.
         let event =
             Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary: String::new(), transient: true };
@@ -682,6 +721,7 @@ impl Factory {
             (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user)
         };
         let secrets = self.vault.granted(id);
+        let apps = crate::apps::granted(self, &self.lock().config, id);
         let render = Render {
             agent: &agent,
             project: project.as_ref(),
@@ -704,6 +744,7 @@ impl Factory {
             models: model_lines(&models),
             folders,
             secrets,
+            apps,
             announced,
         };
         let mut inner = self.lock();
@@ -734,6 +775,7 @@ impl Factory {
                 }
             }
         }
+        sections.extend(crate::apps::sections(self, &inner.config, id));
         let Some(transcript) = inner.agents.get_mut(id).and_then(|runtime| runtime.transcript.as_mut()) else {
             return (sections, written.into_iter().map(|(_, text)| text).collect());
         };
@@ -766,7 +808,7 @@ impl Factory {
         let tools = self.build_tools(id, &job.places, &job.extensions);
         // The segment's system prompt and tools, byte for byte, or new ones.
         let reused = match job.frame {
-            Some(frame) => Ok((frame.system_prompt, fit(tools, &frame.tools, &job.agent))),
+            Some(frame) => Ok((frame.system_prompt, fit(self, tools, &frame.tools, &job.agent))),
             None => Err(tools),
         };
         let (system_prompt, tools) = match reused {
@@ -829,6 +871,7 @@ impl Factory {
             secrets: Some(self.secrets(id)),
         });
         agent.state.cache_ttl = job.cache_ttl;
+        agent.wait_out_with(crate::waits::wait_out(Arc::downgrade(self), id.to_owned(), job.epoch));
         let factory = self.clone();
         let agent_id = id.to_owned();
         let epoch = job.epoch;
@@ -908,6 +951,7 @@ impl Factory {
         for extension in extensions {
             tools.extend(extension.tools(self, id));
         }
+        tools.extend(crate::apps::tools(self, id));
         tools.push(self.extension_call(id));
         tools
     }
@@ -915,7 +959,9 @@ impl Factory {
     /// The agent's extensions' tools as its settings are now.
     fn extension_tools(self: &Arc<Self>, id: &str) -> Vec<Tool> {
         let Some(agent) = self.lock().config.agent(id).cloned() else { return Vec::new() };
-        enabled_extensions(&agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect()
+        let mut tools: Vec<Tool> = enabled_extensions(&agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
+        tools.extend(crate::apps::tools(self, id));
+        tools
     }
 
     fn extension_specs(self: &Arc<Self>, id: &str) -> Vec<ToolSpec> {
@@ -1351,6 +1397,7 @@ mod tests {
             models: map(&[("a/one", "a/one (One)"), ("a/two", "a/two (Two)")]),
             folders: BTreeMap::new(),
             secrets: BTreeMap::new(),
+            apps: BTreeMap::new(),
             announced: Vec::new(),
         };
         assert_eq!(changes(&frame, &frame.roster, &frame.models, &frame.folders, &frame.secrets), None);

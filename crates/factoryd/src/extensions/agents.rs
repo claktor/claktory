@@ -70,6 +70,7 @@ const MAX_RECIPIENTS: usize = 20;
 const MAP: &str =
     "Who can message whom, one line per agent: whom it messages, and by whom it's messaged. `agent` (an id or name) shows just that agent.";
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
+const INSPECT: &str = "How an agent on your team is set up, read only: you, the agents you lead (directly or through others), or, as an admin agent, every agent. `agent` (an id or name) gives its name, role, project and folder, model and effort, lead, extensions with their options, secrets (by name, never values), monitors, prompt and whether it's working; `agent` \"team\", or none, lists your team, one line each.";
 const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a card in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
 /// The prompt's line on suggesting a talk. `{person}`: the user's name, or
 /// "the person".
@@ -226,6 +227,17 @@ impl Extension for Agents {
             let _ = writeln!(text, "You can message: {}.", names.join(", "));
             text.push_str(&SUGGEST_PROMPT.replace("{person}", config.person()));
         }
+        if let Some(lead) = config.lead(agent) {
+            let _ = writeln!(text, "You report to {}, which can see how you're set up.", named(config, agent, lead));
+        }
+        if crate::proposals::is_admin(agent) {
+            text.push_str("You lead every agent: agents_inspect shows how any of them is set up, read only.\n");
+        } else {
+            let team: Vec<String> = led(config, agent).into_iter().map(|other| named(config, agent, other)).collect();
+            if !team.is_empty() {
+                let _ = writeln!(text, "You lead {}: agents_inspect shows how they're set up, read only.", team.join(", "));
+            }
+        }
         if sees_map(agent) {
             text.push_str(
                 "agents_map shows who can message whom across Claktory, for when you set up or check how agents work together.\n",
@@ -238,7 +250,8 @@ impl Extension for Agents {
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
-        let mut tools = vec![send_tool(factory, agent), status_tool(factory, agent), suggest_tool(factory, agent)];
+        let mut tools =
+            vec![send_tool(factory, agent), status_tool(factory, agent), suggest_tool(factory, agent), inspect_tool(factory, agent)];
         let (map, propose) = match factory.lock().config.agent(agent) {
             Some(me) => (sees_map(me), !crate::proposals::is_admin(me)),
             None => (false, false),
@@ -658,33 +671,216 @@ pub(crate) fn status(factory: &Factory, asker: &str, only: Option<&str>) -> Resu
     let now = now_ms();
     let mut lines = Vec::new();
     for agent in agents {
-        let runtime = inner.agents.get(&agent.id);
-        let (started, ended) = times.get(&agent.id).copied().unwrap_or_default();
-        let mut line = format!("{} {}", agent.id, with_role(agent, place(config, from, agent)));
-        if runtime.is_some_and(|runtime| runtime.running) {
-            line.push_str(": working");
-            if let Some(started) = started {
-                let _ = write!(line, " {}", ago(started, now));
-            }
-            if let Some(tool) = runtime.and_then(|runtime| runtime.doing.as_deref()) {
-                let _ = write!(line, ", running {tool}");
-            }
-        } else {
-            line.push_str(": idle");
-            if let Some(ended) = ended {
-                let _ = write!(line, " {}", ago(ended, now));
-            }
-        }
-        let queued = runtime.map_or(0, |runtime| runtime.queue.len());
-        if queued > 0 {
-            let _ = write!(line, "; {queued} queued");
-        }
-        if !inner.models.iter().any(|model| model.id == agent.model) {
-            line.push_str("; no model");
+        let mut line = format!("{} {}: {}", agent.id, with_role(agent, place(config, from, agent)), state(&inner, &times, agent, now));
+        if let Some(lead) = config.lead(agent) {
+            let _ = write!(line, "; led by {}", labeled(config, from, lead));
         }
         lines.push(line);
     }
     Ok(lines.join("\n"))
+}
+
+/// "working 3m, running bash; 2 queued", "idle 12m; no model": what the
+/// agent is doing now.
+fn state(inner: &Inner, times: &crate::store::RunTimes, agent: &AgentConfig, now: i64) -> String {
+    let runtime = inner.agents.get(&agent.id);
+    let (started, ended) = times.get(&agent.id).copied().unwrap_or_default();
+    let mut line = String::new();
+    if runtime.is_some_and(|runtime| runtime.running) {
+        line.push_str("working");
+        if let Some(started) = started {
+            let _ = write!(line, " {}", ago(started, now));
+        }
+        if let Some(tool) = runtime.and_then(|runtime| runtime.doing.as_deref()) {
+            let _ = write!(line, ", running {tool}");
+        }
+    } else {
+        line.push_str("idle");
+        if let Some(ended) = ended {
+            let _ = write!(line, " {}", ago(ended, now));
+        }
+    }
+    let queued = runtime.map_or(0, |runtime| runtime.queue.len());
+    if queued > 0 {
+        let _ = write!(line, "; {queued} queued");
+    }
+    if !inner.models.iter().any(|model| model.id == agent.model) {
+        line.push_str("; no model");
+    }
+    line
+}
+
+/// The agents `lead` leads, directly or through others (every other agent
+/// for an admin agent), in the settings' order.
+fn led<'a>(config: &'a Config, lead: &AgentConfig) -> Vec<&'a AgentConfig> {
+    config.agents.iter().filter(|agent| config.leads(lead, agent)).collect()
+}
+
+fn inspect_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "properties": {"agent": {"type": "string"}},
+        "additionalProperties": false,
+    });
+    super::tool(
+        "agents_inspect",
+        "Inspect an agent",
+        INSPECT,
+        parameters,
+        super::typed_handler(factory, asker, |factory, asker, args: StatusArgs| {
+            let wanted = args.agent.as_deref().map(str::trim).filter(|agent| !agent.is_empty() && !agent.eq_ignore_ascii_case("team"));
+            match wanted {
+                None => team_lines(factory, asker),
+                Some(wanted) => inspect(factory, asker, wanted),
+            }
+        }),
+    )
+}
+
+/// `asker`'s team, one line each: itself, then those it leads.
+fn team_lines(factory: &Factory, asker: &str) -> Result<ToolResult, String> {
+    let times = factory.store.run_times().map_err(|error| format!("Couldn't read runs: {error}"))?;
+    let inner = factory.lock();
+    let config = &inner.config;
+    let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let now = now_ms();
+    let team: Vec<&AgentConfig> = std::iter::once(me).chain(led(config, me)).collect();
+    let mut lines = Vec::new();
+    for agent in &team {
+        let mut line = format!("{} {}", agent.id, with_role(agent, place(config, me, agent)));
+        if agent.id == me.id {
+            line.push_str(" (you)");
+        }
+        let _ = write!(line, ": {} {}", agent.model, agent.effort);
+        if let Some(lead) = config.lead(agent) {
+            let _ = write!(line, "; led by {}", labeled(config, me, lead));
+        }
+        let _ = write!(line, "; {}", state(&inner, &times, agent, now));
+        lines.push(line);
+    }
+    if team.len() == 1 {
+        lines.push("No agent reports to you, so you can inspect only yourself.".to_owned());
+    }
+    let ids: Vec<&str> = team.iter().map(|agent| agent.id.as_str()).collect();
+    Ok(ToolResult::text(lines.join("\n"), json!({"team": ids})))
+}
+
+/// How `wanted` (an id or name on `asker`'s team) is set up, read only.
+fn inspect(factory: &Factory, asker: &str, wanted: &str) -> Result<ToolResult, String> {
+    let times = factory.store.run_times().map_err(|error| format!("Couldn't read runs: {error}"))?;
+    let (id, mut text) = {
+        let inner = factory.lock();
+        let config = &inner.config;
+        let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+        let team: Vec<&AgentConfig> = std::iter::once(me).chain(led(config, me)).collect();
+        let agent = match find(config, me, &team, wanted)? {
+            Some(agent) => agent,
+            None => {
+                let everyone: Vec<&AgentConfig> = config.agents.iter().collect();
+                return Err(match find(config, me, &everyone, wanted)? {
+                    Some(agent) => format!(
+                        "{} isn't on your team: you can see how an agent is set up only when you lead it, directly or through others.",
+                        agent.name
+                    ),
+                    None => format!("No agent has the id or name \"{wanted}\"."),
+                });
+            }
+        };
+        (agent.id.clone(), setup(factory, &inner, &times, me, agent))
+    };
+    text.push_str("\nSecrets:");
+    if factory.vault.exists() && !factory.vault.is_open() {
+        text.push_str(" can't be read while the vault is locked");
+    } else {
+        // "Name (sets A, B): description", never a value.
+        let secrets = factory.vault.granted(&id);
+        if secrets.is_empty() {
+            text.push_str(" none");
+        }
+        for label in secrets.values() {
+            let _ = write!(text, "\n- {label}");
+        }
+    }
+    text.push_str("\nMonitors:");
+    let monitors = super::monitors::lines(factory, &id)?;
+    if monitors.is_empty() {
+        text.push_str(" none");
+    }
+    for line in monitors {
+        let _ = write!(text, "\n- {line}");
+    }
+    let prompt = factory.lock().config.agent(&id).map(|agent| agent.prompt.clone()).unwrap_or_default();
+    if prompt.is_empty() {
+        text.push_str("\nPrompt: none");
+    } else {
+        let _ = write!(text, "\nPrompt:\n{prompt}");
+    }
+    Ok(ToolResult::text(text, json!({"agent": id})))
+}
+
+/// The first part of what agents_inspect says of `agent`: who and where it
+/// is, its model, lead, state and extensions.
+fn setup(factory: &Factory, inner: &Inner, times: &crate::store::RunTimes, me: &AgentConfig, agent: &AgentConfig) -> String {
+    let config = &inner.config;
+    let mut text = format!("{} ({})", agent.name, agent.id);
+    if !agent.role.is_empty() {
+        let _ = write!(text, ", {}", agent.role);
+    }
+    if agent.id == me.id {
+        text.push_str(" (you)");
+    }
+    let project = agent.project.as_deref().and_then(|project| config.project(project));
+    let folder = crate::runner::places(&factory.home, config, agent).folder;
+    match (project, config.agent_folder(agent)) {
+        (Some(project), Some(named)) => {
+            let _ = write!(text, "\nProject: {}, folder {} ({})", project.name, named.name, folder.display());
+        }
+        (Some(project), None) => {
+            let _ = write!(text, "\nProject: {} ({})", project.name, folder.display());
+        }
+        (None, _) => {
+            let _ = write!(text, "\nProject: none, the workspace ({})", folder.display());
+        }
+    }
+    if config.archived(agent) {
+        text.push_str(", archived");
+    }
+    let _ = write!(text, "\nModel: {}, effort {}", agent.model, agent.effort);
+    match config.lead(agent) {
+        Some(lead) => {
+            let _ = write!(text, "\nLead: {}", named(config, me, lead));
+        }
+        None => text.push_str("\nLead: none"),
+    }
+    if crate::proposals::is_admin(agent) {
+        text.push_str(" (an admin agent: it leads every agent)");
+    }
+    let _ = write!(text, "\nNow: {}", state(inner, times, agent, now_ms()));
+    text.push_str("\nExtensions:");
+    for unit in super::units() {
+        let on = enabled(agent, unit.key());
+        let _ = write!(text, "\n- {} ({}): {}", unit.name(), unit.key(), if on { "on" } else { "off" });
+        if unit.instance.is_some() {
+            continue;
+        }
+        let manifest = unit.extension.manifest();
+        let options: Vec<String> = manifest
+            .options
+            .iter()
+            .map(|spec| match spec.kind {
+                super::OptionKind::Switch => format!("{} {}", spec.id, if switch(agent, manifest.id, spec.id) { "on" } else { "off" }),
+                super::OptionKind::Agents => {
+                    let ids: Vec<String> =
+                        agent_list(agent, manifest.id, spec.id).into_iter().filter(|id| config.agent(id).is_some()).collect();
+                    format!("{} [{}]", spec.id, ids.join(", "))
+                }
+            })
+            .collect();
+        if !options.is_empty() {
+            let _ = write!(text, "; {}", options.join(", "));
+        }
+    }
+    text
 }
 
 #[cfg(test)]

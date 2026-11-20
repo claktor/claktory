@@ -482,6 +482,10 @@ class RecordingBackend extends Backend {
   Future<void> setZoom(double zoom) =>
       _record(ClientMessage(setZoom: SetZoom(zoom: zoom)));
 
+  @override
+  Future<void> shuffleAvatar() =>
+      _record(ClientMessage(shuffleAvatar: ShuffleAvatar()));
+
   /// What [useUsageReset] answers.
   var usageResetAnswer = UsageResetAnswer(reset: true, message: 'Reset.');
 
@@ -636,6 +640,8 @@ class RecordingBackend extends Backend {
     String secretId = '',
     String name = '',
     String description = '',
+    Map<String, String> aliases = const {},
+    bool asIs = false,
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -647,6 +653,8 @@ class RecordingBackend extends Backend {
         secretId: secretId,
         name: name,
         description: description,
+        aliases: aliases.entries,
+        asIs: asIs,
       ),
     ),
   );
@@ -745,6 +753,72 @@ class RecordingBackend extends Backend {
     await _record(ClientMessage(loadUsage: ask));
     return usageReport;
   }
+
+  /// What [installLocalApp] answers before it's approved.
+  var appPermissions = AppPermissions();
+
+  @override
+  Future<AppPermissions?> installLocalApp(
+    List<int> content, {
+    bool approve = false,
+    String sha256 = '',
+  }) async {
+    await _record(
+      ClientMessage(
+        installLocalApp: InstallLocalApp(
+          content: content,
+          approve: approve,
+          sha256: sha256,
+        ),
+      ),
+    );
+    return approve ? null : appPermissions;
+  }
+
+  @override
+  Future<void> setAppRunning(String id, bool running) => _record(
+    ClientMessage(
+      setAppRunning: SetAppRunning(id: id, running: running),
+    ),
+  );
+
+  @override
+  Future<void> uninstallApp(String id, {bool keepData = false}) => _record(
+    ClientMessage(
+      uninstallApp: UninstallApp(id: id, keepData: keepData),
+    ),
+  );
+
+  @override
+  Future<void> grantApp(String appId, String agentId, List<String> scopes) =>
+      _record(
+        ClientMessage(
+          grantApp: GrantApp(appId: appId, agentId: agentId, scopes: scopes),
+        ),
+      );
+
+  @override
+  Future<void> subscribeApp(
+    String appId,
+    String eventKind,
+    List<String> agentIds,
+  ) => _record(
+    ClientMessage(
+      subscribeApp: SubscribeApp(
+        appId: appId,
+        eventKind: eventKind,
+        agentIds: agentIds,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> setAppSecret(String appId, String name, String value) =>
+      _record(
+        ClientMessage(
+          setAppSecret: SetAppSecret(appId: appId, name: name, value: value),
+        ),
+      );
 
   /// What [listConnectChoices] answers.
   var connectChoices = ConnectChoices();

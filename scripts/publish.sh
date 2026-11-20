@@ -18,9 +18,11 @@
 #       Before building it checks that main is checked out and clean, and
 #       that no secret is anywhere in its history (scripts/check-secrets.sh,
 #       which needs gitleaks); after building, before uploading, it pushes
-#       main to the repository (scripts/push-source.sh: never forced, except
+#       the release's source to the repository as one commit on top of the
+#       previous release's (scripts/push-source.sh: never forced, except
 #       once over a new repository's README-only first commit), so the
-#       source of every release is public with it.
+#       source of every release is public with it, and the day-to-day
+#       commits aren't.
 #   scripts/publish.sh --local DIR [--dev]
 #       to a channel in a folder, to try it out; --dev releases for the dev
 #       Factory. Point a backend at it with FACTORY_UPDATE_URL=file://DIR/latest.json.
@@ -158,7 +160,7 @@ trap 'rm -rf "$STAGE"' EXIT
 SUPERVISOR_DIR=()
 [[ -d "$RELEASE/supervisor" ]] && SUPERVISOR_DIR=(supervisor)
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
+  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
   -C "$ROOT" LICENSE.md \
   -C "$ROOT/scripts" install-release.sh
 
@@ -179,10 +181,11 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   build="$STAGE/linux-$arch"
   mkdir -p "$build"
   FACTORY_VERSION="$BACKEND_VERSION" FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/build-linux.sh" "$arch" "$build/factoryd"
+  "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$linux_name" \
-    -C "$build" factoryd backend-version CHANGELOG.md \
+    -C "$build" factoryd claktory-apps backend-version CHANGELOG.md \
     -C "$ROOT" LICENSE.md \
     -C "$ROOT/scripts" install-linux.sh
   FILES+=("$STAGE/$linux_name")
@@ -212,9 +215,11 @@ grep -q "^MANIFEST_URL=\"$MANIFEST_URL\"\$" "$STAGE/install.sh" || { echo "could
 
 if [[ -n "$REPO" ]]; then
   # The source first: a release is never public without its source.
-  "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --expect "$SOURCE"
+  "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --version "$VERSION" --expect "$SOURCE"
+  # Its tag is the release's public commit, which push-source.sh left as the branch public.
+  PUBLIC_COMMIT="$(git -C "$ROOT" rev-parse refs/heads/public)"
   gh release create "$VERSION" "${FILES[@]}" "$STAGE/latest.json" "$STAGE/install.sh" \
-    --repo "$REPO" --target "$SOURCE" --title "Claktory $VERSION" --notes "${NOTES:-Claktory $VERSION}"
+    --repo "$REPO" --target "$PUBLIC_COMMIT" --title "Claktory $VERSION" --notes "${NOTES:-Claktory $VERSION}"
   echo "published Claktory $VERSION to $BASE"
   echo "install on another Mac, or a Linux machine, with:"
   echo "  curl -fsSL $BASE/latest/download/install.sh | bash"

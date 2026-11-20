@@ -55,15 +55,79 @@ void main() {
     expect(loose.length, 3);
   });
 
+  test('apps sit along the bottom, wired to the agents given them, with an '
+      'arrow into each that hears them', () {
+    final layout = layoutMap(claktoryMap(apps: true), order: claktoryOrder());
+    final telegram = layout.chips.firstWhere((c) => c.id == 'app:telegram');
+    final apps = layout.boxes.firstWhere((b) => b.kind == MapBoxKind.apps);
+    expect(apps.label, 'Apps');
+    expect(apps.rect.contains(telegram.rect.center), isTrue);
+    final vault = layout.boxes.firstWhere((b) => b.kind == MapBoxKind.vault);
+    expect(apps.rect.top, vault.rect.top);
+    expect(apps.rect.left, greaterThan(vault.rect.right));
+    final wires = layout.wires.where((w) => w.layer == MapLayer.apps).toList();
+    // The given net (a stub and a branch per agent), and the hears line.
+    expect(wires.where((w) => w.ends.contains('agent:rivet')), isNotEmpty);
+    expect(wires.where((w) => w.ends.contains('agent:devops')), isNotEmpty);
+    expect(wires.expand((w) => w.arrows), hasLength(1));
+    // Its bot token goes to the app, not to an agent.
+    final token = layout.wires.where(
+      (w) => w.layer == MapLayer.secrets && w.ends.contains('secret:s4'),
+    );
+    expect(token.expand((w) => w.ends), contains('app:telegram'));
+    expect(layout.related['app:telegram'], contains('agent:rivet'));
+  });
+
   for (final (name, map) in [
     ("Matt's", () => layoutMap(claktoryMap(), order: claktoryOrder())),
+    (
+      "Matt's, with apps,",
+      () => layoutMap(claktoryMap(apps: true), order: claktoryOrder()),
+    ),
+    (
+      "Matt's, with leads,",
+      () => layoutMap(claktoryMap(leads: true), order: claktoryOrder()),
+    ),
     ('a crowded', () => layoutMap(crowdedMap())),
+    ('a crowded, with leads,', () => layoutMap(crowdedMap(leads: true))),
   ]) {
     test('$name Claktory: no line runs through a chip, no two lines share '
         'a stretch, and no chips overlap', () {
       _clean(map());
     });
   }
+
+  test('each agent has a line to its lead, a chevron on its branch '
+      'pointing toward the lead', () {
+    final layout = layoutMap(claktoryMap(leads: true), order: claktoryOrder());
+    final leads = layout.wires.where((w) => w.layer == MapLayer.leads).toList();
+    final mike = leads.where((w) => w.ends.contains('agent:frontend'));
+    expect(mike.first.ends, contains('agent:coordinator'));
+    // Mike's net: a stub and a branch for each of the 13 under him; Rivet's
+    // a stub and Mike's branch. Admins lead everyone else without lines.
+    expect(leads.length, 1 + 13 + 1 + 1);
+    final branches = leads.where((w) => w.arrows.isNotEmpty).toList();
+    expect(branches.length, 13 + 1);
+    for (final wire in branches) {
+      // Drawn from the agent toward its lead: the chevron points the way
+      // the line runs, on the run it sits on.
+      final arrow = wire.arrows.single;
+      var found = false;
+      for (var i = 0; i + 1 < wire.points.length; i++) {
+        final a = wire.points[i];
+        final b = wire.points[i + 1];
+        final on = Rect.fromPoints(a, b).inflate(0.01).contains(arrow.at);
+        if (!on || a == b) continue;
+        found = true;
+        expect(arrow.direction, (b - a) / (b - a).distance);
+      }
+      expect(found, isTrue);
+    }
+    expect(layout.related['agent:frontend'], contains('agent:coordinator'));
+    // None without leads.
+    final plain = layoutMap(claktoryMap(), order: claktoryOrder());
+    expect(plain.wires.where((w) => w.layer == MapLayer.leads), isEmpty);
+  });
 
   test('a crowded Claktory keeps every agent, secret and box', () {
     final map = crowdedMap();

@@ -21,6 +21,12 @@ use factoryd::factory::OpenError;
 use factoryd::home::{self, Home, Instance};
 use factoryd::models::Registry;
 use factoryd::update;
+
+/// How long the supervisor gives the backend to stop on SIGTERM.
+const STOP_WITHIN: Duration = Duration::from_secs(10);
+/// Quick failures in a row, outside an update's trial, after which the
+/// supervisor puts the previous backend back.
+const FAILURES_TO_FALL_BACK: u32 = 5;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -265,6 +271,7 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
     let mut terminate = signal(SignalKind::terminate()).map_err(MainError::Signal)?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(MainError::Signal)?;
     let mut pause = Duration::from_millis(500);
+    let mut failures = 0;
     tracing::info!(backend = %home.backend().display(), version = update::VERSION, "supervising");
     // It may hold the vault's key between two backends.
     factoryd::vault::memory::harden();
@@ -321,7 +328,11 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
                     }
                 }
                 match status {
-                    Ok(status) if status.success() => None,
+                    // Handing over to an update leaves its trial behind;
+                    // exiting cleanly without one (a backend a power cut
+                    // left empty runs as an empty script) counts as stopping.
+                    Ok(status) if status.success() && update::on_trial(&home) => None,
+                    Ok(status) if status.success() => Some("It stopped by itself.".to_owned()),
                     Ok(status) => Some(format!("It stopped ({status}).")),
                     Err(error) => Some(format!("It stopped: {error}.")),
                 }
@@ -333,6 +344,19 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
                 Ok(()) => continue,
                 Err(error) => tracing::error!(%error, "could not go back to the previous backend"),
             }
+        }
+        failures = match &ended {
+            Some(_) if started.elapsed() <= Duration::from_secs(60) => failures + 1,
+            _ => 0,
+        };
+        // Broken outside a trial (a power cut during an update, say): the
+        // one before, once.
+        if failures >= FAILURES_TO_FALL_BACK
+            && let Some(how) = &ended
+            && update::fall_back(&home, how)
+        {
+            failures = 0;
+            continue;
         }
         match ended {
             // Exited on purpose, to hand over to an update.
@@ -351,7 +375,18 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
     }
 }
 
+/// Stops the backend: SIGTERM, so it can finish what it's writing, then
+/// SIGKILL if it hasn't stopped within STOP_WITHIN (launchd allows the
+/// supervisor 20 s).
 async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
+    if let Some(pid) = child.id() {
+        // SAFETY: kill only sends a signal to the backend, our child.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if tokio::time::timeout(STOP_WITHIN, child.wait()).await.is_ok() {
+            return Ok(());
+        }
+        tracing::warn!("the backend didn't stop within {}s; killing it", STOP_WITHIN.as_secs());
+    }
     if let Err(error) = child.kill().await {
         tracing::warn!(%error, "could not stop the backend");
     }
@@ -371,8 +406,17 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         tokio::spawn(factoryd::channel::poll(home.clone(), url));
     }
     // Older installs' LaunchAgent gets what installers write now, once.
-    tokio::spawn(factoryd::launch_agent::update(home.clone()));
+    tokio::spawn(factoryd::launch_agent::update(home.clone(), addr.port()));
     tracing::info!(%addr, home = %home.root().display(), version = factoryd::update::VERSION, "factoryd listening");
-    factoryd::serve(listener, factory).await;
+    // SIGTERM (the supervisor stopping, at a restart or shutdown): what's
+    // being written is finished first.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(MainError::Signal)?;
+    tokio::select! {
+        () = factoryd::serve(listener, factory.clone()) => {}
+        _ = terminate.recv() => {
+            tracing::info!("stopping");
+            factory.finish_writes(Duration::from_secs(5)).await;
+        }
+    }
     Ok(())
 }

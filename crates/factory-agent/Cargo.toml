@@ -39,6 +39,7 @@ zeroize = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [lints.clippy]
 disallowed_types = "deny"

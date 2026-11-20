@@ -36,7 +36,7 @@ tools = ["telegram_history"]
 [[events]]
 kind = "message"
 scope = "read"
-label = "A message you send the bot"
+label = "Messages you send the bot"
 
 [[tools]]
 name = "telegram_send"

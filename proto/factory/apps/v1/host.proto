@@ -1,0 +1,171 @@
+// factoryd ↔ claktory-apps: the internal protocol between the backend and
+// the host that runs apps (WebAssembly components, crates/claktory-apps).
+// Not public: its versions are tied to factoryd's, both built from this
+// repository. Rust types: factory_protocol::apps.
+//
+// Transport: factoryd starts the host as its child and talks over the
+// child's stdin (to the host) and stdout (to factoryd); stderr is the host's
+// log, which factoryd copies into its own. Each message is a Frame: a u32
+// length (big-endian), then the Frame's protobuf bytes. Frames above 16 MiB
+// are refused.
+//
+// Either side asks with a Frame whose `id` is new (counting up from 1, each
+// side its own) and is answered with a Frame whose `reply_to` is that id.
+// One-way messages have id 0. Answers can come in any order.
+//
+// Who does what: the host is mechanism (instances, the sandbox, limits,
+// KV, timers, filtered HTTP); factoryd is policy and state (what's
+// installed, approved and running, crash backoff, grants, the vault,
+// delivering events). The host never decides to start an app by itself.
+syntax = "proto3";
+
+package factory.apps.v1;
+
+message Frame {
+  uint64 id = 1;
+  uint64 reply_to = 2;
+  oneof body {
+    // ---- factoryd → host ----
+    // First, once: answered with Ready.
+    Hello hello = 10;
+    // Compiles the app's component and keeps it ready, not running:
+    // answered with Done. Loading an app that's loaded replaces it (stopping
+    // it first), for an update.
+    Load load = 11;
+    // Instantiates it and calls start() (upgrade(from) first, once, when
+    // Load said so): answered with Done once start() returned. Starting one
+    // that runs is a no-op that answers Done.
+    Start start = 12;
+    // Calls stop() (5 s deadline), then drops the instance: answered with
+    // Done. Stopping one that doesn't run answers Done.
+    Stop stop = 13;
+    // Stops it if it runs and forgets it: answered with Done.
+    Unload unload = 14;
+    // A tool call from an agent: answered with CallResult (or Done with an
+    // error when the app doesn't run).
+    Call call = 15;
+    // ---- host → factoryd ----
+    // The answer to Hello.
+    Ready ready = 30;
+    // The answer to Load, Start, Stop and Unload; also to Call when the call
+    // couldn't reach the app.
+    Done done = 31;
+    // The answer to Call.
+    CallResult call_result = 32;
+    // The app asks for one of its secrets: answered with SecretValue.
+    GetSecret get_secret = 33;
+    // One-way: the app emitted an event.
+    Emit emit = 34;
+    // One-way: the app's status line changed.
+    SetStatus set_status = 35;
+    // One-way: the instance is gone without being stopped (a trap, a missed
+    // deadline, a limit hit). The host doesn't restart it: factoryd does,
+    // with backoff, by sending Start again.
+    Crashed crashed = 36;
+    // ---- factoryd → host, answers ----
+    SecretValue secret_value = 50;
+  }
+}
+
+message Hello {
+  // factoryd's version, for the log.
+  string version = 1;
+}
+
+message Ready {
+  // The host's version, for the log.
+  string version = 1;
+  // The WIT worlds it runs, e.g. "claktory:app@1".
+  repeated string worlds = 2;
+}
+
+message Load {
+  string app_id = 1;
+  // The app's version (the manifest's), for the log and upgrade().
+  string version = 2;
+  // The component: <home>/apps/<id>/<version>/app.wasm.
+  string component = 3;
+  // Its own folder for its store: <home>/apps/<id>/data. The host keeps
+  // what it likes there (kv.sqlite); it survives updates.
+  string data_dir = 4;
+  // The hosts it may reach over HTTPS, as the person approved them
+  // ("api.telegram.org"); anything else is refused.
+  repeated string hosts = 5;
+  uint32 memory_mb = 6;
+  uint32 storage_mb = 7;
+  // Not empty: call upgrade(upgrade_from) before the next start(), once.
+  string upgrade_from = 8;
+  // The WIT world it was built for ("claktory:app@1").
+  string world = 9;
+}
+
+message Start {
+  string app_id = 1;
+}
+
+message Stop {
+  string app_id = 1;
+}
+
+message Unload {
+  string app_id = 1;
+}
+
+message Call {
+  string app_id = 1;
+  // The tool's name, as the manifest declares it ("telegram_send").
+  string tool = 2;
+  // Its arguments, JSON.
+  string args = 3;
+  // The agent's id.
+  string caller = 4;
+}
+
+message Done {
+  // Empty when it worked; otherwise why not, a sentence for the person
+  // ("The component isn't a claktory:app@1 app.").
+  string error = 1;
+}
+
+message CallResult {
+  string text = 1;
+  // JSON, or empty.
+  string data = 2;
+  bool is_error = 3;
+}
+
+message GetSecret {
+  string app_id = 1;
+  // As the manifest names it ("bot_token").
+  string name = 2;
+}
+
+message SecretValue {
+  // False until the person has given it (and when it isn't the app's).
+  bool found = 1;
+  string value = 2;
+}
+
+message Emit {
+  string app_id = 1;
+  // As the manifest declares them.
+  string kind = 2;
+  string scope = 3;
+  string text = 4;
+  // JSON, or empty.
+  string data = 5;
+  // Empty for none.
+  string dedupe_key = 6;
+}
+
+message SetStatus {
+  string app_id = 1;
+  // One short line; empty clears it.
+  string text = 2;
+}
+
+message Crashed {
+  string app_id = 1;
+  // What happened, a sentence for the person ("It ran out of memory (32 MB).").
+  string error = 2;
+}

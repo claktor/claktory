@@ -124,6 +124,9 @@ pub struct Config {
     /// changed.
     #[serde(default, skip_serializing_if = "AccountConfig::is_default")]
     pub account: AccountConfig,
+    /// The apps installed (`crate::apps`). Only written once there's one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<crate::apps::AppConfig>,
 }
 
 /// Claktory's account at claktory.com, or at a service of the person's own.
@@ -190,13 +193,40 @@ impl VaultConfig {
     }
 }
 
-/// The person agents work for.
+/// The person agents work for. Unlike the rest, it keeps what it doesn't
+/// know (`other`): a later backend's profile fields (a picture, say) survive
+/// a rollback to this one, and a rollback can't refuse the file over them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct UserConfig {
     /// Their first name, which agents call them by; empty when not given.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// Their avatar's colours (`crate::person`). Only written once they
+    /// shuffle them.
+    #[serde(skip_serializing_if = "AvatarConfig::is_default")]
+    pub avatar: AvatarConfig,
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
+}
+
+/// The person's avatar: the seed its colours come from. Keeps what it
+/// doesn't know, as `UserConfig` does.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AvatarConfig {
+    /// Random, made when the person shuffles; empty until then, and the
+    /// colours come from this Claktory's key.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub seed: String,
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
+}
+
+impl AvatarConfig {
+    fn is_default(&self) -> bool {
+        *self == AvatarConfig::default()
+    }
 }
 
 impl UserConfig {
@@ -384,6 +414,11 @@ pub struct AgentConfig {
     /// The agent it's nested under in the sidebar, in the same project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The agent it reports to, which sees how it's set up (agents_inspect):
+    /// one in its project, or an admin agent. One that isn't, or that would
+    /// close a loop, is ignored (`Config::lead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     pub name: String,
     /// What it does ("Coordinator"), shown with its name; empty for none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -478,6 +513,7 @@ impl Default for Config {
             id: RIVET.to_owned(),
             project: None,
             parent: None,
+            lead: None,
             name: "Rivet".to_owned(),
             role: RIVET_ROLE.to_owned(),
             prompt: RIVET_PROMPT.trim_end().to_owned(),
@@ -507,6 +543,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             prompt_cache: BTreeMap::new(),
             account: AccountConfig::default(),
+            apps: Vec::new(),
         }
     }
 }
@@ -677,6 +714,96 @@ impl Config {
 
     pub fn agent_mut(&mut self, id: &str) -> Option<&mut AgentConfig> {
         self.agents.iter_mut().find(|agent| agent.id == id)
+    }
+
+    /// The agent `agent` reports to: its `lead`, when that's another agent,
+    /// in its project or an admin agent, whose own leads don't come back to
+    /// it. So leads never make a loop.
+    pub fn lead(&self, agent: &AgentConfig) -> Option<&AgentConfig> {
+        let lead = self.lead_as_written(agent)?;
+        let mut seen = HashSet::new();
+        let mut next = Some(lead);
+        while let Some(current) = next {
+            if current.id == agent.id {
+                return None;
+            }
+            if !seen.insert(current.id.as_str()) {
+                // A loop further up, which doesn't go through `agent`.
+                break;
+            }
+            next = self.lead_as_written(current);
+        }
+        Some(lead)
+    }
+
+    /// `agent`'s `lead`, if it's another agent in its project or an admin agent.
+    fn lead_as_written(&self, agent: &AgentConfig) -> Option<&AgentConfig> {
+        let lead = self.agent(agent.lead.as_deref()?)?;
+        (lead.id != agent.id && (lead.project == agent.project || crate::proposals::is_admin(lead))).then_some(lead)
+    }
+
+    /// Whether `lead` leads `agent`: an admin agent leads every other one;
+    /// any other agent, those that report to it, directly or through others.
+    pub fn leads(&self, lead: &AgentConfig, agent: &AgentConfig) -> bool {
+        if lead.id == agent.id {
+            return false;
+        }
+        if crate::proposals::is_admin(lead) {
+            return true;
+        }
+        let mut seen = HashSet::new();
+        let mut next = self.lead(agent);
+        while let Some(current) = next {
+            if current.id == lead.id {
+                return true;
+            }
+            if !seen.insert(current.id.as_str()) {
+                return false;
+            }
+            next = self.lead(current);
+        }
+        false
+    }
+
+    /// Why `agent` can't report to `lead` (an id), if it can't: it must be
+    /// another agent, in its project or an admin agent, and not one that
+    /// reports to `agent`.
+    pub fn lead_refused(&self, agent: &AgentConfig, lead: &str) -> Option<String> {
+        let Some(lead) = self.agent(lead) else { return Some(format!("no agent with id \"{lead}\"")) };
+        if lead.id == agent.id {
+            return Some(format!("{} can't lead itself", agent.name));
+        }
+        if lead.project != agent.project && !crate::proposals::is_admin(lead) {
+            return Some(format!("{} is in another project; a lead is in the same project, or an admin agent", lead.name));
+        }
+        let mut seen = HashSet::new();
+        let mut next = Some(lead);
+        while let Some(current) = next {
+            if current.id == agent.id {
+                return Some(format!("{} reports to {}, so it can't lead it", lead.name, agent.name));
+            }
+            if !seen.insert(current.id.as_str()) {
+                break;
+            }
+            next = self.lead(current);
+        }
+        None
+    }
+
+    /// Leads that can't be any more, because the agent is gone or now in
+    /// another project, are forgotten.
+    pub fn forget_stale_leads(&mut self) {
+        let stale: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.lead.as_deref().is_some_and(|lead| self.lead_as_written(agent).is_none_or(|found| found.id != lead)))
+            .map(|agent| agent.id.clone())
+            .collect();
+        for agent in &mut self.agents {
+            if stale.contains(&agent.id) {
+                agent.lead = None;
+            }
+        }
     }
 
     /// The agent's project is archived: it doesn't run, and no agent can

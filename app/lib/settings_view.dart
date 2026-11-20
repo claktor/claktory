@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'account.dart';
+import 'apps.dart' show AppsSettings;
+import 'avatar.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show ClaktoryIdentity;
 import 'controls.dart';
@@ -76,11 +78,16 @@ class SettingsView extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(vertical: Space.xl),
                       children: [
                         _Section(
-                          title: 'General',
+                          title: 'Profile',
                           children: [
                             _YourName(workspace: workspace),
-                            ClaktoryIdentity(workspace: workspace),
+                            _Avatar(person: workspace.person),
                           ],
+                        ),
+                        const SizedBox(height: Space.xxl),
+                        _Section(
+                          title: 'General',
+                          children: [ClaktoryIdentity(workspace: workspace)],
                         ),
                         // Only while the backend has the account on.
                         if (workspace.hasAccount() &&
@@ -116,6 +123,12 @@ class SettingsView extends StatelessWidget {
                           title: 'Secrets',
                           children: [SecretsSettings()],
                         ),
+                        // Apps shows only where the backend runs them (the
+                        // dev Claktory, until Apps ships).
+                        if (workspace.appsAvailable) ...const [
+                          SizedBox(height: Space.xxl),
+                          _Section(title: 'Apps', children: [AppsSettings()]),
+                        ],
                         const SizedBox(height: Space.xxl),
                         _Section(
                           title: 'Defaults',
@@ -689,6 +702,59 @@ class _YourNameState extends State<_YourName> with SettingRequests {
             ],
           ),
         ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
+/// The person's avatar (Workspace.person), with Shuffle for new colors,
+/// and the account they're signed in as, when they are.
+class _Avatar extends StatefulWidget {
+  const _Avatar({required this.person});
+
+  final Person person;
+
+  @override
+  State<_Avatar> createState() => _AvatarState();
+}
+
+class _AvatarState extends State<_Avatar> with SettingRequests {
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final person = widget.person;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Avatar',
+          child: Row(
+            children: [
+              PersonAvatar(person: person, size: 40),
+              const SizedBox(width: Space.m),
+              Button(
+                label: 'Shuffle colors',
+                onPressed: () => run(AppScope.of(context).shuffleAvatar),
+              ),
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: Text(
+                  'Shows beside your messages and comments, on every device.',
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (person.email.isNotEmpty)
+          SettingRow(
+            label: 'Signed in as',
+            child: Text(
+              person.email,
+              style: TextStyles.body.copyWith(color: palette.text),
+            ),
+          ),
         failureLine(palette),
       ],
     );

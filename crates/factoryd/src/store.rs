@@ -329,15 +329,17 @@ impl Store {
 
     /// Runs that never ended because Factory stopped: by agent, the version
     /// that was running them. Marks them interrupted.
-    pub(crate) fn interrupted_runs(&self) -> Result<BTreeMap<String, String>, rusqlite::Error> {
+    /// Runs the last Factory left unfinished, ended now as interrupted: for
+    /// each agent, the version that ran it and when it started.
+    pub(crate) fn interrupted_runs(&self) -> Result<BTreeMap<String, (String, i64)>, rusqlite::Error> {
         let mut db = self.db();
         let transaction = db.transaction()?;
         let mut runs = BTreeMap::new();
         {
-            let mut statement = transaction.prepare("SELECT agent, version FROM runs WHERE ended IS NULL ORDER BY id")?;
+            let mut statement = transaction.prepare("SELECT agent, version, started FROM runs WHERE ended IS NULL ORDER BY id")?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
-                runs.insert(row.get(0)?, row.get(1)?);
+                runs.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
             }
         }
         transaction.execute("UPDATE runs SET ended = ?1, outcome = 'interrupted' WHERE ended IS NULL", [now_ms()])?;
@@ -527,6 +529,7 @@ fn source_name(source: EventSource) -> &'static str {
         EventSource::Agent => "agent",
         EventSource::Task => "task",
         EventSource::Monitor => "monitor",
+        EventSource::App => "app",
     }
 }
 
@@ -537,6 +540,7 @@ fn source_named(name: &str) -> Option<EventSource> {
         "agent" => Some(EventSource::Agent),
         "task" => Some(EventSource::Task),
         "monitor" => Some(EventSource::Monitor),
+        "app" => Some(EventSource::App),
         _ => None,
     }
 }

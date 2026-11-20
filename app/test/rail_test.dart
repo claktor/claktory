@@ -1,3 +1,4 @@
+import 'package:fixnum/fixnum.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/connections.dart';
@@ -23,6 +24,8 @@ Workspace _workspace(
   String agent, {
   bool working = false,
   bool unseen = false,
+  List<int> waiting = const [],
+  String usageWait = '',
 }) => Workspace(
   agents: [
     Agent(
@@ -33,6 +36,8 @@ Workspace _workspace(
           ? AgentStatus.AGENT_STATUS_WORKING
           : AgentStatus.AGENT_STATUS_IDLE,
       unseen: unseen,
+      waitingSeqs: [for (final seq in waiting) Int64(seq)],
+      usageWait: usageWait,
     ),
   ],
   selectedAgentId: 'rivet',
@@ -335,6 +340,50 @@ void main() {
     expect(_labeled('mac-mini'), findsOneWidget);
     expect(app.connections.current?.code, _mini);
     expect(app.backends[_mini]!.target?.code, _mini);
+  });
+
+  testWidgets("a Claktory's tile says when something there waits for you, "
+      'before its news', (tester) async {
+    final app = _App(
+      snapshots: {
+        '': _workspace('Rivet'),
+        _nixos: _workspace('Nix', unseen: true, waiting: [4, 9]),
+      },
+    );
+    app.connections.use(parsePairingCode(_nixos));
+    app.connections.use(null);
+    await app.show(tester);
+
+    expect(
+      _labeled('nixos has 2 things waiting for your answer'),
+      findsOneWidget,
+    );
+    expect(_labeled('nixos has something new'), findsNothing);
+  });
+
+  testWidgets("a tile doesn't wave for an agent only waiting out its usage "
+      'limits', (tester) async {
+    final app = _App(
+      snapshots: {
+        '': _workspace('Rivet'),
+        _nixos: _workspace(
+          'Nix',
+          working: true,
+          usageWait: 'Waiting for your Claude usage to reset at Fri 18:57',
+        ),
+      },
+    );
+    app.connections.use(parsePairingCode(_nixos));
+    app.connections.use(null);
+    await app.show(tester);
+
+    expect(
+      find.descendant(
+        of: find.byType(ClaktoryRail),
+        matching: find.byType(WorkingWave),
+      ),
+      findsNothing,
+    );
   });
 
   testWidgets('on a phone, the Claktories are a list at the top', (

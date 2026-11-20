@@ -135,6 +135,20 @@ message ClientMessage {
     // The usage breakdown for a time range, on demand; answered with
     // UsageReport.
     LoadUsage load_usage = 99;
+    // Apps (see AppInfo). Installs an app from a .clapp file on the
+    // Claktory's machine: without `approve`, answered with AppPermissions to
+    // review (to the asker only); approved, installed.
+    InstallLocalApp install_local_app = 100;
+    SetAppRunning set_app_running = 101;
+    UninstallApp uninstall_app = 102;
+    // Gives an agent scopes of an app, or takes them back.
+    GrantApp grant_app = 103;
+    // Which agents hear an app's events of one kind.
+    SubscribeApp subscribe_app = 104;
+    // One of the secrets an app's setup asks for.
+    SetAppSecret set_app_secret = 105;
+    // New colours for the person's avatar (Workspace.person).
+    ShuffleAvatar shuffle_avatar = 106;
   }
 }
 
@@ -199,6 +213,8 @@ message ServerMessage {
     UsageResetAnswer usage_reset_answer = 36;
     // The answer to LoadUsage, to the asker only.
     UsageReport usage_report = 37;
+    // The answer to InstallLocalApp without `approve`, to the asker only.
+    AppPermissions app_permissions = 38;
   }
 }
 
@@ -467,6 +483,9 @@ message CreateAgent {
   string folder_id = 7;
   // What it does, shown with its name (see Agent.role); empty for none.
   string role = 8;
+  // The agent it reports to (see Agent.lead_id); empty for none. Refused
+  // (INVALID_REQUEST) unless it's in the same project or an admin agent.
+  string lead_id = 9;
 }
 
 // Changes an agent's settings. Unset fields stay as they are. Takes effect
@@ -503,6 +522,12 @@ message UpdateAgent {
   optional string avatar_face = 13;
   // What it does (see Agent.role); empty clears it.
   optional string role = 14;
+  // The agent it reports to (see Agent.lead_id); empty for none. Refused
+  // (INVALID_REQUEST) unless it's another agent, in the same project or an
+  // admin agent, that doesn't report to this one, directly or through
+  // others. Moving the agent to another project drops a lead that no
+  // longer fits, and the leads of agents that reported to it.
+  optional string lead_id = 15;
 }
 
 // Turns an extension on or off for an agent, and/or sets one of its options.
@@ -1295,6 +1320,11 @@ message UseUsageReset {
   string reset_id = 3;
 }
 
+// Picks new colours for the person's avatar, always different from the
+// ones it had. Answered with Ack; the new avatar reaches every device with
+// Workspace.
+message ShuffleAvatar {}
+
 // ---- Server → client ----
 
 message Ack {}
@@ -1415,6 +1445,36 @@ message Workspace {
   // How this Claktory is arranged, for the Map: computed here, laid out by
   // the app.
   ClaktoryMap map = 22;
+  // The apps installed, by name.
+  repeated AppInfo apps = 23;
+  // The person this Claktory belongs to: their name and avatar, the same on
+  // every device. Always set.
+  Person person = 24;
+  // This Claktory offers apps (AppInfo): Settings → Apps shows only then.
+  // While false, `apps` is empty, the Map has none and their requests are
+  // refused.
+  bool apps_available = 25;
+}
+
+// The person a Claktory belongs to, as every device shows them.
+message Person {
+  // `user.name` (Settings.user_name); empty when not given.
+  string name = 1;
+  // Their avatar: a circle with these initials in white on a diagonal
+  // gradient from `avatar_from` (top-left) to `avatar_to` (bottom-right).
+  // "MS" for "Matt Smith", "M" for "Matt"; empty when there's no name (and
+  // no email): draw a person glyph instead.
+  string initials = 2;
+  // "#RRGGBB": one of 12 pairs, from a seed kept in the backend, so the
+  // avatar never changes by itself. ShuffleAvatar picks another.
+  string avatar_from = 3;
+  string avatar_to = 4;
+  // Who they are beyond this Claktory, for signed devices and messaging
+  // between Claktories later: "acct:<account id>@<service host>", and the
+  // account's verified email. Empty unless this Claktory is signed in to
+  // its account.
+  string identity_id = 5;
+  string email = 6;
 }
 
 // A Workspace as a change to the last one this app was sent (a Workspace or
@@ -2268,6 +2328,30 @@ message Agent {
   // the default: a new version's default replaces it. To go back to the
   // default, set the prompt to this text (UpdateAgent).
   string default_prompt = 31;
+  // The seqs of the entries in its conversation that wait for the person's
+  // answer, oldest first: its pending SecretRequest, ConnectProposal and
+  // Proposal (to Rivet) entries. Empty when nothing waits. The Workspace is
+  // sent again whenever one is made, decided, withdrawn or expires.
+  repeated uint64 waiting_seqs = 32;
+  // The agent it reports to, its lead, which can read how it's set up (its
+  // settings, extensions, secrets by name, monitors; never its tools):
+  // another agent in its project, or an admin agent. Empty when it has none.
+  // Admin agents lead every agent anyway, without it.
+  string lead_id = 33;
+  // Its run is held up because none of the accounts that can serve its model
+  // can take a request now (all at their usage limit, or out of credit): what
+  // it waits for, in one line, e.g. "Waiting for your Claude usage to reset
+  // at Fri 18:00". Empty when it isn't held up. Meanwhile `status` stays
+  // WORKING (its run is open; messages queue as usual, and Stop ends it), and
+  // its character sleeps. It asks again by itself at `usage_wait_until_ms`, or
+  // sooner when the person adds an account, uses a usage reset, tries a key
+  // again or changes its model. Unrelated to `waiting_seqs`, which are
+  // questions for the person.
+  string usage_wait = 34;
+  // When the agent asks again by itself, in ms since 1970 (the first account's
+  // reset plus a few seconds' margin is when it actually does); 0 when it
+  // waits for the person (out of credit) or isn't held up.
+  int64 usage_wait_until_ms = 35;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -2290,7 +2374,9 @@ enum CharacterMood {
   CHARACTER_MOOD_FAILED = 5;
   // Not running, and its model can't run (Agent.model_available is false).
   CHARACTER_MOOD_NO_MODEL = 6;
-  // Idle for 15 minutes or more. Only a look: it wakes at once for anything.
+  // Idle for 15 minutes or more, or running but waiting out its accounts'
+  // usage limits (Agent.usage_wait). Only a look: it wakes at once for
+  // anything.
   CHARACTER_MOOD_ASLEEP = 7;
 }
 
@@ -2475,6 +2561,8 @@ enum EventSource {
   // One of the agent's monitors fired: `from` is its name, `from_id` its id
   // ("m3").
   EVENT_SOURCE_MONITOR = 4;
+  // An app (see AppInfo): `from` is its name, `from_id` its id.
+  EVENT_SOURCE_APP = 5;
 }
 
 message UserText {
@@ -2706,6 +2794,10 @@ message SecretGrant {
   // How many of the agent's background tasks running now got this secret:
   // what RevokeSecret's stop_running_tasks would stop.
   uint32 running_tasks = 3;
+  // Other names this agent's commands get the secret's values under, as
+  // the request it answered asked (`CLOUDFLARE_API_TOKEN` → the secret's
+  // `CF_CLAKTORY_DNS`); besides the secret's own names. Empty for most.
+  map<string, string> aliases = 4;
 }
 
 // A variable with its value, in requests from the app and in SecretValue.
@@ -2816,6 +2908,17 @@ message DecideSecretRequest {
   // A new secret's name and description.
   string name = 8;
   string description = 9;
+  // Giving an existing secret (`secret_id`) whose variables aren't the ones
+  // the request named: the names the agent's commands also get, each the
+  // value of one of the secret's variables (requested name → the secret's
+  // variable, {"CLOUDFLARE_API_TOKEN": "CF_CLAKTORY_DNS"}). Kept with the
+  // grant (SecretGrant.aliases).
+  map<string, string> aliases = 10;
+  // Give the existing secret with its own variable names only. With
+  // neither this nor `aliases`, a single missing name and a single unused
+  // variable are paired by themselves; any other mismatch is refused,
+  // saying so.
+  bool as_is = 11;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -2920,13 +3023,18 @@ message SecretRequest {
   // Why it needs it, in the agent's words.
   string reason = 6;
   SecretRequestState state = 7;
-  // When it was decided, or expired, in ms since 1970; 0 while pending.
+  // When it was decided, expired or withdrawn, in ms since 1970; 0 while
+  // pending.
   int64 decided_ms = 8;
-  // The person's comment; may be empty.
+  // The person's comment, or the agent's reason for withdrawing it; may be
+  // empty.
   string comment = 9;
   // GRANTED: the secret given, which may be another than the one described.
   string given_secret_id = 10;
   string given_secret_name = 11;
+  // When the agent last changed it (its description, reason or variables),
+  // in ms since 1970; 0 if never.
+  int64 updated_ms = 12;
 }
 
 message NewSecret {
@@ -2940,9 +3048,13 @@ enum SecretRequestState {
   SECRET_REQUEST_STATE_PENDING = 1;
   SECRET_REQUEST_STATE_GRANTED = 2;
   SECRET_REQUEST_STATE_DISMISSED = 3;
-  // Left unanswered too long (12 hours, or 10 of the agent's runs): it can't
-  // be answered any more, and the agent was told. decided_ms says when.
+  // Left unanswered 12 hours since it was made or last changed: it can't be
+  // answered any more, and the agent was told. decided_ms says when.
   SECRET_REQUEST_STATE_EXPIRED = 4;
+  // The agent took it back (secrets_request_cancel): it can't be answered
+  // any more. decided_ms says when, and `comment` holds the agent's reason,
+  // if it gave one.
+  SECRET_REQUEST_STATE_WITHDRAWN = 5;
 }
 
 // This Claktory's account at claktory.com, or at the service in
@@ -3033,7 +3145,8 @@ message MapNode {
   // Unique in the map and the same every time: "workspace",
   // "project:<project id>", "folder:<project id>/<folder id>",
   // "agent:<agent id>", "secret:<secret id>", "data:records" (Claktory's
-  // records) and "data:agent:<agent id>" (an agent's own database).
+  // records), "data:agent:<agent id>" (an agent's own database) and
+  // "app:<app id>".
   string id = 1;
   MapNodeKind kind = 2;
   // A name to show: the agent's, project's, folder's or secret's;
@@ -3061,6 +3174,8 @@ message MapNode {
   // The project a folder or an agent (or its database) is in; empty
   // otherwise.
   string project_id = 10;
+  // An app's icon, as AppInfo.icon; empty for other nodes.
+  string icon = 11;
 }
 
 enum MapNodeKind {
@@ -3075,6 +3190,9 @@ enum MapNodeKind {
   MAP_NODE_KIND_SECRET = 5;
   // A database: an agent's own, or Claktory's records.
   MAP_NODE_KIND_DATA = 6;
+  // An app installed (see AppInfo): label its name, detail its description
+  // (or why it's in trouble), ref_id its id; at the top.
+  MAP_NODE_KIND_APP = 7;
 }
 
 // An extension an agent has on that grants reach or power.
@@ -3099,6 +3217,10 @@ message MapEdge {
   // MESSAGES only: each can message the other. Such a pair is one edge,
   // from the lower id.
   bool both_ways = 4;
+  // APP: the scopes given, by their labels ("Send you Telegram messages ·
+  // Read your messages to the bot"); HEARS: the events heard, the same way.
+  // Empty for other kinds.
+  string label = 5;
 }
 
 enum MapEdgeKind {
@@ -3106,7 +3228,7 @@ enum MapEdgeKind {
   // An agent can message another (and see it): same project, its "also"
   // list, or an admin agent.
   MAP_EDGE_KIND_MESSAGES = 1;
-  // From a secret to an agent that has it.
+  // From a secret to an agent that has it, or to an app.
   MAP_EDGE_KIND_SECRET = 2;
   // From an agent to a folder of its project it can read but not change
   // (the project's own folder is the project's node), or to Claktory's
@@ -3115,6 +3237,13 @@ enum MapEdgeKind {
   // From an agent to the folder it works in (the workspace's, a project's
   // or a project folder's node), or to its own database.
   MAP_EDGE_KIND_WRITES = 4;
+  // From an app to an agent given scopes of it.
+  MAP_EDGE_KIND_APP = 5;
+  // From an app to an agent that hears its events.
+  MAP_EDGE_KIND_HEARS = 6;
+  // From an agent to its lead (Agent.lead_id). Only leads set in agents'
+  // settings: an admin agent leading everyone isn't drawn.
+  MAP_EDGE_KIND_LEAD = 7;
 }
 
 // ---- Connecting services (one-click secrets; docs/CONNECTORS.md) ----
@@ -3503,4 +3632,197 @@ message UsageBucket {
   int64 start_ms = 1;
   // All providers together.
   UsageTokens tokens = 2;
+}
+
+// ---- Apps ----
+//
+// An app is an integration Claktory runs once, for every agent: a Telegram
+// bot, say. It runs sandboxed (a WebAssembly component in Claktory's apps
+// host), reaches only the hosts the person approved, and keeps its own
+// state and secrets (vault secrets given to it, never to agents). It offers
+// agents tools, grouped into scopes the person gives agents (GrantApp), and
+// events, which reach the agents subscribed to them (SubscribeApp) that
+// have the event's scope.
+
+message AppInfo {
+  // Lowercase letters and digits ("telegram"); its tools' names start with
+  // it and "_".
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  // Who made it, as its manifest says ("claktory").
+  string publisher = 4;
+  AppTier tier = 5;
+  // A Lucide icon name; empty for the default.
+  string icon = 6;
+  AppState state = 7;
+  // About the state, a sentence for the person: why it's paused or couldn't
+  // start (the last error); empty when there's nothing to say.
+  string state_detail = 8;
+  repeated AppScopeSpec scopes = 9;
+  repeated AppEventKind events = 10;
+  // The hosts it may reach over HTTPS ("api.telegram.org").
+  repeated string hosts = 11;
+  // The agents given scopes of it.
+  repeated AppGrant grants = 12;
+  // One for each of its event kinds that some agent hears.
+  repeated AppSubscription subscriptions = 13;
+  // What its setup asks for, done or not.
+  repeated AppSetupItem setup = 14;
+  // The app's own line for the person, as it sets it: how to finish its
+  // setup, or what's wrong ("To link your Telegram, open
+  // https://t.me/…"). Plain text; addresses in it are links. Empty for none.
+  string status = 15;
+  string description = 16;
+  int64 installed_ms = 17;
+  // Its publisher's signing key, as "ed25519:" and its first 16 base64
+  // characters.
+  string publisher_key = 18;
+}
+
+enum AppTier {
+  APP_TIER_UNSPECIFIED = 0;
+  // Made by Claktory: signed with Claktory's key.
+  APP_TIER_CLAKTORY = 1;
+  APP_TIER_VERIFIED = 2;
+  APP_TIER_COMMUNITY = 3;
+  // Installed from a file, signed by its own developer's key.
+  APP_TIER_LOCAL = 4;
+}
+
+enum AppState {
+  APP_STATE_UNSPECIFIED = 0;
+  // Turned off (SetAppRunning).
+  APP_STATE_STOPPED = 1;
+  APP_STATE_STARTING = 2;
+  APP_STATE_RUNNING = 3;
+  // Waiting for something in `setup`; it starts once that's done.
+  APP_STATE_NEEDS_SETUP = 4;
+  // It crashed three times in ten minutes: off until the person starts it
+  // again (`state_detail` says why).
+  APP_STATE_PAUSED_CRASHED = 5;
+  // It crashed and starts again shortly.
+  APP_STATE_RESTARTING = 6;
+  // Claktory can't run it here: the apps host is missing or failed
+  // (`state_detail` says why).
+  APP_STATE_UNAVAILABLE = 7;
+}
+
+message AppScopeSpec {
+  string id = 1;
+  // What it lets an agent do, for the person ("Send you Telegram messages").
+  string label = 2;
+  // The tools it gives.
+  repeated string tools = 3;
+}
+
+message AppEventKind {
+  string kind = 1;
+  // For the person ("A message you send the bot").
+  string label = 2;
+  // The scope an agent needs to hear it.
+  string scope = 3;
+}
+
+message AppGrant {
+  string agent_id = 1;
+  repeated string scopes = 2;
+}
+
+message AppSubscription {
+  string event_kind = 1;
+  repeated string agent_ids = 2;
+}
+
+message AppSetupItem {
+  AppSetupKind kind = 1;
+  // A secret's name, as the manifest gives it ("bot_token").
+  string name = 2;
+  string label = 3;
+  // How to get it, for the person.
+  string description = 4;
+  bool done = 5;
+}
+
+enum AppSetupKind {
+  APP_SETUP_KIND_UNSPECIFIED = 0;
+  // A secret to paste: SetAppSecret.
+  APP_SETUP_KIND_SECRET = 1;
+}
+
+// Installs an app from a .clapp: its bytes (`content`, at most 16 MiB), or
+// a file on the Claktory's machine (`path`, when `content` is empty). Ask
+// first without `approve` for AppPermissions; then again with the same
+// file, `approve` and its sha256.
+message InstallLocalApp {
+  string path = 1;
+  bool approve = 2;
+  // With `approve`: AppPermissions.sha256, so what's installed is the file
+  // the person reviewed.
+  string sha256 = 3;
+  bytes content = 4;
+}
+
+// What an app can reach, for the person to approve before it's installed.
+message AppPermissions {
+  // InstallLocalApp.path; empty for one sent as `content`.
+  string path = 1;
+  // The file's SHA-256, hex.
+  string sha256 = 2;
+  string id = 3;
+  string name = 4;
+  string version = 5;
+  string publisher = 6;
+  AppTier tier = 7;
+  // As AppInfo.publisher_key.
+  string publisher_key = 8;
+  string description = 9;
+  string icon = 10;
+  repeated string hosts = 11;
+  repeated AppScopeSpec scopes = 12;
+  repeated AppEventKind events = 13;
+  // The secrets its setup will ask for (`done` false).
+  repeated AppSetupItem secrets = 14;
+  uint32 memory_mb = 15;
+  uint32 storage_mb = 16;
+  // When a version of it is installed: that version, and what this one can
+  // reach that it couldn't, a sentence each ("Reach example.com."); empty
+  // otherwise.
+  string installed_version = 17;
+  repeated string added = 18;
+}
+
+message SetAppRunning {
+  string id = 1;
+  bool running = 2;
+}
+
+message UninstallApp {
+  string id = 1;
+  // Keep its stored data, for a later install.
+  bool keep_data = 2;
+}
+
+// Gives the agent these scopes of the app, in place of what it had; none
+// takes the app away from it (and its subscriptions).
+message GrantApp {
+  string app_id = 1;
+  string agent_id = 2;
+  repeated string scopes = 3;
+}
+
+// The agents that hear the app's events of `event_kind`, in place of those
+// that did; each needs the event's scope.
+message SubscribeApp {
+  string app_id = 1;
+  string event_kind = 2;
+  repeated string agent_ids = 3;
+}
+
+// Keeps the value in the vault as a secret given to the app (never to an
+// agent), replacing what it had; it never comes back to a client.
+message SetAppSecret {
+  string app_id = 1;
+  string name = 2;
+  string value = 3;
 }

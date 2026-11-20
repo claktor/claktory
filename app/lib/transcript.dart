@@ -4,7 +4,6 @@ import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
@@ -12,6 +11,7 @@ import 'agent_name.dart';
 import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
+import 'avatar.dart';
 import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
 import 'explorer.dart' show openFile;
@@ -27,6 +27,7 @@ import 'state.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
 import 'tool_views.dart';
+import 'waiting.dart' show EntryReveal, EntryTarget;
 
 /// The selected agent's transcript.
 ///
@@ -53,7 +54,18 @@ class TranscriptView extends StatefulWidget {
     this.outbox,
     this.loadEarlier,
     this.agentId = '',
+    this.reveal,
+    this.loadFrom,
   });
+
+  /// Where to open instead of at the end: an entry to put at the top of
+  /// the view (the oldest card waiting for the person), once, when it's
+  /// this transcript's agent's. The view clears it once it's used.
+  final EntryReveal? reveal;
+
+  /// Loads every entry from a seq up to the first one held, to go to an
+  /// older entry [reveal] names. Throws [RequestFailure] when it can't.
+  final Future<void> Function(int seq)? loadFrom;
 
   /// Loads the entries before the first one held, when the transcript has
   /// any ([TranscriptStore.hasEarlier]); called as the person scrolls near
@@ -126,9 +138,6 @@ class _Waiting {
 class _TranscriptViewState extends State<TranscriptView>
     with SingleTickerProviderStateMixin {
   final _liveKey = GlobalKey();
-
-  /// Whether the person has text selected here.
-  var _selected = false;
   late final _controller = _FollowController(_liveExtent);
   late int _split;
 
@@ -172,8 +181,118 @@ class _TranscriptViewState extends State<TranscriptView>
     widget.transcript.addListener(_entriesChanged);
     widget.queued?.addListener(_queueChanged);
     widget.outbox?.addListener(_outboxChanged);
+    widget.reveal?.addListener(_revealChanged);
+    _loads = widget.transcript.loads;
     _queueChanged(initial: true);
     _outboxChanged(initial: true);
+    // Opened at what waits for the person: there from the first frame.
+    final target = widget.reveal?.value;
+    final index = target == null ? null : _indexFor(target);
+    if (target != null && index != null) {
+      widget.reveal!.used(target);
+      _split = index;
+      _controller.pinned = false;
+      _atTop();
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealChanged());
+    }
+  }
+
+  /// Loading back to the entry [TranscriptView.reveal] names.
+  var _revealing = false;
+
+  /// The load of the transcript this view shows ([TranscriptStore.loads]).
+  late final int _loads;
+
+  /// Where [target] is in the transcript, when it's this agent's and held.
+  int? _indexFor(EntryTarget target) {
+    final transcript = widget.transcript;
+    if (transcript.agentId != target.agentId) return null;
+    for (var i = transcript.length - 1; i >= 0; i--) {
+      final seq = transcript[i].seq;
+      if (seq == target.seq) return i;
+      if (seq < target.seq) return null;
+    }
+    return null;
+  }
+
+  /// Goes to the entry [TranscriptView.reveal] names, once it's this
+  /// agent's: loads back to it if it's older than what's held, then puts
+  /// it at the top. One that isn't there leaves the view where it is.
+  void _revealChanged() {
+    final reveal = widget.reveal;
+    final target = reveal?.value;
+    final transcript = widget.transcript;
+    if (reveal == null ||
+        target == null ||
+        _revealing ||
+        !mounted ||
+        // A new load is on its way to a view of its own, which goes there.
+        transcript.loads != _loads ||
+        transcript.agentId != target.agentId ||
+        transcript.length == 0) {
+      return;
+    }
+    final index = _indexFor(target);
+    final load = widget.loadFrom;
+    if (index != null ||
+        load == null ||
+        !transcript.hasEarlier ||
+        target.seq >= transcript[0].seq) {
+      reveal.used(target);
+      if (index != null) _goTo(index);
+      return;
+    }
+    _revealing = true;
+    unawaited(() async {
+      var failed = false;
+      try {
+        await load(target.seq);
+      } on RequestFailure {
+        // It stays where it is; scrolling up loads the rest as ever.
+        failed = true;
+      }
+      _revealing = false;
+      // A page scrolling up brought in meanwhile can make this one not
+      // join on: then once more.
+      if (failed || ++_revealTries > 1 || _indexFor(target) != null) {
+        reveal.used(target);
+      }
+      if (!mounted) return;
+      final index = _indexFor(target);
+      if (index != null) {
+        _goTo(index);
+      } else {
+        _revealChanged();
+      }
+    }());
+  }
+
+  /// Loads tried for the entry [TranscriptView.reveal] names.
+  var _revealTries = 0;
+
+  /// Puts the entry at [index] at the top of the view: it starts the part
+  /// below the center line, which sits at offset 0. Following the end
+  /// starts again once the person scrolls down to it.
+  void _goTo(int index) {
+    _glide.stop();
+    _controller
+      ..gliding = false
+      ..pinned = false;
+    setState(() => _split = index);
+    _atTop();
+  }
+
+  /// After the next layout, the view at the center line: the entry after
+  /// it at the top, or as near as the content below it allows.
+  void _atTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final position = _controller.position;
+      _controller.jumpTo(
+        0.0.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+    });
   }
 
   /// Says "Queued" once a message just sent has been queued a moment.
@@ -376,6 +495,10 @@ class _TranscriptViewState extends State<TranscriptView>
       old.outbox?.removeListener(_outboxChanged);
       widget.outbox?.addListener(_outboxChanged);
     }
+    if (old.reveal != widget.reveal) {
+      old.reveal?.removeListener(_revealChanged);
+      widget.reveal?.addListener(_revealChanged);
+    }
   }
 
   @override
@@ -384,6 +507,7 @@ class _TranscriptViewState extends State<TranscriptView>
     widget.transcript.removeListener(_entriesChanged);
     widget.queued?.removeListener(_queueChanged);
     widget.outbox?.removeListener(_outboxChanged);
+    widget.reveal?.removeListener(_revealChanged);
     _relabel?.cancel();
     for (final waiting in _waiting) {
       waiting.leaving?.cancel();
@@ -657,10 +781,13 @@ class _TranscriptViewState extends State<TranscriptView>
                         bubble,
                         if (failure == null)
                           Padding(
-                            padding: const EdgeInsets.only(
+                            padding: EdgeInsets.only(
                               top: 2,
                               left: Space.m,
-                              right: Space.m,
+                              // Under the bubble, clear of the avatar.
+                              right: message.source == 'person'
+                                  ? Space.m + userAvatarSize + Space.xs
+                                  : Space.m,
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
@@ -736,40 +863,35 @@ class _TranscriptViewState extends State<TranscriptView>
           transcript: widget.transcript,
           agentId: widget.transcript.agentId,
           child: SelectableArea(
-            onSelectionChanged: (content) =>
-                _selected = content != null && content.plainText.isNotEmpty,
-            child: _TranscriptSelection(
-              selected: () => _selected,
-              child: CustomScrollView(
-                controller: _controller,
-                center: _liveKey,
-                slivers: [
-                  SliverList(
+            child: CustomScrollView(
+              controller: _controller,
+              center: _liveKey,
+              slivers: [
+                SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) => index == split
+                        ? _EarlierRow(
+                            failed: _earlierFailed,
+                            onRetry: () {
+                              setState(() => _earlierFailed = null);
+                              _maybeLoadEarlier();
+                            },
+                          )
+                        : _item(split - 1 - index),
+                    childCount: split + (hasEarlier ? 1 : 0),
+                  ),
+                ),
+                SliverPadding(
+                  key: _liveKey,
+                  padding: const EdgeInsets.only(bottom: Space.xl),
+                  sliver: SliverList(
                     delegate: SliverChildBuilderDelegate(
-                      (context, index) => index == split
-                          ? _EarlierRow(
-                              failed: _earlierFailed,
-                              onRetry: () {
-                                setState(() => _earlierFailed = null);
-                                _maybeLoadEarlier();
-                              },
-                            )
-                          : _item(split - 1 - index),
-                      childCount: split + (hasEarlier ? 1 : 0),
+                      (context, index) => _item(split + index),
+                      childCount: length - split + _waiting.length,
                     ),
                   ),
-                  SliverPadding(
-                    key: _liveKey,
-                    padding: const EdgeInsets.only(bottom: Space.xl),
-                    sliver: SliverList(
-                      delegate: SliverChildBuilderDelegate(
-                        (context, index) => _item(split + index),
-                        childCount: length - split + _waiting.length,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         );
@@ -1088,8 +1210,11 @@ class AgentTints extends InheritedWidget {
       !mapEquals(old.agents, agents);
 }
 
-/// The person's message: a bubble on the right in the agent's color, with
-/// a mark under it for the device it was sent from.
+/// The person's avatar beside their messages.
+const userAvatarSize = 22.0;
+
+/// The person's message: a bubble on the right in the agent's color, their
+/// avatar at its side, and a mark under it for the device it was sent from.
 class _UserText extends StatelessWidget {
   const _UserText(this.text, {this.sentFrom, this.files = const []});
 
@@ -1114,21 +1239,43 @@ class _UserText extends StatelessWidget {
       ),
     );
     final from = sentFrom;
-    if (from == null && files.isEmpty) return bubble;
+    // The person's avatar beside it, at its foot, as an agent's character
+    // heads its messages.
+    final message = Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: files.isEmpty
+              ? bubble
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (text.isNotEmpty) bubble,
+                    Padding(
+                      padding: EdgeInsets.only(
+                        top: text.isEmpty ? 0 : Space.xs,
+                      ),
+                      child: SentFiles(files),
+                    ),
+                  ],
+                ),
+        ),
+        const SizedBox(width: Space.xs),
+        const PersonAvatar(size: userAvatarSize),
+      ],
+    );
+    if (from == null) return message;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        if (text.isNotEmpty) bubble,
-        if (files.isNotEmpty)
-          Padding(
-            padding: EdgeInsets.only(top: text.isEmpty ? 0 : Space.xs),
-            child: SentFiles(files),
+        message,
+        Padding(
+          padding: const EdgeInsets.only(
+            right: Space.m + userAvatarSize + Space.xs,
+            top: 2,
           ),
-        if (from != null)
-          Padding(
-            padding: const EdgeInsets.only(right: Space.m, top: 2),
-            child: DeviceMark(from),
-          ),
+          child: DeviceMark(from),
+        ),
       ],
     );
   }
@@ -1494,25 +1641,39 @@ class _ProposalCardState extends State<_ProposalCard> {
               ],
             ),
           ] else ...[
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: dismissed ? 'Dismissed' : 'Approved, sent to $name',
-                    style: TextStyle(
-                      color: dismissed ? palette.textMuted : color,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (decided > 0)
-                    TextSpan(
-                      text:
-                          '  ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
-                      style: TextStyle(color: palette.textFaint),
-                    ),
+            // Who decided: the person.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (true) ...[
+                  const PersonAvatar(size: 16),
+                  const SizedBox(width: Space.xs + 2),
                 ],
-              ),
-              style: TextStyles.caption,
+                Flexible(
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: dismissed
+                              ? 'Dismissed'
+                              : 'Approved, sent to $name',
+                          style: TextStyle(
+                            color: dismissed ? palette.textMuted : color,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        if (decided > 0)
+                          TextSpan(
+                            text:
+                                '  ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                            style: TextStyle(color: palette.textFaint),
+                          ),
+                      ],
+                    ),
+                    style: TextStyles.caption,
+                  ),
+                ),
+              ],
             ),
             if (proposal.comment.isNotEmpty) ...[
               const SizedBox(height: Space.xs),
@@ -1529,10 +1690,9 @@ class _ProposalCardState extends State<_ProposalCard> {
 }
 
 /// Another agent's message: a bubble on the left in that agent's color,
-/// under its name. Clicking the name or the bubble opens the sender's
-/// conversation, when the app knows the sender; a click on the bubble waits
-/// to be sure it isn't a double click, and one that drags or clears a
-/// selection only selects.
+/// under its character and name. Clicking the name (or the character)
+/// opens the sender's conversation, when the app knows the sender; the
+/// bubble is like any other, for selecting text, links and Show more.
 class _AgentMessage extends StatefulWidget {
   const _AgentMessage(this.event);
 
@@ -1545,56 +1705,11 @@ class _AgentMessage extends StatefulWidget {
 class _AgentMessageState extends State<_AgentMessage> {
   var _hovered = false;
 
-  /// Where a click on the bubble went down, while it may still be one that
-  /// opens the sender.
-  Offset? _down;
-
-  /// A click on the bubble, waiting out the double-click time.
-  Timer? _pending;
-
-  @override
-  void dispose() {
-    _pending?.cancel();
-    super.dispose();
-  }
-
   String get _sender => widget.event.fromId;
 
   void _open() {
     final tints = context.getInheritedWidgetOfExactType<AgentTints>();
     tints?.open?.call(_sender);
-  }
-
-  void _pointerDown(PointerDownEvent event) {
-    final pending = _pending;
-    if (pending != null && pending.isActive) {
-      // A double click, which selects a word.
-      pending.cancel();
-      _pending = null;
-      _down = null;
-      return;
-    }
-    _down =
-        event.buttons == kPrimaryButton && !_TranscriptSelection.any(context)
-        ? event.position
-        : null;
-  }
-
-  void _pointerMove(PointerMoveEvent event) {
-    final down = _down;
-    if (down != null &&
-        (event.position - down).distance > computeHitSlop(event.kind, null)) {
-      _down = null;
-    }
-  }
-
-  void _pointerUp(PointerUpEvent event) {
-    if (_down == null) return;
-    _down = null;
-    _pending = Timer(kDoubleTapTimeout, () {
-      _pending = null;
-      if (mounted && !_TranscriptSelection.any(context)) _open();
-    });
   }
 
   void _hover(bool hovered) {
@@ -1609,65 +1724,67 @@ class _AgentMessageState extends State<_AgentMessage> {
     final color = tints?.byId[_sender];
     final known = color != null && tints?.open != null;
     final nameColor = color ?? palette.textMuted;
-    // Its role now, faint after the name, when the app knows the sender.
-    Widget name = NameThenRole(
-      name: widget.event.from,
-      role: tints?.agents[_sender]?.role ?? '',
-      style: TextStyles.caption.copyWith(
-        color: nameColor,
-        fontWeight: FontWeight.w600,
-        decoration: known && _hovered ? TextDecoration.underline : null,
-        decorationColor: nameColor,
-      ),
-      roleColor: palette.textFaint,
-    );
-    // The pointer shows over the text too, which would otherwise show the
-    // text cursor: a region laid over it that lets the pointer through.
-    Widget pointing(Widget child) => Stack(
+    Widget from = Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        child,
-        Positioned.fill(
-          child: MouseRegion(
-            opaque: false,
-            cursor: SystemMouseCursors.click,
-            onEnter: (_) => _hover(true),
-            onExit: (_) => _hover(false),
+        // Who it's from, at rest: a reference, not their state now.
+        if (tints?.agents[_sender] case final sender?) ...[
+          AgentCharacter(agent: sender, size: 22),
+          const SizedBox(width: Space.xs),
+        ],
+        // Its role now, faint after the name, when the app knows the
+        // sender.
+        Flexible(
+          child: NameThenRole(
+            name: widget.event.from,
+            role: tints?.agents[_sender]?.role ?? '',
+            style: TextStyles.caption.copyWith(
+              color: nameColor,
+              fontWeight: FontWeight.w600,
+              decoration: known && _hovered ? TextDecoration.underline : null,
+              decorationColor: nameColor,
+            ),
+            roleColor: palette.textFaint,
           ),
         ),
       ],
     );
     if (known) {
-      name = GestureDetector(onTap: _open, child: pointing(name));
+      // The pointer shows over the name too, which would otherwise show
+      // the text cursor: a region laid over it that lets the pointer
+      // through.
+      from = Semantics(
+        button: true,
+        label: 'Open ${widget.event.from}',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _open,
+          child: Stack(
+            children: [
+              from,
+              Positioned.fill(
+                child: MouseRegion(
+                  opaque: false,
+                  cursor: SystemMouseCursors.click,
+                  onEnter: (_) => _hover(true),
+                  onExit: (_) => _hover(false),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
           padding: const EdgeInsets.only(left: Space.m, bottom: 2),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Who it's from, at rest: a reference, not their state now.
-              if (tints?.agents[_sender] case final sender?) ...[
-                AgentCharacter(agent: sender, size: 22),
-                const SizedBox(width: Space.xs),
-              ],
-              Flexible(child: name),
-            ],
-          ),
+          child: from,
         ),
         Bubble(
           color: color ?? palette.selected,
           outgoing: false,
-          around: known
-              ? (bubble) => Listener(
-                  onPointerDown: _pointerDown,
-                  onPointerMove: _pointerMove,
-                  onPointerUp: _pointerUp,
-                  onPointerCancel: (_) => _down = null,
-                  child: pointing(bubble),
-                )
-              : null,
           child: Markdown(
             message,
             color: color == null ? null : const Color(0xFFFFFFFF),
@@ -1694,23 +1811,6 @@ class _AgentMessageState extends State<_AgentMessage> {
   final match = RegExp(r'\n\nAlso sent to: ([^\n]+?)\.?\s*$').firstMatch(text);
   if (match == null) return (text, null);
   return (text.substring(0, match.start), match.group(1));
-}
-
-/// Whether the person has text selected in the transcript, for clicks that
-/// should only clear it.
-class _TranscriptSelection extends InheritedWidget {
-  const _TranscriptSelection({required this.selected, required super.child});
-
-  final bool Function() selected;
-
-  static bool any(BuildContext context) =>
-      context
-          .getInheritedWidgetOfExactType<_TranscriptSelection>()
-          ?.selected() ??
-      false;
-
-  @override
-  bool updateShouldNotify(_TranscriptSelection old) => false;
 }
 
 /// An event from Factory or a background task: one centered line, which
@@ -1834,16 +1934,11 @@ class Bubble extends StatelessWidget {
     required this.color,
     required this.outgoing,
     required this.child,
-    this.around,
   });
 
   final Color color;
   final bool outgoing;
   final Widget child;
-
-  /// Wraps the bubble itself, without its tail's margin or the room beside
-  /// it, such as to make it clickable.
-  final Widget Function(Widget bubble)? around;
 
   @override
   Widget build(BuildContext context) {
@@ -1861,18 +1956,16 @@ class Bubble extends StatelessWidget {
               maxWidth: constraints.maxWidth * 0.78,
               minHeight: 34,
             ),
-            child: (around ?? (bubble) => bubble)(
-              CustomPaint(
-                painter: _BubblePainter(color: color, outgoing: outgoing),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    Space.m,
-                    Space.s - 1,
-                    Space.m,
-                    Space.s,
-                  ),
-                  child: child,
+            child: CustomPaint(
+              painter: _BubblePainter(color: color, outgoing: outgoing),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.m,
+                  Space.s - 1,
+                  Space.m,
+                  Space.s,
                 ),
+                child: child,
               ),
             ),
           ),

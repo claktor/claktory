@@ -195,6 +195,7 @@ mod tests {
             color: String::new(),
             project: project.map(str::to_owned),
             parent: parent.map(str::to_owned),
+            lead: None,
             name: id.to_uppercase(),
             role: String::new(),
             prompt: String::new(),

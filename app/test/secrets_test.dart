@@ -603,6 +603,166 @@ void main() {
     expect(decided.name, isEmpty);
   });
 
+  SecretRequest cloudflare() => SecretRequest(
+    id: 'r2',
+    agentId: 'june',
+    secretName: 'Claktory DNS',
+    newSecret: NewSecret(
+      name: 'Claktory DNS',
+      description: 'Cloudflare: DNS Edit on claktory.com',
+      variables: [SecretVariable(name: 'CLOUDFLARE_API_TOKEN')],
+    ),
+    state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+  );
+
+  Workspace dns() => _workspace(
+    secrets: [
+      SecretInfo(
+        id: 'cf',
+        name: 'CF_CLAKTORY_DNS',
+        variables: [SecretVariable(name: 'CF_CLAKTORY_DNS')],
+      ),
+    ],
+  );
+
+  testWidgets('a secret with other names than asked: given under the asked '
+      'name too, to start with', (tester) async {
+    final harness = Harness(dns());
+    await _show(tester, harness, SecretRequestCard(cloudflare()));
+    expect(
+      find.text(
+        'June asked for CLOUDFLARE_API_TOKEN, but CF_CLAKTORY_DNS sets '
+        'CF_CLAKTORY_DNS.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Also give it as CLOUDFLARE_API_TOKEN'), findsOneWidget);
+    await tester.tap(find.text('Give CF_CLAKTORY_DNS to June'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.secretId, 'cf');
+    expect(decided.aliases, {'CLOUDFLARE_API_TOKEN': 'CF_CLAKTORY_DNS'});
+    expect(decided.asIs, isFalse);
+  });
+
+  testWidgets('or as it is', (tester) async {
+    final harness = Harness(dns());
+    await _show(tester, harness, SecretRequestCard(cloudflare()));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) => w is Toggle && w.label == 'Also give it as CLOUDFLARE_API_TOKEN',
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.text('June gets it only as CF_CLAKTORY_DNS.'), findsOneWidget);
+    await tester.tap(find.text('Give CF_CLAKTORY_DNS to June'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.aliases, isEmpty);
+    expect(decided.asIs, isTrue);
+  });
+
+  testWidgets('a grant under an asked name says so', (tester) async {
+    final harness = Harness(
+      _workspace(
+        secrets: [
+          SecretInfo(
+            id: 'cf',
+            name: 'CF_CLAKTORY_DNS',
+            variables: [SecretVariable(name: 'CF_CLAKTORY_DNS')],
+            grants: [
+              SecretGrant(
+                agentId: 'june',
+                aliases: {'CLOUDFLARE_API_TOKEN': 'CF_CLAKTORY_DNS'}.entries,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    await _show(
+      tester,
+      harness,
+      const Column(
+        children: [
+          SecretsSettings(),
+          SizedBox(height: 400, child: AgentSecretsPanel(agentId: 'june')),
+        ],
+      ),
+    );
+    await tester.tap(_labeled('CF_CLAKTORY_DNS'));
+    await pumpFrames(tester);
+    expect(
+      find.textContaining('also as CLOUDFLARE_API_TOKEN', findRichText: true),
+      findsWidgets,
+    );
+    expect(
+      find.text('CF_CLAKTORY_DNS, also as CLOUDFLARE_API_TOKEN'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a request the agent withdrew says so and takes no answer', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        resend()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_WITHDRAWN
+          ..comment = 'Found another way.'
+          ..decidedMs = Int64(
+            DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
+          ),
+      ),
+    );
+    expect(
+      find.textContaining('Withdrawn by June · ', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('“Found another way.”'), findsOneWidget);
+    expect(find.text('Dismiss'), findsNothing);
+    expect(find.text('Choose one'), findsNothing);
+  });
+
+  testWidgets('a request the agent updated says when, and its form follows', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace(secrets: []));
+    final shown = ValueNotifier(resend());
+    await _show(
+      tester,
+      harness,
+      ValueListenableBuilder(
+        valueListenable: shown,
+        builder: (context, request, _) => SecretRequestCard(request),
+      ),
+    );
+    expect(find.textContaining('Updated'), findsNothing);
+    shown.value = resend()
+      ..updatedMs = Int64(DateTime(2026, 11, 20, 14, 5).millisecondsSinceEpoch)
+      ..newSecret.name = 'Resend production'
+      ..newSecret.variables.add(SecretVariable(name: 'RESEND_DOMAIN'));
+    await pumpFrames(tester);
+    expect(find.textContaining('Updated '), findsOneWidget);
+    expect(find.textContaining('14:05'), findsOneWidget);
+    expect(find.text('RESEND_DOMAIN'), findsOneWidget);
+    expect(
+      tester
+          .widgetList<EditableText>(find.byType(EditableText))
+          .map((field) => field.controller.text),
+      contains('Resend production'),
+    );
+  });
+
   testWidgets('Choose one with nothing chosen says what to do', (tester) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));

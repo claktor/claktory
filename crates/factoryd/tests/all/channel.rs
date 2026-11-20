@@ -19,13 +19,38 @@ fn tar() -> Command {
 /// A release as `scripts/publish.sh` packs it: a signed app (on a Mac; a
 /// Linux release has none), a backend and its version, in a tarball.
 fn tarball(dir: &Path, version: &str) -> PathBuf {
+    tarball_with(dir, version, None)
+}
+
+/// The apps host a release carries, beside factoryd.
+#[derive(Clone, Copy)]
+enum Host {
+    Signed,
+    Unsigned,
+}
+
+/// As `tarball`, with an apps host.
+fn tarball_with(dir: &Path, version: &str, host: Option<Host>) -> PathBuf {
     let content = dir.join(format!("content-{version}"));
     std::fs::create_dir_all(&content).expect("content");
+    let mut files = vec!["factoryd", "backend-version"];
+    if let Some(host) = host {
+        let path = content.join("claktory-apps");
+        match host {
+            // A real Mach-O, signed (ad hoc) as releases sign theirs.
+            Host::Signed if cfg!(target_os = "macos") => {
+                std::fs::copy("/usr/bin/true", &path).expect("host");
+                run(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(&path));
+            }
+            _ => std::fs::write(&path, "not signed").expect("host"),
+        }
+        files.push("claktory-apps");
+    }
     std::fs::write(content.join("factoryd"), format!("backend {version}")).expect("factoryd");
     std::fs::write(content.join("backend-version"), format!("{version}\n")).expect("backend-version");
     let tarball = dir.join(format!("factory-{version}.tar.gz"));
     if !cfg!(target_os = "macos") {
-        run(tar().arg("-czf").arg(&tarball).arg("-C").arg(&content).args(["factoryd", "backend-version"]));
+        run(tar().arg("-czf").arg(&tarball).arg("-C").arg(&content).args(&files));
         return tarball;
     }
     let app = content.join("Factory.app/Contents");
@@ -39,11 +64,8 @@ fn tarball(dir: &Path, version: &str) -> PathBuf {
     )
     .expect("plist");
     run(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(content.join("Factory.app")));
-    run(tar().env("COPYFILE_DISABLE", "1").arg("-czf").arg(&tarball).arg("-C").arg(&content).args([
-        "Factory.app",
-        "factoryd",
-        "backend-version",
-    ]));
+    files.push("Factory.app");
+    run(tar().env("COPYFILE_DISABLE", "1").arg("-czf").arg(&tarball).arg("-C").arg(&content).args(&files));
     tarball
 }
 
@@ -134,6 +156,25 @@ async fn a_release_that_doesnt_match_its_manifest_is_refused_once_and_leaves_not
     assert_eq!(release_files(&dir), Vec::<String>::new());
     // Not downloaded again.
     assert_eq!(channel.check().await.expect("check"), Checked::Skipped("2026.11.20-1012".into()));
+}
+
+#[tokio::test]
+async fn a_release_carries_its_apps_host_and_on_a_mac_only_a_signed_one() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball_with(&dir, "v0.1.10", Some(Host::Signed)), None);
+    assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
+    assert!(home(&dir).releases().join("v0.1.10/claktory-apps").is_file());
+
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball_with(&dir, "v0.1.10", Some(Host::Unsigned)), None);
+    let checked = Channel::new(home(&dir), url).check().await;
+    if cfg!(target_os = "macos") {
+        let error = checked.expect_err("an unsigned host");
+        assert!(error.to_string().contains("its apps host's signature doesn't verify"), "{error}");
+        assert_eq!(latest(&dir), "");
+    } else {
+        assert_eq!(checked.expect("Linux has no code signing"), Checked::Downloaded("v0.1.10".into()));
+    }
 }
 
 #[tokio::test]

@@ -154,3 +154,15 @@ async fn out_of_tries_offers_a_new_code() {
     assert!(page.contains("Too many tries. Get a new code.") && page.contains("Send new code"), "{page}");
     assert_eq!(field(&page, "email"), "matt@example.com");
 }
+
+#[tokio::test]
+async fn the_bare_root_leads_to_the_account_page() {
+    let instance = start().await;
+    for method in ["GET", "HEAD"] {
+        let answer = instance.send(method, "/", Vec::new(), &[]).await;
+        assert_eq!(answer.status, 302, "{method}");
+        assert_eq!(answer.headers.get("location").and_then(|value| value.to_str().ok()), Some("/account"), "{method}");
+    }
+    assert_eq!(instance.send("POST", "/", Vec::new(), &[]).await.status, 404, "only GET and HEAD");
+    assert_eq!(instance.send("GET", "/elsewhere", Vec::new(), &[]).await.status, 404);
+}

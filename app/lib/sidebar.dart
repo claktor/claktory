@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'connection.dart';
@@ -20,6 +21,8 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart' show isAdminAgent;
 import 'usage.dart';
+import 'usage_wait.dart';
+import 'waiting.dart' show NeedsYouMark, waitingIn, waitingLabel;
 import 'tell_rivet.dart';
 
 /// The workspace's own agents, then projects with their agents nested under
@@ -107,6 +110,14 @@ class Sidebar extends StatelessWidget {
                                 ),
                                 child: _QuietRow(
                                   label: '‹ All projects',
+                                  waiting: waitingIn([
+                                    for (final agent in workspace.agents)
+                                      if (agent.projectId != focused.id &&
+                                          agent.id != pinned?.id &&
+                                          archivedProjectOf(workspace, agent) ==
+                                              null)
+                                        agent,
+                                  ]),
                                   onTap: () {
                                     AppScope.scope(context).history.clear();
                                     fireAndLog(backend.focusProject(''));
@@ -346,7 +357,13 @@ class _Place extends StatelessWidget {
     );
     void select(Agent agent) {
       AppScope.closePage(context);
-      fireAndLog(backend.selectAgent(agent.id));
+      fireAndLog(() async {
+        await backend.selectAgent(agent.id);
+        // Its conversation is here now: it opens at what waits for the
+        // person, if anything does.
+        final now = backend.workspace.agent(agent.id);
+        if (now != null) backend.reveal.oldestWaiting(now);
+      }());
       // On a phone, its conversation is pushed over the list.
       PhoneNavigation.of(context)?.value = true;
     }
@@ -479,10 +496,9 @@ class _FolderGroupState extends State<_FolderGroup> {
     final folder = widget.folder;
     final roots = widget.roots;
     final hidden = folder.collapsed ? _all(roots) : const <Agent>[];
-    final working = hidden.any(
-      (agent) => agent.status == AgentStatus.AGENT_STATUS_WORKING,
-    );
+    final working = hidden.any(atWork);
     final unseen = hidden.any((agent) => agent.unseen);
+    final waiting = waitingIn(hidden);
     final heading = DragTarget<String>(
       onWillAcceptWithDetails: (details) {
         final agent = backend.workspace.agent(details.data);
@@ -557,8 +573,10 @@ class _FolderGroupState extends State<_FolderGroup> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyles.caption.copyWith(
-                        color: unseen ? palette.text : color,
-                        fontWeight: unseen ? FontWeight.w600 : FontWeight.w500,
+                        color: unseen || waiting > 0 ? palette.text : color,
+                        fontWeight: unseen || waiting > 0
+                            ? FontWeight.w600
+                            : FontWeight.w500,
                       ),
                     ),
                   ),
@@ -572,6 +590,8 @@ class _FolderGroupState extends State<_FolderGroup> {
                         ),
                       ),
                     ),
+                  if (waiting > 0)
+                    _needsYou(waitingLabel(folder.name, waiting), waiting),
                 ],
               );
             },
@@ -1144,17 +1164,22 @@ class _AgentRowState extends State<_AgentRow> {
     // A collapsed agent speaks for the agents hidden under it: it pulses
     // while one works and is marked while one has news.
     final hidden = agent.collapsed ? _all(widget.children) : const <Agent>[];
-    final working =
-        agent.status == AgentStatus.AGENT_STATUS_WORKING ||
-        hidden.any((other) => other.status == AgentStatus.AGENT_STATUS_WORKING);
+    final working = atWork(agent) || hidden.any(atWork);
+    // Held up by usage limits: its line under the name says what it waits
+    // for, in place of its role.
+    final wait = usageWaitLine(agent);
     // A run ended since the person last opened the agent: its name stands
     // out and a dot in its color sits at the end of the row, until they
     // open it.
     final unseen = agent.unseen || hidden.any((other) => other.unseen);
+    // Something in its conversation (or a folded agent's) waits for the
+    // person's answer: a count in signal takes the dot's place.
+    final waiting = waitingIn([agent, ...hidden]);
+    final stands = unseen || waiting > 0;
     final color = agentColor(agent.color);
     return _Row(
-      // Taller with a role, for its line under the name.
-      height: agent.role.isEmpty ? 32 : 40,
+      // Taller with a role or a wait, for its line under the name.
+      height: agent.role.isEmpty && wait.isEmpty ? 32 : 40,
       selected: widget.selected,
       onTap: widget.onTap,
       // While it (or an agent folded under it) works, a wave of its color
@@ -1205,12 +1230,12 @@ class _AgentRowState extends State<_AgentRow> {
           Expanded(
             child: NameOverRole(
               name: agent.name,
-              role: agent.role,
+              role: wait.isEmpty ? agent.role : wait,
               style: TextStyles.body.copyWith(
-                color: widget.selected || hovered || unseen
+                color: widget.selected || hovered || stands
                     ? palette.text
                     : palette.textMuted,
-                fontWeight: unseen
+                fontWeight: stands
                     ? FontWeight.w600
                     : widget.selected
                     ? FontWeight.w500
@@ -1226,8 +1251,10 @@ class _AgentRowState extends State<_AgentRow> {
               '${agent.queuedMessages}',
               style: TextStyles.caption.copyWith(color: palette.textFaint),
             ),
+          if (waiting > 0)
+            _needsYou(waitingLabel(agent.name, waiting), waiting)
           // A status mark, not the agent's identity: it stays a dot.
-          if (unseen)
+          else if (unseen)
             Padding(
               padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
               child: Semantics(
@@ -1280,28 +1307,46 @@ class _DragFeedback extends StatelessWidget {
 }
 
 class _QuietRow extends StatelessWidget {
-  const _QuietRow({required this.label, required this.onTap});
+  const _QuietRow({required this.label, required this.onTap, this.waiting = 0});
 
   final String label;
   final VoidCallback onTap;
+
+  /// What waits for the person out of sight behind it: marked at its end.
+  final int waiting;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     return _Row(
       onTap: onTap,
-      builder: (context, hovered) => Align(
-        alignment: Alignment.centerLeft,
-        child: Text(
-          label,
-          style: TextStyles.body.copyWith(
-            color: hovered ? palette.textMuted : palette.textFaint,
+      builder: (context, hovered) => Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyles.body.copyWith(
+                color: hovered ? palette.textMuted : palette.textFaint,
+              ),
+            ),
           ),
-        ),
+          if (waiting > 0)
+            _needsYou(
+              'Something in another project is waiting for your answer',
+              waiting,
+            ),
+        ],
       ),
     );
   }
 }
+
+/// The needs-you mark at the end of a sidebar row, where the unseen dot
+/// would be.
+Widget _needsYou(String label, int count) => Padding(
+  padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
+  child: NeedsYouMark(count: count, label: label),
+);
 
 /// Archived projects, at the bottom of the project list: "Archived (N)",
 /// which opens in place to list them, each with Unarchive. A click on one
@@ -1568,6 +1613,16 @@ class _Footer extends StatelessWidget {
                   name: 'Usage',
                   color: color,
                 ),
+              ),
+              const Spacer(),
+              // The person, at the end: their profile is at the top of
+              // Settings.
+              GlyphButton(
+                label: 'Profile',
+                active: false,
+                onTap: () => AppScope.openPage(context, AppPage.settings),
+                glyph: (_) =>
+                    const ExcludeSemantics(child: PersonAvatar(size: 20)),
               ),
             ],
           ),

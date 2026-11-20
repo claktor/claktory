@@ -1041,7 +1041,7 @@ impl Factory {
         };
         let saved = if reconnect.is_empty() {
             let name = if inspected.account.is_empty() { spec.name.clone() } else { format!("{} ({})", spec.name, inspected.account) };
-            self.vault.add_connection(&name, &spec.id, &meta, &control)
+            self.vault.add_connection(&name, &describe(&spec.name, &meta.access), &spec.id, &meta, &control)
         } else {
             match self.vault.connection(&reconnect) {
                 Ok(before) if !before.meta.subject.is_empty() && before.meta.subject != meta.subject => Err(VaultError::Invalid(format!(
@@ -1189,7 +1189,12 @@ impl Factory {
         let values: Vec<Value> =
             values.into_iter().map(|variable| Value { variable: variable.name, value: variable.value, file: false }).collect();
         let name = if ask.name.is_empty() { format!("{} access", recipe.spec().name) } else { ask.name.clone() };
-        match self.vault.add_export(&opened.id, &name, &request.description, &values, &derived.meta) {
+        // Unless said otherwise, it says what it grants, as checked.
+        let description = match request.description.trim() {
+            "" => describe(&recipe.spec().name, &derived.meta.access),
+            given => given.to_owned(),
+        };
+        match self.vault.add_export(&opened.id, &name, &description, &values, &derived.meta) {
             Ok(made) => {
                 tracing::info!(connection = %opened.id, secret = %made.0, by, "made a secret from a connection");
                 self.vault_changed();
@@ -1358,6 +1363,20 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
     getrandom::fill(&mut bytes).expect("the system's random source");
     bytes
+}
+
+/// What a secret made from (or a connection to) `service` grants, in a
+/// line, from what was checked: "Cloudflare: DNS Edit on claktory.com".
+pub(crate) fn describe(service: &str, access: &[String]) -> String {
+    const LONGEST: usize = 300;
+    if access.is_empty() {
+        return String::new();
+    }
+    let text = format!("{service}: {}", access.join("; "));
+    if text.chars().count() <= LONGEST {
+        return text;
+    }
+    format!("{}…", text.chars().take(LONGEST - 1).collect::<String>())
 }
 
 /// A random id, 16 hex digits.
