@@ -11,6 +11,7 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
 import 'tunnel_client.dart';
 import 'settings_view.dart';
@@ -649,7 +650,10 @@ class _FactoryChooserState extends State<FactoryChooser> {
   @override
   Widget build(BuildContext context) {
     final connections = AppScope.scope(context).connections;
-    final hasLocalBackend = AppScope.of(context).localBackend;
+    // This Mac's own Claktory, if it runs one (else it can be set up).
+    final claktories = ClaktoriesScope.of(context);
+    final hasLocalBackend =
+        claktories?.localBackend ?? AppScope.of(context).localBackend;
     return ListenableBuilder(
       listenable: Listenable.merge([connections, _code]),
       builder: (context, _) {
@@ -671,6 +675,16 @@ class _FactoryChooserState extends State<FactoryChooser> {
                 detail: 'Running here',
                 showing: current == null,
                 onTap: () => _show(null),
+              )
+            else if (claktories != null && claktories.canChooseLocal)
+              _FactoryRow(
+                label: 'This Mac',
+                detail: 'Set up Claktory here',
+                showing: false,
+                onTap: () {
+                  widget.close();
+                  claktories.setLocalBackend(true);
+                },
               ),
             for (final saved in connections.saved)
               _FactoryRow(
@@ -687,7 +701,9 @@ class _FactoryChooserState extends State<FactoryChooser> {
             const SizedBox(height: Space.l),
             Field(
               label: 'Connect to another Claktory',
-              note: "Paste the code from that Claktory's Settings → Devices.",
+              note:
+                  "Paste the code from that Claktory's Settings → Devices, "
+                  'or the one `factoryd pair` prints on a server.',
               child: TextField(
                 controller: _code,
                 placeholder: 'Paste code',

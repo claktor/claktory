@@ -75,7 +75,7 @@ impl State {
         let read = || -> rusqlite::Result<Vec<(String, Vec<u8>)>> {
             let db = store.db();
             let mut statement = db.prepare("SELECT agent, layout FROM layouts")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows = statement.query_map([], crate::store::row2)?;
             rows.collect()
         };
         match read() {

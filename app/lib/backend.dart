@@ -11,7 +11,7 @@ import 'app_update.dart';
 import 'attachments.dart';
 import 'connections.dart';
 import 'loopback_forward.dart';
-import 'device_kind.dart' show thisDeviceKindForHello;
+import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
 import 'outbox.dart';
@@ -95,6 +95,7 @@ class Backend {
     Tunnels? tunnels,
     this.localBackend = true,
     Future<RemoteFactory?> Function()? localPairing,
+    @visibleForTesting this.localEndpoint = _localEndpoint,
   }) : queued = queued ?? QueuedStore(),
        _tunnels = tunnels ?? RustTunnels(),
        _localPairing = localPairing ?? readLocalPairing,
@@ -126,6 +127,15 @@ class Backend {
   /// Where the next conversation shown opens, when it's not at its end:
   /// at what waits for the person (waiting.dart).
   final reveal = EntryReveal();
+
+  /// Opens a screen an agent asked to show (its show_screen tool) in the
+  /// window showing this Claktory, answering whether it did
+  /// (screens.dart). Null while no window shows it: the answer is no.
+  bool Function(OpenScreen request)? showScreen;
+
+  /// The Settings section to bring into view next, by its id ("devices"),
+  /// once: Settings scrolls to it and clears it.
+  final settingsSection = ValueNotifier<String?>(null);
 
   /// The last file in any agent's panes the backend said changed.
   final fileChanged = ValueNotifier<FileChanged?>(null);
@@ -299,6 +309,9 @@ class Backend {
   /// in with its code, so one made for each run.
   late final _localKey = newDeviceKey();
 
+  /// This Mac's Factory's open port, as a WebSocket address.
+  final String localEndpoint;
+
   /// Whether this device runs a Factory of its own to show when no other
   /// is chosen: a Mac does, a phone doesn't, and waits to be paired.
   final bool localBackend;
@@ -351,13 +364,17 @@ class Backend {
         continue;
       }
       // This Mac's Factory through the tunnel too, with its own code; the
-      // open port is only for a backend from before it.
+      // open port is for a backend from before it, and with the code's
+      // token when the tunnel to it fails (every other try then).
       final local = target == null ? await _localPairing() : null;
       final via = target ?? local;
+      final loopback = via == null || (local != null && _loopbackNext);
+      if (local != null) _loopbackNext = false;
+      _welcomed = false;
       try {
         final WebSocket socket;
-        if (via == null) {
-          socket = await WebSocket.connect(_localEndpoint);
+        if (loopback) {
+          socket = await WebSocket.connect(localEndpoint);
         } else if (via.tunnelled) {
           final tunnel = await _tunnelTo(
             via,
@@ -392,7 +409,7 @@ class Backend {
         });
         _watchTunnel();
         _helloVia = via;
-        _helloKey = via == null || !via.tunnelled
+        _helloKey = via == null || !via.tunnelled || loopback
             ? null
             : target == null
             ? _localKey
@@ -405,6 +422,7 @@ class Backend {
               clientVersion: _clientVersion,
               token: _helloVia?.token,
               deviceKind: await thisDeviceKindForHello(),
+              deviceName: await thisDeviceNameForHello(),
               // Changes come as patches to the last Workspace, not whole.
               workspacePatches: askForPatches,
             ),
@@ -424,6 +442,7 @@ class Backend {
             !_closed &&
             via != null &&
             via.tunnelled &&
+            !loopback &&
             !identical(_redialed, socket)) {
           unawaited(_tunnel?.reconnect());
         }
@@ -437,6 +456,9 @@ class Backend {
         _log('no connection within ${connectWithin.inSeconds}s');
         unawaited(_tunnel?.reconnect());
       }
+      // This Mac's own through the tunnel never got welcomed: the open
+      // port next, with its code's token.
+      if (local != null && !loopback && !_welcomed) _loopbackNext = true;
       _disconnected();
       _watchTunnel();
       // Turned away at the tunnel: like a refused Hello, trying again
@@ -454,6 +476,13 @@ class Backend {
       _retryDelay = doubled > _maxRetryDelay ? _maxRetryDelay : doubled;
     }
   }
+
+  /// The next try at this Mac's own Factory goes to its open port, with
+  /// its pairing code's token: the tunnel to it just failed.
+  var _loopbackNext = false;
+
+  /// Whether the current connection was welcomed.
+  var _welcomed = false;
 
   /// The connection's Welcome timeout, cancelled while it waits to be
   /// allowed.
@@ -1152,6 +1181,11 @@ class Backend {
   Future<void> accountResend() =>
       _request(ClientMessage(accountResend: AccountResend()));
 
+  /// Not now: a Claktory from before sign-in stops asking, until the
+  /// person signs in from Settings → Account.
+  Future<void> skipAccountSignIn() =>
+      _request(ClientMessage(skipAccountSignIn: SkipAccountSignIn()));
+
   Future<void> accountSignOut() =>
       _request(ClientMessage(accountSignOut: AccountSignOut()));
 
@@ -1273,6 +1307,20 @@ class Backend {
   Future<void> setHighlights(bool on) =>
       _request(ClientMessage(setHighlights: SetHighlights(on: on)));
 
+  /// An agent asked to show [request]'s screen: the window showing this
+  /// Claktory opens it if it can, and the backend hears whether it did.
+  void screenRequested(OpenScreen request) {
+    final opened = showScreen?.call(request) ?? false;
+    fireAndLog(screenOpened(request.id, opened));
+  }
+
+  /// Answers an OpenScreen: whether this device opened the screen.
+  Future<void> screenOpened(String id, bool opened) => _request(
+    ClientMessage(
+      screenOpened: ScreenOpened(id: id, opened: opened),
+    ),
+  );
+
   /// Zooms the whole app on this device ([zoom] 1 is actual size): kept
   /// for this device only (`Settings.zoom`, see zoom.dart).
   Future<void> setZoom(double zoom) =>
@@ -1332,6 +1380,24 @@ class Backend {
     }
     return reply.pairingCode;
   }
+
+  /// The code of the agent's pairing [pairingId] (DevicePairing.id) while
+  /// it waits, to show on its card; the same code each time it's asked.
+  /// Refused with ERROR_CODE_NOT_FOUND once it no longer waits.
+  Future<PairingCode> showPairingCode(String pairingId) async {
+    final reply = await _call(
+      ClientMessage(showPairingCode: ShowPairingCode(pairingId: pairingId)),
+    );
+    if (!reply.hasPairingCode()) {
+      throw const RequestFailure('Claktory sent no pairing code.');
+    }
+    return reply.pairingCode;
+  }
+
+  /// Skips connecting a model in a new Claktory's first run
+  /// (`Settings.onboarding`), on every device.
+  Future<void> skipModelStep() =>
+      _request(ClientMessage(setOnboarding: SetOnboarding(skipModel: true)));
 
   /// The folders in [path] on the machine Factory runs on: absolute, or
   /// from the home folder ("", "~" or "~/code").
@@ -1510,6 +1576,7 @@ class Backend {
     }
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
+        _welcomed = true;
         _retryDelay = _minRetryDelay;
         _quiet?.cancel();
         reconnecting.value = false;
@@ -1528,8 +1595,16 @@ class Backend {
         unawaited(_pairingPending(message.pairingPending));
       case ServerMessage_Body.error:
         if (message.error.code == ErrorCode.ERROR_CODE_UNAUTHORIZED) {
-          // Not (or no longer) a paired device: retrying won't help.
-          refused.value = message.error.message;
+          if (_target != null) {
+            // Not (or no longer) a paired device: retrying won't help.
+            refused.value = message.error.message;
+          } else if (!connected.value) {
+            // This Mac's own, not ready for this app yet (just installed,
+            // its code not written): it tries again, reading the code
+            // afresh.
+            _log('this Mac\'s Claktory refused: ${message.error.message}');
+            unawaited(_socket?.close());
+          }
         }
         final pending = _pending.remove(message.replyTo.toInt());
         if (pending != null) {
@@ -1568,6 +1643,8 @@ class Backend {
         queued.apply(message.queuedMessages);
       case ServerMessage_Body.highlight:
         highlights.apply(message.highlight);
+      case ServerMessage_Body.openScreen:
+        screenRequested(message.openScreen);
       case ServerMessage_Body.pairingCode:
       case ServerMessage_Body.appChunk:
       case ServerMessage_Body.folderList:

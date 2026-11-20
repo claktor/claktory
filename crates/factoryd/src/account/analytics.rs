@@ -174,9 +174,7 @@ fn activity(db: &Connection, from: i64, to: i64, now: i64) -> rusqlite::Result<V
     let mut statement = db.prepare(
         "SELECT started, ended, outcome, last_call FROM runs WHERE started < ?2 AND (ended IS NULL OR ended > ?1 OR outcome = 'interrupted')",
     )?;
-    let rows = statement.query_map([from * 1000, to * 1000], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<i64>>(3)?))
-    })?;
+    let rows = statement.query_map([from * 1000, to * 1000], crate::store::row4::<i64, Option<i64>, Option<String>, Option<i64>>)?;
     let mut runs: Vec<(i64, i64)> = Vec::new();
     for row in rows {
         let (started, ended, outcome, last_call) = row?;

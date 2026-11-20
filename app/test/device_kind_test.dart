@@ -72,4 +72,19 @@ void main() {
       );
     }
   });
+
+  test("a Mac's name is its Computer Name; an iPhone's, iPhone", () async {
+    expect(
+      await deviceNameOf(
+        TargetPlatform.macOS,
+        run: (command, args) async =>
+            command == '/usr/sbin/scutil' && args.last == 'ComputerName'
+            ? "Matt's MacBook Pro\n"
+            : null,
+      ),
+      "Matt's MacBook Pro",
+    );
+    expect(await deviceNameOf(TargetPlatform.iOS, shortestSide: 393), 'iPhone');
+    expect(await deviceNameOf(TargetPlatform.iOS, shortestSide: 820), 'iPad');
+  });
 }

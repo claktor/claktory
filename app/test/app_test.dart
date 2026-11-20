@@ -1,5 +1,6 @@
 import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/provider_picker.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
@@ -199,19 +200,14 @@ void main() {
 
     expect(find.text('No model available'), findsOneWidget);
     expect(find.text('Opus 5.5 · High'), findsNothing);
-    expect(
-      find.text("No model available, so Builder can't run."),
-      findsOneWidget,
-    );
+    // No model at all: connect one.
+    expect(find.text('Connect a model so Builder can answer.'), findsOneWidget);
     // No composer to type into: sending couldn't work.
     expect(find.byType(EditableText), findsNothing);
 
-    await tester.tap(find.text('Sign in…').last);
+    await tester.tap(find.text('Connect a model…'));
     await settle(tester);
-    expect(find.text('Providers'), findsOneWidget);
-    expect(find.text('Not signed in'), findsOneWidget);
-
-    await tester.tap(find.text('Sign in with Anthropic (Claude Pro/Max)'));
+    await tester.tap(find.text('Sign in with Claude'));
     await settle(tester);
     expect(harness.last.startLogin.providerId, 'anthropic');
     expect(harness.last.startLogin.methodId, 'oauth');
@@ -223,7 +219,7 @@ void main() {
     final harness = await showApp(tester, workspace(signedIn: false));
     harness.page.value = AppPage.settings;
     await settle(tester);
-    await tester.tap(find.text('Sign in with Anthropic (Claude Pro/Max)'));
+    await tester.tap(find.text('Anthropic (Claude Pro/Max)'));
     await settle(tester);
 
     // The backend sets the flow, then the provider publishes its address.
@@ -972,6 +968,7 @@ Finder get settingsField => find
       (element) =>
           element.widget is EditableText &&
           (element.widget as EditableText).controller.text != 'Matt' &&
-          element.findAncestorWidgetOfExactType<ClaktoryIdentity>() == null,
+          element.findAncestorWidgetOfExactType<ClaktoryIdentity>() == null &&
+          element.findAncestorWidgetOfExactType<ProviderPicker>() == null,
     )
     .first;

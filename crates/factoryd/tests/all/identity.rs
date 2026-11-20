@@ -24,7 +24,12 @@ fn set(name: Option<&str>, color: Option<&str>) -> client_message::Body {
 /// What Welcome says to a new connection.
 async fn welcome(addr: std::net::SocketAddr) -> v1::Welcome {
     let mut client = Client::open(addr).await;
-    let hello = v1::Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), ..Default::default() };
+    let hello = v1::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_version: "test".into(),
+        token: crate::common::local_token(addr),
+        ..Default::default()
+    };
     client.send(ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) }).await;
     match client.receive().await.body {
         Some(Body::Welcome(welcome)) => welcome,

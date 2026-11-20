@@ -6,6 +6,7 @@ import 'package:factory_app/controls.dart';
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
+import 'package:factory_app/name_step.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
@@ -578,5 +579,28 @@ void main() {
     ) as dynamic).back();
     await pumpFrames(tester);
     expect(tester.getTopLeft(find.text('Claktories')).dx, greaterThan(47));
+  });
+
+  testWidgets('another Claktory asks the name with the one this Mac knows', (
+    tester,
+  ) async {
+    final app = _App(
+      snapshots: {
+        _nixos: _workspace('Rivet')..settings = Settings(userName: ''),
+      },
+    );
+    await app.show(tester);
+    expect(find.text("What's your name?"), findsNothing);
+    app.connections.use(parsePairingCode(_nixos));
+    await pumpFrames(tester);
+    expect(find.text("What's your name?"), findsOneWidget);
+    final field = tester.widget<EditableText>(
+      find.descendant(
+        of: find.byType(NameStep),
+        matching: find.byType(EditableText),
+      ),
+    );
+    expect(field.controller.text, 'Matt');
+    expect(field.controller.selection.end, 4);
   });
 }

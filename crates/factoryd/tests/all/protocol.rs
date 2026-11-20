@@ -1,10 +1,11 @@
-use crate::common::{Client, start, temp_dir};
+use crate::common::{Client, home, local_token, start, temp_dir};
 use factory_protocol::PROTOCOL_VERSION;
 use factory_protocol::v1::{ClientMessage, ErrorCode, Hello, ServerMessage, client_message, server_message::Body};
 use prost::Message as _;
 
-fn hello(id: u64, protocol_version: u32) -> ClientMessage {
-    let hello = Hello { protocol_version, client_version: "test".into(), token: String::new(), device_kind: 0, workspace_patches: false };
+fn hello(id: u64, protocol_version: u32, token: String) -> ClientMessage {
+    let hello =
+        Hello { protocol_version, client_version: "test".into(), token, device_kind: 0, workspace_patches: false, ..Default::default() };
     ClientMessage { id, body: Some(client_message::Body::Hello(hello)) }
 }
 
@@ -19,7 +20,7 @@ fn error_code(message: &ServerMessage) -> ErrorCode {
 async fn welcome_echoes_the_request_id_and_is_followed_by_the_workspace() {
     let (addr, _factory) = start(&temp_dir()).await;
     let mut client = Client::open(addr).await;
-    client.send(hello(7, PROTOCOL_VERSION)).await;
+    client.send(hello(7, PROTOCOL_VERSION, local_token(addr))).await;
     let welcome = client.receive().await;
     assert_eq!(welcome.reply_to, 7);
     match welcome.body {
@@ -41,7 +42,7 @@ async fn welcome_echoes_the_request_id_and_is_followed_by_the_workspace() {
 async fn unsupported_version_is_rejected_and_closed() {
     let (addr, _factory) = start(&temp_dir()).await;
     let mut client = Client::open(addr).await;
-    client.send(hello(3, PROTOCOL_VERSION + 1)).await;
+    client.send(hello(3, PROTOCOL_VERSION + 1, local_token(addr))).await;
     let reply = client.receive().await;
     assert_eq!(reply.reply_to, 3);
     assert_eq!(error_code(&reply), ErrorCode::UnsupportedProtocolVersion);
@@ -85,4 +86,54 @@ async fn message_from_a_newer_client_is_answered_not_fatal() {
     // And the connection keeps working.
     let reply = client.request(crate::common::create_project("After", &temp_dir())).await;
     assert!(matches!(reply.body, Body::Ack(_)), "got {:?}", reply.body);
+}
+
+/// The loopback port lets in only this machine's app, by the token in its
+/// local pairing code, which only this user can read: any other user's
+/// program, with no token or another, is turned away, and its Hello is
+/// answered so a CLI can say why.
+#[tokio::test]
+async fn the_loopback_port_wants_this_users_token() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    for token in [String::new(), "not-the-token".to_owned()] {
+        let mut client = Client::open(addr).await;
+        client.send(hello(4, PROTOCOL_VERSION, token)).await;
+        let reply = client.receive().await;
+        assert_eq!(reply.reply_to, 4);
+        assert_eq!(error_code(&reply), ErrorCode::Unauthorized);
+        assert!(client.closed().await);
+    }
+    // Not even once this machine's app has used the tunnel and gone.
+    Client::connect(addr).await;
+    let mut client = Client::open(addr).await;
+    client.send(hello(5, PROTOCOL_VERSION, String::new())).await;
+    assert_eq!(error_code(&client.receive().await), ErrorCode::Unauthorized);
+    drop(factory);
+
+    // Only this user can open the home, its remote folder and the code.
+    use std::os::unix::fs::PermissionsExt;
+    let root = home(&dir).root().to_owned();
+    let mode = |path: &std::path::Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode(&root), 0o700);
+    assert_eq!(mode(&root.join("remote")), 0o700);
+    assert_eq!(mode(&root.join("remote/local-pairing")), 0o600);
+}
+
+/// A home made before, open to every user, is made private when Factory
+/// opens, and its code still lets this machine's app in.
+#[tokio::test]
+async fn an_open_home_is_made_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir();
+    let root = home(&dir).root().to_owned();
+    std::fs::create_dir_all(root.join("remote")).expect("remote");
+    for path in [&root, &root.join("remote")] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("permissions");
+    }
+    let (addr, _factory) = start(&dir).await;
+    let mode = |path: &std::path::Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode(&root), 0o700);
+    assert_eq!(mode(&root.join("remote")), 0o700);
+    Client::connect(addr).await;
 }

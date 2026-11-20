@@ -9,13 +9,15 @@ use hashbrown::HashMap;
 use parking_lot::Mutex;
 
 use crate::accounts::{
-    account_name, account_noun, exhausted_message, key_label, mark_answered_by, mark_none_left, out_of_credit, switch_note, usage_limit,
+    Refused, account_name, account_noun, exhausted_message, key_label, mark_answered_by, mark_none_left, mark_refused, out_of_credit,
+    refused, switch_note, usage_limit,
 };
 use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
 use crate::credentials::{Account, Credential, FileCredentialStore};
 use crate::errors::{Error, models_error};
 use crate::limits::{AccountUsage, ResetAnswer, UsageLimit, UsageReset};
+use crate::providers::keys::KeyCheck;
 use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels};
 use crate::stream::{EventStream, LlmContext, StreamFn, StreamOptions, ThinkingLevel, event_stream};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent, Usage};
@@ -124,6 +126,17 @@ fn shown_label(account: &Account) -> String {
 }
 
 /// The error a stream ends with when it can't go on, without a response.
+/// Whose credentials a request went with: the account chosen, and how it
+/// signed in.
+fn refused_by(chosen: Option<&Account>) -> Refused {
+    let Some(account) = chosen else { return Refused::default() };
+    let method = match account.credential {
+        Credential::ApiKey { .. } => "api_key",
+        Credential::Oauth { .. } => "oauth",
+    };
+    Refused { account: account.id.clone(), method: method.to_owned() }
+}
+
 fn failed(model: &Model, text: String) -> StreamEvent {
     let message = AssistantMessage {
         content: Vec::new(),
@@ -471,6 +484,11 @@ impl Registry {
             () = cancel.cancelled() => return Err(Error::Aborted),
             credential = login => credential?,
         };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(Error::Aborted),
+            checked = self.check_key(provider, &credential) => checked?,
+        }
         let identity = self.identify(provider, &credential).await;
         let stored = credential.clone();
         self.inner
@@ -494,6 +512,29 @@ impl Registry {
             .await
             .map_err(|error| models_error("auth", format!("Credential store modify failed for {id}"), Some(&error)))?;
         Ok(credential)
+    }
+
+    /// Asks the provider whether it accepts a new API key, so one it refuses
+    /// is never kept. A key that can't be checked (the provider is down, or
+    /// the server at its base URL has no such call) is kept: its first
+    /// request says what's wrong.
+    async fn check_key(&self, provider: &Provider, credential: &Credential) -> Result<(), Error> {
+        let (Credential::ApiKey { .. }, Some(check), Some(api_key)) = (credential, provider.check_key, &provider.api_key) else {
+            return Ok(());
+        };
+        let Some(resolved) = api_key.resolve(&self.inner.env, Some(credential))? else { return Ok(()) };
+        let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+        match check(base_url, resolved.auth).await {
+            KeyCheck::Accepted => Ok(()),
+            KeyCheck::Refused(detail) => {
+                tracing::info!(provider = provider.id, %detail, "the provider refused a new API key");
+                Err(Error::Models { code: crate::errors::REFUSED, message: format!("{} didn't accept this key.", provider.name) })
+            }
+            KeyCheck::Unchecked(why) => {
+                tracing::warn!(provider = provider.id, %why, "could not check a new API key; keeping it");
+                Ok(())
+            }
+        }
     }
 
     /// Who a new sign-in is: read from a subscription, or the end of an API
@@ -662,7 +703,12 @@ impl Registry {
                     let mut inner = match registry.open(&model, context.clone(), options.clone(), account.as_deref()).await {
                         Ok(inner) => inner,
                         Err(error) => {
-                            sink.push(failed(&model, error.to_string()));
+                            let mut event = failed(&model, error.to_string());
+                            // A sign-in whose token the provider won't refresh.
+                            if let (true, StreamEvent::Error { error, .. }) = (error.is_refused(), &mut event) {
+                                mark_refused(error, &refused_by(chosen.as_ref()));
+                            }
+                            sink.push(event);
                             return;
                         }
                     };
@@ -691,8 +737,19 @@ impl Registry {
                             }
                         }
                         done = matches!(event, StreamEvent::Done { .. });
-                        if let (Some(account), StreamEvent::Done { message, .. }) = (&account, &mut event) {
-                            mark_answered_by(message, account);
+                        match &mut event {
+                            StreamEvent::Done { message, .. } => {
+                                if let Some(account) = &account {
+                                    mark_answered_by(message, account);
+                                }
+                            }
+                            // The provider says whether it refused the credentials; whose they were is known here.
+                            StreamEvent::Error { error, .. } if refused(error).is_some() => {
+                                let by = refused_by(chosen.as_ref());
+                                tracing::info!(provider = %model.provider, account = %by.account, method = %by.method, "the provider refused the credentials");
+                                mark_refused(error, &by);
+                            }
+                            _ => {}
                         }
                         sink.push(event);
                     }

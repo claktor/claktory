@@ -178,6 +178,7 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     let factory = Factory::open(crate::common::home(&dir), Arc::new(registry(&dir, &base_url))).await.expect("open");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
+    crate::common::serves(addr, crate::common::home(&dir));
     tokio::spawn(factoryd::serve(listener, factory.clone()));
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
@@ -274,6 +275,7 @@ async fn the_person_uses_a_usage_reset_and_the_usage_is_read_again() {
     let factory = Factory::open(crate::common::home(&dir), Arc::new(registry(&dir, &base_url))).await.expect("open");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
+    crate::common::serves(addr, crate::common::home(&dir));
     tokio::spawn(factoryd::serve(listener, factory.clone()));
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
@@ -345,9 +347,10 @@ fn builder(view: &View) -> v1::Agent {
     view.agent("builder").clone()
 }
 
-async fn serve(factory: &Arc<Factory>) -> (Client, View) {
+async fn serve(factory: &Arc<Factory>, dir: &std::path::Path) -> (Client, View) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
+    crate::common::serves(addr, crate::common::home(dir));
     tokio::spawn(factoryd::serve(listener, factory.clone()));
     let (client, workspace, transcript) = Client::connect(addr).await;
     let entries = transcript.map(|transcript| transcript.entries).unwrap_or_default();
@@ -377,12 +380,13 @@ fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
 #[tokio::test]
 async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
     let dir = temp_dir();
-    let resets = now_ms() / 1000 + 2;
+    // Far enough ahead that a busy machine still asks before it.
+    let resets = now_ms() / 1000 + 5;
     let limited = Arc::new(AtomicBool::new(true));
     let (base_url, seen) = anthropic_with(resets, limited.clone()).await;
     let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
     factory.set_usage_wait_margin(Duration::ZERO);
-    let (mut client, mut view) = serve(&factory).await;
+    let (mut client, mut view) = serve(&factory, &dir).await;
     create_builder(&mut client, &mut view).await;
 
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
@@ -420,14 +424,14 @@ async fn a_wait_survives_a_restart_and_ends_early_with_a_usage_reset() {
     let resets = now_ms() / 1000 + 3 * 3600;
     let (base_url, seen) = anthropic(resets).await;
     let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
-    let (mut client, mut view) = serve(&factory).await;
+    let (mut client, mut view) = serve(&factory, &dir).await;
     create_builder(&mut client, &mut view).await;
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
     view.follow(&mut client, |view| builder(view).usage_wait_until_ms == i64::try_from(resets * 1000).expect("ms")).await;
 
     // Restarted: the open run resumes, finds no account free, and waits again, asking nothing.
     let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a_again(&dir, &base_url))).await.expect("open again");
-    let (mut client, mut view) = serve(&factory).await;
+    let (mut client, mut view) = serve(&factory, &dir).await;
     view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
     assert_eq!(model_requests(&seen), 1);
 

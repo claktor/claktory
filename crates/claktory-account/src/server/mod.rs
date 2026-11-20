@@ -2,6 +2,7 @@
 
 mod api;
 pub mod db;
+mod devices;
 pub mod geo;
 pub mod mail;
 pub mod secrets;
@@ -246,6 +247,12 @@ impl Service {
             (&Method::POST, "/v1/share") => api::share(self, call).await,
             (&Method::POST, "/v1/check-in") => api::check_in(self, call),
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
+            (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
+            (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
+            (&Method::GET, "/v1/devices/me") => devices::me(self, call),
+            (&Method::POST, "/v1/devices/sign-out") => devices::sign_out(self, call),
+            (&Method::GET, "/v1/claktories") => devices::claktories(self, call),
+            (&Method::POST, "/v1/devices/assertion") => devices::assertion(self, call),
             (&Method::GET, "/v1/relay/allowlist") => api::allowlist(self, call),
             (&Method::GET, "/v1/stats/public") => api::public_stats(self),
             (&Method::GET | &Method::HEAD, "/") => Ok(web::root()),

@@ -79,6 +79,54 @@ pub fn credit_error(status: u16, body: &str) -> bool {
         || message.contains("requires more credits")
 }
 
+/// The key a failed response's `extra` has when the provider refused its
+/// credentials (a key it doesn't know or revoked, a sign-in it ended):
+/// `{"account": <the account's id>, "method": "api_key" | "oauth"}`. The
+/// provider marks it; the registry, which knows the account, fills them in.
+pub const REFUSED: &str = "credentialsRefused";
+
+/// Whose credentials a provider refused.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Refused {
+    /// The account's id among the provider's; empty when unknown.
+    pub account: String,
+    /// How it signed in: "api_key" or "oauth"; empty when unknown.
+    pub method: String,
+}
+
+/// Marks `output` as failed because the provider refused its credentials.
+pub fn mark_refused(output: &mut AssistantMessage, refused: &Refused) {
+    output.extra.insert(REFUSED.into(), json!({ "account": refused.account, "method": refused.method }));
+}
+
+/// Whose credentials the provider refused, when that's why the response failed.
+pub fn refused(message: &AssistantMessage) -> Option<Refused> {
+    let mark = message.extra.get(REFUSED)?;
+    let text = |key: &str| mark.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    Some(Refused { account: text("account"), method: text("method") })
+}
+
+/// Whether a provider's error answer refuses the credentials themselves,
+/// rather than the request: any 401, or a 403 that says the key or token is
+/// invalid or revoked (a 403 is otherwise a permission the key lacks).
+pub fn refused_error(status: u16, body: &str) -> bool {
+    if status == 401 {
+        return true;
+    }
+    if status != 403 {
+        return false;
+    }
+    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let error = &parsed["error"];
+    let code = error["code"].as_str().or_else(|| error["type"].as_str()).or_else(|| error.as_str()).unwrap_or_default();
+    let message = error["message"].as_str().unwrap_or(body).to_ascii_lowercase();
+    matches!(code, "authentication_error" | "invalid_api_key" | "invalid_token" | "token_revoked" | "token_expired")
+        || message.contains("revoked")
+        || message.contains("invalid api key")
+        || message.contains("invalid x-api-key")
+        || message.contains("invalid bearer token")
+}
+
 /// An API key as people tell keys apart: "sk-…a1b2".
 pub fn key_label(key: &str) -> String {
     let characters: Vec<char> = key.trim().chars().collect();

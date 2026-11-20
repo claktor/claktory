@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS claktories (
     devices INTEGER,
     country TEXT,
     region TEXT,
-    city TEXT
+    city TEXT,
+    display_name TEXT,
+    color TEXT,
+    relays TEXT
 );
 CREATE INDEX IF NOT EXISTS claktories_account ON claktories (account_id);
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -119,6 +122,23 @@ CREATE TABLE IF NOT EXISTS seen_days (
     day TEXT NOT NULL,
     PRIMARY KEY (claktory_id, day)
 );
+CREATE TABLE IF NOT EXISTS devices (
+    account_key TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    version TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS devices_account ON devices (account_id);
+CREATE TABLE IF NOT EXISTS device_keys (
+    device_key TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    issued INTEGER NOT NULL,
+    PRIMARY KEY (device_key, account_key)
+);
+CREATE INDEX IF NOT EXISTS device_keys_account_key ON device_keys (account_key);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
@@ -148,7 +168,13 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             conn.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
         }
     }
-    conn.pragma_update(None, "user_version", 2)?;
+    if (1..=2).contains(&version) {
+        // Before devices signed in, a Claktory sent no name, color or relays.
+        for column in ["display_name TEXT", "color TEXT", "relays TEXT"] {
+            conn.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
+        }
+    }
+    conn.pragma_update(None, "user_version", 3)?;
     Ok(conn)
 }
 
@@ -346,10 +372,15 @@ pub struct Claktory {
     pub counts: Option<Counts>,
     /// From the IP of its last request, when the service has a GeoIP file.
     pub location: Location,
+    /// Its own name and color, and the relays its pairing codes give, from
+    /// its last `PUT /v1/endpoints` that had them.
+    pub display_name: Option<String>,
+    pub color: Option<String>,
+    pub relays: Vec<String>,
 }
 
 const CLAKTORY: &str = "SELECT id, account_id, name, backend_key, epoch, created, last_seen, version, platform, revoked_at,
-    agents, projects, devices, country, region, city FROM claktories";
+    agents, projects, devices, country, region, city, display_name, color, relays FROM claktories";
 
 fn claktory_row(row: &rusqlite::Row) -> rusqlite::Result<Claktory> {
     Ok(Claktory {
@@ -368,6 +399,9 @@ fn claktory_row(row: &rusqlite::Row) -> rusqlite::Result<Claktory> {
             _ => None,
         },
         location: Location { country: row.get(13)?, region: row.get(14)?, city: row.get(15)? },
+        display_name: row.get(16)?,
+        color: row.get(17)?,
+        relays: row.get::<_, Option<String>>(18)?.and_then(|relays| serde_json::from_str(&relays).ok()).unwrap_or_default(),
     })
 }
 
@@ -409,14 +443,7 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64)
         return Err(rusqlite::Error::InvalidQuery);
     };
     let tx = conn.transaction()?;
-    let account_id = match account_by_email(&tx, &request.email)? {
-        Some(account) => account.id,
-        None => {
-            let id = crate::protocol::b64(*crate::protocol::random_32());
-            tx.execute("INSERT INTO accounts (id, email, created, last_sign_in) VALUES (?1, ?2, ?3, ?3)", params![id, request.email, now])?;
-            id
-        }
-    };
+    let account_id = account_for(&tx, &request.email, now)?;
     let existing = claktory(&tx, id)?;
     if let Some(existing) = &existing
         && existing.account_id != account_id
@@ -440,7 +467,8 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64)
                 tx.execute("DELETE FROM share_releases WHERE claktory_id = ?1", params![id])?;
                 anonymize(&tx, id)?;
                 tx.execute(
-                    "UPDATE claktories SET agents = NULL, projects = NULL, devices = NULL, country = NULL, region = NULL, city = NULL WHERE id = ?1",
+                    "UPDATE claktories SET agents = NULL, projects = NULL, devices = NULL, country = NULL, region = NULL, city = NULL,
+                     display_name = NULL, color = NULL, relays = NULL WHERE id = ?1",
                     params![id],
                 )?;
             }
@@ -469,6 +497,16 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64)
     bump_allowlist(&tx)?;
     tx.commit()?;
     Ok(Registered::Done { account_id, epoch })
+}
+
+/// The id of the account with this email, made now if there's none.
+fn account_for(conn: &Connection, email: &str, now: i64) -> rusqlite::Result<String> {
+    if let Some(account) = account_by_email(conn, email)? {
+        return Ok(account.id);
+    }
+    let id = crate::protocol::b64(*crate::protocol::random_32());
+    conn.execute("INSERT INTO accounts (id, email, created, last_sign_in) VALUES (?1, ?2, ?3, ?3)", params![id, email, now])?;
+    Ok(id)
 }
 
 /// Counts a sign-in for its day, for `stats`.
@@ -710,6 +748,33 @@ pub fn set_endpoints(conn: &mut Connection, id: &str, backend: &str, devices: &[
     Ok(true)
 }
 
+/// Keeps what a Claktory sent of its own name, color and relays (each only
+/// when it sent it).
+pub fn set_identity(
+    conn: &Connection,
+    id: &str,
+    name: Option<&str>,
+    color: Option<&str>,
+    relays: Option<&[String]>,
+) -> rusqlite::Result<()> {
+    if let Some(name) = name {
+        conn.execute("UPDATE claktories SET display_name = ?2 WHERE id = ?1", params![id, name])?;
+    }
+    if let Some(color) = color {
+        conn.execute("UPDATE claktories SET color = ?2 WHERE id = ?1", params![id, color])?;
+    }
+    if let Some(relays) = relays {
+        let relays = serde_json::to_string(relays).unwrap_or_else(|_| "[]".to_owned());
+        conn.execute("UPDATE claktories SET relays = ?2 WHERE id = ?1", params![id, relays])?;
+    }
+    Ok(())
+}
+
+/// A Claktory's own endpoint id, if it registered one.
+pub fn backend_endpoint(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT endpoint FROM endpoints WHERE claktory_id = ?1 AND kind = 'backend'", params![id], |row| row.get(0)).optional()
+}
+
 pub fn allowlist_version(conn: &Connection) -> rusqlite::Result<i64> {
     Ok(conn.query_row("SELECT value FROM meta WHERE key = 'allowlist_version'", [], |row| row.get(0)).optional()?.unwrap_or(0))
 }
@@ -719,11 +784,16 @@ fn bump_allowlist(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// The endpoints relays let through: those of Claktories not removed.
+/// The endpoints relays let through: those of Claktories not removed, and
+/// the device keys assertions were made for in the last day (`purge` drops
+/// older ones), of devices still signed in.
 pub fn allowlist(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = conn.prepare(
-        "SELECT DISTINCT endpoint FROM endpoints JOIN claktories ON claktories.id = endpoints.claktory_id
-         WHERE claktories.revoked_at IS NULL ORDER BY endpoint",
+        "SELECT endpoint FROM endpoints JOIN claktories ON claktories.id = endpoints.claktory_id
+         WHERE claktories.revoked_at IS NULL
+         UNION
+         SELECT device_key FROM device_keys JOIN devices ON devices.account_key = device_keys.account_key
+         ORDER BY 1",
     )?;
     statement.query_map([], |row| row.get(0))?.collect()
 }
@@ -754,6 +824,11 @@ pub fn delete_account(conn: &mut Connection, account: &Account) -> rusqlite::Res
         )?;
     }
     tx.execute("DELETE FROM claktories WHERE account_id = ?1", params![account.id])?;
+    tx.execute(
+        "DELETE FROM device_keys WHERE account_key IN (SELECT account_key FROM devices WHERE account_id = ?1)",
+        params![account.id],
+    )?;
+    tx.execute("DELETE FROM devices WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -823,6 +898,9 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "version": claktory.version,
             "platform": claktory.platform,
             "removed": claktory.revoked_at,
+            "own_name": claktory.display_name,
+            "color": claktory.color,
+            "relays": claktory.relays,
             "counts": claktory.counts,
             "location": claktory.location,
             "endpoints": endpoints,
@@ -832,9 +910,30 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "days_in_touch": days,
         }));
     }
+    let mut devices_out = Vec::new();
+    for device in devices(conn, &account.id)? {
+        let keys: Vec<Value> = {
+            let mut statement = conn.prepare("SELECT device_key, issued FROM device_keys WHERE account_key = ?1 ORDER BY issued")?;
+            statement
+                .query_map(params![device.account_key], |row| {
+                    Ok(json!({"device_key": row.get::<_, String>(0)?, "issued": row.get::<_, i64>(1)?}))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        devices_out.push(json!({
+            "account_key": device.account_key,
+            "name": device.name,
+            "platform": device.platform,
+            "version": device.version,
+            "signed_in": device.created,
+            "last_contact": device.last_seen,
+            "assertions": keys,
+        }));
+    }
     Ok(json!({
         "account": {"id": account.id, "email": account.email, "created": account.created, "last_sign_in": account.last_sign_in},
         "claktories": claktories_out,
+        "devices": devices_out,
     }))
 }
 
@@ -859,13 +958,155 @@ pub fn delete_session(conn: &Connection, token: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Forgets what has expired: requests, sessions, old limit windows, and
-/// share releases (with their IPs) after 30 days.
+/// Forgets what has expired: requests, sessions, old limit windows, share
+/// releases (with their IPs) after 30 days, and device keys a day after
+/// their last assertion.
 pub fn purge(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    if conn.execute("DELETE FROM device_keys WHERE issued < ?1", params![now - DEVICE_KEYS_KEPT])? > 0 {
+        bump_allowlist(conn)?;
+    }
     conn.execute("DELETE FROM requests WHERE expires <= ?1", params![now])?;
     conn.execute("DELETE FROM sessions WHERE expires <= ?1", params![now])?;
     conn.execute("DELETE FROM limits WHERE window < ?1", params![now - 2 * 86_400])?;
     conn.execute("DELETE FROM share_releases WHERE time < ?1", params![now - RELEASES_KEPT])?;
     conn.execute("DELETE FROM periods WHERE received < ?1", params![now - PERIODS_KEPT])?;
+    Ok(())
+}
+
+/// How long a device key stays on the relay allowlist after its last
+/// assertion: a day, many times an assertion's hour, so a device connected
+/// through a relay isn't cut off while it renews.
+pub const DEVICE_KEYS_KEPT: i64 = 86_400;
+
+/// The most devices an account may have signed in.
+pub const DEVICES_PER_ACCOUNT: u32 = 30;
+
+/// A device signed in to an account, by its account key.
+#[derive(Clone, Debug)]
+pub struct Device {
+    pub account_key: String,
+    pub account_id: String,
+    pub name: String,
+    pub platform: String,
+    pub version: String,
+    /// When it signed in.
+    pub created: i64,
+    pub last_seen: i64,
+}
+
+const DEVICE: &str = "SELECT account_key, account_id, name, platform, version, created, last_seen FROM devices";
+
+fn device_row(row: &rusqlite::Row) -> rusqlite::Result<Device> {
+    Ok(Device {
+        account_key: row.get(0)?,
+        account_id: row.get(1)?,
+        name: row.get(2)?,
+        platform: row.get(3)?,
+        version: row.get(4)?,
+        created: row.get(5)?,
+        last_seen: row.get(6)?,
+    })
+}
+
+pub fn device(conn: &Connection, account_key: &str) -> rusqlite::Result<Option<Device>> {
+    conn.query_row(&format!("{DEVICE} WHERE account_key = ?1"), params![account_key], device_row).optional()
+}
+
+/// An account's devices, the one in touch last first.
+pub fn devices(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec<Device>> {
+    let mut statement = conn.prepare(&format!("{DEVICE} WHERE account_id = ?1 ORDER BY last_seen DESC, created DESC"))?;
+    statement.query_map(params![account_id], device_row)?.collect()
+}
+
+/// A device was in touch.
+pub fn touch_device(conn: &Connection, account_key: &str, now: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE devices SET last_seen = ?2 WHERE account_key = ?1", params![account_key, now])?;
+    Ok(())
+}
+
+/// What a device's right code signs in to.
+pub enum Bound {
+    Done {
+        account_id: String,
+    },
+    /// The account has as many devices as it may.
+    TooMany,
+}
+
+/// Signs a device in from a request whose code was right: makes the
+/// account if it's new, then binds the device's account key to it (moving
+/// it from another account, whose assertions for it then stop counting).
+pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqlite::Result<Bound> {
+    let (Some(account_key), Some(name), Some(version), Some(platform)) =
+        (&request.backend_key, &request.name, &request.version, &request.platform)
+    else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let tx = conn.transaction()?;
+    let account_id = account_for(&tx, &request.email, now)?;
+    let others: u32 = tx.query_row(
+        "SELECT count(*) FROM devices WHERE account_id = ?1 AND account_key != ?2",
+        params![account_id, account_key],
+        |row| row.get(0),
+    )?;
+    if others >= DEVICES_PER_ACCOUNT {
+        tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
+        tx.commit()?;
+        return Ok(Bound::TooMany);
+    }
+    let existing = device(&tx, account_key)?;
+    let created = match &existing {
+        Some(existing) if existing.account_id == account_id => existing.created,
+        _ => now,
+    };
+    if existing.as_ref().is_some_and(|existing| existing.account_id != account_id)
+        && tx.execute("DELETE FROM device_keys WHERE account_key = ?1", params![account_key])? > 0
+    {
+        bump_allowlist(&tx)?;
+    }
+    tx.execute(
+        "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (account_key) DO UPDATE SET account_id = ?2, name = ?3, platform = ?4, version = ?5, created = ?6, last_seen = ?7",
+        params![account_key, account_id, name, platform, version, created, now],
+    )?;
+    tx.execute("UPDATE accounts SET last_sign_in = ?2 WHERE id = ?1", params![account_id, now])?;
+    tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
+    tx.commit()?;
+    Ok(Bound::Done { account_id })
+}
+
+/// Signs a device out: its account key is unbound, and the keys it got
+/// assertions for leave the allowlist. False when it wasn't signed in, or
+/// (given `account_id`) isn't that account's.
+pub fn unbind_device(conn: &mut Connection, account_key: &str, account_id: Option<&str>) -> rusqlite::Result<bool> {
+    let tx = conn.transaction()?;
+    let removed = match account_id {
+        Some(account_id) => {
+            tx.execute("DELETE FROM devices WHERE account_key = ?1 AND account_id = ?2", params![account_key, account_id])?
+        }
+        None => tx.execute("DELETE FROM devices WHERE account_key = ?1", params![account_key])?,
+    };
+    if removed > 0 && tx.execute("DELETE FROM device_keys WHERE account_key = ?1", params![account_key])? > 0 {
+        bump_allowlist(&tx)?;
+    }
+    tx.commit()?;
+    Ok(removed > 0)
+}
+
+/// Records that a device got an assertion for `device_key`, which puts the
+/// key on the allowlist for a day.
+pub fn issued_assertion(conn: &Connection, account_key: &str, device_key: &str, now: i64) -> rusqlite::Result<()> {
+    let new = conn.execute(
+        "INSERT OR IGNORE INTO device_keys (device_key, account_key, issued) VALUES (?1, ?2, ?3)",
+        params![device_key, account_key, now],
+    )?;
+    if new > 0 {
+        bump_allowlist(conn)?;
+    } else {
+        conn.execute(
+            "UPDATE device_keys SET issued = ?3 WHERE device_key = ?1 AND account_key = ?2",
+            params![device_key, account_key, now],
+        )?;
+    }
     Ok(())
 }

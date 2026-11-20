@@ -131,12 +131,16 @@ void main() {
     expect(harness.last.startLogin.addAccount, isTrue);
   });
 
-  testWidgets('a provider with no account offers to sign in', (tester) async {
+  testWidgets('a provider with no account is in the picker, to sign in', (
+    tester,
+  ) async {
     final harness = await showSettings(tester, anthropic());
-    expect(find.text('Not signed in'), findsOneWidget);
+    // No card for it: only the picker's list.
+    expect(find.text('Not signed in'), findsNothing);
     expect(find.text('Add an API key'), findsNothing);
-    await tester.tap(find.text('Sign in with Anthropic (Claude Pro/Max)'));
+    await tester.tap(find.text('Anthropic (Claude Pro/Max)'));
     await settle(tester);
+    expect(harness.last.startLogin.providerId, 'anthropic');
     expect(harness.last.startLogin.addAccount, isFalse);
   });
 

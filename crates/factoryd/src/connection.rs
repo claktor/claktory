@@ -104,8 +104,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
     };
 
-    factory.health.connecting();
-    let mut device = None;
+    let device;
     let kind;
     let workspace_patches;
     let hello_id = loop {
@@ -125,13 +124,13 @@ pub(crate) async fn serve_stream<S: Stream>(
         kind = hello.device_kind();
         workspace_patches = hello.workspace_patches;
         if let Some(peer) = &peer {
-            let connected = match factory.authorize(&hello.token, peer, kind).await {
+            let connected = match factory.authorize(&hello.token, peer, kind, &hello.device_name).await {
                 Authorized::Connected(connected) => connected,
                 Authorized::Pending(waiting) => {
                     // Remote access stays on until it's heard how this ends.
                     let _waiting = factory.waiting();
                     match wait_to_be_allowed(&mut socket, &factory, message.id, &waiting, peer).await? {
-                        Pairing::Allowed => match factory.authorize(&hello.token, peer, kind).await {
+                        Pairing::Allowed => match factory.authorize(&hello.token, peer, kind, &hello.device_name).await {
                             Authorized::Connected(connected) => connected,
                             _ => {
                                 let reason = "This device was allowed, then removed.";
@@ -149,14 +148,15 @@ pub(crate) async fn serve_stream<S: Stream>(
                 }
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
-            device = Some(connected);
-        } else if !hello.token.is_empty() || !factory.loopback_open() {
-            // The loopback port: this machine's app's token (from its local
-            // pairing code), or nothing once that app uses the tunnel.
+            device = connected;
+        } else {
+            // The loopback port, which any user of this machine can reach:
+            // only this machine's app's token (from its local pairing code,
+            // which only this user can read) lets a client in.
             let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
-            let Authorized::Connected(connected) = factory.authorize(&hello.token, &local, kind).await else {
-                // A program on this machine without its app's token: an
-                // app build or test made without FACTORY_PORT, say.
+            let Authorized::Connected(connected) = factory.authorize(&hello.token, &local, kind, &hello.device_name).await else {
+                // Another user's program, or one of this user's without the
+                // token: an app build or test made without FACTORY_PORT, say.
                 tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
                 let reason = format!(
                     "This port wants a token: connect with the pairing code in {}.",
@@ -165,42 +165,41 @@ pub(crate) async fn serve_stream<S: Stream>(
                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected with this machine's token");
-            device = Some(connected);
-        } else {
-            tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected");
+            device = connected;
         }
         break message.id;
     };
-    let device_id = device.as_ref().map(|connected| connected.device.id.clone()).unwrap_or_default();
+    // Only a client let in counts as an app trying an updated backend: one
+    // turned away (another user's, say) can't make an update roll back.
+    factory.health.connecting();
     let claktory = factory.identity();
     let welcome = Welcome {
         protocol_version: PROTOCOL_VERSION,
         server_version: SERVER_VERSION.to_owned(),
-        device_id,
+        device_id: device.device.id.clone(),
         name: claktory.name,
         color: claktory.color,
+        // Confirming devices as the owner's (onboarding slice 6): Sam's next.
+        confirm_by_ms: 0,
     };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
     // This machine's own app may do what the loopback port's may.
-    let remote = device.as_ref().is_some_and(|connected| !connected.device.local);
-    let name = device.as_ref().map_or_else(|| "this computer".to_owned(), |connected| connected.device.name.clone());
+    let remote = !device.device.local;
     // Where the person's messages come from: a paired device by its name,
     // this computer's own app by the computer's.
-    let from = match &device {
-        Some(connected) if !connected.device.local => connected.device.name.clone(),
-        _ => crate::remote::machine_name().to_owned(),
-    };
+    let from = if remote { device.device.name.clone() } else { crate::remote::machine_name().to_owned() };
     let sent_from = crate::transcript::device(&from, kind);
     let files = crate::explorer::Watches::watch(&factory);
-    let binding = match &device {
-        Some(connected) => connected.device.id.clone(),
-        None => format!("connection-{}", crate::connectors::random_id()),
+    let connection = Connection {
+        remote,
+        device: device.device.name.clone(),
+        sent_from,
+        binding: device.device.id.clone(),
+        zoom_device: device.device.id.clone(),
+        workspace_patches,
+        files,
     };
-    // Whose zoom it sets: a loopback connection without a token is this
-    // machine's own app too.
-    let zoom_device = device.as_ref().map_or_else(|| crate::remote::LOCAL_DEVICE.to_owned(), |connected| connected.device.id.clone());
-    let connection = Connection { remote, device: name, sent_from, binding, zoom_device, workspace_patches, files };
-    session(&mut socket, &factory, connection, device.as_ref().map(|connected| connected.closed.clone())).await?;
+    session(&mut socket, &factory, connection, device.closed.clone()).await?;
     tracing::info!("client disconnected");
     Ok(())
 }
@@ -209,16 +208,14 @@ pub(crate) async fn serve_stream<S: Stream>(
 struct Connection {
     /// A device on another machine.
     remote: bool,
-    /// The device's name, for the vault: "this computer" on the loopback port.
+    /// The device's name, for the vault.
     device: String,
     /// Where the person's messages come from.
     sent_from: factory_agent::SentFrom,
-    /// What a flow connecting a service is bound to: the paired device's id,
-    /// or this one connection's when it has no device (the loopback port
-    /// before this computer's app paired).
+    /// What a flow connecting a service is bound to: the paired device's id.
     binding: String,
     /// Whose zoom SetZoom sets: the paired device's id, "local" for this
-    /// machine's own app and the loopback port.
+    /// machine's own app.
     zoom_device: String,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
@@ -226,13 +223,13 @@ struct Connection {
     files: crate::explorer::Watch,
 }
 
-/// Requests in, events out, until the client leaves. `unpaired` is a paired
+/// Requests in, events out, until the client leaves. `unpaired` is the
 /// device's: notified, the connection closes.
 async fn session<S: Stream>(
     socket: &mut Socket<S>,
     factory: &Arc<Factory>,
     connection: Connection,
-    unpaired: Option<Arc<tokio::sync::Notify>>,
+    unpaired: Arc<tokio::sync::Notify>,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone());
     let mut sent = Workspaces::new(connection.workspace_patches);
@@ -246,7 +243,7 @@ async fn session<S: Stream>(
 
     loop {
         tokio::select! {
-            () = async { match &unpaired { Some(unpaired) => unpaired.notified().await, None => std::future::pending().await } } => {
+            () = unpaired.notified() => {
                 tracing::info!("closing an unpaired device's connection");
                 socket.close(None).await?;
                 return Ok(());
@@ -383,6 +380,10 @@ async fn handle(
         Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
         Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
         Some(Request::ShuffleAvatar(_)) => factory.shuffle_avatar().await,
+        Some(Request::ScreenOpened(answer)) => {
+            crate::extensions::highlight::screen_opened(&answer.id, &connection.sent_from.device, answer.opened);
+            Ok(())
+        }
         Some(Request::SetZoom(request)) => factory.set_zoom(&connection.zoom_device, request.zoom).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
         // A remote device's app is on another machine: its path means nothing here.
@@ -421,6 +422,13 @@ async fn handle(
         Some(Request::MoveAccount(request)) => factory.move_account(&request.provider_id, &request.account_id, request.position).await,
         Some(Request::UpdateAccount(request)) => {
             factory.update_account(&request.provider_id, &request.account_id, request.label.as_deref(), request.retry).await
+        }
+        Some(Request::SetOnboarding(request)) => factory.set_onboarding(&request),
+        Some(Request::ShowPairingCode(request)) => {
+            return match crate::extensions::devices::code(factory, &request.pairing_id).await {
+                Ok(code) => Body::PairingCode(code),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
         }
         Some(Request::CreatePairing(request)) => {
             return match factory.create_pairing(&request.name).await {
@@ -552,6 +560,11 @@ async fn handle(
         Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await,
         Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
+        Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory).await,
+        // Onboarding slice 6 (Sam's next): refused until it's built.
+        Some(Request::ConfirmDevice(_)) => {
+            Err(RequestError::Account(v1::ErrorCode::InvalidRequest, "Confirming devices isn't available in this version yet.".into()))
+        }
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
         Some(Request::DecideProposal(request)) => {
@@ -670,6 +683,7 @@ async fn wait_to_be_allowed<S: Stream>(
         name: waiting.name.clone(),
         machine: crate::remote::machine_name().to_owned(),
         expires_ms: waiting.code_expires.unwrap_or_default(),
+        discovered: false,
     };
     send(socket, hello_id, Body::PairingPending(pending)).await?;
     loop {

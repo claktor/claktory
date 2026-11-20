@@ -1,2 +1,7 @@
 #include "../../Flutter/Flutter-Debug.xcconfig"
 #include "Warnings.xcconfig"
+
+// The link scheme this build opens (Info.plist, app/lib/links.dart): debug
+// builds get one of their own, so claktory:// links always open the real
+// Claktory. Claktory Dev's is claktory-dev (scripts/lib.sh).
+CLAKTORY_URL_SCHEME = claktory-debug

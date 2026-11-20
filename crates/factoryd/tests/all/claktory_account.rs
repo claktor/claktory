@@ -212,6 +212,13 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
         assert!(sent.get("periods").is_none(), "no whole hour since signing in: {sent}");
         assert!(state.last_contact_ms > 0);
         assert_eq!(instance.count("SELECT COUNT(*) FROM endpoints WHERE kind = 'backend'"), 1, "the backend's endpoint registered");
+        // With its name, color and relays, for the person's devices to find it.
+        let (name, color, relays): (String, String, String) = rusqlite::Connection::open(&instance.db)
+            .expect("the service's database")
+            .query_row("SELECT display_name, color, relays FROM claktories", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("its name, color and relays");
+        assert!(!name.is_empty() && !color.is_empty(), "{name:?} {color:?}");
+        assert!(serde_json::from_str::<Vec<String>>(&relays).is_ok(), "{relays}");
 
         // The recovery key, to note down: the same each time, and logged.
         let shown = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
@@ -356,6 +363,8 @@ async fn a_claktory_removed_at_the_service_opens_only_with_the_recovery_key_unti
 #[tokio::test]
 async fn while_signing_in_is_off_nothing_shows_and_nothing_is_sent() {
     let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), r#"{"account": {"enabled": false}}"#).expect("config");
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     assert_eq!(workspace.account, None);
@@ -365,4 +374,84 @@ async fn while_signing_in_is_off_nothing_shows_and_nothing_is_sent() {
     // The recovery key is the vault's, signed in or not.
     let shown = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
     assert!(matches!(shown.body, Body::RecoveryKey(ref key) if !key.key.is_empty()), "{:?}", shown.body);
+}
+
+/// Onboarding slice 3: an agent signs a Claktory in from a shell, with the
+/// code the person reads in their email.
+#[tokio::test]
+async fn the_command_line_signs_in_with_the_emailed_code() {
+    use factoryd::cli::{Exit, Flags, run};
+    let dir = temp_dir();
+    let service = Instance::start(&dir).await;
+    let (addr, _factory) = open(&dir, &service.url).await;
+    let instance = factoryd::home::Instance { home: crate::common::home(&dir), addr };
+    let command = |line: String| {
+        let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        Flags::parse(&args).expect("a command")
+    };
+    let asked = run(&instance, &command("account sign-in --email matt@example.com --json".into()), String::new).await;
+    assert_eq!(asked.exit, Exit::NeedsHuman, "{asked:?}");
+    assert_eq!((asked.json["state"].as_str(), asked.json["sent_to"].as_str()), (Some("awaiting_code"), Some("m…@example.com")));
+    assert_eq!(asked.json["sent_from"], "code@auth.claktory.com");
+    assert!(asked.json["expires_in"].as_i64().is_some_and(|left| left > 0), "{}", asked.json);
+    let wrong = run(&instance, &command("account verify --code 000000 --json".into()), String::new).await;
+    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_code")), "{wrong:?}");
+    let code = service.last_code("matt@example.com");
+    let verified = run(&instance, &command(format!("account verify --code {code} --json")), String::new).await;
+    assert_eq!(verified.exit, Exit::Ok, "{verified:?}");
+    assert_eq!((verified.json["state"].as_str(), verified.json["email"].as_str()), (Some("signed_in"), Some("matt@example.com")));
+    let status = run(&instance, &command("account status --json".into()), String::new).await;
+    assert_eq!(status.json["account"]["state"], "signed_in");
+}
+
+/// Signing in is on by default. A new Claktory asks for it until it's
+/// signed in; one from before (its config.json was there) may skip it once,
+/// which lasts across restarts and a sign-out, and can still sign in later.
+/// The code step says where the code comes from.
+#[tokio::test]
+async fn a_new_claktory_asks_to_sign_in_and_one_from_before_may_skip_it() {
+    // New: no config.json yet, so it's made now, with signing in on.
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let state = account(&workspace);
+    assert_eq!((state.state(), state.skippable), (AccountState::SignedOut, false));
+    let skip = client.request(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
+    assert_eq!(failure(&skip.body), (ErrorCode::InvalidRequest, "Sign in to use this Claktory.".into()));
+    let config = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    assert!(!config.contains("\"account\""), "on by default, so not written: {config}");
+
+    // From before: its config.json had no account settings.
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), format!(r#"{{"account": {{"service": "{}"}}}}"#, instance.url)).expect("config");
+    {
+        let (addr, _factory) = start(&dir).await;
+        let (mut client, workspace, _) = Client::connect(addr).await;
+        let state = account(&workspace);
+        assert_eq!((state.state(), state.skippable, state.code_from.as_str()), (AccountState::SignedOut, true, ""));
+        // Not now, with a code on its way: the code is dropped.
+        let events = client.ok(Request::AccountSignIn(v1::AccountSignIn { email: "matt@example.com".into() })).await;
+        let state = account(last_workspace(&events).expect("workspace"));
+        assert_eq!((state.state(), state.skippable), (AccountState::AwaitingCode, true));
+        assert_eq!(state.code_from, "code@auth.claktory.com", "the service says where codes come from");
+        let events = client.ok(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
+        let state = account(last_workspace(&events).expect("workspace"));
+        assert_eq!((state.state(), state.skippable, state.code_from.as_str()), (AccountState::Skipped, false, ""));
+        let code = instance.last_code("matt@example.com");
+        let late = client.request(Request::AccountVerify(v1::AccountVerify { code })).await;
+        assert_eq!(failure(&late.body).0, ErrorCode::InvalidRequest, "the code was dropped");
+    }
+    // Still skipped after a restart; signing in later works, and signing out goes back to skipped.
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(account(&workspace).state(), AccountState::Skipped);
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    let state = account(&workspace);
+    assert_eq!((state.state(), state.skippable), (AccountState::SignedIn, false));
+    let skip = client.request(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
+    assert_eq!(failure(&skip.body), (ErrorCode::InvalidRequest, "This Claktory is already signed in.".into()));
+    let events = client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    assert_eq!(account(last_workspace(&events).expect("workspace")).state(), AccountState::Skipped);
 }

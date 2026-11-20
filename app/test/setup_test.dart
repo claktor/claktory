@@ -74,6 +74,15 @@ class FakeSetupChannel implements SetupChannel {
 
   @override
   bool installedHere() => installed;
+
+  /// The ClaktoryAppOnly user default.
+  bool appOnlyMark = false;
+
+  @override
+  Future<bool> appOnly() async => appOnlyMark;
+
+  @override
+  Future<void> setAppOnly(bool appOnly) async => appOnlyMark = appOnly;
 }
 
 void main() {
@@ -107,6 +116,57 @@ void main() {
       expect(channel.runs, ['install --check', 'install']);
       expect(setup.stage, SetupStage.done);
       expect(reconnects, 1);
+    });
+
+    test('with somewhere else to go, a Mac without Claktory is asked '
+        'first: here, or a Claktory on another computer', () async {
+      final channel = FakeSetupChannel(
+        results: {
+          'install --check': const InstallResult(result: 'not_installed'),
+          'install': const InstallResult(result: 'installed'),
+        },
+      );
+      var elsewhere = 0;
+      connected = ValueNotifier(false);
+      final setup = MacSetup(
+        channel: channel,
+        connected: connected,
+        reconnect: () {},
+        elsewhere: () => elsewhere++,
+      );
+      await setup.start();
+      expect(setup.stage, SetupStage.choosing);
+      expect(setup.showing, isTrue);
+      expect(channel.runs, ['install --check']);
+      setup.useElsewhere();
+      expect(setup.stage, SetupStage.done);
+      expect(setup.showing, isFalse);
+      expect(elsewhere, 1);
+      expect(channel.runs, ['install --check'], reason: 'nothing installed');
+
+      // Chosen here: it's installed.
+      final here = MacSetup(
+        channel: channel,
+        connected: connected,
+        reconnect: () {},
+        elsewhere: () => elsewhere++,
+      );
+      await here.start();
+      await here.setUpHere();
+      expect(channel.runs.last, 'install');
+      expect(here.stage, SetupStage.done);
+
+      // Already chosen (this Mac after all): not asked again.
+      channel.runs.clear();
+      final chosen = MacSetup(
+        channel: channel,
+        connected: connected,
+        reconnect: () {},
+        elsewhere: () => elsewhere++,
+        ask: false,
+      );
+      await chosen.start();
+      expect(channel.runs, ['install --check', 'install']);
     });
 
     test('one already installed is left alone', () async {

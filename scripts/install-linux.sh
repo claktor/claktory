@@ -10,37 +10,55 @@
 #                                       service runs it, from boot on
 #   ~/.config/systemd/user/factoryd.service
 #
-#   install-linux.sh RELEASE_DIR
+#   ~/.local/bin/factoryd               a link to the backend, so factoryd is
+#                                       on PATH (/usr/local/bin/factoryd for root)
+#
+#   install-linux.sh RELEASE_DIR [--no-pair]
 #
 # A Linux Factory has no app of its own: Factory on a Mac connects to it over
 # its private tunnel. The first install prints a pairing code for the first
-# device. Installing again restarts the
-# backend, which interrupts every agent mid-run.
+# device and waits for it (--no-pair leaves that out: the online installer's
+# --yes and --json). Installing again restarts the backend, which interrupts
+# every agent mid-run.
+#
+# Exit codes, as factoryd's commands use them: 0 installed and running, 3
+# refused (not this machine's kind, or no systemd session), 4 installed but
+# not running (the reason on stderr), 1 anything else.
 set -euo pipefail
 
-RELEASE="${1:?usage: install-linux.sh RELEASE_DIR}"
+RELEASE="${1:?usage: install-linux.sh RELEASE_DIR [--no-pair]}"
+PAIR=true
+[[ "${2:-}" == "--no-pair" ]] && PAIR=false
 HOME_DIR="$HOME/.factory"
 BIN="$HOME_DIR/bin/factoryd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/factoryd.service"
+PORT="${FACTORY_PORT:-7420}"
 
 fail() {
   echo "Claktory can't be installed: $*" >&2
   exit 1
 }
+refuse() {
+  echo "Claktory can't be installed: $*" >&2
+  exit 3
+}
 
-[[ "$(uname -s)" == Linux ]] || fail "this installer is for Linux."
+[[ "$(uname -s)" == Linux ]] || refuse "this installer is for Linux."
 [[ -f "$RELEASE/factoryd" ]] || fail "$RELEASE isn't a Claktory release: it needs factoryd."
-command -v systemctl >/dev/null || fail "it needs systemd, to keep Claktory running."
+command -v systemctl >/dev/null || refuse "it needs systemd, to keep Claktory running."
 # systemctl --user needs the user's session; a login over ssh has one.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user show-environment >/dev/null 2>&1 ||
-  fail "systemd doesn't run a session for $(id -un) (systemctl --user doesn't answer). Log in over ssh or a terminal, not su or sudo, and try again."
+  refuse "systemd doesn't run a session for $(id -un) (systemctl --user doesn't answer). Log in over ssh or a terminal, not su or sudo, and try again."
 
 first=true
 [[ -f "$HOME_DIR/config.json" ]] && first=false
 
 mkdir -p "$HOME_DIR/bin" "$UNIT_DIR"
+# Only this user reads it: its keys and agents' work go here, even before a
+# backend that can't start yet (another user's holds its port) keeps it so.
+chmod 700 "$HOME_DIR"
 cp "$RELEASE/factoryd" "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
@@ -104,27 +122,93 @@ if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
 fi
 systemctl --user daemon-reload
 systemctl --user enable factoryd.service >/dev/null 2>&1
+log_start=0
+[[ -f "$HOME_DIR/factoryd.log" ]] && log_start="$(stat -c %s "$HOME_DIR/factoryd.log")"
 systemctl --user restart factoryd.service
-echo "Claktory installed. Its log: $HOME_DIR/factoryd.log"
 
-if $first; then
-  # The backend writes its settings when it first starts.
-  for _ in $(seq 100); do
-    [[ -f "$HOME_DIR/config.json" ]] && break
-    sleep 0.2
-  done
-  [[ -f "$HOME_DIR/config.json" ]] || fail "the backend didn't start; see $HOME_DIR/factoryd.log"
-  echo
-  if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
-    echo "Claktory is running on this machine and starts with it."
-  else
-    echo "Claktory is running on this machine while you're logged in (see above to keep it running)."
+# Running once it answers its own commands (it writes its settings first, on
+# a first start). If it doesn't, the reason it logged since the restart, or
+# whoever holds its port. The online installer reads its status and the command's path from
+# CLAKTORY_INSTALL_OUT, for its --json answer.
+out="${CLAKTORY_INSTALL_OUT:-}"
+if [[ -z "$out" ]]; then
+  out="$(mktemp -d)"
+  trap 'rm -rf "$out"' EXIT
+fi
+# Whether whoever listens on the port is another user's: ss names the process
+# only for one's own (or for root).
+others_port() {
+  command -v ss >/dev/null || return 1
+  local listener
+  listener="$(ss -ltnpH "sport = :$PORT" 2>/dev/null)"
+  [[ -n "$listener" ]] || return 1
+  [[ "$(id -u)" == 0 ]] && return 1
+  [[ "$listener" != *pid=* ]]
+}
+running=false
+for _ in $(seq 150); do
+  # Not another user's backend answering in its place.
+  if "$BIN" status --json >"$out/status.json" 2>/dev/null && ! others_port; then
+    running=true
+    break
   fi
+  # It said why it stopped, and someone else has its port: no use waiting.
+  if others_port && tail -c +"$((log_start + 1))" "$HOME_DIR/factoryd.log" 2>/dev/null | grep -q 'factoryd stopped error='; then
+    break
+  fi
+  sleep 0.2
+done
+if ! $running; then
+  reason="$(tail -c +"$((log_start + 1))" "$HOME_DIR/factoryd.log" 2>/dev/null | sed -n 's/.*factoryd stopped error=//p' | tail -n 1)"
+  if [[ -z "$reason" ]] && others_port; then
+    reason="Another Claktory on this computer already uses port $PORT (another user's, say), so this one can't start. Stop that one, or start this one on another port with FACTORY_PORT."
+  fi
+  [[ -n "$reason" ]] || reason="it didn't start. Its log: $HOME_DIR/factoryd.log"
+  echo "Claktory is installed but isn't running: $reason" >&2
+  exit 4
+fi
+version="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$out/status.json")"
+
+# factoryd on PATH: a link in /usr/local/bin for root, else ~/.local/bin,
+# which most distributions put on PATH at login once it exists. Never over
+# another program of that name.
+cli="$BIN"
+link_dir="$HOME/.local/bin"
+[[ "$(id -u)" == 0 ]] && link_dir=/usr/local/bin
+if mkdir -p "$link_dir" 2>/dev/null && { [[ -L "$link_dir/factoryd" ]] || [[ ! -e "$link_dir/factoryd" ]]; }; then
+  ln -sfn "$BIN" "$link_dir/factoryd"
+  cli="$link_dir/factoryd"
+fi
+case ":$PATH:" in
+  *":$(dirname "$cli"):"*) on_path=true ;;
+  *) on_path=false ;;
+esac
+echo "$cli" >"$out/cli"
+
+if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
+  echo "Claktory ${version:-} is running on this machine and starts with it. Its log: $HOME_DIR/factoryd.log"
+else
+  echo "Claktory ${version:-} is running on this machine while you're logged in (see above to keep it running). Its log: $HOME_DIR/factoryd.log"
+fi
+if $on_path; then
+  echo "Its command, factoryd, is in $(dirname "$cli")."
+  run="factoryd"
+else
+  if grep -qs '\.local/bin' "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login"; then
+    echo "Its command, factoryd, is in $(dirname "$cli"), which your next login puts on your PATH. Until then: export PATH=\"$(dirname "$cli"):\$PATH\""
+  else
+    echo "Its command, factoryd, is in $(dirname "$cli"), which isn't on your PATH: add  export PATH=\"$(dirname "$cli"):\$PATH\"  to your shell's profile."
+  fi
+  run="$cli"
+fi
+
+if $first && $PAIR; then
   echo
-  # Before pair: in a terminal, pair waits there until the device is allowed.
-  echo "To connect: on your iPhone, open Claktory and tap Scan code. On your Mac, click Add a Claktory (+) at the far left of the window and paste the code. It works for 10 minutes."
+  # In a terminal, pair waits there until the device is allowed.
+  # Cancelling it (Ctrl-C) leaves Claktory installed all the same.
+  "$BIN" pair || true
   echo
-  "$BIN" pair "First device"
-  echo
-  echo "To connect another device later, run: ~/.factory/bin/factoryd pair \"Device name\""
+  echo "To connect another device later, run: $run pair"
+elif $first; then
+  echo "To connect a device, run: $run pair"
 fi

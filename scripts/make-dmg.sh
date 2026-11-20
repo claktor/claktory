@@ -2,7 +2,11 @@
 # Makes the disk image people download to install Claktory on a Mac:
 # Claktory-<version>.dmg, holding the release's app as "Claktory.app" (the
 # bundle and its id stay the same; only the name people see changes) and a
-# link to /Applications to drag it onto. The app carries its helpers
+# link to /Applications to drag it onto, on a background with an arrow from
+# one to the other (scripts/dmg: the window's layout for dmgbuild, which
+# writes it without Finder, and its pinned requirements, installed once into
+# ~/Library/Caches/claktory-dmgbuild; the background's drawn by
+# scripts/dmg-background.swift). The app carries its helpers
 # (Contents/Helpers), so on first launch it sets Claktory up by itself.
 # With the Developer ID and the notarization key (scripts/sign-release.sh says
 # where), the image is signed, notarized and stapled too; without them it's
@@ -42,14 +46,22 @@ if ! $UNSIGNED; then
   }
 fi
 
+# dmgbuild, in a virtual environment of its own, installed again when its
+# pinned requirements change.
+VENV="${XDG_CACHE_HOME:-$HOME/Library/Caches}/claktory-dmgbuild"
+if ! cmp -s "$ROOT/scripts/dmg/requirements.txt" "$VENV/requirements.txt"; then
+  rm -rf "$VENV"
+  python3 -m venv "$VENV"
+  "$VENV/bin/pip" install --quiet --disable-pip-version-check --require-hashes --only-binary :all: \
+    -r "$ROOT/scripts/dmg/requirements.txt"
+  cp "$ROOT/scripts/dmg/requirements.txt" "$VENV/requirements.txt"
+fi
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-mkdir "$STAGE/Claktory"
-ditto "$APP" "$STAGE/Claktory/Claktory.app"
-ln -s /Applications "$STAGE/Claktory/Applications"
 rm -f "$DMG"
 # Compressed with lzfse (ULFO, macOS 10.11 and later), HFS+ for any Mac.
-hdiutil create -quiet -volname Claktory -srcfolder "$STAGE/Claktory" -fs HFS+ -format ULFO "$DMG"
+"$VENV/bin/dmgbuild" -s "$ROOT/scripts/dmg/settings.py" -D app="$APP" -D dir="$ROOT/scripts/dmg" Claktory "$DMG" >/dev/null
 hdiutil verify -quiet "$DMG"
 
 if $UNSIGNED; then

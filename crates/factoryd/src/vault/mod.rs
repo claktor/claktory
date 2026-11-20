@@ -414,7 +414,7 @@ impl Vault {
         }
         let db = open_db(&path)?;
         let (vault_id, locked_mode): (String, bool) =
-            db.query_row("SELECT vault_id, locked_mode FROM vault WHERE id = 1", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            db.query_row("SELECT vault_id, locked_mode FROM vault WHERE id = 1", [], crate::store::row2)?;
         let mut inner = self.lock();
         inner.vault_id = vault_id;
         inner.locked_mode = locked_mode;
@@ -724,9 +724,11 @@ impl Vault {
     }
 
     fn secret_id(db: &Connection, id_or_name: &str) -> Result<(String, String), VaultError> {
-        db.query_row("SELECT id, name FROM secrets WHERE id = ?1 OR name = ?1 ORDER BY id = ?1 DESC LIMIT 1", [id_or_name], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        db.query_row(
+            "SELECT id, name FROM secrets WHERE id = ?1 OR name = ?1 ORDER BY id = ?1 DESC LIMIT 1",
+            [id_or_name],
+            crate::store::row2,
+        )
         .optional()?
         .ok_or_else(|| VaultError::NoSecret(id_or_name.to_owned()))
     }
@@ -927,14 +929,12 @@ impl Vault {
     /// A secret's values, decrypted.
     fn values_of(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str) -> Result<Vec<Value>, VaultError> {
         let (version, sealed_dek): (u32, Vec<u8>) =
-            db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], crate::store::row2)?;
         let version = version.to_string();
         let corrupt = || VaultError::Invalid(format!("The secret {id} can't be opened: the vault was changed outside Claktory."));
         let dek = crypto::open_key(vmk, &sealed_dek, &aad(&["dek", vault_id, id, &version])).ok_or_else(corrupt)?;
         let mut statement = db.prepare("SELECT name, file, sealed_value FROM variables WHERE secret = ?1 ORDER BY position")?;
-        let rows = statement
-            .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, Vec<u8>>(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = statement.query_map([id], crate::store::row3::<String, bool, Vec<u8>>)?.collect::<Result<Vec<_>, _>>()?;
         let mut values = Vec::with_capacity(rows.len());
         for (variable, file, sealed) in rows {
             let bytes = crypto::open(&dek, &sealed, &aad(&["value", vault_id, id, &version, &variable])).ok_or_else(corrupt)?;
@@ -1057,9 +1057,7 @@ impl Vault {
                 secret.variables.push(variable);
             }
             let mut grants = db.prepare("SELECT agent, granted, mac, aliases FROM grants WHERE secret = ?1 ORDER BY granted")?;
-            for row in grants.query_map([&secret.id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?))
-            })? {
+            for row in grants.query_map([&secret.id], crate::store::row4::<String, i64, Vec<u8>, String>)? {
                 let (agent, granted, mac, aliases) = row?;
                 // Locked, grants can't be checked, and can't be used either.
                 if let Some(key) = &grant_key
@@ -1103,9 +1101,7 @@ impl Vault {
     /// its aliases.
     fn grant_of(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<Option<BTreeMap<String, String>>, VaultError> {
         let row: Option<(i64, Vec<u8>, String)> = Self::db(inner)?
-            .query_row("SELECT granted, mac, aliases FROM grants WHERE secret = ?1 AND agent = ?2", [secret, agent], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_row("SELECT granted, mac, aliases FROM grants WHERE secret = ?1 AND agent = ?2", [secret, agent], crate::store::row3)
             .optional()?;
         Ok(row
             .filter(|(granted, mac, aliases)| {
@@ -1126,15 +1122,13 @@ impl Vault {
                 "SELECT secrets.id, secrets.name, secrets.description FROM grants JOIN secrets ON secrets.id = grants.secret
                  WHERE grants.agent = ?1 ORDER BY secrets.name COLLATE NOCASE",
             )?;
-            let rows = statement
-                .query_map([agent], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
+            let rows = statement.query_map([agent], crate::store::row3::<String, String, String>)?.collect::<Result<Vec<_>, _>>()?;
             let mut granted = BTreeMap::new();
             for (id, name, description) in rows {
                 let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else { continue };
                 let variables = db
                     .prepare("SELECT name, file FROM variables WHERE secret = ?1 ORDER BY position")?
-                    .query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
+                    .query_map([&id], crate::store::row2::<String, bool>)?
                     .map(|row| {
                         row.map(|(name, file)| {
                             let mut label = name.clone();
@@ -1209,9 +1203,8 @@ impl Vault {
         };
         let mut variables: Vec<factory_agent::SecretVariable> = Vec::new();
         for asked in names {
-            let found: Option<(String, String)> = db
-                .query_row("SELECT id, name FROM secrets WHERE name = ?1", [asked.trim()], |row| Ok((row.get(0)?, row.get(1)?)))
-                .optional()?;
+            let found: Option<(String, String)> =
+                db.query_row("SELECT id, name FROM secrets WHERE name = ?1", [asked.trim()], crate::store::row2).optional()?;
             let Some((id, name)) = found else { return Err(Refusal::NotYours(asked.trim().to_owned())) };
             // Said as for a name the vault doesn't have: nothing shows through.
             let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else {
@@ -1250,9 +1243,7 @@ impl Vault {
         let read = || -> Result<Vec<factory_agent::SecretVariable>, VaultError> {
             let secrets = db
                 .prepare("SELECT id, name, kind, meta FROM secrets")?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
-                })?
+                .query_map([], crate::store::row4::<String, String, String, String>)?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut variables = Vec::new();
             for (id, name, kind, meta) in secrets {

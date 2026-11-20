@@ -75,9 +75,12 @@ class AppScope extends InheritedWidget {
 
   static Backend of(BuildContext context) => scope(context).backend;
 
-  /// Shows Settings, where providers are signed in.
-  static void openSettings(BuildContext context) =>
-      openPage(context, AppPage.settings);
+  /// Shows Settings at Providers, where providers are signed in and the
+  /// provider picker adds one.
+  static void openProviders(BuildContext context) {
+    openPage(context, AppPage.settings);
+    of(context).settingsSection.value = 'providers';
+  }
 
   /// Shows what changed in each version of Claktory.
   static void openChangelog(BuildContext context) =>

@@ -422,7 +422,7 @@ fn has_threads(db: &Connection, path: &str) -> rusqlite::Result<bool> {
 }
 
 fn snapshot(db: &Connection, path: &str) -> rusqlite::Result<Option<(String, String)>> {
-    db.query_row("SELECT sha, text FROM thread_files WHERE path = ?1", [path], |row| Ok((row.get(0)?, row.get(1)?))).optional()
+    db.query_row("SELECT sha, text FROM thread_files WHERE path = ?1", [path], crate::store::row2).optional()
 }
 
 fn save_snapshot(db: &Connection, path: &str, sha: &str, text: &str) -> rusqlite::Result<()> {

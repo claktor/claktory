@@ -76,7 +76,10 @@ void main() {
     await tester.tap(glyphButton('Settings'));
     await settle(tester);
     final sent = harness.backend.sent.length;
-    AppScope.openSettings(tester.element(find.byType(Sidebar).first));
+    AppScope.openPage(
+      tester.element(find.byType(Sidebar).first),
+      AppPage.settings,
+    );
     await settle(tester);
     expect(harness.backend.sent.length, sent);
     expect(kinds(harness), ['chat', 'settings']);

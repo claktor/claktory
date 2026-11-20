@@ -176,9 +176,10 @@ async fn the_dev_claktory_keeps_to_its_own_data_folder() {
     // such as the repository the real Claktory's agents build in.
     let dir = temp_dir();
     let home = factoryd::home::Home::new(dir.join(".factory-dev"));
-    let factory = factoryd::Factory::open(home, std::sync::Arc::new(crate::common::Scripted::signed_in())).await.expect("open");
+    let factory = factoryd::Factory::open(home.clone(), std::sync::Arc::new(crate::common::Scripted::signed_in())).await.expect("open");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
+    crate::common::serves(addr, home);
     tokio::spawn(factoryd::serve(listener, factory.clone()));
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };

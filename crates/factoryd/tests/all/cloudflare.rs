@@ -508,7 +508,7 @@ async fn rivet_reads_a_connection_and_gives_an_agent_only_a_narrow_secret_made_f
     assert!(!builder.contains("Accounts:"), "{builder}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cloudflare_connects_with_a_pasted_token_that_mints_narrow_ones_and_is_deleted_with_them() {
     let (mut client, mut view, cloud, stand_in, addr) = setup_with(Cloudflare::pasted()).await;
     cloud.lock().expect("lock").pasted = Some(PASTED.to_owned());
@@ -537,7 +537,7 @@ async fn cloudflare_connects_with_a_pasted_token_that_mints_narrow_ones_and_is_d
     };
     assert_eq!(failure(&apply_request(&mut client, &mut view, paste("  ")).await), "Paste the token to connect.");
     // Only the device that started it finishes it.
-    let (mut other, _, _) = Client::connect(addr).await;
+    let (mut other, _) = crate::remote::another_device(addr, "Phone").await;
     let elsewhere = other.request(paste(PASTED)).await.body;
     assert!(failure(&elsewhere).starts_with("This connection was started on another device."), "{elsewhere:?}");
 

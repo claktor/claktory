@@ -232,3 +232,40 @@ async fn a_running_tool_shows_working_and_a_failure_lasts_until_a_new_run_or_cle
     let (_client, workspace, _) = Client::connect(addr).await;
     assert_eq!(View { workspace, ..View::default() }.agent("builder").character_mood(), CharacterMood::Idle);
 }
+
+/// Onboarding rehearsal 2: Rivet's first turn on a key Anthropic refused
+/// showed the raw answer. The failure's notice says whose credentials the
+/// provider refused, so the app can offer to change them; any other failure
+/// says nothing of the kind.
+#[tokio::test]
+async fn a_refused_key_says_whose_it_was() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let select = client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() });
+    apply_request(&mut client, &mut view, select).await;
+    let notices = |view: &View| -> Vec<v1::Notice> {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(v1::entry::Kind::Notice(notice)) if notice.level() == v1::NoticeLevel::Error => Some(notice.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    apply_request(&mut client, &mut view, send_message("builder", "please refuse my key")).await;
+    view.follow(&mut client, |view| !notices(view).is_empty()).await;
+    let refused = notices(&view)[0].clone();
+    assert!(refused.text.contains("invalid x-api-key"), "the provider's words stay: {}", refused.text);
+    let whose = refused.refused.expect("refused");
+    assert_eq!((whose.provider_id.as_str(), whose.account_id.as_str(), whose.method_id.as_str()), ("scripted", "1", "api_key"));
+
+    view.follow(&mut client, |view| mood(view, "builder") == CharacterMood::Failed).await;
+    apply_request(&mut client, &mut view, send_message("builder", "please fail")).await;
+    view.follow(&mut client, |view| notices(view).len() == 2).await;
+    assert_eq!(notices(&view)[1].refused, None);
+}

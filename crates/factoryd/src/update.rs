@@ -35,6 +35,15 @@ pub const VERSION: &str = match option_env!("FACTORY_VERSION") {
 /// Set by the supervisor for the backend it runs.
 pub const SUPERVISED: &str = "FACTORY_SUPERVISED";
 
+/// What the supervisor (`factoryd supervise`) does, as a number: bump it
+/// whenever that changes (`supervise_backend` in main.rs, and what it calls
+/// here: `start_trial`, `on_trial`, `update_failed`, `roll_back`,
+/// `fall_back`). An update moves the LaunchAgent to its release's
+/// supervisor, which restarts the backend a second time, only when the
+/// installed supervisor's number is lower (`factoryd supervisor-version`);
+/// supervisors from before it don't answer, and count as 0.
+pub const SUPERVISOR_VERSION: u32 = 1;
+
 /// Time for the ack to reach the app before the backend hands over.
 const RESTART_DELAY: Duration = Duration::from_millis(300);
 

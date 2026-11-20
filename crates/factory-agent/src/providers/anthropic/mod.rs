@@ -83,6 +83,7 @@ pub fn provider() -> Provider {
     provider.plan = Some(crate::limits::anthropic_plan);
     provider.identity = Some(crate::limits::anthropic_identity);
     provider.reset = Some(crate::limits::anthropic_reset);
+    provider.check_key = Some(crate::providers::keys::anthropic);
     provider
 }
 
@@ -768,6 +769,8 @@ async fn request(
         let text = response_text(response).await;
         if crate::accounts::credit_error(status, &text) {
             crate::accounts::mark_out_of_credit(&mut parser.output);
+        } else if crate::accounts::refused_error(status, &text) {
+            crate::accounts::mark_refused(&mut parser.output, &crate::accounts::Refused::default());
         }
         let parsed = serde_json::from_str::<Value>(&text).ok().filter(truthy);
         let fallback = if parsed.is_some() { None } else { Some(text.as_str()) };

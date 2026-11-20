@@ -1,7 +1,7 @@
 # claktory-account
 
-Claktory's account service: email sign-in, the Claktories of each account,
-the vault's service share, daily check-ins, the relay allowlist and the
+Claktory's account service: email sign-in, the Claktories of each account
+and the devices signed in to it (to find them), the vault's service share, daily check-ins, the relay allowlist and the
 account page (claktory.com/account). One binary with one SQLite file and one
 secrets file; anyone can run their own and point their Claktory's
 `account.service` at it.
@@ -49,7 +49,10 @@ then sign in again); the secrets can't.
 Accounts (email, when made, last sign-in); Claktories (id, name, backend
 public key, token hash, epoch, version, platform, last contact, when
 removed, their counts of agents, projects and devices, and their place:
-country, region and city); the days each was in touch; their usage per day,
+country, region and city; their own name and color and their relays, as
+they last sent them); the devices signed in (account public key, name,
+platform, version, when signed in, last contact) and the tunnel keys they
+got assertions for, for a day; the days each was in touch; their usage per day,
 provider and model, and their agents' activity per hour; the ids of the
 periods they reported (120 days, to know one sent again); their relay
 endpoint ids; share releases with their IP, for 30 days; pending sign-in codes (hashed, 15 minutes); rate-limit counters (2

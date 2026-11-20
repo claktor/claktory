@@ -20,6 +20,7 @@ import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'markdown.dart';
 import 'outbox.dart';
+import 'pairing_card.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -1163,6 +1164,13 @@ class _EntryViewState extends State<EntryView> {
         ConnectProposalCard(
           key: ValueKey(entry.connectProposal.id),
           entry.connectProposal,
+        ),
+        Space.l,
+      ),
+      Entry_Kind.devicePairing => (
+        DevicePairingCard(
+          key: ValueKey(entry.devicePairing.id),
+          entry.devicePairing,
         ),
         Space.l,
       ),
@@ -2553,6 +2561,7 @@ class _NoticeView extends StatelessWidget {
       final store = AppScope.of(context).workspace;
       final id = store.workspace.selectedAgentId;
       final name = store.agent(id)?.name ?? id;
+      if (notice.hasRefused()) return RefusedLine(notice.refused, agent: name);
       return ErrorLine(
         notice.text,
         about: "In $name's conversation (agent $id):",
@@ -2561,6 +2570,135 @@ class _NoticeView extends StatelessWidget {
     return Text(
       notice.text,
       style: TextStyles.caption.copyWith(color: palette.textMuted),
+    );
+  }
+}
+
+/// A run that ended because the provider refused the agent's key or
+/// sign-in: says so plainly, with the way to fix it (a new key, signing in
+/// again) rather than the provider's raw answer, and nothing to ask Rivet,
+/// whose model may be the one refused.
+class RefusedLine extends StatefulWidget {
+  const RefusedLine(this.refused, {super.key, required this.agent});
+
+  final CredentialsRefused refused;
+
+  /// The agent's name.
+  final String agent;
+
+  @override
+  State<RefusedLine> createState() => _RefusedLineState();
+}
+
+class _RefusedLineState extends State<RefusedLine> {
+  String? _failure;
+
+  /// Starts [provider]'s sign-in with [method], in place of the refused
+  /// account when it's the first (a key from the environment can't be
+  /// replaced: a stored one goes before it), and opens Settings →
+  /// Providers, where it shows.
+  Future<void> _fix(Provider? provider, String method) async {
+    final scope = AppScope.scope(context);
+    setState(() => _failure = null);
+    AppScope.openProviders(context);
+    if (provider == null || !provider.methods.any((m) => m.id == method)) {
+      return;
+    }
+    final account = widget.refused.accountId;
+    final env = account == 'env';
+    final first =
+        provider.accounts.isEmpty || provider.accounts.first.id == account;
+    // Another account than the first: Settings, to choose what to do.
+    if (!env && !first) return;
+    try {
+      await scope.login.start(
+        provider.id,
+        method,
+        addAccount: env && provider.accounts.isNotEmpty,
+      );
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _failure = failure.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final refused = widget.refused;
+    final workspace = AppScope.of(context).workspace.workspace;
+    final provider = workspace.providers
+        .where((p) => p.id == refused.providerId)
+        .firstOrNull;
+    final name = provider?.name ?? refused.providerId;
+    final env = refused.accountId == 'env';
+    final variable = env
+        ? provider?.accounts
+                  .where((a) => a.id == 'env')
+                  .map((a) => a.label)
+                  .firstOrNull ??
+              ''
+        : '';
+    final (
+      String text,
+      String action,
+      String method,
+    ) = switch (refused.methodId) {
+      'api_key' when env => (
+        variable.isEmpty
+            ? '$name refused the key from the environment.'
+            : '$name refused the key in $variable.',
+        'Add a key…',
+        'api_key',
+      ),
+      'api_key' => (
+        "$name refused ${widget.agent}'s key.",
+        'Change key…',
+        'api_key',
+      ),
+      'oauth' => (
+        "$name refused ${widget.agent}'s sign-in.",
+        'Sign in again…',
+        'oauth',
+      ),
+      _ => ("$name refused ${widget.agent}'s sign-in.", 'Open Providers…', ''),
+    };
+    final caption = TextStyles.caption;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: Space.s,
+          crossAxisAlignment: WrapCrossAlignment.end,
+          children: [
+            Text(text, style: caption.copyWith(color: palette.danger)),
+            Semantics(
+              button: true,
+              label: action,
+              excludeSemantics: true,
+              child: Pressable(
+                onTap: () => _fix(provider, method),
+                builder: (context, hovered) => Text(
+                  action,
+                  style: caption.copyWith(
+                    color: hovered ? palette.text : palette.textMuted,
+                    fontWeight: FontWeight.w500,
+                    decoration: hovered ? TextDecoration.underline : null,
+                    decorationColor: palette.text,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (_failure case final failure?)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.xs),
+            child: Text(
+              failure,
+              style: caption.copyWith(color: palette.danger),
+            ),
+          ),
+      ],
     );
   }
 }

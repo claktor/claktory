@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use factory_agent::{Event, EventSource, Finished, Task};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, types::FromSql};
 
 use crate::characters::Presence;
 use crate::config::{FolderView, State};
@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 18] = [
+const MIGRATIONS: [&str; 20] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -164,6 +164,8 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::annotations::SCHEMA,
     crate::annotations::SUGGESTIONS,
     crate::usage_report::SCHEMA,
+    crate::extensions::devices::SCHEMA,
+    crate::onboarding::SCHEMA,
 ];
 
 /// A background task as recorded.
@@ -222,6 +224,19 @@ pub(crate) fn migrate(db: &Connection, schema: &str, migrations: &[&str]) -> rus
         }
     }
     Ok(())
+}
+
+/// Positional row readers: convert columns in order, returning the first error.
+pub(crate) fn row2<A: FromSql, B: FromSql>(row: &Row<'_>) -> rusqlite::Result<(A, B)> {
+    Ok((row.get(0)?, row.get(1)?))
+}
+
+pub(crate) fn row3<A: FromSql, B: FromSql, C: FromSql>(row: &Row<'_>) -> rusqlite::Result<(A, B, C)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+pub(crate) fn row4<A: FromSql, B: FromSql, C: FromSql, D: FromSql>(row: &Row<'_>) -> rusqlite::Result<(A, B, C, D)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
 impl Store {

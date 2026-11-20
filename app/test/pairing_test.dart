@@ -212,6 +212,13 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('0427'), findsOneWidget);
+    // A server has no screen: the command that allows it there, checking
+    // the number, to copy.
+    expect(find.text('No screen on Studio? Run this there:'), findsOneWidget);
+    expect(find.text('factoryd allow d9 --number 0427'), findsOneWidget);
+    await tester.tap(find.text('Copy'));
+    await pumpFrames(tester);
+    expect(find.text('Copied'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await pumpFrames(tester);
     expect(harness.connections.current, isNull);

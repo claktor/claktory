@@ -97,6 +97,23 @@ impl Claktory {
     }
 }
 
+/// A person's device (the app on a phone, say), by its account key.
+pub struct Device {
+    pub key: SigningKey,
+    /// Where its requests come from (X-Forwarded-For).
+    pub ip: String,
+}
+
+impl Device {
+    pub fn new(ip: &str) -> Device {
+        Device { key: new_signing_key(), ip: ip.to_owned() }
+    }
+
+    pub fn account_key(&self) -> String {
+        b64(self.key.verifying_key().to_bytes())
+    }
+}
+
 impl Instance {
     pub fn advance(&self, seconds: i64) {
         self.time.fetch_add(seconds, Ordering::SeqCst);
@@ -141,6 +158,43 @@ impl Instance {
             ("x-forwarded-for", claktory.ip.clone()),
         ];
         self.send(method, path, body, &headers).await
+    }
+
+    /// A device-signed request from `device`, at `time` (now if None); a
+    /// GET has no body.
+    pub async fn device_signed(&self, device: &Device, method: &str, path: &str, body: Option<&Value>, time: Option<i64>) -> Answer {
+        let body = body.map(|body| serde_json::to_vec(body).expect("json")).unwrap_or_default();
+        let time = time.unwrap_or_else(|| self.now());
+        let signature = sign_request(&device.key, method, path, time, &body);
+        let headers = [
+            ("authorization", format!("{DEVICE_AUTH} {}", device.account_key())),
+            (TIME_HEADER, time.to_string()),
+            (SIGNATURE_HEADER, signature),
+            ("x-forwarded-for", device.ip.clone()),
+        ];
+        self.send(method, path, body, &headers).await
+    }
+
+    pub async fn start_device_sign_in(&self, device: &Device, email: &str, name: &str) -> Answer {
+        let start = DeviceSignInStart {
+            email: email.to_owned(),
+            account_key: device.account_key(),
+            name: name.to_owned(),
+            platform: "ios".to_owned(),
+            version: "v0.1.13".to_owned(),
+        };
+        self.post("/v1/devices/sign-in/start", &start, &device.ip).await
+    }
+
+    /// Signs `device` in to `email`'s account.
+    pub async fn sign_in_device(&self, device: &Device, email: &str, name: &str) -> DeviceAccount {
+        let answer = self.start_device_sign_in(device, email, name).await;
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        let started: SignInStarted = answer.json();
+        let verify = serde_json::json!({"request_id": started.request_id, "code": self.last_code(email)});
+        let answer = self.device_signed(device, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        answer.json()
     }
 
     /// The code in the last email to `email`.

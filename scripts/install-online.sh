@@ -13,18 +13,61 @@
 # again repairs the install. Afterwards the backend checks the channel itself,
 # and the app offers each new release.
 #
+#   curl -fsSL <channel>/install.sh | bash -s -- [--yes] [--json] [--app-only]
+#
+#   --yes         ask nothing and wait for nothing: no pairing code on a first
+#                 Linux install (make one with factoryd pair), and the Mac's
+#                 app isn't opened
+#   --json        for agents: implies --yes; what a person would read goes to
+#                 stderr, and stdout gets one JSON line, {"ok":true,…} (with
+#                 factoryd status's answer) or {"ok":false,"error":…,"message":…}.
+#                 Exit codes as factoryd's: 0 done, 3 refused (this machine
+#                 can't run it: error "unsupported"), 4 installed but not
+#                 running ("not_running", or "port_in_use": another user's
+#                 Claktory has its port), 1 anything else ("install_failed").
+#   --app-only    on a Mac, only the app, from the release's .dmg, with no
+#                 Claktory of its own: it connects to one elsewhere
 #   FACTORY_UPDATE_URL=<manifest url>  another channel, such as a file:// one
 #   install-online.sh --download-only DIR   only download and check the
 #                                           release, into DIR/<version>
+#
+# factoryd, the backend's command, ends up on PATH: a link in ~/.local/bin,
+# or /usr/local/bin when run as root.
 set -euo pipefail
 
 # Filled in by scripts/publish.sh.
 MANIFEST_URL=""
 
-fail() {
-  echo "Claktory can't be installed: $*" >&2
-  exit 1
+JSON=false
+YES=false
+
+# A string as JSON: quoted, with quotes, backslashes and control characters
+# escaped.
+json_string() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  text="${text//$'\n'/\\n}"
+  text="${text//$'\t'/ }"
+  text="$(tr -d '\000-\037' <<<"$text")"
+  printf '"%s"' "$text"
 }
+
+# Stops with ERROR (a code for agents) and EXIT, saying why (unless it's been
+# said: --said).
+stop() {
+  local error="$1" code="$2" message="$3"
+  if $JSON; then
+    printf '{"ok":false,"error":"%s","message":%s}\n' "$error" "$(json_string "$message")"
+  fi
+  [[ "${4:-}" == --said ]] || echo "$message" >&2
+  exit "$code"
+}
+fail() { stop install_failed 1 "Claktory can't be installed: $*"; }
+refuse() { stop unsupported 3 "Claktory can't be installed: $*"; }
+
+# What a person reads: stdout, or stderr when stdout is for JSON.
+say() { if $JSON; then echo "$@" >&2; else echo "$@"; fi; }
 
 file_size() { if [[ "$(uname -s)" == Darwin ]]; then stat -f %z "$1"; else stat -c %s "$1"; fi; }
 file_sha256() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -d' ' -f1; }
@@ -43,19 +86,31 @@ macos_number() {
 }
 
 main() {
-  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only=""
-  if [[ "${1:-}" == "--download-only" ]]; then
-    download_only="${2:?--download-only needs a folder}"
-  fi
+  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only="" app_only=false
+  while (($#)); do
+    case "$1" in
+      --yes) YES=true ;;
+      --json) JSON=true YES=true ;;
+      --app-only) app_only=true ;;
+      --download-only)
+        download_only="${2:-}"
+        [[ -n "$download_only" ]] || stop usage 3 "--download-only needs a folder."
+        shift
+        ;;
+      *) stop usage 3 "install.sh doesn't know $1. It takes --yes, --json, --app-only and --download-only DIR." ;;
+    esac
+    shift
+  done
   [[ -n "$url" ]] || fail "this installer doesn't know where releases are published (set FACTORY_UPDATE_URL)."
   local os
   os="$(uname -s)"
-  [[ "$os" == Darwin || "$os" == Linux ]] || fail "Claktory runs on macOS and Linux."
+  [[ "$os" == Darwin || "$os" == Linux ]] || refuse "Claktory runs on macOS and Linux."
+  [[ "$os" == Darwin ]] || ! $app_only || refuse "--app-only is for a Mac: on Linux, Claktory has no app, only what the app connects to."
 
   # Global, for the trap that runs after main returns.
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
-  echo "Reading $url"
+  say "Reading $url"
   curl -fsSL --proto '=https,file' "$url" -o "$work/latest.json" || fail "couldn't read $url"
   local version backend tarball sha256 size min_macos="" archs="" arch
   arch="$(uname -m)"
@@ -63,13 +118,13 @@ main() {
     case "$arch" in
       x86_64 | amd64) arch=x86_64 ;;
       aarch64 | arm64) arch=aarch64 ;;
-      *) fail "Claktory runs on x86_64 and aarch64 Linux, and this machine is $arch." ;;
+      *) refuse "Claktory runs on x86_64 and aarch64 Linux, and this machine is $arch." ;;
     esac
     version="$(top_field version "$work/latest.json")"
     backend="$(top_field backend "$work/latest.json")"
     local build
     build="$(grep "^    \"$arch\": {" "$work/latest.json" || true)"
-    [[ -n "$build" || -z "$version" ]] || fail "Claktory $version has no build for Linux $arch."
+    [[ -n "$build" || -z "$version" ]] || refuse "Claktory $version has no build for Linux $arch."
     tarball="$(linux_field url "$build")"
     sha256="$(linux_field sha256 "$build")"
     size="$(linux_field size "$build")"
@@ -77,9 +132,16 @@ main() {
     field() { plutil -extract "$1" raw -o - "$work/latest.json" 2>/dev/null || true; }
     version="$(field version)"
     backend="$(field backend)"
-    tarball="$(field url)"
-    sha256="$(field sha256)"
-    size="$(field size)"
+    if $app_only; then
+      tarball="$(field dmg.url)"
+      sha256="$(field dmg.sha256)"
+      size="$(field dmg.size)"
+      [[ -n "$tarball" || -z "$version" ]] || fail "Claktory $version has no .dmg to install the app from."
+    else
+      tarball="$(field url)"
+      sha256="$(field sha256)"
+      size="$(field size)"
+    fi
     min_macos="$(field min_macos)"
     archs="$(plutil -extract archs json -o - "$work/latest.json" 2>/dev/null || true)"
   fi
@@ -89,19 +151,32 @@ main() {
   if [[ -n "$min_macos" ]]; then
     local here
     here="$(sw_vers -productVersion)"
-    (($(macos_number "$here") >= $(macos_number "$min_macos"))) || fail "it needs macOS $min_macos or later, and this Mac has $here."
+    (($(macos_number "$here") >= $(macos_number "$min_macos"))) || refuse "it needs macOS $min_macos or later, and this Mac has $here."
   fi
   if [[ -n "$archs" && "$archs" != *"\"$arch\""* ]]; then
-    fail "this release is built for $archs, and this Mac is $arch."
+    refuse "this release is built for $archs, and this Mac is $arch."
   fi
 
-  echo "Downloading Claktory $version"
-  curl -fSL --progress-bar --proto '=https,file' "$tarball" -o "$work/release.tar.gz" || fail "couldn't download $tarball"
-  [[ -z "$size" || "$(file_size "$work/release.tar.gz")" == "$size" ]] || fail "the download's size doesn't match the manifest."
-  [[ "$(file_sha256 "$work/release.tar.gz")" == "$(tr 'A-F' 'a-f' <<<"$sha256")" ]] ||
+  # A Mac with its own Claktory has the app already, beside it.
+  if $app_only && [[ -x "$HOME/.factory/bin/factoryd" && -d "$HOME/Applications/Factory.app" ]]; then
+    say "This Mac already has Claktory, with its own agents: ~/Applications/Factory.app."
+    $JSON && printf '{"ok":true,"app":%s,"version":"%s","own_claktory":true}\n' "$(json_string "$HOME/Applications/Factory.app")" "$version"
+    return
+  fi
+
+  say "Downloading Claktory $version"
+  local progress=--progress-bar
+  $JSON && progress=-s
+  curl -fSL "$progress" --proto '=https,file' "$tarball" -o "$work/download" || fail "couldn't download $tarball"
+  [[ -z "$size" || "$(file_size "$work/download")" == "$size" ]] || fail "the download's size doesn't match the manifest."
+  [[ "$(file_sha256 "$work/download")" == "$(tr 'A-F' 'a-f' <<<"$sha256")" ]] ||
     fail "the download doesn't match the manifest's SHA-256."
+  if $app_only; then
+    install_app_only "$version"
+    return
+  fi
   mkdir -p "$work/release"
-  tar -xzf "$work/release.tar.gz" -C "$work/release"
+  tar -xzf "$work/download" -C "$work/release"
   if [[ "$os" == Linux ]]; then
     [[ -f "$work/release/factoryd" && -f "$work/release/install-linux.sh" ]] || fail "the release is incomplete."
   else
@@ -120,26 +195,157 @@ main() {
   rm -rf "${releases:?}/$version"
   mv "$work/release" "$releases/$version"
   if [[ -n "$download_only" ]]; then
-    echo "Claktory $version downloaded to $releases/$version"
+    say "Claktory $version downloaded to $releases/$version"
+    $JSON && printf '{"ok":true,"version":"%s","release":%s}\n' "$version" "$(json_string "$releases/$version")"
     return
   fi
   # Named only once complete, as scripts/release.sh does.
   echo "$version" >"$releases/latest.new"
   mv -f "$releases/latest.new" "$releases/latest"
 
+  mkdir -p "$work/out"
   if [[ "$os" == Linux ]]; then
-    bash "$releases/$version/install-linux.sh" "$releases/$version" </dev/null
-    echo
-    echo "Claktory $version is installed and running here. Once your Mac's Claktory is connected to it, sign in to a model provider there, under Settings → Providers."
+    local pair=() status=0
+    $YES && pair=(--no-pair)
+    # Its own words go to the person; the last of them, when it fails, is why.
+    if $JSON; then
+      CLAKTORY_INSTALL_OUT="$work/out" bash "$releases/$version/install-linux.sh" "$releases/$version" "${pair[@]}" </dev/null \
+        >&2 2> >(tee "$work/out/errors" >&2) || status=$?
+    else
+      CLAKTORY_INSTALL_OUT="$work/out" bash "$releases/$version/install-linux.sh" "$releases/$version" "${pair[@]}" </dev/null \
+        2> >(tee "$work/out/errors" >&2) || status=$?
+    fi
+    wait
+    if ((status != 0)); then
+      local why
+      why="$(grep -v '^$' "$work/out/errors" 2>/dev/null | tail -n 1)"
+      [[ -n "$why" ]] || why="Claktory can't be installed: its installer stopped ($status)."
+      case "$status:$why" in
+        3:*) stop unsupported 3 "$why" --said ;;
+        4:*"already uses port"*) stop port_in_use 4 "$why" --said ;;
+        4:*) stop not_running 4 "$why" --said ;;
+        *) stop install_failed 1 "$why" --said ;;
+      esac
+    fi
+    answer "$(cat "$work/out/cli" 2>/dev/null || true)" ""
     return
   fi
-  bash "$releases/$version/install-release.sh" "$releases/$version" --open </dev/null
-  echo
-  echo "Claktory $version is installed in ~/Applications and open."
-  echo "Sign in to a model provider in Claktory, under Settings → Providers."
-  if ! xcode-select -p >/dev/null 2>&1; then
-    echo "Agents need git and other developer tools: run  xcode-select --install"
+
+  # A Mac: install-release.sh's own last line would only say it again.
+  local open=--open
+  $YES && open=""
+  bash "$releases/$version/install-release.sh" "$releases/$version" $open </dev/null >/dev/null ||
+    fail "the release's installer stopped; see above."
+  # This Mac has a Claktory of its own now, not only the app (--app-only's mark).
+  defaults delete dev.factory.app ClaktoryAppOnly >/dev/null 2>&1 || true
+  local bin="$HOME/.factory/bin/factoryd"
+  waited_status "$bin" ||
+    stop not_running 4 "Claktory is installed but isn't running: $(mac_stopped_reason). Its log: ~/.factory/factoryd.log"
+  local cli
+  cli="$(link_cli "$bin")"
+  if $YES; then
+    say "Claktory $version is installed in ~/Applications and running."
+  else
+    say "Claktory $version is installed in ~/Applications and open."
   fi
+  say_cli "$cli"
+  if ! xcode-select -p >/dev/null 2>&1; then
+    say "Agents need git and other developer tools: run  xcode-select --install"
+  fi
+  answer "$cli" "$HOME/Applications/Factory.app"
+}
+
+# Waits up to 30 seconds for the backend BIN to answer factoryd status;
+# its answer in $work/out/status.json.
+waited_status() {
+  local _
+  for _ in $(seq 150); do
+    "$1" status --json >"$work/out/status.json" 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Why a Mac's backend stopped, from its log's last word on it.
+mac_stopped_reason() {
+  local reason
+  reason="$(tail -n 200 "$HOME/.factory/factoryd.log" 2>/dev/null | sed -n 's/.*factoryd stopped error=//p' | tail -n 1)"
+  [[ -n "$reason" ]] || reason="it didn't start"
+  echo "$reason"
+}
+
+# Links factoryd onto PATH: /usr/local/bin for root, else ~/.local/bin; never
+# over another program of that name. Prints the command's path.
+link_cli() {
+  local bin="$1" dir="$HOME/.local/bin"
+  [[ "$(id -u)" == 0 ]] && dir=/usr/local/bin
+  if mkdir -p "$dir" 2>/dev/null && { [[ -L "$dir/factoryd" ]] || [[ ! -e "$dir/factoryd" ]]; }; then
+    ln -sfn "$bin" "$dir/factoryd"
+    echo "$dir/factoryd"
+  else
+    echo "$bin"
+  fi
+}
+
+# Says where factoryd is, and how to reach it when it isn't on PATH.
+say_cli() {
+  local dir
+  dir="$(dirname "$1")"
+  case ":$PATH:" in
+    *":$dir:"*) say "Its command, factoryd, is in $dir." ;;
+    *) say "Its command, factoryd, is in $dir, which isn't on your PATH: add  export PATH=\"$dir:\$PATH\"  to your shell's profile (~/.zprofile)." ;;
+  esac
+}
+
+# The --json answer: factoryd status's, with where its command and app are.
+answer() {
+  $JSON || return 0
+  local cli="$1" app="$2" status on_path=false extra
+  status="$(cat "$work/out/status.json" 2>/dev/null || true)"
+  [[ "$status" == "{"*"}" ]] || status='{}'
+  status="$(sed -e 's/"ok":true,//' -e 's/,"ok":true}/}/' -e 's/^{"ok":true}$/{}/' <<<"$status")"
+  case ":$PATH:" in *":$(dirname "$cli"):"*) on_path=true ;; esac
+  extra="\"ok\":true,\"factoryd\":$(json_string "$cli"),\"on_path\":$on_path"
+  [[ -n "$app" ]] && extra="$extra,\"app\":$(json_string "$app")"
+  if [[ "$status" == "{}" ]]; then
+    echo "{$extra}"
+  else
+    echo "{$extra,${status#\{}"
+  fi
+}
+
+# --app-only: the app from the .dmg in $work/download, with no Claktory of its
+# own on this Mac. The app reads ClaktoryAppOnly at its first launch and
+# offers to connect to a Claktory elsewhere instead of setting one up here.
+install_app_only() {
+  local version="$1" mount="$work/mount" dir=/Applications app
+  mkdir -p "$mount"
+  # Its errors only when it fails: newer macOS warns that its options are deprecated.
+  hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$work/download" >/dev/null 2>"$work/attach.log" ||
+    fail "couldn't open the .dmg: $(grep -v -i deprecated "$work/attach.log" | tail -n 1)"
+  trap 'hdiutil detach -quiet "$work/mount" 2>/dev/null || true; rm -rf "$work"' EXIT
+  [[ -d "$mount/Claktory.app" ]] || fail "the .dmg has no Claktory.app."
+  codesign --verify --deep --strict "$mount/Claktory.app" || fail "the app's signature doesn't verify."
+  [[ -w "$dir" ]] || dir="$HOME/Applications"
+  mkdir -p "$dir"
+  app="$dir/Claktory.app"
+  rm -rf "$app.new"
+  ditto "$mount/Claktory.app" "$app.new" || fail "couldn't copy the app to $dir."
+  rm -rf "$app.old"
+  [[ ! -e "$app" ]] || mv "$app" "$app.old"
+  mv "$app.new" "$app"
+  rm -rf "$app.old"
+  hdiutil detach -quiet "$mount" 2>/dev/null || true
+  # Not on a Mac with its own Claktory (the app ignores it there too).
+  [[ -x "$HOME/.factory/bin/factoryd" ]] || defaults write dev.factory.app ClaktoryAppOnly -bool true
+  if $YES; then
+    say "Claktory $version is installed in $dir. Open it to connect to your Claktory."
+  else
+    open "$app" || true
+    say "Claktory $version is installed in $dir and open: connect it to your Claktory there."
+  fi
+  $JSON && printf '{"ok":true,"app":%s,"version":"%s"}\n' "$(json_string "$app")" "$version"
+  return 0
 }
 
 # Only once the whole script has arrived, when it's piped into bash.

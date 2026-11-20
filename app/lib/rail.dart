@@ -79,10 +79,13 @@ class Claktory {
 class Claktories extends ChangeNotifier {
   Claktories({
     required this.connections,
-    required this.localBackend,
+    required bool localBackend,
     required this.open,
     required this.drafts,
-  }) {
+    this.keepLocal,
+  }) // Mutable, behind a getter: setLocalBackend changes it.
+    // ignore: prefer_initializing_formals
+    : _localBackend = localBackend {
     connections.addListener(_sync);
     _sync();
     // iOS suspends the app in the background, and its connections die
@@ -120,8 +123,32 @@ class Claktories extends ChangeNotifier {
 
   final Connections connections;
 
-  /// Whether this device runs a Claktory of its own (a Mac does).
-  final bool localBackend;
+  /// Whether this device runs a Claktory of its own: a Mac does, unless
+  /// it uses only Claktories on other computers ("app only").
+  bool get localBackend => _localBackend;
+  bool _localBackend;
+
+  /// Keeps on this device whether it runs a Claktory of its own
+  /// (Setup.swift's ClaktoryAppOnly); null where that can't change.
+  final Future<void> Function(bool local)? keepLocal;
+
+  /// Whether this Mac's own Claktory can be set up or given up here.
+  bool get canChooseLocal => keepLocal != null;
+
+  /// This Mac runs a Claktory of its own from now on, or doesn't: its
+  /// Claktory starts again as one or the other, and the choice is kept.
+  void setLocalBackend(bool local) {
+    if (local == _localBackend) return;
+    _localBackend = local;
+    unawaited(keepLocal?.call(local));
+    final old = _open.remove('');
+    if (old != null) unawaited(old.close());
+    if (local && connections.current != null) {
+      // Its own shows: the one it chose.
+      connections.use(null);
+    }
+    _sync();
+  }
 
   /// Connects to a Claktory (null: this device's own), live from now on.
   final Backend Function(RemoteFactory? target) open;

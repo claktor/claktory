@@ -19,6 +19,7 @@ pub(crate) mod agents;
 pub(crate) mod checklist;
 pub(crate) mod comments;
 pub(crate) mod database;
+pub(crate) mod devices;
 pub(crate) mod highlight;
 pub(crate) mod memory;
 pub(crate) mod monitors;
@@ -203,11 +204,12 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 13] = [
+pub(crate) const ALL: [&dyn Extension; 14] = [
     &agents::Agents,
     &checklist::Checklist,
     &comments::Comments,
     &database::Database,
+    &devices::Devices,
     &highlight::Highlight,
     &memory::Memory,
     &monitors::Monitors,

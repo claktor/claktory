@@ -178,6 +178,17 @@ impl Error {
     }
 }
 
+/// `Error::Models`' code when the provider refused the credentials: a key it
+/// doesn't accept, or a sign-in whose token it won't refresh.
+pub const REFUSED: &str = "refused";
+
+impl Error {
+    /// Whether the provider refused the credentials (`REFUSED`).
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Error::Models { code: REFUSED, .. })
+    }
+}
+
 /// Pi's `ModelsError`: the cause's text joins the message because callers show `message` alone.
 pub fn models_error(code: &'static str, message: impl Into<String>, cause: Option<&Error>) -> Error {
     let message = message.into();

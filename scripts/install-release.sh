@@ -47,6 +47,9 @@ swap_in() {
 }
 
 mkdir -p "$HOME_DIR/bin" "$HOME/Applications" "$HOME/Library/LaunchAgents"
+# Only this user reads it: its keys and agents' work go here, even before a
+# backend that can't start yet (another user's holds its port) keeps it so.
+chmod 700 "$HOME_DIR"
 cp "$RELEASE/factoryd" "$BIN.new"
 chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"

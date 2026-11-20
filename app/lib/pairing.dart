@@ -1,11 +1,13 @@
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
+import 'markdown.dart' show CodeBlock;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
@@ -67,6 +69,40 @@ class PairingDigits extends StatelessWidget {
   }
 }
 
+/// The command that allows this device on a Claktory without a screen
+/// (a server), from its terminal: only if it shows the same number.
+String allowCommand(PairingWait wait) =>
+    'factoryd allow ${wait.pending.deviceId} --number ${wait.number}';
+
+/// [command] in a code block, with Copy.
+class AllowCommand extends StatefulWidget {
+  const AllowCommand(this.command, {super.key});
+
+  final String command;
+
+  @override
+  State<AllowCommand> createState() => _AllowCommandState();
+}
+
+class _AllowCommandState extends State<AllowCommand> {
+  var _copied = false;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Expanded(child: CodeBlock(widget.command)),
+      const SizedBox(width: Space.s),
+      Button(
+        label: _copied ? 'Copied' : 'Copy',
+        onPressed: () {
+          Clipboard.setData(ClipboardData(text: widget.command));
+          setState(() => _copied = true);
+        },
+      ),
+    ],
+  );
+}
+
 /// This device used a pairing code and waits for the person to allow it
 /// on that Claktory: the number to compare with the one it shows, and
 /// Cancel; turned away, why, and Use a new code. [onCancel] gives up on it.
@@ -117,6 +153,19 @@ class PairingWaitView extends StatelessWidget {
                     if (wait != null && wait.number.isNotEmpty) ...[
                       const SizedBox(height: Space.xl),
                       PairingDigits(wait.number),
+                      // A server has no screen: it's allowed from its
+                      // terminal, with the number checked there.
+                      if (wait.pending.deviceId.isNotEmpty) ...[
+                        const SizedBox(height: Space.xl),
+                        Text(
+                          'No screen on $machine? Run this there:',
+                          style: TextStyles.body.copyWith(
+                            color: palette.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: Space.s),
+                        AllowCommand(allowCommand(wait)),
+                      ],
                     ],
                   ],
                   const SizedBox(height: Space.xl),

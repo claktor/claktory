@@ -331,7 +331,7 @@ fn query(url: &str, key: &str) -> String {
     url.query_pairs().find(|(name, _)| name == key).map(|(_, value)| value.into_owned()).expect(key)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_secret_is_given() {
     let dir = temp_dir();
     let models = Scripted::signed_in();
@@ -391,7 +391,7 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     let finish = |url: String| {
         Request::FinishConnect(v1::FinishConnect { flow_id: started.flow_id.clone(), callback_url: url, token: String::new() })
     };
-    let (mut other, other_workspace, _) = Client::connect(addr).await;
+    let (mut other, other_workspace) = crate::remote::another_device(addr, "Phone").await;
     let mut other_view = View { workspace: other_workspace, ..View::default() };
     let elsewhere = apply_request(&mut other, &mut other_view, finish(format!("{redirect}?code=good-code&state={state}"))).await;
     assert_eq!(failure(&elsewhere), "This connection was started on another device. Finish it there, or start again here.");
@@ -427,12 +427,11 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     // The proposer learns it has nothing yet; Rivet is asked to decide.
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     assert!(describe(&view.entries).iter().any(|line| line.starts_with(&format!("connect proposal {} (Connected)", proposal.id))));
-    assert!(
+    view.follow(&mut client, |view| {
         describe(&view.entries).iter().any(|line| line
-            == "event from Claktory: The person connected Demo (matt@example.com) for your proposal. You don't have it: an admin agent decides what you get."),
-        "{:?}",
-        describe(&view.entries)
-    );
+            == "event from Claktory: The person connected Demo (matt@example.com) for your proposal. You don't have it: an admin agent decides what you get.")
+    })
+    .await;
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     view.follow(&mut client, |view| describe(&view.entries).iter().any(|line| line.contains("for Builder (builder)'s proposal"))).await;
 

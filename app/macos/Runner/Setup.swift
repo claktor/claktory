@@ -30,6 +30,15 @@ enum Setup {
         removeApp(forget: call.arguments as? Bool ?? false, result)
       case "moveToApplications":
         moveToApplications(result)
+      case "appOnly":
+        result(UserDefaults.standard.bool(forKey: appOnlyKey))
+      case "setAppOnly":
+        if call.arguments as? Bool ?? false {
+          UserDefaults.standard.set(true, forKey: appOnlyKey)
+        } else {
+          UserDefaults.standard.removeObject(forKey: appOnlyKey)
+        }
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -39,6 +48,12 @@ enum Setup {
   }
 
   private static var channels: [FlutterMethodChannel] = []
+
+  /// This Mac has no Claktory of its own: the app shows Claktories on
+  /// other computers only. `install.sh --app-only` writes it
+  /// (`defaults write dev.factory.app ClaktoryAppOnly -bool true`), and so
+  /// does choosing "Use a Claktory on another computer" at first launch.
+  static let appOnlyKey = "ClaktoryAppOnly"
 
   /// The backend the app carries.
   static var helper: URL {

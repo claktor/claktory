@@ -171,12 +171,31 @@ pub(crate) fn answers(port: u16, within: Duration) -> bool {
     port != 0 && std::net::TcpStream::connect_timeout(&addr, within).is_ok()
 }
 
+/// Something of another user's answers on `port`: it answers, and no
+/// process of this user's listens there (lsof sees only this user's). False
+/// when that can't be told.
+fn taken_by_another(port: u16) -> bool {
+    if !answers(port, Duration::from_millis(300)) {
+        return false;
+    }
+    let uid = unsafe { libc::getuid() };
+    let listening = Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-a", "-t", "-sTCP:LISTEN", &format!("-iTCP:{port}"), "-u", &uid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .output();
+    match listening {
+        // lsof exits 1, printing nothing, when nothing of this user's matches.
+        Ok(output) => output.stdout.iter().all(u8::is_ascii_whitespace) && output.status.code() == Some(1),
+        Err(_) => false,
+    }
+}
+
 /// How things stand, changing nothing.
 pub(crate) fn check(setup: &Setup) -> Report {
     let found = examine(setup);
     if found.installed() {
         let mut report = Report::new(Outcome::AlreadyInstalled, "Claktory is already set up on this Mac.", "");
-        report.running = Some(answers(setup.port, Duration::from_millis(300)));
+        report.running = Some(answers(setup.port, Duration::from_millis(300)) && !taken_by_another(setup.port));
         return report;
     }
     if found.nothing() {
@@ -188,7 +207,7 @@ pub(crate) fn check(setup: &Setup) -> Report {
 /// Sets Claktory up, or (`repair`) completes it and reloads its job.
 pub(crate) fn install(setup: &Setup, repair: bool) -> Report {
     let found = examine(setup);
-    if found.installed() && (!repair || answers(setup.port, Duration::from_millis(300))) {
+    if found.installed() && (!repair || (answers(setup.port, Duration::from_millis(300)) && !taken_by_another(setup.port))) {
         return check(setup);
     }
     if !found.nothing() && !repair {
@@ -245,6 +264,13 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
     write_plist(setup, &supervisor, &path).map_err(|detail| {
         Report::new(Outcome::Failed, "Claktory couldn't set up its background service.", format!("{}: {detail}", setup.plist.display()))
     })?;
+    if taken_by_another(setup.port) {
+        return Err(Report::new(
+            Outcome::Failed,
+            "Another Claktory on this Mac already uses its port, so this one can't start. It's probably another user's: quit Claktory in that account, then try again.",
+            format!("Something of another user's answers on port {}", setup.port),
+        ));
+    }
     load(setup).map_err(|detail| Report::new(Outcome::Failed, "macOS didn't start Claktory's background service.", detail))?;
     eprintln!("waiting for the backend");
     let deadline = Instant::now() + setup.answer_within;
@@ -532,6 +558,15 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).expect("read")
+    }
+
+    #[test]
+    fn a_port_only_counts_as_another_users_when_something_of_theirs_answers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(!taken_by_another(port), "this user's own listener");
+        drop(listener);
+        assert!(!taken_by_another(port), "nothing there");
     }
 
     #[test]

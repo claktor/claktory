@@ -1,6 +1,11 @@
 //! Devices reach Factory through its private tunnel (iroh): pairing, keys
 //! and tokens, the gate after the handshake, Unpair; and this machine's app,
 //! through its local pairing code.
+//!
+//! The tests run on several threads: the tunnel's endpoints (Claktory's and
+//! the devices') keep exchanging packets while anything else in the test
+//! blocks a thread, so a busy machine (the whole suite in parallel) can't
+//! starve a connection into its idle timeout (ConnectionLost(TimedOut)).
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -24,11 +29,11 @@ fn now_ms() -> i64 {
 
 /// What a pairing code holds.
 #[derive(Debug)]
-struct Code {
-    token: String,
+pub(crate) struct Code {
+    pub(crate) token: String,
     endpoint: EndpointId,
     relays: Vec<String>,
-    addresses: Vec<SocketAddr>,
+    pub(crate) addresses: Vec<SocketAddr>,
 }
 
 fn decode(text: &str) -> String {
@@ -47,7 +52,7 @@ fn decode(text: &str) -> String {
     String::from_utf8(out).expect("utf-8")
 }
 
-fn parse(code: &str) -> Code {
+pub(crate) fn parse(code: &str) -> Code {
     let query = code.trim().strip_prefix("factory://?").expect("factory://? (no host: only the tunnel)");
     let values =
         |name: &str| -> Vec<String> { query.split('&').filter_map(|pair| pair.strip_prefix(&format!("{name}="))).map(decode).collect() };
@@ -61,7 +66,7 @@ fn parse(code: &str) -> Code {
 
 /// The four digits a device waiting to be allowed shows, worked out as the
 /// protocol says (PendingDevice.number), from its side.
-fn number(code: &Code, device: &str) -> String {
+pub(crate) fn number(code: &Code, device: &str) -> String {
     use sha2::Digest as _;
     let token: String = sha2::Sha256::digest(code.token.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
     let digest = sha2::Sha256::digest(format!("claktory pairing\n{}\n{device}\n{token}", code.endpoint).as_bytes());
@@ -69,13 +74,13 @@ fn number(code: &Code, device: &str) -> String {
 }
 
 /// A device: a key of its own, no relays.
-async fn new_device() -> Endpoint {
+pub(crate) async fn new_device() -> Endpoint {
     Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.expect("device endpoint")
 }
 
 /// Connects to Factory at the code's addresses; Err with why when it's
 /// turned away (or nothing answers).
-async fn dial(device: &Endpoint, code: &Code, addresses: &[SocketAddr]) -> Result<Connection, String> {
+pub(crate) async fn dial(device: &Endpoint, code: &Code, addresses: &[SocketAddr]) -> Result<Connection, String> {
     dial_offering(device, code, addresses, &[factoryd::remote::ALPN]).await
 }
 
@@ -103,30 +108,41 @@ async fn dial_offering(device: &Endpoint, code: &Code, addresses: &[SocketAddr],
     }
 }
 
-type Socket = WebSocketStream<tokio::io::Join<RecvStream, SendStream>>;
+pub(crate) type Socket = WebSocketStream<tokio::io::Join<RecvStream, SendStream>>;
 
-/// A client on the loopback port, as scripts and the app from before the
-/// tunnel connect.
+/// A client on the loopback port, as the CLI and this machine's app when
+/// the tunnel fails connect.
 async fn loopback(addr: SocketAddr) -> WebSocketStream<tokio::net::TcpStream> {
     let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
     tokio_tungstenite::client_async("ws://factory/", tcp).await.expect("websocket").0
 }
 
 /// A client on a new stream of the connection, as the app's tunnel makes one.
-async fn open(connection: &Connection) -> Socket {
+pub(crate) async fn open(connection: &Connection) -> Socket {
     let (send, receive) = connection.open_bi().await.expect("stream");
     let (socket, _) = tokio_tungstenite::client_async("ws://factory/", tokio::io::join(receive, send)).await.expect("websocket");
     socket
 }
 
 /// Says hello with `token`; returns the answer.
-async fn hello<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, token: &str) -> Body {
+pub(crate) async fn hello<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, token: &str) -> Body {
+    hello_as(socket, token, "").await
+}
+
+/// `hello` from a device that gives its own name.
+pub(crate) async fn hello_as<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    token: &str,
+    name: &str,
+) -> Body {
     let hello = v1::Hello {
         protocol_version: PROTOCOL_VERSION,
         client_version: "test".into(),
         token: token.into(),
         device_kind: v1::DeviceKind::Phone.into(),
         workspace_patches: false,
+        device_name: name.into(),
+        ..Default::default()
     };
     let message = ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
     socket.send(Message::Binary(message.encode_to_vec().into())).await.expect("send");
@@ -134,7 +150,7 @@ async fn hello<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: 
 }
 
 /// The next message; None once the connection closes.
-async fn next<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>) -> Option<Body> {
+pub(crate) async fn next<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>) -> Option<Body> {
     loop {
         match tokio::time::timeout(WAIT, socket.next()).await.expect("in time") {
             Some(Ok(Message::Binary(bytes))) => return ServerMessage::decode(bytes).expect("decode").body,
@@ -152,11 +168,14 @@ async fn workspace(socket: &mut Socket) -> v1::Workspace {
     }
 }
 
-/// This machine's pairing code, once Factory has written it.
+/// This machine's pairing code, once Factory has written it with the
+/// tunnel's address (a new home's first one has none until it binds).
 async fn local_pairing(dir: &Path) -> String {
     let path = dir.join("home/remote/local-pairing");
     for _ in 0..200 {
-        if let Ok(code) = std::fs::read_to_string(&path) {
+        if let Ok(code) = std::fs::read_to_string(&path)
+            && code.contains("&a=")
+        {
             return code;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -164,7 +183,29 @@ async fn local_pairing(dir: &Path) -> String {
     panic!("no local pairing code");
 }
 
-#[tokio::test]
+/// Another device of the person's, paired with a code and allowed, as an
+/// app through the private tunnel (from this machine, so remote access
+/// can stay off; a relay of its own, so pairing needs no network).
+pub(crate) async fn another_device(addr: SocketAddr, name: &str) -> (Client, v1::Workspace) {
+    let home = crate::common::home_of(addr);
+    let local = parse(&local_pairing(home.root().parent().expect("the test's folder")).await);
+    let (mut setup, _, _) = Client::connect(addr).await;
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    setup.ok(client_message::Body::SetRemoteAccess(relays)).await;
+    let (token, _) = factoryd::remote::pair(&home, name).expect("paired");
+    let device = new_device().await;
+    let connection = dial(&device, &local, &local.addresses).await.expect("let in");
+    let (send, receive) = connection.open_bi().await.expect("stream");
+    let mut client = Client::over(Box::new(tokio::io::join(receive, send)), Some(Box::new((device, connection)))).await;
+    let hello = v1::Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token, ..Default::default() };
+    client.send(v1::ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) }).await;
+    assert!(matches!(client.receive().await.body, Some(Body::PairingPending(_))));
+    factoryd::remote::approve(&home, name).expect("allowed");
+    let (workspace, _) = client.welcomed().await;
+    (client, workspace)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -176,11 +217,10 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     assert!(local.relays.is_empty(), "no relays while remote access is off: {written}");
     assert!(matches!(local.addresses.as_slice(), [address] if address.ip().is_loopback()), "{written}");
 
-    // Until this machine's app has used the tunnel, the loopback port lets in
-    // a client without a token: the app from before the tunnel, during an
-    // update.
-    let mut old_app = loopback(addr).await;
-    assert!(matches!(hello(&mut old_app, "").await, Body::Welcome(_)));
+    // The loopback port never lets in a client without the token: any user
+    // of this machine can reach it.
+    let mut stranger = loopback(addr).await;
+    assert!(matches!(hello(&mut stranger, "").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
 
     // The app, with a key of its own, gets Factory as on the loopback port.
     let app = new_device().await;
@@ -199,8 +239,7 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     // A wrong token from this machine is refused all the same.
     let mut wrong = open(&connection).await;
     assert!(matches!(hello(&mut wrong, "0000").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
-    // From now on the loopback port wants the token: an agent on this
-    // machine can't drive Factory without it.
+    // Nor after this machine's app has used the tunnel.
     let mut unknown = loopback(addr).await;
     match hello(&mut unknown, "").await {
         Body::Error(error) => {
@@ -219,7 +258,7 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     assert!(matches!(hello(&mut laptop, &token).await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
     factoryd::remote::unpair(&home(&dir), "laptop").expect("unpaired");
     // Deleting the code's file makes a new token, and keeps the port closed.
-    drop((old_app, script));
+    drop((stranger, script));
 
     // A new backend on the same data keeps the key and the token.
     drop((socket, second, wrong, unknown, laptop, connection));
@@ -235,7 +274,7 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     assert!(matches!(hello(&mut unknown, "").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_and_unpair_cuts_them_off() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -368,7 +407,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert!(matches!(apply_request(&mut client, &mut view, unknown).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn factoryd_pair_makes_a_code_for_the_running_factory() {
     let dir = temp_dir();
     let (_addr, _factory) = start(&dir).await;
@@ -382,7 +421,7 @@ async fn factoryd_pair_makes_a_code_for_the_running_factory() {
     assert!(factoryd::remote::unpair(&home(&dir), "local").is_err(), "this machine's app isn't a device to unpair");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_app_browses_this_machines_folders() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
@@ -447,7 +486,7 @@ async fn ask<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let dir = temp_dir();
     let (_addr, factory) = start(&dir).await;
@@ -528,7 +567,7 @@ async fn turned_away(socket: &mut Socket, case: &str) -> String {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_they_stop_pairing() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -589,7 +628,7 @@ async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_th
 /// An app that offers `claktory/2` gets it: the same protocol, compressed
 /// both ways, each message arriving as soon as it's sent. One that offers
 /// only `claktory/1` (every app before it) gets that, as before.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connects() {
     let dir = temp_dir();
     let (_addr, _factory) = start(&dir).await;
@@ -641,7 +680,7 @@ async fn forward_to(connection: &Connection, port: u16) -> (String, SendStream, 
 /// A paired device reaches what listens on this machine's localhost, as a
 /// browser on the device coming back from a sign-in does; nobody else does,
 /// nor Claktory's own port, and unpairing ends it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paired_device_forwards_to_this_machines_localhost() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let dir = temp_dir();

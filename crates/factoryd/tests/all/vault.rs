@@ -143,7 +143,10 @@ async fn the_person_grants_reveals_and_deletes_with_no_passphrase() {
     let Body::SecretUses(uses) = &uses.body else { panic!("expected uses, got {:?}", uses.body) };
     let kinds: Vec<(&str, &str, &str)> =
         uses.uses.iter().map(|used| (used.kind.as_str(), used.agent_id.as_str(), used.detail.as_str())).collect();
-    assert_eq!(kinds, [("revoke", "builder", ""), ("reveal", "", "this computer"), ("grant", "builder", "")]);
+    // Revealed on this computer's app, by its device's name.
+    let devices = factoryd::remote::devices(&crate::common::home(&dir)).expect("devices");
+    let this_computer = devices.iter().find(|device| device.local).map(|device| device.name.as_str()).expect("this computer");
+    assert_eq!(kinds, [("revoke", "builder", ""), ("reveal", "", this_computer), ("grant", "builder", "")]);
 
     // Deleted; granted again first, the grant goes with it.
     client.request(grant()).await;

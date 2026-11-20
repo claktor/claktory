@@ -31,8 +31,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str =
-    "usage: factoryd [--dev] [supervise | login [PROVIDER] | pair NAME | allow DEVICE | deny DEVICE | unpair DEVICE | devices]";
+const USAGE: &str = factoryd::cli::USAGE;
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
@@ -44,6 +43,12 @@ enum MainError {
     Open(#[from] OpenError),
     #[error("could not listen on {addr}: {source}")]
     Bind { addr: SocketAddr, source: std::io::Error },
+    /// The port is taken, most likely by another user's Claktory on this
+    /// computer: said plainly, since it's what the person can act on.
+    #[error(
+        "Another Claktory on this computer already uses port {0} (another user's, say), so this one can't start. Stop that one, or start this one on another port with FACTORY_PORT."
+    )]
+    PortInUse(u16),
     #[error("login failed: {0}")]
     Login(#[from] factory_agent::Error),
     #[error("FACTORY_PORT must be a port number: {0}")]
@@ -63,12 +68,24 @@ fn main() -> ExitCode {
     // `factoryd install` and `uninstall`, run by the Mac app: their answer
     // is one JSON line on stdout, so no logs there.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // What the supervisor in this binary does, as a number, for updates to
+    // tell whether the installed one needs replacing (see
+    // update::SUPERVISOR_VERSION).
+    if args.iter().map(String::as_str).filter(|arg| *arg != "--dev").eq(["supervisor-version"]) {
+        println!("{}", update::SUPERVISOR_VERSION);
+        return ExitCode::SUCCESS;
+    }
     if let Some(at) = args.iter().position(|arg| arg != "--dev")
         && (args[at] == "install" || args[at] == "uninstall")
     {
         let mut flags: Vec<String> = args[..at].to_vec();
         flags.extend_from_slice(&args[at + 1..]);
         return if args[at] == "install" { factoryd::install::main(&flags) } else { factoryd::uninstall::main(&flags) };
+    }
+    // The commands for setting Claktory up from a shell, with --json: they
+    // talk to the running backend, and print one JSON line, so no logs.
+    if let Some(code) = factoryd::cli::dispatch(&args) {
+        return code;
     }
     serve_main()
 }
@@ -130,16 +147,14 @@ async fn run() -> Result<(), MainError> {
         [supervise] if supervise == "supervise" => supervise_backend(instance.home, dev).await,
         [login] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), None).await?),
         [login, provider] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), Some(provider)).await?),
-        [pair, name @ ..] if pair == "pair" && !name.is_empty() => {
+        [pair, name @ ..] if pair == "pair" => {
             // `--host ADDRESS`, from before the private tunnel: devices find
-            // this machine by its key now, so it's left out.
+            // this machine by its key now, so it's left out. Without a name,
+            // the device that uses the code gives its own.
             let name = match name {
                 [name @ .., flag, _] if flag == "--host" => name,
                 name => name,
             };
-            if name.is_empty() {
-                return Err(MainError::Usage);
-            }
             let (code, device) = factoryd::remote::pair_offline(&instance.home, &name.join(" "))?;
             let minutes = factoryd::remote::CODE_LIFETIME.as_secs() / 60;
             // A terminal gets the code as a QR code too, to scan from the
@@ -275,7 +290,8 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
 /// Runs the backend at `<home>/bin/factoryd` and keeps it running: an exit
 /// that hands over to an update starts the new one right away, a crash starts
 /// it again after a pause, and an update that dies before passing its trial is
-/// undone. Stops it on SIGTERM or SIGINT.
+/// undone. Stops it on SIGTERM or SIGINT. A change to what it does needs
+/// update::SUPERVISOR_VERSION bumped, or installed Claktories keep the old.
 async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = signal(SignalKind::terminate()).map_err(MainError::Signal)?;
@@ -405,7 +421,10 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
 
 async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
     let Instance { home, addr } = instance;
-    let listener = TcpListener::bind(addr).await.map_err(|source| MainError::Bind { addr, source })?;
+    let listener = TcpListener::bind(addr).await.map_err(|source| match source.kind() {
+        std::io::ErrorKind::AddrInUse => MainError::PortInUse(addr.port()),
+        _ => MainError::Bind { addr, source },
+    })?;
     let models = Arc::new(Registry::new(home.auth_path()));
     let factory = Factory::open(home.clone(), models).await?;
     if let Some(handed) = handed {

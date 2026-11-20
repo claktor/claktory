@@ -1,7 +1,7 @@
 # claktory-account HTTP API, v1
 
-The contract between a Claktory's backend (factoryd) and the account service
-(`claktory-account`). The design is in Opus Researcher's
+The contract between a Claktory's backend (factoryd), the app on a person's
+devices (Devices, below) and the account service (`claktory-account`). The design is in Opus Researcher's
 `claktory-account.md`; this is what the service implements. Only add to it:
 never change what a field means.
 
@@ -40,6 +40,20 @@ never change what a field means.
   A token without its key is useless. Signatures are deterministic, so the
   same request twice in one second is refused as `replayed`: a retry signs
   again with the time then.
+- **A device's account key**: Ed25519, made by the app on a device (a phone,
+  a laptop), given at its sign-in (`account_key`). Requests marked *device
+  signed* carry `Authorization: Device <b64(account key)>` with the same
+  `Claktory-Time` and `Claktory-Signature` as signed requests, by the
+  account key, over the same bytes; the same `clock_skew` and `replayed`.
+- **A device assertion**: `b64(payload) "." b64(sig)`, where payload is the
+  JSON `{"v": 1, "account_id", "account_key", "device_key": "<64 hex>",
+  "iat", "exp"}` (exp = iat + 3600) and sig the service key's signature over
+  `"claktory device assertion v1\n" ‖ payload`. It says that whoever holds
+  the tunnel key `device_key` (an iroh endpoint id) is signed in to the
+  account, through the device with `account_key`. A Claktory checks it
+  offline with its pinned service key, that the account is its own and that
+  `device_key` is the key the device connected with, with 60 s of leeway on
+  the times (`protocol::verify_device_assertion`).
 - **The service share** `S` (32 bytes) = HMAC-SHA256(K_share,
   `"claktory share v1" 0x00 claktory_id 0x00 u64be(epoch)`). Never stored;
   only ever sent sealed.
@@ -60,6 +74,8 @@ never change what a field means.
 - `version`, `platform`: up to 40 characters; platform like `macos-arm64`,
   `linux-x86_64`.
 - Endpoint ids: iroh endpoint ids, 64 hex characters.
+- A device's `name`: what it's called ("Matt's iPhone"), tidied as a
+  Claktory's name.
 
 ## Endpoints
 
@@ -72,7 +88,9 @@ never change what a field means.
 ```
 Emails a 6-digit code (it works for 15 minutes, 5 tries), from
 `code@<mail domain>` (`code@auth.claktory.com`). Answers the same whether or
-not the account exists: `200 {"request_id": "…", "expires_in": 900}`.
+not the account exists: `200 {"request_id": "…", "expires_in": 900, "code_from": "code@auth.claktory.com"}`
+(`code_from`, the address the code comes from, is newer: a client reads its
+absence as unknown).
 Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`
 (per email 5 an hour and 20 a day, per IP 30 sign-ins a day),
 `503 email_unavailable` (the day's email cap is reached, or the mail
@@ -166,15 +184,71 @@ once a minute; `Cache-Control: public, max-age=300` and
 `Access-Control-Allow-Origin: *`, for a counter on claktory.com.
 
 ### `PUT /v1/endpoints` (signed)
-`{"backend": "<64 hex>", "devices": ["<64 hex>", …]}` → `200 {"count": 3}`.
+`{"backend": "<64 hex>", "devices": ["<64 hex>", …], "name": "Mac mini", "color": "blue", "relays": ["https://…"]}` → `200 {"count": 3}`.
 Replaces this Claktory's iroh endpoint ids for the relay allowlist (20 at
-most: `400 too_many_endpoints`). Errors: `401`, `403 revoked`.
+most: `400 too_many_endpoints`). `name`, `color` and `relays` (newer, each
+optional) are the Claktory's own name and color and the relays its pairing
+codes give, for devices that find it through the account: kept until it
+sends them again, the name tidied as at sign-in, a color that isn't a
+label (up to 40 of `A-Z a-z 0-9 . _ + -`) and relays that aren't http(s)
+URLs (200 characters at most, 8 kept) left out rather than refused.
+Errors: `401`, `403 revoked`.
+
+### Devices
+
+A person's devices sign in to the account themselves, to find its
+Claktories and connect to them without a pairing code. A Claktory still
+decides who gets in: the first device of a Claktory signed in less than 30
+minutes ago at once, every other one once the person allows it on a device
+already in (or with a pairing code too).
+
+#### `POST /v1/devices/sign-in/start`
+```json
+{"email": "…", "account_key": b64, "name": "Matt's iPhone", "platform": "ios", "version": "v0.1.13"}
+```
+Emails a 6-digit code (15 minutes, 5 tries) for signing in on that device,
+which works only with that account key. Limits are a Claktory sign-in's,
+counted together with them. `200 {"request_id", "expires_in": 900, "code_from"}`.
+Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`,
+`503 email_unavailable`.
+
+#### `POST /v1/devices/sign-in/verify` (device signed, by the key that started it)
+`{"request_id", "code"}` → `200 {"account_id", "email", "name"}`. Makes the
+account if it's new and binds the account key to it (from another account,
+it moves, and the old account's assertions for it leave the allowlist).
+Errors: `400 wrong_code`, `410 code_expired`, `401 unauthorized` (another
+key, which spends none of the code's tries), `403 too_many_devices` (30 per
+account).
+
+#### `GET /v1/devices/me` (device signed)
+`200 {"account_id", "email", "name"}`, or `401 unauthorized` when the key isn't
+bound: never signed in, signed out, or removed at claktory.com/account.
+
+#### `POST /v1/devices/sign-out` (device signed)
+`{}` → `200 {}`: the key is unbound (also when it wasn't bound), and the
+device keys of its assertions leave the allowlist.
+
+#### `GET /v1/claktories` (device signed)
+`200 {"claktories": [{"claktory_id", "name", "color", "machine", "platform", "version", "endpoint_id", "relays": [], "last_contact_ms"}]}`:
+the account's Claktories that aren't removed, newest contact first. `name`
+and `color` are the Claktory's own (until it sends them, its computer's name
+and ""); `machine` is its computer's name; `endpoint_id` and `relays` are what
+its pairing codes give (`e=`, `r=`), empty if it never registered.
+
+#### `POST /v1/devices/assertion` (device signed)
+`{"device_key": "<64 hex>"}` → `200 {"assertion", "expires_in": 3600}`, for
+the tunnel key the device connects to one Claktory with (a device may use
+one per Claktory). 60 an hour per account key. Its `device_key` goes on the
+relay allowlist for a day after its last assertion. Errors: `400
+invalid_request`, `401 unauthorized`, `429 rate_limited`.
 
 ### `GET /v1/relay/allowlist?since=<version>` (relays only)
 `Authorization: Bearer <relay bearer>` →
 `200 {"version": 7, "endpoints": ["<64 hex>", …]}`, or
 `200 {"version": 7, "unchanged": true}` when `since` is the current version.
-Endpoints of Claktories that aren't removed. For Claktory's own relays,
+Endpoints of Claktories that aren't removed, and the device keys
+assertions were made for in the last day (dropped within the hour after),
+of devices still signed in. For Claktory's own relays,
 later: `claktory-account relay-access` runs beside a relay and answers its
 `access.http` checks from this list.
 
@@ -182,7 +256,8 @@ later: `claktory-account relay-access` runs beside a relay and answers its
 Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, recent unlocks with their IP, and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
-model in the last 30); **Remove** a Claktory (what `revoked` means above);
+model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
+(name, platform, last seen), each with **Remove** (its key is unbound);
 **Delete account** (its Claktories' usage stays only in anonymous totals);
 **Download my data** (JSON, everything kept about the account). Whoever runs
 the service (`--admin-email`) also gets **Usage counts** at `/account/admin`,
@@ -205,6 +280,7 @@ logged.
 | 401 | `replayed` | |
 | 403 | `revoked` | the Claktory was removed from its account |
 | 403 | `too_many_claktories` | |
+| 403 | `too_many_devices` | |
 | 404 | `not_found` | |
 | 409 | `claktory_taken` | |
 | 410 | `code_expired` | |

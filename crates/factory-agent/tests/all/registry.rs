@@ -101,6 +101,7 @@ fn fake_provider(oauth: Option<Arc<dyn OAuthFlow>>, api: Option<Arc<dyn Api>>) -
         plan: None,
         identity: None,
         reset: None,
+        check_key: None,
     }
 }
 
@@ -225,11 +226,16 @@ async fn an_expiring_oauth_credential_is_refreshed_once_and_written_back() {
 #[tokio::test]
 async fn login_stores_the_credential_and_logout_removes_it() {
     let dir = tempfile::tempdir().unwrap();
-    let registry = registry(dir.path(), &[]);
+    // OpenAI, which accepts the key when asked.
+    let server = crate::support::server::serve(vec![crate::support::server::served_json(200, json!({"data": []}))]).await;
+    let registry = registry(dir.path(), &[("OPENAI_BASE_URL", &server.base_url)]);
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let typing = Typing { answer: "typed-key".into(), prompts: prompts.clone() };
     let credential = registry.login("openai", "api_key", &typing).await.unwrap();
     assert_eq!(credential, Credential::ApiKey { key: "typed-key".into(), extra: Default::default() });
+    let asked = server.requests.lock().clone();
+    assert_eq!(asked.iter().map(|request| (request.method.as_str(), request.path.as_str())).collect::<Vec<_>>(), [("GET", "/models")]);
+    assert!(asked[0].headers.contains(&("authorization".into(), "Bearer typed-key".into())), "{:?}", asked[0].headers);
     assert_eq!(prompts.lock().clone(), vec![AuthPrompt::Secret { message: "Enter OpenAI API key".into(), placeholder: None }]);
     assert_eq!(registry.check_auth("openai").await.unwrap(), Some(AuthCheck { source: Some("stored credential".into()), kind: "api_key" }));
     assert_eq!(registry.login("openai", "oauth", &typing).await.unwrap_err().to_string(), "OpenAI does not support oauth login");
@@ -389,6 +395,7 @@ async fn a_cancelled_login_reports_the_abort_signal_text() {
         plan: None,
         identity: None,
         reset: None,
+        check_key: None,
     };
     let registry = Registry::with_providers(FileCredentialStore::new(dir.path().join("auth.json")), env(&[]), vec![provider]);
     let waiting = Waiting { cancel: CancellationToken::new() };

@@ -141,6 +141,20 @@ impl ApiKeyAuth for EnvApiKeyAuth {
     }
 }
 
+/// Whether a token endpoint's error answer refuses the refresh token itself
+/// (revoked, expired or used up), so only signing in again helps, rather than
+/// failing for now: OAuth's `invalid_grant`, ChatGPT's `refresh_token_…`
+/// codes, or a 401.
+pub fn refresh_refused(status: u16, body: &str) -> bool {
+    status == 401 || ((400..500).contains(&status) && (body.contains("invalid_grant") || body.contains("refresh_token_")))
+}
+
+/// A token endpoint's refusal of the refresh token, as `Error::Models` with
+/// the `REFUSED` code; any other failure as it is.
+pub fn refusal(refused: bool, message: String) -> Error {
+    if refused { Error::Models { code: crate::errors::REFUSED, message } } else { Error::Other(message) }
+}
+
 pub trait OAuthFlow: Send + Sync {
     fn name(&self) -> &str;
     fn is_subscription(&self) -> bool;
@@ -226,7 +240,10 @@ async fn resolve_stored_oauth(
                 };
                 match tokio::time::timeout(OAUTH_REFRESH_TIMEOUT, oauth.refresh(current, cancel.clone())).await {
                     Ok(Ok(refreshed)) => Ok(Some(refreshed)),
-                    Ok(Err(error)) => Err(models_error("oauth", format!("OAuth refresh failed for {id}"), Some(&error))),
+                    Ok(Err(error)) => {
+                        let code = if error.is_refused() { crate::errors::REFUSED } else { "oauth" };
+                        Err(models_error(code, format!("OAuth refresh failed for {id}"), Some(&error)))
+                    }
                     Err(_) => {
                         let timeout = Error::Other("The operation was aborted due to timeout".into());
                         Err(models_error("oauth", format!("OAuth refresh failed for {id}"), Some(&timeout)))

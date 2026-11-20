@@ -44,7 +44,7 @@ async fn starting_answers_alike_for_any_email_and_refuses_bad_fields() {
     let claktory = Claktory::new("198.51.100.3");
     let answer = instance.start_sign_in(&claktory, "new@example.com", "Mac mini").await;
     let started: SignInStarted = answer.json();
-    assert_eq!(started.expires_in, 900);
+    assert_eq!((started.expires_in, started.code_from.as_str()), (900, "code@auth.claktory.com"));
 
     let answer = instance.start_sign_in(&claktory, "not an email", "Mac mini").await;
     assert_eq!((answer.status, answer.error().as_str()), (400, "invalid_email"));

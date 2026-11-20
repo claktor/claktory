@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'connections.dart';
 import 'drafts.dart';
 import 'identity.dart';
+import 'links.dart' show appLinks;
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
@@ -18,7 +20,15 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final drafts = await DeviceDrafts.load(DeviceDraftStorage());
   final connections = await Connections.load(DeviceConnectionStorage());
-  runApp(FactoryApp(drafts: drafts, connections: connections));
+  runApp(
+    FactoryApp(
+      drafts: drafts,
+      connections: connections,
+      localBackend: await runsClaktoryHere(),
+    ),
+  );
+  // Links that opened the app, such as claktory://add?code=… (links.dart).
+  unawaited(appLinks.listen());
 }
 
 class FactoryApp extends StatefulWidget {
@@ -54,35 +64,70 @@ class FactoryApp extends StatefulWidget {
 }
 
 class _FactoryAppState extends State<FactoryApp> {
-  late final _claktories = Claktories(
+  late final _claktories = _made = Claktories(
     connections: widget.connections,
     localBackend: widget.localBackend ?? hasLocalBackend,
     open: widget.open ?? _open,
     drafts: widget.drafts,
+    // A Mac keeps whether it runs a Claktory of its own.
+    keepLocal: _canChooseLocal ? _keepLocal : null,
   );
+  Claktories? _made;
   final _appBuild = AppBuild.current();
 
-  /// Setting this Mac up, on the first launch of the app downloaded for it.
-  late final MacSetup? _setup = _startSetup();
+  /// Whether this Mac runs a Claktory of its own now: until the
+  /// Claktories are made, as the app started.
+  bool get _localNow =>
+      _made?.localBackend ?? widget.localBackend ?? hasLocalBackend;
 
-  MacSetup? _startSetup() {
-    final channel =
-        widget.setupChannel ?? (setsUpThisMac ? const SetupChannel() : null);
-    if (channel == null || !_claktories.localBackend) return null;
+  /// The channel that sets this Mac up and keeps its choice, where there
+  /// is one.
+  SetupChannel? get _channel =>
+      widget.setupChannel ?? (setsUpThisMac ? const SetupChannel() : null);
+
+  bool get _canChooseLocal =>
+      widget.setupChannel != null ||
+      defaultTargetPlatform == TargetPlatform.macOS;
+
+  /// Setting this Mac up, on the first launch of the app downloaded for
+  /// it, or once the person chooses this Mac after all.
+  MacSetup? _setup;
+
+  void _startSetup({bool ask = true}) {
+    final channel = _channel;
+    _setup?.dispose();
+    _setup = null;
+    if (channel == null || !_claktories.localBackend) return;
     final local = _claktories.all.firstWhere((each) => each.target == null);
-    final setup = MacSetup(
+    final setup = _setup = MacSetup(
       channel: channel,
       connected: local.backend.connected,
       reconnect: local.backend.reconnectNow,
+      ask: ask,
+      elsewhere: () => _claktories.setLocalBackend(false),
     );
     unawaited(setup.start());
-    return setup;
+  }
+
+  /// Keeps the person's choice: this Mac runs a Claktory of its own, or
+  /// only shows others. Chosen here after all, it's set up.
+  Future<void> _keepLocal(bool local) async {
+    await (_channel ?? const SetupChannel()).setAppOnly(!local);
+    if (!mounted) return;
+    if (local) {
+      setState(() => _startSetup(ask: false));
+    } else if (_setup?.stage != SetupStage.done) {
+      setState(() {
+        _setup?.dispose();
+        _setup = null;
+      });
+    }
   }
 
   @override
   void initState() {
     super.initState();
-    _setup;
+    _startSetup();
   }
 
   /// The window, as an overlay entry: the root layer the phone's list of
@@ -96,7 +141,7 @@ class _FactoryAppState extends State<FactoryApp> {
       transcript: TranscriptStore(),
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
-      localBackend: widget.localBackend ?? hasLocalBackend,
+      localBackend: _localNow,
     );
     // The device's key for each Claktory, kept with its pairing.
     backend.deviceKey = widget.connections.deviceKey;
@@ -121,9 +166,9 @@ class _FactoryAppState extends State<FactoryApp> {
     // to the next, and its stores are already live, so it shows at once.
     // The rail sits inside it, so its dialogs cover the whole window.
     if (isPhoneLayout(context)) {
-      return PhoneClaktories(shell: Shell(key: ValueKey(shown.key)));
+      return PhoneClaktories(shell: Shell(key: ObjectKey(shown)));
     }
-    return Shell(key: ValueKey(shown.key), rail: const ClaktoryRail());
+    return Shell(key: ObjectKey(shown), rail: const ClaktoryRail());
   }
 
   @override
@@ -152,10 +197,7 @@ class _FactoryAppState extends State<FactoryApp> {
                 ),
               ),
             );
-            final setup = _setup;
-            return setup == null
-                ? scope
-                : SetupScope(setup: setup, child: scope);
+            return SetupScope(setup: _setup, child: scope);
           },
         ),
       ),

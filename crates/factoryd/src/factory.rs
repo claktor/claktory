@@ -109,6 +109,10 @@ pub enum RequestError {
     Monitor(String),
     #[error("no paired device \"{0}\"")]
     UnknownDevice(String),
+    /// The code of an agent's pairing (ShowPairingCode) that no longer
+    /// waits for a device, and why.
+    #[error("{0}")]
+    NoPairingCode(String),
     /// Remote access can't do that now, and why.
     #[error("{0}")]
     Remote(String),
@@ -176,6 +180,7 @@ impl RequestError {
             | RequestError::UnknownOption { .. }
             | RequestError::NoTask(_)
             | RequestError::UnknownDevice(_)
+            | RequestError::NoPairingCode(_)
             | RequestError::NoApp { .. }
             | RequestError::UnknownProposal(_)
             | RequestError::UnknownThread(_)
@@ -324,6 +329,8 @@ pub struct Factory {
     pub(crate) key_seed: String,
     /// This Claktory's account at claktory.com (`crate::account`).
     pub(crate) account: crate::account::State,
+    /// A new Claktory's first run (`crate::onboarding`).
+    pub(crate) onboarding: crate::onboarding::State,
     /// Notified when a project is unarchived: its agents read what waited.
     unarchived: tokio::sync::Notify,
 }
@@ -488,6 +495,14 @@ impl Runtime {
 impl Factory {
     pub async fn open(home: Home, models: Arc<dyn Models>) -> Result<Arc<Factory>, OpenError> {
         tokio::fs::create_dir_all(home.workspace()).await?;
+        // Only this user may open the home, and the loopback port wants the
+        // local pairing code's token from the first client on.
+        let local = home.clone();
+        match tokio::task::spawn_blocking(move || crate::remote::prepare_local(&local)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "could not write this machine's pairing code"),
+            Err(error) => tracing::error!(%error, "could not write this machine's pairing code"),
+        }
         let mut created = false;
         let (config, config_error) = match tokio::fs::read_to_string(home.config_path()).await {
             Ok(text) => match Config::parse(&text) {
@@ -554,7 +569,8 @@ impl Factory {
         let key_color = crate::remote::key_color(&home);
         let key_seed = crate::remote::key_seed(&home);
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
-        let account = crate::account::State::new(&home);
+        let account = crate::account::State::new(&home, created, inner.config.account.enabled);
+        let onboarding = crate::onboarding::State::load(&store, created, &inner.models)?;
         let factory = Arc::new(Factory {
             home,
             models,
@@ -586,6 +602,7 @@ impl Factory {
             vault,
             apps: crate::apps::Apps::default(),
             account,
+            onboarding,
             unarchived: tokio::sync::Notify::new(),
             key_color,
             key_seed,
@@ -608,6 +625,8 @@ impl Factory {
         tokio::spawn(crate::extensions::monitors::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::characters::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::remote::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::extensions::devices::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::onboarding::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::resources::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
@@ -857,6 +876,7 @@ impl Factory {
         crate::extensions::memory::forget(&self.store, id)?;
         crate::extensions::monitors::forget(self, id)?;
         crate::proposals::forget(&self.store, id)?;
+        crate::extensions::devices::forget(self, id).await?;
         crate::extensions::viewer::forget(self, id)?;
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
@@ -1224,6 +1244,9 @@ impl Factory {
         if let Err(error) = crate::proposals::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read proposals; decided ones show as pending");
         }
+        if let Err(error) = crate::extensions::devices::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read the devices it adds; they show as waiting");
+        }
         match self.vault.requests_of(id) {
             Ok(requests) => {
                 for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
@@ -1263,6 +1286,7 @@ impl Factory {
         requests.iter().any(|request| request.state() == v1::SecretRequestState::Pending)
             || connects.iter().any(|proposal| proposal.state() == v1::ConnectProposalState::Pending)
             || crate::proposals::pending_of(&self.store, id)
+            || crate::extensions::devices::waiting_of(&self.store, id)
     }
 
     /// Changes the config in memory and on disk, or changes nothing.
@@ -1392,6 +1416,7 @@ impl Factory {
             inner.providers = providers;
             self.broadcast_workspace(&inner);
             self.capacity_changed();
+            self.onboarding.models_changed.notify_one();
         }
     }
 
@@ -1725,6 +1750,16 @@ impl Factory {
         self.send(body);
     }
 
+    /// How many apps are connected now.
+    pub(crate) fn clients(&self) -> usize {
+        self.events.receiver_count()
+    }
+
+    /// Whether Settings shows Apps (Workspace.apps_available).
+    pub(crate) fn apps_available(&self) -> bool {
+        self.apps.available()
+    }
+
     pub(crate) fn send(&self, body: Body) {
         if self.events.receiver_count() == 0 {
             return;
@@ -1880,6 +1915,7 @@ impl Factory {
                     .collect(),
                 name: config.claktory_name(),
                 color: config.claktory_color(self.key_color).to_owned(),
+                onboarding: Some(self.onboarding.view()),
             }),
         }
     }
@@ -1918,7 +1954,7 @@ fn folder_mut<'a>(config: &'a mut Config, project: &str, id: &str) -> Result<&'a
 }
 
 /// "high" if the model takes it, otherwise its strongest effort.
-fn fitting_effort<'a>(models: &'a [v1::Model], model: &str) -> &'a str {
+pub(crate) fn fitting_effort<'a>(models: &'a [v1::Model], model: &str) -> &'a str {
     let Some(model) = models.iter().find(|candidate| candidate.id == model) else { return config::DEFAULT_EFFORT };
     if model.efforts.iter().any(|effort| effort == config::DEFAULT_EFFORT) {
         return config::DEFAULT_EFFORT;
@@ -1931,7 +1967,7 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
         Some(problem) => format!("This conversation couldn't be loaded: {problem}"),
         None => "This conversation couldn't be loaded.".to_owned(),
     };
-    let notice = v1::Notice { text, level: v1::NoticeLevel::Error.into() };
+    let notice = v1::Notice { text, level: v1::NoticeLevel::Error.into(), ..Default::default() };
     let entry = v1::Entry { seq: 0, timestamp_ms: crate::transcript::now_ms(), kind: Some(v1::entry::Kind::Notice(notice)), reply: 0 };
     v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false }
 }

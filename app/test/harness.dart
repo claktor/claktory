@@ -247,6 +247,29 @@ class RecordingBackend extends Backend {
     return pairingCode;
   }
 
+  /// What [showPairingCode] answers, by pairing id; a pairing not in it is
+  /// refused as no longer waiting.
+  final shownCodes = <String, PairingCode>{};
+
+  @override
+  Future<PairingCode> showPairingCode(String pairingId) async {
+    await _record(
+      ClientMessage(showPairingCode: ShowPairingCode(pairingId: pairingId)),
+    );
+    final code = shownCodes[pairingId];
+    if (code == null) {
+      throw const RequestFailure(
+        'That pairing no longer waits.',
+        code: ErrorCode.ERROR_CODE_NOT_FOUND,
+      );
+    }
+    return code;
+  }
+
+  @override
+  Future<void> skipModelStep() =>
+      _record(ClientMessage(setOnboarding: SetOnboarding(skipModel: true)));
+
   @override
   Future<void> unpairDevice(String deviceId) =>
       _record(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
@@ -479,6 +502,11 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(setHighlights: SetHighlights(on: on)));
 
   @override
+  Future<void> screenOpened(String id, bool opened) => _record(
+    ClientMessage(screenOpened: ScreenOpened(id: id, opened: opened)),
+  );
+
+  @override
   Future<void> setZoom(double zoom) =>
       _record(ClientMessage(setZoom: SetZoom(zoom: zoom)));
 
@@ -683,6 +711,10 @@ class RecordingBackend extends Backend {
   @override
   Future<void> accountResend() =>
       _record(ClientMessage(accountResend: AccountResend()));
+
+  @override
+  Future<void> skipAccountSignIn() =>
+      _record(ClientMessage(skipAccountSignIn: SkipAccountSignIn()));
 
   @override
   Future<void> accountSignOut() =>

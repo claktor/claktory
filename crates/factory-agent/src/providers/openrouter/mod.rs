@@ -25,14 +25,16 @@ const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasonin
 const TOOL_ID_LIMIT: usize = 40;
 
 pub fn provider() -> Provider {
-    Provider::new(
+    let mut provider = Provider::new(
         "openrouter",
         "OpenRouter",
         "https://openrouter.ai/api/v1",
         api_key(EnvApiKeyAuth { name: "OpenRouter API key", env_vars: &["OPENROUTER_API_KEY"], base_url_var: Some("OPENROUTER_BASE_URL") }),
         oauth(OpenRouterOAuth::new()),
         stream_simple,
-    )
+    );
+    provider.check_key = Some(crate::providers::keys::openrouter);
+    provider
 }
 
 /// `getCompat` for the fields an OpenRouter model reaches: detection by provider or base URL, then `model.compat`.
@@ -639,6 +641,8 @@ async fn request(
         let body = response_text(response).await;
         if crate::accounts::credit_error(status, &body) {
             crate::accounts::mark_out_of_credit(&mut parser.output);
+        } else if crate::accounts::refused_error(status, &body) {
+            crate::accounts::mark_refused(&mut parser.output, &crate::accounts::Refused::default());
         }
         return Err(completion_error(status_error(status, &body)));
     }

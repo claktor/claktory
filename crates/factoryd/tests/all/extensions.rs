@@ -93,6 +93,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "comments",
             "database",
             "database:factory",
+            "devices",
             "highlight",
             "memory",
             "memory:factory",
@@ -105,7 +106,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[7];
+    let manual = &view.workspace.extensions[8];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
     let records = &view.workspace.extensions[4];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
@@ -114,7 +115,8 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[5].enabled && !builder[5].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[6].enabled && !builder[6].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[5].enabled && !builder[5].enabled, "admins add the person's devices");
     assert!(builder[2].enabled, "comments on unless turned off");
     assert!(
         !builder[3].enabled

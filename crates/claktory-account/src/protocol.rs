@@ -30,6 +30,14 @@ pub const CODE_LIFETIME: i64 = 15 * 60;
 pub const CODE_TRIES: u32 = 5;
 /// A Claktory's name, at most, in characters.
 pub const NAME_LIMIT: usize = 40;
+/// The `Authorization` scheme of a device's signed calls: `Device <account
+/// key, base64url>`, with `Claktory-Time` and `Claktory-Signature` as a
+/// Claktory's.
+pub const DEVICE_AUTH: &str = "Device";
+/// How long a device assertion works, in seconds.
+pub const ASSERTION_LIFETIME: i64 = 3600;
+/// How far a device assertion's times may be from the verifier's clock.
+pub const ASSERTION_SKEW: i64 = 60;
 
 /// Base64url without padding, as the API writes binary values.
 pub fn b64(bytes: impl AsRef<[u8]>) -> String {
@@ -286,6 +294,10 @@ pub struct SignInStart {
 pub struct SignInStarted {
     pub request_id: String,
     pub expires_in: i64,
+    /// The address the code comes from ("code@auth.claktory.com"), so the
+    /// app can say what to look for; empty from a service before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code_from: String,
 }
 
 /// `POST /v1/sign-in/verify`.
@@ -434,11 +446,20 @@ pub fn valid_model(text: &str) -> bool {
 }
 
 /// `PUT /v1/endpoints`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Endpoints {
     pub backend: String,
     #[serde(default)]
     pub devices: Vec<String>,
+    /// The Claktory's own name and color (its Settings), and the relays its
+    /// pairing codes give, for devices that find it through the account
+    /// (`GET /v1/claktories`). Absent from Claktories before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -474,6 +495,121 @@ pub fn new_signing_key() -> SigningKey {
     SigningKey::from_bytes(&random_32())
 }
 
+/// `POST /v1/devices/sign-in/start`: a device (an app) signs in to the
+/// account with its account key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceSignInStart {
+    pub email: String,
+    /// The device's account key (Ed25519 public, base64url): every later
+    /// call is signed with it, and the code works only for it.
+    pub account_key: String,
+    /// The device's name, as the email says it: "Matt's iPhone".
+    pub name: String,
+    pub platform: String,
+    pub version: String,
+}
+
+/// `POST /v1/devices/sign-in/verify`, signed by the account key that started it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceSignInVerify {
+    pub request_id: String,
+    pub code: String,
+}
+
+/// The answer to `sign-in/verify` and `GET /v1/devices/me`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAccount {
+    pub account_id: String,
+    pub email: String,
+    /// The device's name, as it signed in.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `GET /v1/claktories`: the account's Claktories, newest contact first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClaktoryList {
+    pub claktories: Vec<ListedClaktory>,
+}
+
+/// A Claktory as a device finds it, to connect to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListedClaktory {
+    pub claktory_id: String,
+    /// Its own name and color (its Settings); its computer's name and ""
+    /// until it has sent them.
+    pub name: String,
+    pub color: String,
+    /// The computer's name, as sent at sign-in.
+    pub machine: String,
+    pub platform: String,
+    pub version: String,
+    /// Its tunnel endpoint id (64 hex) and relays, as its pairing codes give
+    /// them (e= and r=); empty when it never registered one.
+    pub endpoint_id: String,
+    pub relays: Vec<String>,
+    /// When it was last heard from, in ms since 1970.
+    pub last_contact_ms: i64,
+}
+
+/// `POST /v1/devices/assertion`, signed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssertionRequest {
+    /// The tunnel endpoint id (64 hex) the device will connect with.
+    pub device_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssertionIssued {
+    pub assertion: String,
+    pub expires_in: i64,
+}
+
+/// What a device assertion says: the service's word that whoever holds the
+/// tunnel key `device_key` is signed in to `account_id` (through the device
+/// with `account_key`), from `iat` to `exp` (unix seconds).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceAssertion {
+    pub v: u32,
+    pub account_id: String,
+    pub account_key: String,
+    pub device_key: String,
+    pub iat: i64,
+    pub exp: i64,
+}
+
+/// What a device assertion's signature covers, before its payload.
+const ASSERTION_LABEL: &[u8] = b"claktory device assertion v1\n";
+
+/// A device assertion, signed with the service key: `b64(payload) "."
+/// b64(signature)`, the signature over `ASSERTION_LABEL ‖ payload`.
+pub fn sign_device_assertion(service_key: &SigningKey, assertion: &DeviceAssertion) -> String {
+    let payload = serde_json::to_vec(assertion).unwrap_or_default();
+    let signature = service_key.sign(&[ASSERTION_LABEL, &payload].concat());
+    format!("{}.{}", b64(&payload), b64(signature.to_bytes()))
+}
+
+/// What a device assertion says, if `service_key` signed it and it's
+/// version 1, whenever it works: `verify_device_assertion` checks that too.
+pub fn read_device_assertion(service_key: &VerifyingKey, text: &str) -> Option<DeviceAssertion> {
+    let (payload, signature) = text.trim().split_once('.')?;
+    let payload = unb64(payload)?;
+    if !verify(service_key, &[ASSERTION_LABEL, &payload].concat(), signature) {
+        return None;
+    }
+    let assertion: DeviceAssertion = serde_json::from_slice(&payload).ok()?;
+    (assertion.v == 1).then_some(assertion)
+}
+
+/// What a device assertion says, if `service_key` signed it, it's version 1,
+/// and it works at `now` (unix seconds, give or take `ASSERTION_SKEW`).
+/// Whether its account and device key are the ones expected is the
+/// caller's to check.
+pub fn verify_device_assertion(service_key: &VerifyingKey, text: &str, now: i64) -> Option<DeviceAssertion> {
+    read_device_assertion(service_key, text)
+        .filter(|assertion| assertion.iat <= now + ASSERTION_SKEW && now <= assertion.exp + ASSERTION_SKEW)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +641,46 @@ mod tests {
         ] {
             assert!(!verify(&key.verifying_key(), &request_message(method, path, time, body), &signature));
         }
+    }
+
+    #[test]
+    fn a_device_assertion_holds_only_with_the_service_key_and_while_it_works() {
+        let service = new_signing_key();
+        let said = DeviceAssertion {
+            v: 1,
+            account_id: "acct".into(),
+            account_key: b64([7u8; 32]),
+            device_key: "ab".repeat(32),
+            iat: 1000,
+            exp: 1000 + ASSERTION_LIFETIME,
+        };
+        let text = sign_device_assertion(&service, &said);
+        assert_eq!(verify_device_assertion(&service.verifying_key(), &text, 1500), Some(said.clone()));
+        assert_eq!(
+            verify_device_assertion(&service.verifying_key(), &text, 1000 + ASSERTION_LIFETIME + ASSERTION_SKEW),
+            Some(said.clone())
+        );
+        assert_eq!(
+            verify_device_assertion(&service.verifying_key(), &text, 1000 + ASSERTION_LIFETIME + ASSERTION_SKEW + 1),
+            None,
+            "expired"
+        );
+        assert_eq!(read_device_assertion(&service.verifying_key(), &text), Some(said.clone()), "still readable");
+        assert_eq!(verify_device_assertion(&service.verifying_key(), &text, 900), None, "not yet");
+        assert_eq!(verify_device_assertion(&new_signing_key().verifying_key(), &text, 1500), None, "another key");
+        let (payload, signature) = text.split_once('.').expect("two parts");
+        let mut changed = said.clone();
+        changed.account_id = "other".into();
+        let forged = format!("{}.{signature}", b64(serde_json::to_vec(&changed).expect("json")));
+        assert_eq!(verify_device_assertion(&service.verifying_key(), &forged, 1500), None, "changed");
+        let mut later = said;
+        later.v = 2;
+        assert_eq!(
+            read_device_assertion(&service.verifying_key(), &sign_device_assertion(&service, &later)),
+            None,
+            "a version it doesn't know"
+        );
+        assert!(unb64(payload).is_some());
     }
 
     #[test]

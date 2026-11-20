@@ -20,6 +20,7 @@ import 'panes.dart' show pageOfKind, paneGlyph, paneTitle;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show ClaktoriesBackRow;
 import 'scanner.dart';
+import 'screens.dart' show ScreenOpener;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'sidebar.dart';
@@ -56,8 +57,24 @@ class _PhoneShellState extends State<PhoneShell> {
   String? _files;
   String? _file;
 
+  /// Where an agent's show_screen says it opened a conversation
+  /// (screens.dart): it's pushed over the list.
+  Listenable? _opened;
+
+  void _push() => _conversation.value = true;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final opened = ScreenOpener.conversations(context);
+    if (opened == _opened) return;
+    _opened?.removeListener(_push);
+    _opened = opened?..addListener(_push);
+  }
+
   @override
   void dispose() {
+    _opened?.removeListener(_push);
     _conversation.dispose();
     super.dispose();
   }

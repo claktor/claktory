@@ -292,6 +292,7 @@ pub mod fixtures {
         if status != 200 && factory_agent::accounts::credit_error(status, &body) {
             expected["outOfCredit"] = Value::Bool(true);
         }
+        crate::support::expect_refused(case, &mut expected);
         assert!(same_json(&actual, &expected), "{name}: {actual} != {expected}");
         if case["request"].is_null() {
             assert!(server.requests.lock().is_empty(), "{name}");
@@ -326,3 +327,14 @@ pub mod fixtures {
 pub mod auth;
 pub mod codex_server;
 pub mod server;
+
+/// Factory marks credentials the provider refused (not Pi), so the app can
+/// offer to change them: `expected` gets the mark when the case's answer
+/// refuses them (and isn't out of credit, which is marked instead).
+pub fn expect_refused(case: &serde_json::Value, expected: &mut serde_json::Value) {
+    let status = case["http"]["status"].as_u64().map_or(200, |status| status as u16);
+    let body = case["http"]["chunks"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect::<String>();
+    if status != 200 && !factory_agent::accounts::credit_error(status, &body) && factory_agent::accounts::refused_error(status, &body) {
+        expected["credentialsRefused"] = serde_json::json!({"account": "", "method": ""});
+    }
+}

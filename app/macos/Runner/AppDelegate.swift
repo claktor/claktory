@@ -31,11 +31,51 @@ class AppDelegate: FlutterAppDelegate {
     }
   }
 
+  /// A link for this app (claktory://add?code=…), clicked or opened with
+  /// `open`: passed on to the window.
+  override func application(_ application: NSApplication, open urls: [URL]) {
+    Links.open(urls)
+  }
+
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
   }
 
   override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
     return true
+  }
+}
+
+/// Links the app is opened with (app/lib/links.dart). Those that come
+/// before the window's Flutter asks for them (the link that launched the
+/// app) wait; after that each is passed on as it comes.
+enum Links {
+  private static var channel: FlutterMethodChannel?
+  private static var waiting: [String] = []
+  private static var listening = false
+
+  static func register(with messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "factory/links", binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "listen":
+        listening = true
+        result(waiting)
+        waiting = []
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    Self.channel = channel
+  }
+
+  static func open(_ urls: [URL]) {
+    for url in urls {
+      if listening, let channel {
+        channel.invokeMethod("opened", arguments: url.absoluteString)
+      } else {
+        waiting.append(url.absoluteString)
+      }
+    }
   }
 }

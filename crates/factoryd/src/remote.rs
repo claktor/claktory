@@ -28,12 +28,12 @@
 //! - A device on another machine can't make Factory replace an app bundle on
 //!   this machine (`InstallUpdate.app_path` is ignored for it).
 //!
-//! The loopback port (7420) wants the local pairing code's token too. Without
-//! one it lets a client in only until this machine's app has connected
-//! through the tunnel once: an app from before the tunnel keeps working
-//! through an update, and after that an agent on this machine can't drive
-//! Factory without the token. (It can read the token's file, as it runs as
-//! the same user: a bar, not a boundary.)
+//! The loopback port (7420) wants the local pairing code's token too, always:
+//! any user of this machine can reach the port, but only this one can read
+//! the code (`<home>` and `<home>/remote` are 0700, the file 0600). The code
+//! is written when Factory opens, before the port serves anyone, so this
+//! machine's app finds it even when the tunnel can't start. (An agent of
+//! this user can read it too: a bar, not a boundary.)
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -106,6 +106,19 @@ fn dir(home: &Home) -> PathBuf {
     home.root().join("remote")
 }
 
+/// Makes `path` a folder only this user can open, as `<home>` and
+/// `<home>/remote` are: what other users of this machine could read or
+/// change there is removed from its permissions.
+pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))?;
+    }
+    Ok(())
+}
+
 /// Written so only this user can read it.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -130,7 +143,7 @@ pub fn secret_key(home: &Home) -> Result<SecretKey, RemoteError> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
-            std::fs::create_dir_all(dir(home))?;
+            private_dir(&dir(home))?;
             write_private(&path, format!("{}\n", hex(&key.to_bytes())).as_bytes())?;
             Ok(key)
         }
@@ -178,7 +191,16 @@ pub struct Device {
     /// When it asked, in ms since 1970.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_since: Option<i64>,
+    /// Its code was made without a name: the first device to use it gives
+    /// its own (`Hello.device_name`). False once it has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unnamed: bool,
 }
+
+/// What a device made without a name is called until one uses its code.
+const UNNAMED: &str = "New device";
+/// The longest name a device takes for itself.
+const NAME_CHARS: usize = 60;
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if passes a reference
 fn is_zero(value: &i32) -> bool {
@@ -188,7 +210,7 @@ fn is_zero(value: &i32) -> bool {
 impl Device {
     /// Its code is waiting for its device: not used yet and not expired.
     /// It may have a device waiting to be allowed.
-    fn awaiting(&self, now: i64) -> bool {
+    pub(crate) fn awaiting(&self, now: i64) -> bool {
         !self.local && self.endpoint_id.is_empty() && self.code_expires.is_some_and(|expires| expires > now)
     }
 
@@ -198,7 +220,7 @@ impl Device {
     }
 
     /// Its code ran out before a device was allowed with it.
-    fn expired(&self, now: i64) -> bool {
+    pub(crate) fn expired(&self, now: i64) -> bool {
         !self.local && self.endpoint_id.is_empty() && self.code_expires.is_some_and(|expires| expires <= now)
     }
 
@@ -234,7 +256,7 @@ fn devices_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn save_devices(home: &Home, devices: &[Device]) -> Result<(), RemoteError> {
-    std::fs::create_dir_all(dir(home))?;
+    private_dir(&dir(home))?;
     let mut json = serde_json::to_string_pretty(devices).map_err(|error| RemoteError::Devices(devices_path(home), error))?;
     json.push('\n');
     write_private(&devices_path(home), json.as_bytes())?;
@@ -270,7 +292,9 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
     let token = new_token()?;
     let _changing = devices_lock();
     let mut devices = devices(home)?;
-    let name = name.trim();
+    // Without a name, the device that uses the code names itself.
+    let unnamed = name.trim().is_empty();
+    let name = if unnamed { UNNAMED } else { name.trim() };
     let base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let base = base.trim_matches('-');
     let base = if base.is_empty() || base == LOCAL_DEVICE { "device" } else { base };
@@ -294,6 +318,7 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
         pending_endpoint_id: String::new(),
         pending_kind: 0,
         pending_since: None,
+        unnamed,
     };
     devices.push(device.clone());
     save_devices(home, &devices)?;
@@ -352,6 +377,26 @@ pub fn pair_offline(home: &Home, name: &str) -> Result<(String, Device), RemoteE
     let relays = remote_config(home)?.map(|remote| remote.relays).unwrap_or_default();
     let (token, device) = pair(home, name)?;
     Ok((pairing_code(&token, &endpoint_id, &relays, &[], &identity(home)), device))
+}
+
+/// A new token for the device `id` made at `created`, while its code waits
+/// for a device and none has used it: what an agent's pairing shows after a
+/// restart, which forgot the token. The code made with the old one stops
+/// working. Err(NotWaiting) otherwise.
+fn rekey(home: &Home, id: &str, created: i64) -> Result<String, RemoteError> {
+    let token = new_token()?;
+    let _changing = devices_lock();
+    let mut devices = devices(home)?;
+    let now = now_ms();
+    let Some(device) = devices
+        .iter_mut()
+        .find(|device| device.id == id && device.created == created && device.awaiting(now) && device.pending_endpoint_id.is_empty())
+    else {
+        return Err(RemoteError::NotWaiting(id.to_owned()));
+    };
+    device.token_sha256 = token_hash(&token);
+    save_devices(home, &devices)?;
+    Ok(token)
 }
 
 /// Unpairs the device with this id or name; it can't connect any more.
@@ -464,6 +509,18 @@ fn local_port(home: &Home) -> u16 {
         .map_or(0, |address| address.port())
 }
 
+/// Makes `<home>` and `<home>/remote` private and writes this machine's own
+/// pairing code, before Factory serves anyone: the loopback port wants its
+/// token, so this machine's app has it from its first connection on, even
+/// when the tunnel can't start. Until the tunnel binds, the code names the
+/// port it had before (none the first time); then it's written again.
+pub(crate) fn prepare_local(home: &Home) -> Result<(), RemoteError> {
+    private_dir(home.root())?;
+    private_dir(&dir(home))?;
+    let id = secret_key(home)?.public().to_string();
+    write_local_pairing(home, &id, local_port(home))
+}
+
 /// Writes this machine's own pairing code to `<home>/remote/local-pairing`,
 /// which only this user can read: this machine's app connects with it. Its
 /// token stays while the file holds it.
@@ -478,8 +535,8 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
         (Some(token), Some(index)) if devices[index].token_sha256 == token_hash(&token) => token,
         _ => {
             let token = new_token()?;
-            // A new token, but the app having connected through the tunnel
-            // stays known, so a deleted file doesn't open the loopback port.
+            // A new token; the key this machine's app connected through the
+            // tunnel with stays known.
             let endpoint_id = local.map(|index| devices[index].endpoint_id.clone()).unwrap_or_default();
             let device = Device {
                 id: LOCAL_DEVICE.to_owned(),
@@ -494,6 +551,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
                 pending_endpoint_id: String::new(),
                 pending_kind: 0,
                 pending_since: None,
+                unnamed: false,
             };
             match local {
                 Some(index) => devices[index] = device,
@@ -503,7 +561,8 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
             token
         }
     };
-    let code = pairing_code(&token, endpoint_id, &[], &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))], &identity(home));
+    let addresses: &[SocketAddr] = if port == 0 { &[] } else { &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))] };
+    let code = pairing_code(&token, endpoint_id, &[], addresses, &identity(home));
     write_private(&path, format!("{code}\n").as_bytes())?;
     Ok(())
 }
@@ -699,6 +758,12 @@ pub(crate) struct State {
     /// Connections of devices waiting to be allowed, or being told they
     /// weren't: remote access stays on for them until they've heard.
     waiting: AtomicU64,
+    /// The tokens of agents' pairings still waiting for a device, by
+    /// pairing id (`extensions::devices`): only in memory, never on disk.
+    codes: Mutex<HashMap<String, String>>,
+    /// Notified whenever devices may have changed, for agents' pairings to
+    /// show it (`extensions::devices::monitor`).
+    pub(crate) changed: Arc<tokio::sync::Notify>,
     /// The port Claktory's own listener has (7420), which devices may not
     /// forward to; 0 until it listens.
     listener_port: AtomicU64,
@@ -811,7 +876,9 @@ impl Factory {
     /// code waits for the person to allow it (`Pending`), and no other key
     /// can use the code. A wrong token is answered no sooner than a second
     /// after the key's last wrong one.
-    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer, kind: v1::DeviceKind) -> Authorized {
+    /// A device whose code was made without a name takes `name`, its own,
+    /// when it first uses the code.
+    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer, kind: v1::DeviceKind, name: &str) -> Authorized {
         let digest = token_hash(token);
         let now = now_ms();
         let mut found = None;
@@ -836,6 +903,11 @@ impl Factory {
                         if device.pending_endpoint_id.is_empty() {
                             device.pending_endpoint_id.clone_from(&peer.endpoint_id);
                             device.pending_since = Some(now);
+                            let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect();
+                            if device.unnamed && !name.is_empty() {
+                                device.name = name;
+                                device.unnamed = false;
+                            }
                         }
                         if device.pending_endpoint_id == peer.endpoint_id {
                             device.pending_kind = kind.into();
@@ -971,18 +1043,6 @@ impl Factory {
         Ok(())
     }
 
-    /// The loopback port lets in a client with no token: only while this
-    /// machine's app has never connected through the tunnel.
-    pub(crate) fn loopback_open(&self) -> bool {
-        match devices(&self.home) {
-            Ok(devices) => !devices.iter().any(|device| device.local && !device.endpoint_id.is_empty()),
-            Err(error) => {
-                tracing::error!(%error, "could not read the paired devices");
-                false
-            }
-        }
-    }
-
     /// Closes a device's sessions and its tunnel connections.
     fn close_device(&self, id: &str, endpoint_id: &str) {
         let sessions = lock(&self.remote.connected).remove(id).unwrap_or_default();
@@ -1061,6 +1121,7 @@ impl Factory {
         if changed {
             self.broadcast_workspace(&self.lock());
         }
+        self.remote.changed.notify_one();
     }
 
     fn set_remote_shown(&self, change: impl FnOnce(&mut Shown)) {
@@ -1091,6 +1152,8 @@ impl Factory {
                 number: approval_number(&shown.endpoint_id, &device.pending_endpoint_id, &device.token_sha256),
                 requested_ms: device.pending_since.unwrap_or_default(),
                 expires_ms: device.code_expires.unwrap_or_default(),
+                signed_in: false,
+                discovered: false,
             })
             .collect();
         pending.sort_by_key(|device| device.requested_ms);
@@ -1120,6 +1183,8 @@ impl Factory {
                         paired_ms: device.created,
                         last_seen_ms: device.last_seen.unwrap_or_default(),
                         last_address: device.last_address,
+                        confirmed: false,
+                        confirm_by_ms: 0,
                     }
                 })
                 .collect(),
@@ -1146,6 +1211,14 @@ impl Factory {
         let (home, name) = (self.home.clone(), name.to_owned());
         let paired = tokio::task::spawn_blocking(move || pair(&home, &name)).await.map_err(std::io::Error::other)?;
         let (token, device) = paired.map_err(|error| RequestError::Remote(error.to_string()))?;
+        let code = self.code_with(&token).await?;
+        Ok(v1::PairingCode { code, device_id: device.id })
+    }
+
+    /// The pairing code with `token`: remote access turns on, and the code
+    /// names the relay the tunnel reaches and the addresses it can be
+    /// dialled at.
+    async fn code_with(self: &Arc<Self>, token: &str) -> Result<String, RequestError> {
         sync_tunnel(self).await;
         self.refresh_remote();
         let Some(endpoint) = lock(&self.remote.endpoint).clone() else {
@@ -1162,8 +1235,58 @@ impl Factory {
             }
         }
         let addresses: Vec<SocketAddr> = addr.ip_addrs().filter(|address| !address.ip().is_loopback()).copied().collect();
-        let code = pairing_code(&token, &endpoint.id().to_string(), &relays, &addresses, &self.identity());
-        Ok(v1::PairingCode { code, device_id: device.id })
+        Ok(pairing_code(token, &endpoint.id().to_string(), &relays, &addresses, &self.identity()))
+    }
+
+    /// Keeps the token of an agent's pairing in memory while its code waits.
+    pub(crate) fn keep_code(&self, pairing: &str, token: String) {
+        lock(&self.remote.codes).insert(pairing.to_owned(), token);
+    }
+
+    /// Forgets the token of an agent's pairing that no longer waits.
+    pub(crate) fn forget_code(&self, pairing: &str) {
+        lock(&self.remote.codes).remove(pairing);
+    }
+
+    /// The code of an agent's pairing whose device (`id`, made at
+    /// `created`) waits for it: the one made with it, or after a restart a
+    /// new one. Err(NoPairingCode) once it no longer waits.
+    pub(crate) async fn agent_pairing_code(self: &Arc<Self>, pairing: &str, id: &str, created: i64) -> Result<String, RequestError> {
+        let gone = || RequestError::NoPairingCode("This code no longer works: the device was added, or adding it ended.".to_owned());
+        let kept = lock(&self.remote.codes).get(pairing).cloned();
+        let token = match kept {
+            Some(token) => token,
+            None => {
+                let (home, id) = (self.home.clone(), id.to_owned());
+                let token = match tokio::task::spawn_blocking(move || rekey(&home, &id, created)).await.map_err(std::io::Error::other)? {
+                    Ok(token) => token,
+                    Err(RemoteError::NotWaiting(_)) => return Err(gone()),
+                    Err(error) => return Err(RequestError::Remote(error.to_string())),
+                };
+                lock(&self.remote.codes).entry(pairing.to_owned()).or_insert(token).clone()
+            }
+        };
+        self.code_with(&token).await
+    }
+
+    /// Where the device `id`, made at `created` with a code good until
+    /// `expires`, stands, from `devices` (devices.json as it is now).
+    pub(crate) fn pairing_state(&self, devices: &[Device], id: &str, created: i64, expires: i64) -> v1::DevicePairingState {
+        use v1::DevicePairingState as State;
+        let now = now_ms();
+        match devices.iter().find(|device| device.id == id && device.created == created && !device.local) {
+            Some(device) if !device.endpoint_id.is_empty() => State::Added,
+            Some(device) if device.is_pending(now) => State::Asking,
+            Some(device) if device.awaiting(now) => State::Waiting,
+            Some(_) => State::Expired,
+            None => match lock(&self.remote.ended).get(id) {
+                Some(Ended::Denied) => State::Denied,
+                Some(Ended::Expired) => State::Expired,
+                Some(Ended::Cancelled) => State::Cancelled,
+                None if expires <= now => State::Expired,
+                None => State::Cancelled,
+            },
+        }
     }
 
     /// The folders in a folder of this machine, for an app on another one
@@ -1568,6 +1691,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn a_waiting_code_gets_a_new_token_only_while_no_device_has_used_it() {
+        let root = std::env::temp_dir().join(format!("factoryd-rekey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::new(root.clone());
+        let (old, device) = pair(&home, "Phone").expect("paired");
+        let new = rekey(&home, &device.id, device.created).expect("a new token");
+        assert_ne!(new, old);
+        let saved = devices(&home).expect("devices");
+        assert_eq!(saved[0].token_sha256, token_hash(&new), "the old code stops working");
+        assert!(matches!(rekey(&home, &device.id, device.created + 1), Err(RemoteError::NotWaiting(_))), "another device by that id");
+        let mut used = saved;
+        used[0].pending_endpoint_id = "a key".into();
+        save_devices(&home, &used).expect("save");
+        assert!(matches!(rekey(&home, &device.id, device.created), Err(RemoteError::NotWaiting(_))), "a device used it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The example the app checks its side against.
     #[test]
     fn the_approval_number_is_four_digits_both_sides_work_out() {
@@ -1592,6 +1733,7 @@ mod tests {
             pending_endpoint_id: String::new(),
             pending_kind: 0,
             pending_since: None,
+            unnamed: false,
         };
         assert!(!remote_on(&[], 100));
         assert!(!remote_on(&[device("k", None, true)], 100), "this machine's app alone");

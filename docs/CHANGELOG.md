@@ -6,6 +6,22 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.13
+Released 2026-11-20 20:40 UTC.
+- Changed: Only your own user account can connect to Claktory on the computer it runs on. Other people's accounts there can't.
+- Changed: Claktory asks you to sign in with your email when you first open it, so your secrets unlock by themselves after a restart. If you've used Claktory before, choose Not now to sign in later in Settings → Account.
+- Added: Setting up a new Claktory now walks you through connecting a model: sign in with Claude or ChatGPT, or use an API key. Then Rivet greets you, ready to help.
+- Added: Set up Claktory on a server from its terminal, or let an agent there do it for you: sign in with the emailed code, give your name, add a device and an API key, all without the app. The installer can run without questions and makes the factoryd command ready to use.
+- Added: Use the Mac app with a Claktory on a server, without setting one up on your Mac: the first launch asks where your Claktory runs, and a link from your agent connects it. The server has no screen to allow your Mac on, so the app shows the command to run there, ready to copy, and your Mac shows there under its own name.
+- Added: Ask Rivet to add a device, such as your iPhone. Its code shows in Rivet's conversation for you to scan or copy, and you still allow the device yourself. Rivet can also list your devices and remove one when you ask.
+- Added: Rivet can open a screen for you, such as Settings → Devices or the Map, in the app you're using, so you don't have to look for it. Your other devices stay as they are.
+- Changed: Settings → Providers lists only the providers you've signed in to. To add one, type its name in Add a provider… and pick it from the list. Sign in… on an agent opens Settings right at Providers.
+- Changed: The Mac download's window shows an arrow from Claktory to Applications, so it's clear where to drag it.
+- Fixed: A mistyped or expired API key looked connected until Rivet's first answer failed. Claktory now checks a key with its provider first and tells you right away.
+- Fixed: When a provider refused an agent's key or sign-in, its conversation showed the provider's raw error. It now says so plainly, with Change key… or Sign in again….
+- Fixed: When another Claktory on the same computer (another user's, say) already used the port Claktory needs, Claktory and its installer only said it didn't start. Now they say why.
+- Fixed: Updating Claktory restarted your agents twice, the second time about half a minute after the first. Now it restarts them once.
+
 ## v0.1.12
 Released 2026-11-20 19:12 UTC.
 - Added: Remove Claktory from this Mac in Settings → This Mac. Keep your data to pick up where you left off later, or delete it too.

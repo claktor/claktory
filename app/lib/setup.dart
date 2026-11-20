@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'connections.dart' show hasLocalBackend;
 import 'controls.dart';
 import 'identity.dart';
 import 'main.dart' show isDevBuild;
@@ -27,6 +28,19 @@ bool get setsUpThisMac =>
     defaultTargetPlatform == TargetPlatform.macOS &&
     kReleaseMode &&
     !isDevBuild;
+
+/// Whether this device runs a Claktory of its own: a Mac does, unless
+/// it's marked app only (`install.sh --app-only`, or the person chose a
+/// Claktory on another computer) and has none installed. Claktory Dev
+/// goes by the mark alone: the dev Claktory is always there.
+Future<bool> runsClaktoryHere({
+  SetupChannel channel = const SetupChannel(),
+}) async {
+  if (!hasLocalBackend) return false;
+  if (defaultTargetPlatform != TargetPlatform.macOS) return true;
+  if (!await channel.appOnly()) return true;
+  return !isDevBuild && channel.installedHere();
+}
 
 /// Where the app runs from.
 class SetupLocation {
@@ -178,6 +192,30 @@ class SetupChannel {
     }
   }
 
+  /// Whether this Mac has no Claktory of its own, only the app
+  /// (`ClaktoryAppOnly`: `install.sh --app-only`, or "Use a Claktory on
+  /// another computer"). False where the app can't say.
+  Future<bool> appOnly() async {
+    try {
+      return await _channel.invokeMethod<bool>('appOnly') ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Keeps whether this Mac has no Claktory of its own.
+  Future<void> setAppOnly(bool appOnly) async {
+    try {
+      await _channel.invokeMethod<void>('setAppOnly', appOnly);
+    } on PlatformException {
+      // Asked again at the next launch.
+    } on MissingPluginException {
+      // The same, where there's no channel.
+    }
+  }
+
   /// Moves the app to Applications and quits; the error's words when it
   /// can't.
   Future<String?> moveToApplications() =>
@@ -201,6 +239,9 @@ enum SetupStage {
 
   /// Moving it; the app quits when it's done.
   moving,
+
+  /// Asking where Claktory runs: on this Mac, or on another computer.
+  choosing,
 
   /// `factoryd install` (or --repair) is running.
   settingUp,
@@ -226,6 +267,8 @@ class MacSetup extends ChangeNotifier {
     required this.connected,
     required this.reconnect,
     this.startWithin = const Duration(seconds: 30),
+    this.elsewhere,
+    this.ask = true,
   }) {
     connected.addListener(_connectedChanged);
   }
@@ -241,6 +284,15 @@ class MacSetup extends ChangeNotifier {
   /// How long an installed backend may take to answer before Repair is
   /// offered.
   final Duration startWithin;
+
+  /// The person chose a Claktory on another computer instead: this Mac
+  /// gets none. Null where that isn't offered.
+  final VoidCallback? elsewhere;
+
+  /// Whether a Mac with nothing installed is asked first: set up here, or
+  /// use a Claktory on another computer ([elsewhere]). Not when the
+  /// person already chose this Mac.
+  final bool ask;
 
   var _stage = SetupStage.checking;
   SetupStage get stage => _stage;
@@ -265,7 +317,7 @@ class MacSetup extends ChangeNotifier {
   /// Whether it puts a step over the window now. Once this Mac's Claktory
   /// answers, only the offer to move stays.
   bool get showing => switch (_stage) {
-    SetupStage.offerMove || SetupStage.moving => true,
+    SetupStage.offerMove || SetupStage.moving || SetupStage.choosing => true,
     SetupStage.settingUp ||
     SetupStage.failed ||
     SetupStage.notRunning ||
@@ -343,6 +395,7 @@ class MacSetup extends ChangeNotifier {
     }
     final check = await channel.install(const ['install', '--check']);
     if (check.result == 'not_installed') {
+      if (ask && elsewhere != null) return _set(SetupStage.choosing);
       return _run(const ['install']);
     }
     _settled(check);
@@ -351,6 +404,15 @@ class MacSetup extends ChangeNotifier {
   Future<void> _run(List<String> arguments) async {
     _set(SetupStage.settingUp);
     _settled(await channel.install(arguments));
+  }
+
+  /// Sets Claktory up on this Mac, as chosen.
+  Future<void> setUpHere() => _run(const ['install']);
+
+  /// Uses a Claktory on another computer instead: nothing is installed.
+  void useElsewhere() {
+    _set(SetupStage.done);
+    elsewhere?.call();
   }
 
   /// Repair: completes an install, or starts one that doesn't run.
@@ -412,7 +474,9 @@ class MacSetup extends ChangeNotifier {
 
 /// The app's [MacSetup], where there is one.
 class SetupScope extends InheritedNotifier<MacSetup> {
-  const SetupScope({super.key, required MacSetup setup, required super.child})
+  /// Always there, [setup] or not, so the window under it stays put as
+  /// setting up starts or ends.
+  const SetupScope({super.key, required MacSetup? setup, required super.child})
     : super(notifier: setup);
 
   static MacSetup? of(BuildContext context) =>
@@ -479,6 +543,27 @@ class _SetupStepState extends State<SetupStep> {
             onPressed: setup.stage == SetupStage.moving
                 ? null
                 : setup.moveToApplications,
+          ),
+        ]),
+      ],
+      SetupStage.choosing => [
+        title('Set up Claktory'),
+        const SizedBox(height: Space.s),
+        Text(
+          'Claktory runs your agents on this Mac. If it already runs on '
+          'another computer, such as a server, use that one instead.',
+          style: body,
+        ),
+        const SizedBox(height: Space.xl),
+        buttons([
+          Button(
+            label: 'Use a Claktory on another computer',
+            onPressed: setup.useElsewhere,
+          ),
+          Button(
+            label: 'Set up on this Mac',
+            primary: true,
+            onPressed: setup.setUpHere,
           ),
         ]),
       ],

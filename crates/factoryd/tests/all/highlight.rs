@@ -87,3 +87,68 @@ async fn agents_highlight_parts_of_the_app_and_messages_light_up_both_agents() {
     let said = call(&mut client, &mut view, "lead", r#"call highlight {"targets":[{"kind":"marketplace"}]}"#).await;
     assert!(said.starts_with("tool highlight: Highlights are off"), "{said}");
 }
+
+/// #189: an agent opens a screen in the app the person is using. Every app
+/// is asked; each says whether it opened it (only the one in use does).
+#[tokio::test]
+async fn agents_open_a_screen_in_the_app_the_person_is_using() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
+    let on = v1::ExtensionChange { id: "highlight".into(), enabled: Some(true), ..Default::default() };
+    let turn_on = v1::UpdateAgent { agent_id: "lead".into(), extension: Some(on), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(turn_on)).await;
+    apply_request(&mut client, &mut view, select("lead")).await;
+
+    // An app too old to know OpenScreen (this test's own client) never answers.
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"settings","id":"devices"}"#).await;
+    assert!(said.starts_with("tool show_screen: Nothing opened: the person's app didn't answer"), "{said}");
+    assert!(said.ends_with("Settings → Devices."), "{said}");
+
+    // Another app answers, as the one in use or not; what it was asked is kept.
+    let in_use = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (mut other, _, _) = Client::connect(addr).await;
+    tokio::spawn({
+        let (in_use, asked) = (in_use.clone(), asked.clone());
+        async move {
+            let mut id = 1000;
+            loop {
+                let message = other.receive().await;
+                let Some(Body::OpenScreen(open)) = message.body else { continue };
+                let target = open.target.clone().unwrap_or_default();
+                asked.lock().expect("asked").push((target.kind, target.id, open.from_agent_id.clone()));
+                let opened = in_use.load(Ordering::SeqCst);
+                let answer = client_message::Body::ScreenOpened(v1::ScreenOpened { id: open.id, opened });
+                id += 1;
+                other.send(v1::ClientMessage { id, body: Some(answer) }).await;
+            }
+        }
+    });
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"agent_settings","id":"lead"}"#).await;
+    assert!(said.starts_with("tool show_screen: Opened Lead's settings on "), "{said}");
+    assert_eq!(*asked.lock().expect("asked"), [("agent_settings".to_owned(), "lead".to_owned(), "lead".to_owned())]);
+    in_use.store(false, Ordering::SeqCst);
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"map"}"#).await;
+    assert_eq!(
+        said,
+        "tool show_screen: The person isn't using Claktory on any device right now, so nothing opened. Tell them where to find it instead: the Map."
+    );
+
+    // Screens that don't exist aren't asked for; the agent hears why.
+    asked.lock().expect("asked").clear();
+    for (args, why) in [
+        (r#"{"screen":"settings","id":"secret"}"#, "Settings has no section \"secret\""),
+        (r#"{"screen":"agent","id":"nobody"}"#, "No agent has the id \"nobody\"."),
+        (r#"{"screen":"map","id":"x"}"#, "the Map takes no id."),
+    ] {
+        let said = call(&mut client, &mut view, "lead", &format!("call show_screen {args}")).await;
+        assert!(said.contains(why), "{said}");
+    }
+    assert!(asked.lock().expect("asked").is_empty());
+}

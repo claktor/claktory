@@ -1,5 +1,6 @@
 import 'package:factory_app/account.dart';
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/name_step.dart' show nameFromEmail;
 import 'package:factory_app/controls.dart' show Field;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -160,6 +161,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('Resend in'), findsOneWidget);
+    expect(find.text("Can't find it? Check your spam folder."), findsOneWidget);
     // Only digits count; the sixth sends it.
     await tester.enterText(field, '123 45');
     await tester.pump();
@@ -171,6 +173,35 @@ void main() {
     await become(tester, harness, signedIn);
     expect(find.text('Check your email'), findsNothing);
     expect(find.text("What's your name?"), findsOneWidget);
+    // Empty, with a guess from the email offered under it.
+    final name = tester.widget<EditableText>(find.byType(EditableText).last);
+    expect(name.controller.text, isEmpty);
+    await tester.tap(find.text('Matt?'));
+    await tester.pump();
+    expect(name.controller.text, 'Matt');
+    expect(find.text('Matt?'), findsNothing);
+    await tester.tap(find.text('Continue'));
+    await tester.pump();
+    expect(harness.last.updateSettings.userName, 'Matt');
+  });
+
+  test('a name is guessed from the email, unless it looks like no first '
+      'name', () {
+    expect(nameFromEmail('matt.k@gmail.com'), 'Matt');
+    expect(nameFromEmail('matt_k42@example.com'), 'Matt');
+    expect(nameFromEmail('MATT@example.com'), 'Matt');
+    expect(nameFromEmail('kenji+claktory@example.com'), 'Kenji');
+    expect(nameFromEmail('mcKay@example.com'), 'McKay');
+    expect(nameFromEmail('2zoe@example.com'), 'Zoe');
+    expect(nameFromEmail('info@example.com'), isNull);
+    expect(nameFromEmail('claktory-test-7@gmail.com'), isNull);
+    expect(nameFromEmail('test.user@example.com'), isNull);
+    expect(nameFromEmail('demo@example.com'), isNull);
+    expect(nameFromEmail('acme@acme.com'), isNull);
+    expect(nameFromEmail('matt@mail.acme.co.uk'), 'Matt');
+    expect(nameFromEmail('j@example.com'), isNull);
+    expect(nameFromEmail('42@example.com'), isNull);
+    expect(nameFromEmail(''), isNull);
   });
 
   testWidgets('a wrong code says how many tries are left, and none left '
@@ -219,6 +250,78 @@ void main() {
     await tester.pump();
     expect(harness.last.accountSignIn.email, 'matt@home.test');
     expect(find.text('Check your email'), findsOneWidget);
+  });
+
+  testWidgets('Back returns to the code already sent', (tester) async {
+    final harness = await showAccount(tester, awaiting);
+    await tester.tap(find.text('Use a different email'));
+    await tester.pump();
+    expect(
+      tester.widget<EditableText>(field).controller.text,
+      'matt@example.com',
+    );
+    await tester.tap(find.text('Back'));
+    await tester.pump();
+    expect(find.text('Check your email'), findsOneWidget);
+    expect(harness.backend.sent, isEmpty);
+  });
+
+  testWidgets('a Claktory from before sign-in offers Not now, once', (
+    tester,
+  ) async {
+    final snapshot = withAccount(signedOut)..account.skippable = true;
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    await tester.tap(find.text('Not now'));
+    await tester.pump();
+    expect(harness.last.hasSkipAccountSignIn(), isTrue);
+    final skipped = harness.backend.workspace.workspace.deepCopy()
+      ..account.state = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED
+      ..account.skippable = false;
+    await harness.apply(tester, skipped);
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsNothing);
+
+    // Settings → Account can still sign in, and Not now goes back.
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Not signed in'));
+    await tester.tap(find.text('Sign in…'));
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    final sent = harness.backend.sent.length;
+    await tester.tap(find.text('Not now'));
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsNothing);
+    expect(harness.backend.sent, hasLength(sent), reason: 'skipped already');
+  });
+
+  testWidgets('a new Claktory has no Not now', (tester) async {
+    await showAccount(tester, signedOut);
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    expect(find.text('Not now'), findsNothing);
+  });
+
+  testWidgets('the code step names the sender, and can skip while waiting', (
+    tester,
+  ) async {
+    final snapshot = withAccount(awaiting)
+      ..account.codeFrom = 'code@auth.claktory.com'
+      ..account.skippable = true;
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        "It's from code@auth.claktory.com. Can't find it? Check your spam "
+        'folder.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Not now'));
+    await tester.pump();
+    expect(harness.last.hasSkipAccountSignIn(), isTrue);
   });
 
   testWidgets("when claktory.com can't be reached, Claktory starts without "

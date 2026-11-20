@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use factory_agent::auth::{AuthEvent, AuthFuture, AuthInteraction, AuthPrompt, Env, OAuthFlow, RequestAuth};
+use factory_agent::accounts::{Refused, refused, refused_error};
+use factory_agent::auth::{AuthEvent, AuthFuture, AuthInteraction, AuthPrompt, Env, OAuthFlow, RequestAuth, refresh_refused, refusal};
 use factory_agent::clock::now_ms;
 use factory_agent::credentials::{Credential, FileCredentialStore};
 use factory_agent::errors::Error;
@@ -16,7 +17,7 @@ use factory_agent::limits::{Identity, ResetAnswer, UsageReset};
 use factory_agent::providers::models::{AccountNote, Notes, Registry, default_providers};
 use factory_agent::providers::{Provider, catalog};
 use factory_agent::stream::{LlmContext, StreamOptions, Transport};
-use factory_agent::types::{AssistantPart, Message, Model, StopReason, StreamEvent, UserMessage};
+use factory_agent::types::{AssistantMessage, AssistantPart, Message, Model, StopReason, StreamEvent, UserMessage};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -626,6 +627,7 @@ fn pasted_registry(file: &std::path::Path) -> Registry {
         plan: None,
         identity: Some(who),
         reset: None,
+        check_key: None,
     };
     Registry::with_providers(FileCredentialStore::new(file.to_path_buf()), no_env(), vec![provider])
 }
@@ -784,7 +786,9 @@ async fn keys_are_added_beside_the_others_and_the_environments_comes_last() {
     let file = dir.path().join("auth.json");
     store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
     let env: Env = Arc::new(|name| (name == "ANTHROPIC_API_KEY").then(|| "sk-ant-api03-from-env-9999".to_owned()));
-    let registry = Registry::with_providers(FileCredentialStore::new(file.clone()), env, default_providers());
+    // Anthropic, which accepts every key when asked.
+    let server = mock(Arc::new(|_| json_answer(200, Vec::new(), json!({"data": []})))).await;
+    let registry = Registry::with_providers(FileCredentialStore::new(file.clone()), env, on(&server.base_url));
 
     registry.login_account("anthropic", "api_key", &Login::new(KEY_1), true).await.expect("first key");
     registry.login_account("anthropic", "api_key", &Login::new(KEY_2), true).await.expect("second key");
@@ -1018,4 +1022,153 @@ async fn reaching_a_limit_and_moving_to_the_next_account_are_logged() {
         logged.contains(&format!("moved from account first-183 to second-183 (usage limit, resets {resets}) provider=anthropic")),
         "{logged}"
     );
+}
+
+/// The real providers, on `base_url`.
+fn on(base_url: &str) -> Vec<Provider> {
+    let base: &'static str = Box::leak(base_url.to_owned().into_boxed_str());
+    let mut providers = default_providers();
+    for provider in &mut providers {
+        provider.base_url = base;
+    }
+    providers
+}
+
+/// Anthropic's answer to a key it doesn't know.
+fn invalid_key() -> Answer {
+    json_answer(
+        401,
+        Vec::new(),
+        json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}, "request_id": "req_1"}),
+    )
+}
+
+/// Onboarding rehearsal 2: a dummy key read as "Connected". A new key is
+/// checked with one call that costs nothing before it's kept; one the
+/// provider refuses isn't kept, and says so. One that can't be checked (the
+/// provider is down) is kept.
+#[tokio::test]
+async fn a_new_key_is_checked_and_one_the_provider_refuses_is_not_kept() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|seen| match seen.token.as_str() {
+        KEY_1 => json_answer(200, Vec::new(), json!({"data": [{"id": "claude"}]})),
+        KEY_2 => json_answer(503, Vec::new(), json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})),
+        _ => invalid_key(),
+    }))
+    .await;
+    let registry = Registry::with_providers(FileCredentialStore::new(file), no_env(), on(&server.base_url));
+
+    let refused = registry.login_account("anthropic", "api_key", &Login::new("sk-ant-dummy"), true).await.expect_err("refused");
+    assert_eq!(refused.to_string(), "Anthropic didn't accept this key.");
+    assert!(refused.is_refused());
+    assert!(registry.accounts("anthropic").await.expect("accounts").is_empty(), "not kept");
+
+    registry.login_account("anthropic", "api_key", &Login::new(KEY_1), true).await.expect("accepted");
+    registry.login_account("anthropic", "api_key", &Login::new(KEY_2), true).await.expect("unchecked, kept");
+    let labels: Vec<String> = registry.accounts("anthropic").await.expect("accounts").into_iter().map(|account| account.label).collect();
+    assert_eq!(labels, ["sk-…1111", "sk-…2222"]);
+    let asked: Vec<(String, String)> = server.seen.lock().iter().map(|seen| (seen.path.clone(), seen.token.clone())).collect();
+    assert_eq!(
+        asked,
+        [
+            ("/v1/models?limit=1".to_owned(), "sk-ant-dummy".to_owned()),
+            ("/v1/models?limit=1".to_owned(), KEY_1.to_owned()),
+            ("/v1/models?limit=1".to_owned(), KEY_2.to_owned())
+        ]
+    );
+}
+
+/// How a request ended, when it failed: its error's message.
+async fn failure(registry: &Registry, model: &Model) -> AssistantMessage {
+    let stream = registry.stream_fn_with(None);
+    let mut events = stream(model, context(), StreamOptions::default()).expect("stream");
+    let mut last = None;
+    while let Some(event) = tokio::time::timeout(crate::support::server::HANG, events.next()).await.expect("the stream ends") {
+        last = Some(event);
+    }
+    match last.expect("an event") {
+        StreamEvent::Error { error, .. } => error,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Rivet's first turn on a refused key: the failure says the provider
+/// refused the credentials, and whose, so the app can offer to change them.
+#[tokio::test]
+async fn a_request_the_provider_refuses_the_key_for_says_whose_it_was() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|seen| if seen.token == KEY_1 { invalid_key() } else { claude_reply() })).await;
+    store_accounts(&file, "anthropic", vec![keyed("k", KEY_1)]);
+    let registry = registry(&file, &server.base_url);
+    let failed = failure(&registry, &claude(&server.base_url)).await;
+    assert_eq!(refused(&failed), Some(Refused { account: "k".into(), method: "api_key".into() }));
+    assert!(failed.error_message.as_deref().is_some_and(|text| text.contains("invalid x-api-key")), "{failed:?}");
+
+    // Anything else isn't a refusal: a usage limit, a rate limit, no credit.
+    let server = mock(Arc::new(|_| no_credit())).await;
+    let failed = failure(&registry, &claude(&server.base_url)).await;
+    assert_eq!(refused(&failed), None);
+    assert!(refused_error(401, ""));
+    assert!(refused_error(403, r#"{"error": {"type": "authentication_error", "message": "OAuth token has been revoked."}}"#));
+    assert!(!refused_error(403, r#"{"error": {"type": "permission_error", "message": "Your key can't use this model."}}"#));
+    assert!(!refused_error(429, r#"{"error": {"type": "rate_limit_error"}}"#));
+}
+
+/// A subscription whose refresh token the provider no longer takes.
+struct Revoked;
+
+impl OAuthFlow for Revoked {
+    fn name(&self) -> &str {
+        "Revoked (subscription)"
+    }
+
+    fn is_subscription(&self) -> bool {
+        true
+    }
+
+    fn login<'a>(&'a self, _interaction: &'a dyn AuthInteraction) -> AuthFuture<'a, Result<Credential, Error>> {
+        Box::pin(async { Err(Error::Aborted) })
+    }
+
+    fn refresh<'a>(&'a self, _credential: Credential, _cancel: CancellationToken) -> AuthFuture<'a, Result<Credential, Error>> {
+        let refused = refresh_refused(400, r#"{"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}"#);
+        Box::pin(async move { Err(refusal(refused, "HTTP request failed. status=400".into())) })
+    }
+
+    fn to_auth(&self, _credential: &Credential) -> Result<RequestAuth, Error> {
+        Ok(RequestAuth::default())
+    }
+}
+
+/// A sign-in whose token can't be refreshed any more fails the request as
+/// refused, naming the account and that it signed in with OAuth.
+#[tokio::test]
+async fn a_sign_in_the_provider_wont_refresh_is_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let mut model = crate::support::luna();
+    model.provider = "revoked".into();
+    let provider = Provider {
+        id: "revoked",
+        name: "Revoked",
+        base_url: "http://127.0.0.1:9",
+        api_key: None,
+        oauth: Some(Arc::new(Revoked)),
+        models: vec![model.clone()],
+        api: None,
+        limits: None,
+        plan: None,
+        identity: None,
+        reset: None,
+        check_key: None,
+    };
+    let mut stale = account("s", "s@x.com", "stale");
+    stale["expires"] = json!(0);
+    store_accounts(&file, "revoked", vec![stale]);
+    let registry = Registry::with_providers(FileCredentialStore::new(file), no_env(), vec![provider]);
+    let failed = failure(&registry, &model).await;
+    assert_eq!(refused(&failed), Some(Refused { account: "s".into(), method: "oauth".into() }));
+    assert!(!refresh_refused(500, "invalid_grant") && !refresh_refused(429, ""), "a passing failure isn't a refusal");
 }

@@ -37,7 +37,10 @@ pub(super) async fn start(service: &Service, mut request: db::Request, code: &st
     request.code_hash = db::code_hash(code, &request.id);
     request.expires = service.now() + CODE_LIFETIME;
     db::insert_request(&service.db(), &request)?;
-    let mail = mail::code_mail(&service.config.mail_domain, &request.email, code);
+    let mail = match (request.kind.as_str(), &request.name) {
+        ("device", Some(device)) => mail::device_code_mail(&service.config.mail_domain, &request.email, code, device),
+        _ => mail::code_mail(&service.config.mail_domain, &request.email, code),
+    };
     if service.send(&mail, true).await.is_err() {
         db::delete_request(&service.db(), &request.id)?;
         return Err(ApiError::email_unavailable());
@@ -102,7 +105,8 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
         expires: 0,
     };
     let request_id = start(service, request, &new_code()).await?;
-    Ok(Reply::json(&SignInStarted { request_id, expires_in: CODE_LIFETIME }))
+    let code_from = mail::code_address(&service.config.mail_domain);
+    Ok(Reply::json(&SignInStarted { request_id, expires_in: CODE_LIFETIME, code_from }))
 }
 
 pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, ApiError> {
@@ -156,25 +160,8 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
 fn authenticate(service: &Service, call: &Call) -> Result<db::Claktory, ApiError> {
     let token = call.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).ok_or_else(ApiError::unauthorized)?;
     let claktory = db::claktory_by_token(&service.db(), token.trim())?.ok_or_else(ApiError::unauthorized)?;
-    let now = service.now();
-    let time: i64 = call.header(TIME_HEADER).and_then(|value| value.trim().parse().ok()).ok_or_else(ApiError::unauthorized)?;
-    if (time - now).abs() > MAX_SKEW {
-        let mut error = ApiError::new(StatusCode::UNAUTHORIZED, "clock_skew", "This computer's clock is off. Set it right and try again.");
-        error.body.server_time = Some(now);
-        return Err(error);
-    }
-    let signature = call.header(SIGNATURE_HEADER).ok_or_else(ApiError::unauthorized)?.trim().to_owned();
     let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
-    if !protocol::verify(&key, &request_message(call.method.as_str(), &call.path_and_query, time, &call.body), &signature) {
-        return Err(ApiError::unauthorized());
-    }
-    {
-        let mut seen = service.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        seen.retain(|_, until| *until >= now);
-        if seen.insert(signature, time + MAX_SKEW).is_some() {
-            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "replayed", "This request was sent already."));
-        }
-    }
+    signed_by(service, call, &key, ApiError::unauthorized)?;
     if claktory.revoked_at.is_some() {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -183,6 +170,33 @@ fn authenticate(service: &Service, call: &Call) -> Result<db::Claktory, ApiError
         ));
     }
     Ok(claktory)
+}
+
+/// Checks a signed request's time, its signature by `key` and that it's
+/// seen only once; `unauthorized` is the error for a bad signature.
+pub(super) fn signed_by(
+    service: &Service,
+    call: &Call,
+    key: &ed25519_dalek::VerifyingKey,
+    unauthorized: fn() -> ApiError,
+) -> Result<(), ApiError> {
+    let now = service.now();
+    let time: i64 = call.header(TIME_HEADER).and_then(|value| value.trim().parse().ok()).ok_or_else(unauthorized)?;
+    if (time - now).abs() > MAX_SKEW {
+        let mut error = ApiError::new(StatusCode::UNAUTHORIZED, "clock_skew", "This computer's clock is off. Set it right and try again.");
+        error.body.server_time = Some(now);
+        return Err(error);
+    }
+    let signature = call.header(SIGNATURE_HEADER).ok_or_else(unauthorized)?.trim().to_owned();
+    if !protocol::verify(key, &request_message(call.method.as_str(), &call.path_and_query, time, &call.body), &signature) {
+        return Err(unauthorized());
+    }
+    let mut seen = service.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    seen.retain(|_, until| *until >= now);
+    if seen.insert(signature, time + MAX_SKEW).is_some() {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "replayed", "This request was sent already."));
+    }
+    Ok(())
 }
 
 pub(super) async fn share(service: &Service, call: &Call) -> Result<Reply, ApiError> {
@@ -299,6 +313,16 @@ pub(super) fn public_stats(service: &Service) -> Result<Reply, ApiError> {
 
 /// Endpoints a Claktory may have for the relay allowlist.
 const ENDPOINTS_PER_CLAKTORY: usize = 20;
+/// Relays kept for a Claktory, for devices that find it.
+const RELAYS_PER_CLAKTORY: usize = 8;
+
+/// A relay's address as a pairing code gives it: an http(s) URL of up to
+/// 200 characters, nothing in it a page or a mail program would trip on.
+fn valid_relay(relay: &str) -> bool {
+    (relay.starts_with("https://") || relay.starts_with("http://"))
+        && relay.len() <= 200
+        && relay.bytes().all(|byte| byte.is_ascii_graphic() && !b"\"'<>\\`".contains(&byte))
+}
 
 pub(super) fn endpoints(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let claktory = authenticate(service, call)?;
@@ -315,9 +339,24 @@ pub(super) fn endpoints(service: &Service, call: &Call) -> Result<Reply, ApiErro
     if count > ENDPOINTS_PER_CLAKTORY {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "too_many_endpoints", "A Claktory can have 20 endpoints at most."));
     }
+    // Its name, color and relays are for devices to find it by: ones that
+    // aren't what a Claktory sends are left out rather than refusing the
+    // endpoints, which relays need.
+    let name = body.name.as_deref().map(clean_name);
+    let color = body.color.filter(|color| color.is_empty() || valid_label(color));
+    let relays = body.relays.map(|relays| {
+        let mut kept: Vec<String> = Vec::new();
+        for relay in relays.into_iter().filter(|relay| valid_relay(relay)) {
+            if !kept.contains(&relay) && kept.len() < RELAYS_PER_CLAKTORY {
+                kept.push(relay);
+            }
+        }
+        kept
+    });
     let now = service.now();
     let mut conn = service.db();
     db::set_endpoints(&mut conn, &claktory.id, &backend, &devices, now)?;
+    db::set_identity(&conn, &claktory.id, name.as_deref(), color.as_deref(), relays.as_deref())?;
     db::touch(&conn, &claktory, None, now)?;
     Ok(Reply::json(&EndpointsSet { count }))
 }

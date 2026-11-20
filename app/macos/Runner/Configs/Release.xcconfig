@@ -1,2 +1,6 @@
 #include "../../Flutter/Flutter-Release.xcconfig"
 #include "Warnings.xcconfig"
+
+// The link scheme this build opens (Info.plist, app/lib/links.dart):
+// claktory://add?code=…; Claktory Dev's is claktory-dev (scripts/lib.sh).
+CLAKTORY_URL_SCHEME = claktory

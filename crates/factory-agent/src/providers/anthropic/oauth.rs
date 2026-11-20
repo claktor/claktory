@@ -75,7 +75,8 @@ impl AnthropicOAuth {
         let status = response.status().as_u16();
         let text = response_text(response).await;
         if !(200..300).contains(&status) {
-            return Err(Error::Other(format!("HTTP request failed. status={status}; url={}; body={text}", self.token_url)));
+            let message = format!("HTTP request failed. status={status}; url={}; body={text}", self.token_url);
+            return Err(crate::auth::refusal(crate::auth::refresh_refused(status, &text), message));
         }
         Ok(text)
     }
@@ -87,7 +88,10 @@ impl AnthropicOAuth {
         request_error: String,
         invalid_error: &str,
     ) -> Result<Credential, Error> {
-        let text = self.post_json(body, cancel).await.map_err(|error| Error::Other(format!("{request_error} details=Error: {error}")))?;
+        let text = self
+            .post_json(body, cancel)
+            .await
+            .map_err(|error| crate::auth::refusal(error.is_refused(), format!("{request_error} details=Error: {error}")))?;
         let invalid =
             |detail: String| Error::Other(format!("{invalid_error} url={}; body={text}; details=Error: {detail}", self.token_url));
         let data = serde_json::from_str(&text).map_err(|error| invalid(error.to_string()))?;

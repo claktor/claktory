@@ -2,6 +2,7 @@
 //! in memory and a clock of its own.
 
 mod analytics;
+mod devices;
 mod files;
 mod limits;
 mod live;

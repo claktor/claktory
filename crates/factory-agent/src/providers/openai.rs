@@ -15,14 +15,16 @@ const MIN_OUTPUT_TOKENS: u64 = 16;
 const ERROR_PREFIX: &str = "OpenAI API error";
 
 pub fn provider() -> Provider {
-    Provider::new(
+    let mut provider = Provider::new(
         "openai",
         "OpenAI",
         "https://api.openai.com/v1",
         api_key(EnvApiKeyAuth { name: "OpenAI API key", env_vars: &["OPENAI_API_KEY"], base_url_var: Some("OPENAI_BASE_URL") }),
         None,
         stream_simple,
-    )
+    );
+    provider.check_key = Some(crate::providers::keys::openai);
+    provider
 }
 
 fn assign(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
@@ -127,6 +129,8 @@ async fn request(
         let body = response_text(response).await;
         if crate::accounts::credit_error(status, &body) {
             crate::accounts::mark_out_of_credit(output);
+        } else if crate::accounts::refused_error(status, &body) {
+            crate::accounts::mark_refused(output, &crate::accounts::Refused::default());
         }
         return Err(status_error(status, &body).format(Some(ERROR_PREFIX)));
     }

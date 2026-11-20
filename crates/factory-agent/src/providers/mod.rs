@@ -13,6 +13,7 @@ macro_rules! spawn_stream {
 
 pub mod anthropic;
 pub mod catalog;
+pub mod keys;
 pub mod models;
 pub mod openai;
 pub mod openai_codex;
@@ -106,6 +107,9 @@ pub struct Provider {
     pub identity: Option<crate::limits::IdentityFn>,
     /// Uses one of a subscription sign-in's usage resets; None when the provider has none.
     pub reset: Option<crate::limits::ResetFn>,
+    /// Asks the provider whether it accepts a new API key, before it's kept;
+    /// None when it can't be asked.
+    pub check_key: Option<keys::CheckKeyFn>,
 }
 
 fn api_key(auth: impl ApiKeyAuth + 'static) -> Option<Arc<dyn ApiKeyAuth>> {
@@ -137,6 +141,7 @@ impl Provider {
             plan: None,
             identity: None,
             reset: None,
+            check_key: None,
         }
     }
 }

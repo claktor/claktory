@@ -1478,7 +1478,7 @@ class _Footer extends StatelessWidget {
     final configError = workspace.configError;
     final scope = AppScope.scope(context);
     final appVersion = scope.appBuild.version;
-    void openSettings() => AppScope.openSettings(context);
+    void openSettings() => AppScope.openProviders(context);
     final status = <Widget>[];
     if (workspace.hasLogin() &&
         !AppScope.pageShown(context, AppPage.settings)) {

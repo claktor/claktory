@@ -89,8 +89,40 @@ pub async fn start_with_models(dir: &Path, models: Arc<dyn Models>) -> (SocketAd
     let factory = Factory::open(home(dir), models).await.expect("open factory");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
+    homes().insert(addr, home(dir));
     tokio::spawn(factoryd::serve(listener, factory.clone()));
     (addr, factory)
+}
+
+/// The homes of the Factories tests started, by address: their clients
+/// connect with their local pairing code's token, as this machine's app.
+fn homes() -> std::sync::MutexGuard<'static, std::collections::HashMap<SocketAddr, Home>> {
+    static HOMES: std::sync::LazyLock<Mutex<std::collections::HashMap<SocketAddr, Home>>> = std::sync::LazyLock::new(Default::default);
+    HOMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Says that the Factory at `addr` keeps its files in `home`, for one the
+/// test runs as a process of its own.
+pub fn serves(addr: SocketAddr, home: Home) {
+    homes().insert(addr, home);
+}
+
+/// Where the Factory at `addr` keeps its files.
+pub fn home_of(addr: SocketAddr) -> Home {
+    homes().get(&addr).cloned().expect("a Factory the test started")
+}
+
+/// The token the loopback port at `addr` wants: the one in its Factory's
+/// `<home>/remote/local-pairing`, written before it serves anyone.
+pub fn local_token(addr: SocketAddr) -> String {
+    let home = home_of(addr);
+    let code = std::fs::read_to_string(home.root().join("remote/local-pairing")).expect("the local pairing code");
+    code_token(&code)
+}
+
+/// The token in a pairing code.
+pub fn code_token(code: &str) -> String {
+    code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("a token in the code").to_owned()
 }
 
 /// A provider with one model, which answers "echo: <the prompt>" streamed in
@@ -413,6 +445,16 @@ impl Models for Scripted {
                 sink.push(StreamEvent::Done { reason: StopReason::ToolUse, message: partial });
                 return Ok(stream);
             }
+            // "refuse my key" fails as a provider that refuses the key does.
+            if prompt.ends_with("refuse my key") {
+                partial.stop_reason = StopReason::Error;
+                partial.error_message =
+                    Some(r#"401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#.into());
+                let refused = factory_agent::accounts::Refused { account: "1".into(), method: "api_key".into() };
+                factory_agent::accounts::mark_refused(&mut partial, &refused);
+                sink.push(StreamEvent::Error { reason: StopReason::Error, error: partial });
+                return Ok(stream);
+            }
             // "fail" fails for good, as a model that won't answer does.
             if prompt.ends_with("fail") {
                 partial.stop_reason = StopReason::Error;
@@ -472,9 +514,16 @@ fn text_of(content: &UserContent) -> String {
     }
 }
 
+/// What a client's WebSocket runs over: the loopback port, or a stream of
+/// the private tunnel.
+pub trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
 pub struct Client {
-    socket: WebSocketStream<TcpStream>,
+    socket: WebSocketStream<Box<dyn Io>>,
     next_id: u64,
+    /// What must live as long as the client: its tunnel connection.
+    _keep: Option<Box<dyn std::any::Any + Send>>,
 }
 
 pub struct Reply {
@@ -486,8 +535,13 @@ pub struct Reply {
 impl Client {
     pub async fn open(addr: SocketAddr) -> Client {
         let stream = TcpStream::connect(addr).await.expect("connect");
-        let (socket, _) = client_async(format!("ws://{addr}"), stream).await.expect("websocket handshake");
-        Client { socket, next_id: 1 }
+        Client::over(Box::new(stream), None).await
+    }
+
+    /// A client over `stream`, keeping `keep` while it lives.
+    pub async fn over(stream: Box<dyn Io>, keep: Option<Box<dyn std::any::Any + Send>>) -> Client {
+        let (socket, _) = client_async("ws://factory/", stream).await.expect("websocket handshake");
+        Client { socket, next_id: 1, _keep: keep }
     }
 
     /// Connects and completes the handshake. Returns the initial state.
@@ -506,11 +560,19 @@ impl Client {
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
             client_version: "test".into(),
-            token: String::new(),
+            token: local_token(addr),
             device_kind: kind.into(),
             workspace_patches: patches,
+            ..Default::default()
         };
         client.send(ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) }).await;
+        let (workspace, transcript) = client.welcomed().await;
+        (client, workspace, transcript)
+    }
+
+    /// Reads the answer to Hello: Welcome, then the state.
+    pub async fn welcomed(&mut self) -> (v1::Workspace, Option<v1::Transcript>) {
+        let client = self;
         match client.receive().await.body {
             Some(Body::Welcome(_)) => {}
             other => panic!("expected welcome, got {other:?}"),
@@ -528,7 +590,7 @@ impl Client {
             }
         };
         client.next_id = 2;
-        (client, workspace, transcript)
+        (workspace, transcript)
     }
 
     pub async fn send(&mut self, message: ClientMessage) {
@@ -700,6 +762,7 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
             Some(Kind::ConnectProposal(proposal)) => {
                 format!("connect proposal {} ({:?}): {} for {}", proposal.id, proposal.state(), proposal.connector_id, proposal.purpose)
             }
+            Some(Kind::DevicePairing(pairing)) => format!("device pairing {} ({:?}): {}", pairing.id, pairing.state(), pairing.name),
             None => "empty".into(),
         });
     }

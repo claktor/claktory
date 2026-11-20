@@ -873,7 +873,7 @@ class _AgentFields extends StatelessWidget {
                   label: 'Sign in…',
                   onPressed: () {
                     close();
-                    AppScope.openSettings(context);
+                    AppScope.openProviders(context);
                   },
                 ),
               ],

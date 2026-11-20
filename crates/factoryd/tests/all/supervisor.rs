@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::common::{Client, View, apply_request, temp_dir};
+use crate::common::{Client, View, apply_request, serves, temp_dir};
 use factory_protocol::v1::{self, client_message, server_message::Body};
 
 /// The factoryd under test: this build, or FACTORYD_UNDER_TEST's (a copy
@@ -96,6 +96,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     std::fs::set_permissions(home.join("bin/factoryd"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let port = std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    serves(addr, factoryd::home::Home::new(home.clone()));
     let _supervisor = supervise(&home, port);
     let (mut client, mut view) = reconnect(addr, |_| true).await;
     assert_eq!(view.workspace.version, "dev");
@@ -148,4 +149,32 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     // Byte for byte, so a signed build's signature stays whole.
     assert_eq!(std::fs::read(home.join("bin/factoryd")).expect("read"), update, "the update is in place");
     assert_eq!(std::fs::read(home.join("bin/factoryd.previous")).expect("read"), original);
+
+    // A client turned away (another user's, say) isn't an app that couldn't
+    // be served: with no app, the trial passes when its time is up.
+    publish(&home, "2099.01.01-0002", &update);
+    let (mut client, mut view) = reconnect(addr, |workspace| workspace.latest_release == "2099.01.01-0002").await;
+    assert!(matches!(apply_request(&mut client, &mut view, install()).await, Body::Ack(_)));
+    drop((client, view));
+    let deadline = tokio::time::Instant::now() + HANG;
+    while home.join("bin/trial.json").exists() {
+        assert!(tokio::time::Instant::now() < deadline, "the trial never ended");
+        if let Ok(tcp) = tokio::net::TcpStream::connect(addr).await
+            && let Ok((mut socket, _)) = tokio_tungstenite::client_async("ws://factory/", tcp).await
+        {
+            let hello = v1::Hello {
+                protocol_version: factory_protocol::PROTOCOL_VERSION,
+                client_version: "stranger".into(),
+                token: "0".repeat(64),
+                ..Default::default()
+            };
+            let message = v1::ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
+            use futures_util::SinkExt;
+            use prost::Message as _;
+            let _ = socket.send(tokio_tungstenite::tungstenite::Message::Binary(message.encode_to_vec().into())).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (_client, view) = reconnect(addr, |_| true).await;
+    assert!(view.workspace.update_error.is_empty(), "{}", view.workspace.update_error);
 }

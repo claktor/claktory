@@ -19,7 +19,7 @@ pub(super) fn protector(inner: &Inner) -> Option<(String, String)> {
     inner
         .db
         .as_ref()?
-        .query_row("SELECT kind, params FROM protectors WHERE kind LIKE 'account:%' LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_row("SELECT kind, params FROM protectors WHERE kind LIKE 'account:%' LIMIT 1", [], crate::store::row2)
         .optional()
         .ok()?
 }
@@ -104,9 +104,7 @@ impl Vault {
         }
         let db = Self::db(&inner)?;
         let found: Option<(String, Vec<u8>)> = db
-            .query_row("SELECT kind, sealed_vmk FROM protectors WHERE kind LIKE 'account:%' LIMIT 1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row("SELECT kind, sealed_vmk FROM protectors WHERE kind LIKE 'account:%' LIMIT 1", [], crate::store::row2)
             .optional()?;
         let Some((kind, sealed)) = found else { return Ok(false) };
         let Some(vmk) = crypto::open_key(&kek(&inner.vault_id, shares), &sealed, &aad(&["vmk", &inner.vault_id, &kind])) else {

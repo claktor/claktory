@@ -10,11 +10,12 @@ import 'claktory_identity.dart' show ClaktoryIdentity;
 import 'controls.dart';
 import 'devices.dart';
 import 'identity.dart';
-import 'login.dart';
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'provider_picker.dart' show ProviderSettings;
 import 'remove_mac.dart';
 import 'scope.dart';
+import 'screens.dart' show SettingsScroller, SettingsSectionAnchor;
 import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
@@ -75,93 +76,86 @@ class SettingsView extends StatelessWidget {
                 builder: (context, _) {
                   final workspace = scope.backend.workspace.workspace;
                   return SelectableArea(
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(vertical: Space.xl),
-                      children: [
-                        _Section(
-                          title: 'Profile',
-                          children: [
-                            _YourName(workspace: workspace),
-                            _Avatar(person: workspace.person),
-                          ],
-                        ),
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'General',
-                          children: [ClaktoryIdentity(workspace: workspace)],
-                        ),
-                        // Only while the backend has the account on.
-                        if (workspace.hasAccount() &&
-                            workspace.account.state !=
-                                ClaktoryAccountState
-                                    .CLAKTORY_ACCOUNT_STATE_UNSPECIFIED) ...[
-                          const SizedBox(height: Space.xxl),
+                    // Scrolls to the section an agent opens (screens.dart).
+                    child: SettingsScroller(
+                      builder: (context, controller) => ListView(
+                        controller: controller,
+                        padding: const EdgeInsets.symmetric(vertical: Space.xl),
+                        children: [
                           _Section(
-                            title: 'Account',
+                            title: 'Profile',
                             children: [
-                              AccountSettings(account: workspace.account),
+                              _YourName(workspace: workspace),
+                              _Avatar(person: workspace.person),
                             ],
                           ),
-                        ],
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'Providers',
-                          children: [
-                            for (final provider in workspace.providers)
-                              ProviderCard(
-                                provider: provider,
-                                flow:
-                                    workspace.hasLogin() &&
-                                        workspace.login.providerId ==
-                                            provider.id
-                                    ? workspace.login
-                                    : null,
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: Space.xxl),
-                        const _Section(
-                          title: 'Secrets',
-                          children: [SecretsSettings()],
-                        ),
-                        // Apps shows only where the backend runs them (the
-                        // dev Claktory, until Apps ships).
-                        if (workspace.appsAvailable) ...const [
-                          SizedBox(height: Space.xxl),
-                          _Section(title: 'Apps', children: [AppsSettings()]),
-                        ],
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'Defaults',
-                          children: [_Defaults(workspace: workspace)],
-                        ),
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'Devices',
-                          children: [DevicesSettings(workspace: workspace)],
-                        ),
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'Resources',
-                          children: [_ResourceAlerts(workspace: workspace)],
-                        ),
-                        const SizedBox(height: Space.xxl),
-                        _Section(
-                          title: 'Display',
-                          children: [
-                            const ZoomSetting(),
-                            _Highlights(workspace: workspace),
-                          ],
-                        ),
-                        // Removing Claktory, from the Mac it runs on.
-                        if (canRemoveThisMac(context)) ...const [
-                          SizedBox(height: Space.xxl),
+                          const SizedBox(height: Space.xxl),
                           _Section(
-                            title: 'This Mac',
-                            children: [RemoveThisMac()],
+                            title: 'General',
+                            children: [ClaktoryIdentity(workspace: workspace)],
                           ),
+                          // Only while the backend has the account on.
+                          if (workspace.hasAccount() &&
+                              workspace.account.state !=
+                                  ClaktoryAccountState
+                                      .CLAKTORY_ACCOUNT_STATE_UNSPECIFIED) ...[
+                            const SizedBox(height: Space.xxl),
+                            _Section(
+                              title: 'Account',
+                              children: [
+                                AccountSettings(account: workspace.account),
+                              ],
+                            ),
+                          ],
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Providers',
+                            children: [ProviderSettings(workspace: workspace)],
+                          ),
+                          const SizedBox(height: Space.xxl),
+                          const _Section(
+                            title: 'Secrets',
+                            children: [SecretsSettings()],
+                          ),
+                          // Apps shows only where the backend runs them (the
+                          // dev Claktory, until Apps ships).
+                          if (workspace.appsAvailable) ...const [
+                            SizedBox(height: Space.xxl),
+                            _Section(title: 'Apps', children: [AppsSettings()]),
+                          ],
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Defaults',
+                            children: [_Defaults(workspace: workspace)],
+                          ),
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Devices',
+                            children: [DevicesSettings(workspace: workspace)],
+                          ),
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Resources',
+                            children: [_ResourceAlerts(workspace: workspace)],
+                          ),
+                          const SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'Display',
+                            children: [
+                              const ZoomSetting(),
+                              _Highlights(workspace: workspace),
+                            ],
+                          ),
+                          // Removing Claktory, from the Mac it runs on.
+                          if (canRemoveThisMac(context)) ...const [
+                            SizedBox(height: Space.xxl),
+                            _Section(
+                              title: 'This Mac',
+                              children: [RemoveThisMac()],
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   );
                 },
@@ -183,25 +177,28 @@ class _Section extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 640),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: Space.xl),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                title,
-                style: TextStyles.emphasis.copyWith(color: palette.text),
-              ),
-              const SizedBox(height: Space.m),
-              for (final child in children) ...[
-                child,
-                const SizedBox(height: Space.s),
+    return SettingsSectionAnchor(
+      id: title.toLowerCase(),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 640),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Space.xl),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  title,
+                  style: TextStyles.emphasis.copyWith(color: palette.text),
+                ),
+                const SizedBox(height: Space.m),
+                for (final child in children) ...[
+                  child,
+                  const SizedBox(height: Space.s),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

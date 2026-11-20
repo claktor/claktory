@@ -142,8 +142,43 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// What the supervisor at `program` does, as a number
+/// (`update::SUPERVISOR_VERSION`); 0 for one from before it, which doesn't
+/// answer, or one that can't be run or doesn't answer within 5 s.
+fn supervisor_version(program: &Path) -> u32 {
+    let Ok(mut child) = Command::new(program)
+        .arg("supervisor-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return 0;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return 0;
+            }
+        }
+    }
+    let mut said = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut said);
+    }
+    said.trim().parse().unwrap_or(0)
+}
+
 /// Stages the release's supervisor app and a plist that runs it, when the
-/// job runs another supervisor; Ok(None) when there's nothing to do.
+/// job runs another supervisor, or an older one (by
+/// `update::SUPERVISOR_VERSION`: the release's app is this build's own
+/// factoryd, so it would restart the backend again for nothing when only
+/// the backend changed); Ok(None) when there's nothing to do.
 pub(crate) fn prepare_supervisor(home: &Home, job: &Job) -> Result<Option<NewSupervisor>, String> {
     let release = release_supervisor(home);
     let program_in = |app: &Path| app.join("Contents/MacOS/factoryd-supervisor");
@@ -161,7 +196,9 @@ pub(crate) fn prepare_supervisor(home: &Home, job: &Job) -> Result<Option<NewSup
         return Ok(None);
     }
     let installed = supervisors(home)[0].clone();
-    if program == installed.to_string_lossy() && same_file(&installed, &program_in(&release)) {
+    if program == installed.to_string_lossy()
+        && (same_file(&installed, &program_in(&release)) || supervisor_version(&installed) >= crate::update::SUPERVISOR_VERSION)
+    {
         return Ok(None);
     }
     let record = serde_json::json!({"version": crate::update::VERSION, "time": crate::transcript::now_ms(), "from": program});
@@ -567,6 +604,38 @@ exit 0
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(std::fs::read(&plist).expect("read"), before, "the old plist is back");
         assert_eq!(std::fs::read_to_string(&installed).expect("installed"), "older", "and the old app");
+    }
+
+    #[test]
+    fn an_installed_app_whose_supervisor_does_the_same_is_kept() {
+        let dir = temp();
+        let home = Home::new(dir.join("home"));
+        // The installed app's program says what its supervisor does; the
+        // release's is another binary (a backend change), as every release's is.
+        let installed = supervisors(&home)[0].clone();
+        std::fs::create_dir_all(installed.parent().expect("parent")).expect("dir");
+        let answering = |version: u32| {
+            let script = format!("#!/bin/sh\n[ \"$1\" = supervisor-version ] && echo {version}\n");
+            std::fs::write(&installed, script).expect("installed");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        };
+        let plist = old_plist(&dir, &installed);
+        release_app(&home, "another build");
+        let job =
+            Job { plist, launchctl: PathBuf::from("/nonexistent"), domain: "gui/501".into(), codesign: PathBuf::from("/usr/bin/true") };
+
+        answering(crate::update::SUPERVISOR_VERSION);
+        assert_eq!(prepare_supervisor(&home, &job).expect("same"), None);
+        assert!(!supervisor_marker(&home).exists(), "nothing tried");
+        answering(crate::update::SUPERVISOR_VERSION + 1);
+        assert_eq!(prepare_supervisor(&home, &job).expect("newer"), None);
+        // An older one, or one from before it that doesn't answer, is replaced.
+        answering(crate::update::SUPERVISOR_VERSION - 1);
+        assert!(prepare_supervisor(&home, &job).expect("older").is_some());
+        std::fs::remove_file(supervisor_marker(&home)).expect("forget");
+        std::fs::write(&installed, "not a program").expect("installed");
+        assert!(prepare_supervisor(&home, &job).expect("silent").is_some());
     }
 
     #[test]

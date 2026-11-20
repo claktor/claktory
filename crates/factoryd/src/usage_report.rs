@@ -128,7 +128,7 @@ fn report(
         let mut statement = db.prepare(
             "SELECT agent, agent_name FROM agent_usage a WHERE agent != '' AND hour = (SELECT MAX(hour) FROM agent_usage b WHERE b.agent = a.agent)",
         )?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = statement.query_map([], crate::store::row2)?;
         rows.collect::<rusqlite::Result<_>>()?
     };
     let mut statement = db.prepare(

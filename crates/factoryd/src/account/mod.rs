@@ -95,7 +95,23 @@ struct Saved {
     /// hour; 0 before the first sign-in).
     periods: Vec<api::Period>,
     periods_until: i64,
+    /// The first launch's sign-in step: "asked" in a Claktory made since
+    /// signing in is on, which asks until it's signed in; "offered" in one
+    /// from before, which may skip it; "skipped" once it has. Set once, at
+    /// its first start with this field (`State::new`).
+    step: String,
+    /// When it last signed in (the code was given), in ms since 1970; 0 for
+    /// a sign-in from before this was kept, which is never new.
+    signed_in_ms: i64,
 }
+
+const ASKED: &str = "asked";
+/// Empty is the same: signing in was off when this Claktory started.
+const OFFERED: &str = "offered";
+const SKIPPED: &str = "skipped";
+
+/// Where codes come from when the service doesn't say: claktory.com's.
+const DEFAULT_CODE_FROM: &str = "code@auth.claktory.com";
 
 impl Saved {
     fn signed_in(&self) -> bool {
@@ -122,6 +138,8 @@ struct Pending {
     start: SignInStart,
     request_id: String,
     expires_ms: i64,
+    /// The address the code comes from; empty when unknown.
+    code_from: String,
 }
 
 struct Inner {
@@ -140,7 +158,7 @@ struct Inner {
     share_asked: Option<Instant>,
     next_check_in: Instant,
     /// The endpoints last registered, so they're sent only when changed.
-    endpoints_sent: Option<(String, Vec<String>)>,
+    endpoints_sent: Option<Endpoints>,
 }
 
 /// The account's state, held by `Factory`.
@@ -271,15 +289,23 @@ fn sign_in_error(service: &str, failure: Failure) -> RequestError {
 }
 
 impl State {
-    pub(crate) fn new(home: &crate::home::Home) -> State {
+    /// The account as `<home>/account` keeps it. `created`: this Claktory
+    /// is new, so it asks to sign in; one from before only offers it. That's
+    /// decided at the first start with signing in on (`enabled`); while it's
+    /// off, nothing is written.
+    pub(crate) fn new(home: &crate::home::Home, created: bool, enabled: bool) -> State {
         let dir = home.root().join("account");
-        let saved = match std::fs::read(dir.join("account.json")) {
+        let mut saved: Saved = match std::fs::read(dir.join("account.json")) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
                 tracing::error!(%error, "account.json can't be read; signed out");
                 Saved::default()
             }),
             Err(_) => Saved::default(),
         };
+        let first = saved.step.is_empty() && enabled;
+        if first {
+            saved.step = if created { ASKED } else { OFFERED }.to_owned();
+        }
         let now = Instant::now();
         let inner = Inner {
             saved,
@@ -300,7 +326,11 @@ impl State {
             .user_agent(format!("Claktory/{}", crate::update::VERSION))
             .build()
             .unwrap_or_default();
-        State { dir, inner: Mutex::new(inner), busy: tokio::sync::Mutex::new(()), wake: Notify::new(), http }
+        let state = State { dir, inner: Mutex::new(inner), busy: tokio::sync::Mutex::new(()), wake: Notify::new(), http };
+        if first {
+            state.save();
+        }
+        state
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -516,6 +546,8 @@ impl State {
             v1::ClaktoryAccountState::Revoked
         } else if saved.signed_in() {
             v1::ClaktoryAccountState::SignedIn
+        } else if saved.step == SKIPPED {
+            v1::ClaktoryAccountState::Skipped
         } else {
             v1::ClaktoryAccountState::SignedOut
         };
@@ -537,6 +569,8 @@ impl State {
             last_check_in_json: saved.last_check_in_json.clone(),
             last_sign_in_ms: saved.last_sign_in_ms,
             last_check_in_ms: saved.last_check_in_ms,
+            skippable: state != v1::ClaktoryAccountState::Skipped && skippable(saved, inner.pending.is_some()),
+            code_from: inner.pending.as_ref().map(|pending| pending.code_from.clone()).unwrap_or_default(),
         })
     }
 
@@ -553,6 +587,91 @@ impl State {
         let service = self.lock().saved.service.clone();
         format!("Can't reach {}. Claktory keeps working and tries again on its own.", service_name(&service))
     }
+}
+
+/// The account this Claktory is signed in to, as devices are checked
+/// against it (onboarding slice 6).
+// Used by pairing (remote.rs), which comes next.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct Owner {
+    pub account_id: String,
+    pub email: String,
+    /// The service's key, pinned at sign-in: device assertions are checked
+    /// with it.
+    pub service_key: VerifyingKey,
+    /// When it signed in, in ms since 1970; 0 when that's unknown (a
+    /// sign-in from before it was kept).
+    pub signed_in_ms: i64,
+}
+
+/// The account it's signed in to, while signing in is on (`config`, so it
+/// can be called with the Factory locked) and it's signed in and not
+/// removed at the service.
+#[allow(dead_code)]
+pub(crate) fn owner(factory: &Factory, config: &AccountConfig) -> Option<Owner> {
+    if !config.enabled {
+        return None;
+    }
+    let inner = factory.account.lock();
+    let saved = &inner.saved;
+    if !saved.signed_in() || saved.revoked {
+        return None;
+    }
+    Some(Owner {
+        account_id: saved.account_id.clone(),
+        email: saved.email.clone(),
+        service_key: api::verifying_key(&saved.service_key)?,
+        signed_in_ms: saved.signed_in_ms,
+    })
+}
+
+/// Why a device assertion doesn't let a device in.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssertionRefusal {
+    /// This Claktory isn't signed in (or signing in is off, or it was
+    /// removed at the service): it can't check one.
+    NotSignedIn,
+    /// Not the service's, or not one this version reads.
+    Invalid,
+    /// The service's, but no longer working: the device gets a fresh one.
+    Expired,
+    /// For another account than this Claktory's.
+    OtherAccount,
+    /// For another tunnel key than the one the device connected with.
+    OtherKey,
+}
+
+/// What a device's assertion says, if it lets the device with tunnel key
+/// `endpoint_id` in as this Claktory's owner: the service's, working now,
+/// for this Claktory's account and that key.
+#[allow(dead_code)]
+pub(crate) fn check_assertion(
+    factory: &Factory,
+    config: &AccountConfig,
+    assertion: &str,
+    endpoint_id: &str,
+) -> Result<api::DeviceAssertion, AssertionRefusal> {
+    let owner = owner(factory, config).ok_or(AssertionRefusal::NotSignedIn)?;
+    let said = api::read_device_assertion(&owner.service_key, assertion).ok_or(AssertionRefusal::Invalid)?;
+    if api::verify_device_assertion(&owner.service_key, assertion, now_s()).is_none() {
+        return Err(AssertionRefusal::Expired);
+    }
+    if said.account_id != owner.account_id {
+        return Err(AssertionRefusal::OtherAccount);
+    }
+    if !said.device_key.eq_ignore_ascii_case(endpoint_id) {
+        return Err(AssertionRefusal::OtherKey);
+    }
+    Ok(said)
+}
+
+/// Whether the sign-in step may be skipped: in a Claktory from before
+/// signing in was on (or turned on since it started), while it isn't signed
+/// in (or is waiting for a code).
+fn skippable(saved: &Saved, pending: bool) -> bool {
+    saved.step != ASKED && (pending || !saved.signed_in())
 }
 
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -622,6 +741,10 @@ async fn send_code(
             start,
             request_id: started.request_id,
             expires_ms: now_ms() + started.expires_in * 1000,
+            code_from: match started.code_from {
+                from if from.is_empty() && service == DEFAULT_SERVICE => DEFAULT_CODE_FROM.to_owned(),
+                from => from,
+            },
         });
     }
     account.save();
@@ -694,6 +817,7 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), Req
         inner.saved.epoch = signed_in.epoch;
         inner.saved.name = pending.start.name.clone();
         inner.saved.revoked = false;
+        inner.saved.signed_in_ms = now_ms();
         if inner.saved.periods_until == 0 {
             inner.saved.periods_until = now_s() / 3600 * 3600;
         }
@@ -759,6 +883,29 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
     account.save();
     tracing::info!("signed out of the account service");
     factory.vault_changed();
+    Ok(())
+}
+
+/// SkipAccountSignIn: the person chose Not now on the sign-in step, which a
+/// Claktory from before signing in was on may. It isn't asked again; it can
+/// still sign in from Settings → Account. A code waiting is dropped.
+pub(crate) async fn skip(factory: &Arc<Factory>) -> Result<(), RequestError> {
+    enabled(factory)?;
+    let account = &factory.account;
+    let _busy = account.busy.lock().await;
+    {
+        let mut inner = account.lock();
+        let pending = inner.pending.is_some();
+        if !skippable(&inner.saved, pending) {
+            let why = if inner.saved.signed_in() { "This Claktory is already signed in." } else { "Sign in to use this Claktory." };
+            return Err(refused(ErrorCode::InvalidRequest, why));
+        }
+        inner.pending = None;
+        inner.saved.step = SKIPPED.to_owned();
+    }
+    account.save();
+    tracing::info!("the sign-in step was skipped");
+    changed(factory);
     Ok(())
 }
 
@@ -986,8 +1133,10 @@ async fn reseal(factory: &Arc<Factory>, epoch: u64) {
     }
 }
 
-/// The iroh endpoint ids of this backend and its paired devices.
-fn endpoints(factory: &Factory) -> Option<(String, Vec<String>)> {
+/// The iroh endpoint ids of this backend and its paired devices, with this
+/// Claktory's name, color and relays for devices that find it through the
+/// account.
+fn endpoints(factory: &Factory) -> Option<Endpoints> {
     let backend = crate::remote::secret_key(&factory.home).ok()?.public().to_string();
     if !api::valid_endpoint(&backend) {
         return None;
@@ -1001,7 +1150,17 @@ fn endpoints(factory: &Factory) -> Option<(String, Vec<String>)> {
     devices.sort();
     devices.dedup();
     devices.truncate(MAX_ENDPOINTS - 1);
-    Some((backend, devices))
+    let identity = factory.identity();
+    // The relays its pairing codes give: the one it's reached through now,
+    // then those it's set to use.
+    let shown = factory.remote_view(&factory.lock());
+    let mut relays: Vec<String> = Vec::new();
+    for relay in std::iter::once(shown.home_relay).chain(shown.relays) {
+        if !relay.is_empty() && !relays.iter().any(|known| known.trim_end_matches('/') == relay.trim_end_matches('/')) {
+            relays.push(relay);
+        }
+    }
+    Some(Endpoints { backend, devices, name: Some(identity.name), color: Some(identity.color), relays: Some(relays) })
 }
 
 /// Registers the endpoints, if they changed since they last were.
@@ -1011,7 +1170,7 @@ async fn register_endpoints(factory: &Arc<Factory>) {
     if account.lock().endpoints_sent.as_ref() == Some(&now) {
         return;
     }
-    let body = Endpoints { backend: now.0.clone(), devices: now.1.clone() };
+    let body = now.clone();
     let (service, service_key, token) = {
         let inner = account.lock();
         (inner.saved.service.clone(), inner.saved.service_key.clone(), inner.saved.machine_token.clone())

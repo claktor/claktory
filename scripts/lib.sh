@@ -93,6 +93,9 @@ make_dev_app() {
   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   local plist="$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.factory.app.dev" -c "Set :CFBundleName Claktory Dev" "$plist"
+  # Its own link scheme (claktory-dev://add?code=…), so claktory:// links
+  # always open the real Claktory.
+  /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 claktory-dev" "$plist" 2>/dev/null || true
   # The name shown is Claktory Dev; the display name in Info.plist matches the
   # bundle's file name, Factory Dev.app, as macOS needs to show the localized one.
   /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$plist" 2>/dev/null || true

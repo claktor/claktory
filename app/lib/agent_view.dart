@@ -12,6 +12,7 @@ import 'controls.dart';
 import 'drafts.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -346,10 +347,18 @@ class _Header extends StatelessWidget {
                       ],
                       if (!agent.modelAvailable) ...[
                         const SizedBox(width: Space.s),
-                        Button(
-                          label: 'Sign in…',
-                          onPressed: () => AppScope.openSettings(context),
-                        ),
+                        // No model at all: connect one, as the first
+                        // launch offers.
+                        AppScope.of(context).workspace.workspace.models.isEmpty
+                            ? Button(
+                                label: 'Connect…',
+                                onPressed: () => showConnectModel(context),
+                              )
+                            : Button(
+                                label: 'Sign in…',
+                                onPressed: () =>
+                                    AppScope.openProviders(context),
+                              ),
                       ],
                     ],
                   ),
@@ -959,8 +968,13 @@ class _ComposerState extends State<_Composer> {
                                           child: Align(
                                             alignment: Alignment.centerLeft,
                                             child: Text(
-                                              "No model available, so "
-                                              "${agent.name} can't run.",
+                                              hasModels
+                                                  ? "No model available, so "
+                                                        "${agent.name} can't "
+                                                        'run.'
+                                                  : 'Connect a model so '
+                                                        '${agent.name} can '
+                                                        'answer.',
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
                                               style: TextStyles.body.copyWith(
@@ -1027,12 +1041,21 @@ class _ComposerState extends State<_Composer> {
                                           ),
                                         ],
                                         const SizedBox(width: Space.xs),
-                                        Button(
-                                          label: 'Sign in…',
-                                          primary: true,
-                                          onPressed: () =>
-                                              AppScope.openSettings(context),
-                                        ),
+                                        hasModels
+                                            ? Button(
+                                                label: 'Sign in…',
+                                                primary: true,
+                                                onPressed: () =>
+                                                    AppScope.openProviders(
+                                                      context,
+                                                    ),
+                                              )
+                                            : Button(
+                                                label: 'Connect a model…',
+                                                primary: true,
+                                                onPressed: () =>
+                                                    showConnectModel(context),
+                                              ),
                                       ],
                                     ],
                                   ),

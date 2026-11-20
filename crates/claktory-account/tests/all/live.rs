@@ -138,7 +138,7 @@ async fn a_claktory_signs_in_unlocks_and_checks_in_with_a_running_service() {
     let checked: CheckedIn = serde_json::from_slice(&body).unwrap();
     assert_eq!((checked.periods_recorded, checked.epoch), (1, signed_in.epoch));
 
-    let endpoints = Endpoints { backend: "a".repeat(64), devices: vec!["b".repeat(64)] };
+    let endpoints = Endpoints { backend: "a".repeat(64), devices: vec!["b".repeat(64)], ..Default::default() };
     let (status, _) = live.signed(&key, &signed_in.machine_token, "PUT", "/v1/endpoints", &endpoints).await;
     assert_eq!(status, 200);
 

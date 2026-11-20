@@ -149,6 +149,14 @@ message ClientMessage {
     SetAppSecret set_app_secret = 105;
     // New colours for the person's avatar (Workspace.person).
     ShuffleAvatar shuffle_avatar = 106;
+    // The code of a device an agent is adding (DevicePairing), to show.
+    ShowPairingCode show_pairing_code = 107;
+    // Whether this app showed an OpenScreen; answered with Ack.
+    ScreenOpened screen_opened = 108;
+    SkipAccountSignIn skip_account_sign_in = 109;
+    // Skips a step of a new Claktory's first run (Settings.onboarding).
+    SetOnboarding set_onboarding = 110;
+    ConfirmDevice confirm_device = 111;
   }
 }
 
@@ -215,6 +223,8 @@ message ServerMessage {
     UsageReport usage_report = 37;
     // The answer to InstallLocalApp without `approve`, to the asker only.
     AppPermissions app_permissions = 38;
+    // An agent asks the app the person is using to open a screen.
+    OpenScreen open_screen = 39;
   }
 }
 
@@ -234,6 +244,26 @@ message Hello {
   // The app applies WorkspacePatch: after the first whole Workspace, the
   // backend sends only what changed. Apps before it get whole Workspaces.
   bool workspace_patches = 5;
+  // This device's own name, as its owner knows it: a Mac's Computer Name
+  // ("Matt's MacBook"), an iPhone's name. A device whose pairing code was
+  // made without a name (`factoryd pair --no-wait`) takes it when it first
+  // uses the code. Empty from apps before it.
+  string device_name = 6;
+  // A device assertion: claktory.com's word, signed with its key, that the
+  // device with this connection's tunnel key is signed in to an account
+  // (claktory-account API.md, "Devices"). Through the tunnel only. With no
+  // token, the device found this Claktory through its account (discovery):
+  // it's let in only if the account is this Claktory's, and then waits for
+  // Allow (PairingPending.discovered), unless it's the first device of a
+  // Claktory signed in less than 30 minutes ago. With a pairing code's token,
+  // a matching account takes the place of Allow. From a paired device, it
+  // confirms the device as the owner's. Empty when the device has none.
+  string assertion = 7;
+  // This app can sign in to the account and confirm (`assertion`,
+  // ConfirmDevice). A paired device is asked to confirm only once it has
+  // connected with an app that can: false from apps before it, which keep
+  // working as they did.
+  bool can_confirm = 8;
 }
 
 enum DeviceKind {
@@ -267,6 +297,10 @@ message Welcome {
   // Workspace.
   string name = 4;
   string color = 5;
+  // This device has to confirm it's the owner's by then, in ms since 1970:
+  // a Hello with an assertion, or ConfirmDevice with one. Past it, its Hello
+  // is refused with ERROR_CODE_SIGN_IN_REQUIRED. 0 when it needn't.
+  int64 confirm_by_ms = 6;
 }
 
 // Pairs a new device with this Factory. Answered with PairingCode. Refused
@@ -279,8 +313,10 @@ message CreatePairing {
   string host = 2;
 }
 
-// A new device's pairing code. Sent only to the client that asked, once:
-// Factory keeps only a hash of the key in it.
+// A new device's pairing code: the answer to CreatePairing or
+// ShowPairingCode. Sent only to the client that asked; Factory keeps only a
+// hash of the key in it on disk (and, for ShowPairingCode, the code in
+// memory while it waits).
 message PairingCode {
   // factory://?t=<token>&name=<this machine>&e=<endpoint id>[&r=<relay
   // URL>…]: what the device pastes or scans to connect, through the tunnel.
@@ -316,6 +352,17 @@ message DenyDevice {
   string device_id = 1;
 }
 
+// The code of an agent's DevicePairing that's WAITING, for the person's app
+// to show as a QR code and with Copy code. Answered with PairingCode, to the
+// asker only; ERROR_CODE_NOT_FOUND once the pairing no longer waits (a
+// device used its code, or it ended). Asked again, it gives the same code;
+// after the backend restarts (it keeps codes only in memory) a new one,
+// which replaces the code shown before.
+message ShowPairingCode {
+  // DevicePairing.id.
+  string pairing_id = 1;
+}
+
 // Cancels a pairing code that hasn't let a device in yet, when the person
 // closes Add a device: the code stops working and the device is forgotten
 // (a device waiting with it is turned away). A code exists only while the
@@ -341,6 +388,11 @@ message PairingPending {
   string machine = 3;
   // When its code stops working, in ms since 1970.
   int64 expires_ms = 4;
+  // It came without a code, through its account (Hello.assertion with no
+  // token): it waits for Allow on another device, or `factoryd allow` on the
+  // machine. Its four digits are PendingDevice.number's, worked out with the
+  // SHA-256 of the assertion (the text sent in Hello) in place of the token's.
+  bool discovered = 5;
 }
 
 // Turns remote access (devices on other machines reaching this Factory
@@ -423,6 +475,12 @@ message PendingDevice {
   int64 requested_ms = 5;
   // When its code stops working, and it's turned away, unless allowed.
   int64 expires_ms = 6;
+  // It showed a valid device assertion for this Claktory's account: it's
+  // signed in as the owner ("signed in as you").
+  bool signed_in = 7;
+  // It came without a code, through its account (PairingPending.discovered);
+  // `number` uses its assertion in place of the token.
+  bool discovered = 8;
 }
 
 // How a device's connection travels.
@@ -454,6 +512,16 @@ message PairedDevice {
   // (ms since 1970); 0 once a device has used it. Past it, the device can't
   // connect: pair it again.
   int64 code_expires_ms = 8;
+  // It's the owner's: it showed a valid device assertion for this
+  // Claktory's account, or the person confirmed it from a confirmed device
+  // (ConfirmDevice.device_id). Always true for this computer's own app.
+  bool confirmed = 9;
+  // While it isn't confirmed and has connected with an app that can
+  // confirm (Hello.can_confirm), the end of its 7-day grace, in ms since
+  // 1970; 0 otherwise. Past it and not confirmed, it's "Not confirmed": its
+  // Hello is refused until it confirms, and the person can confirm or remove
+  // it from another device.
+  int64 confirm_by_ms = 10;
 }
 
 // ---- Requests (client → server). Each is answered with `ack` or `error`. ----
@@ -1382,6 +1450,12 @@ enum ErrorCode {
   // The account service can't be reached (or answered something Claktory
   // can't trust); the message says which. Claktory keeps working.
   ERROR_CODE_UNREACHABLE = 14;
+  // Hello refused: this device has to show a (fresh) device assertion. A
+  // paired device whose grace to confirm is over, or a device that found
+  // this Claktory through its account with an assertion missing or expired.
+  // The app signs in to the account (or gets a new assertion) and connects
+  // again. Connection closes.
+  ERROR_CODE_SIGN_IN_REQUIRED = 15;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -1562,6 +1636,32 @@ message Highlight {
 message HighlightTarget {
   string kind = 1;
   string id = 2;
+}
+
+// An agent asks to open a screen in the app (its show_screen tool). Sent to
+// every app connected; each opens it only while it's the one the person is
+// using (its window frontmost and focused, or on a phone in the
+// foreground), never bringing itself forward, and answers ScreenOpened
+// either way.
+message OpenScreen {
+  // Unique per call; ScreenOpened gives it back.
+  string id = 1;
+  // What to open, by kind and id. "settings": id a section ("profile",
+  // "general", "account", "providers", "secrets", "apps", "defaults",
+  // "devices", "resources", "display"), or empty for the top. "map",
+  // "usage", "marketplace", "changelog" (What's new): no id. "agent": an
+  // agent's id, its conversation. "agent_settings": an agent's id, its
+  // settings.
+  HighlightTarget target = 2;
+  // The agent that asked.
+  string from_agent_id = 3;
+}
+
+// Whether this app showed OpenScreen `id`: `opened` when it did, false when
+// it isn't the one in use.
+message ScreenOpened {
+  string id = 1;
+  bool opened = 2;
 }
 
 enum HighlightKind {
@@ -2027,6 +2127,34 @@ message Settings {
   // device not listed has; 0.5 to 2.0. Each device's own, since each has its
   // own screen; set with SetZoom.
   map<string, double> zoom = 28;
+  // Where this Claktory's first run stands, the same on every device.
+  Onboarding onboarding = 29;
+}
+
+// Where a new Claktory's first run stands. A Claktory from before it, or
+// whose first run is over, has every step DONE.
+message Onboarding {
+  // "Connect a model": NEEDED on a Claktory that started with no model
+  // available, until one is; SKIPPED once the person skips it
+  // (SetOnboarding), until one is. The first time a model is available it
+  // turns DONE by itself, and Rivet greets the person (an event from
+  // Claktory starts it), moved first to a model that can run if its own
+  // can't.
+  OnboardingStep model = 1;
+}
+
+enum OnboardingStep {
+  ONBOARDING_STEP_UNSPECIFIED = 0;
+  ONBOARDING_STEP_NEEDED = 1;
+  ONBOARDING_STEP_SKIPPED = 2;
+  ONBOARDING_STEP_DONE = 3;
+}
+
+// Skips steps of the first run. Answered with Ack, also when the step is
+// already skipped or done.
+message SetOnboarding {
+  // "Connect a model" (Onboarding.model): skipped until a model is available.
+  bool skip_model = 1;
 }
 
 // How long a provider's (or one model's) prompt cache is asked to last.
@@ -2505,6 +2633,9 @@ message Entry {
     // An agent proposes connecting a service (its
     // secrets_propose_connection tool): see ConnectProposal.
     ConnectProposal connect_proposal = 13;
+    // An agent adds a device for the person (its devices_add tool): see
+    // DevicePairing.
+    DevicePairing device_pairing = 14;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -2544,6 +2675,54 @@ message Proposal {
   string comment = 4;
   // When it was approved or dismissed, in ms since 1970; 0 while pending.
   int64 decided_at_ms = 5;
+}
+
+// A device an agent adds for the person (an admin agent's devices_add tool,
+// the Devices extension's), shown in the agent's conversation after the
+// call: Add a device from Settings → Devices, started by the agent. The
+// pairing code never enters the conversation: while the pairing is WAITING
+// the app gets it with ShowPairingCode and shows it as a QR code, with Copy
+// code and a Cancel (CancelPairing with device_id). A device that uses the
+// code waits for the person to allow it like any other
+// (RemoteAccess.pending_devices: "Allow … to connect?"). The entry is sent
+// again whenever its state changes, and counts in Agent.waiting_seqs while
+// WAITING or ASKING.
+message DevicePairing {
+  // Unique in this Claktory; what ShowPairingCode names.
+  string id = 1;
+  // The agent that started it.
+  string agent_id = 2;
+  // The device's id in RemoteAccess.devices (or pending_devices): what
+  // CancelPairing names. A device added later may reuse it once this one
+  // has ended.
+  string device_id = 3;
+  // What the device is called, e.g. "Laptop".
+  string name = 4;
+  DevicePairingState state = 5;
+  // When its code stops working unless a device was allowed with it by
+  // then, in ms since 1970.
+  int64 expires_ms = 6;
+  // When the device was added or the pairing ended, in ms since 1970; 0
+  // while WAITING or ASKING.
+  int64 ended_ms = 7;
+}
+
+enum DevicePairingState {
+  DEVICE_PAIRING_STATE_UNSPECIFIED = 0;
+  // Its code waits to be scanned or pasted on the device.
+  DEVICE_PAIRING_STATE_WAITING = 1;
+  // A device used the code and waits for the person to allow it: it's in
+  // RemoteAccess.pending_devices, by device_id.
+  DEVICE_PAIRING_STATE_ASKING = 2;
+  // The person allowed it: it's paired.
+  DEVICE_PAIRING_STATE_ADDED = 3;
+  // The person didn't allow the device that used the code.
+  DEVICE_PAIRING_STATE_DENIED = 4;
+  // Cancelled (from the card, Settings → Devices, or the agent) before a
+  // device was allowed with it.
+  DEVICE_PAIRING_STATE_CANCELLED = 5;
+  // Its code ran out before a device was allowed with it.
+  DEVICE_PAIRING_STATE_EXPIRED = 6;
 }
 
 enum ProposalState {
@@ -2649,6 +2828,24 @@ message Compaction {
 message Notice {
   string text = 1;
   NoticeLevel level = 2;
+  // Set when a run ended because the model's provider refused its
+  // credentials: a key it doesn't accept or revoked (a 401, or a 403 that
+  // says so), or a sign-in whose token it won't refresh. Unset for every
+  // other failure (rate and usage limits, credit, outages). `text` keeps the
+  // provider's own words.
+  CredentialsRefused refused = 3;
+}
+
+// Whose credentials a provider refused: what to sign in to again.
+message CredentialsRefused {
+  // The provider, as Provider.id.
+  string provider_id = 1;
+  // The account among the provider's, as Account.id ("env" for the
+  // environment's key); empty when unknown.
+  string account_id = 2;
+  // How it signed in, as LoginMethod.id: "api_key" or "oauth"; empty when
+  // unknown.
+  string method_id = 3;
 }
 
 enum NoticeLevel {
@@ -3085,6 +3282,15 @@ message ClaktoryAccount {
   // When each was sent, in ms since 1970; 0 before the first.
   int64 last_sign_in_ms = 10;
   int64 last_check_in_ms = 11;
+  // The first launch's sign-in step may be skipped (SkipAccountSignIn): this
+  // Claktory existed before signing in was on, and it's SIGNED_OUT or
+  // AWAITING_CODE. False in a Claktory made since, which asks until it's
+  // signed in.
+  bool skippable = 12;
+  // AWAITING_CODE: the address the code email comes from, such as
+  // "code@auth.claktory.com", so the person knows what to look for (in spam
+  // too); empty when unknown.
+  string code_from = 13;
 }
 
 enum ClaktoryAccountState {
@@ -3097,6 +3303,10 @@ enum ClaktoryAccountState {
   // Removed at claktory.com: it keeps running, but after a restart its
   // secrets open only with the recovery key, until it signs in again.
   CLAKTORY_ACCOUNT_STATE_REVOKED = 4;
+  // Not signed in, and the person chose Not now on the sign-in step
+  // (SkipAccountSignIn): the app doesn't ask again. Settings → Account
+  // offers to sign in, as from SIGNED_OUT (AccountSignIn works from here).
+  CLAKTORY_ACCOUNT_STATE_SKIPPED = 5;
 }
 
 // Emails a code to sign this Claktory in. Answered with Ack once it's sent;
@@ -3116,9 +3326,26 @@ message AccountVerify {
 // Emails a new code to the same address. Answered with Ack.
 message AccountResend {}
 
-// Signs out: no more check-ins, and back to SIGNED_OUT. The vault stays as
-// it is, unlocked while Claktory runs. Answered with Ack.
+// Signs out: no more check-ins, and back to SIGNED_OUT (SKIPPED once the
+// sign-in step was skipped). The vault stays as it is, unlocked while
+// Claktory runs. Answered with Ack.
 message AccountSignOut {}
+
+// Confirms a paired device as the owner's. With `assertion`: this device
+// confirms itself (the assertion's device key must be this connection's
+// tunnel key). With `device_id`: the person confirms another paired device
+// from this one ("Confirm it's yours"), which must be confirmed itself or be
+// this computer's own app (else ERROR_CODE_UNAUTHORIZED). Answered with Ack.
+message ConfirmDevice {
+  string assertion = 1;
+  string device_id = 2;
+}
+
+// Not now, on the first launch's sign-in step, while
+// `ClaktoryAccount.skippable`: SKIPPED from then on, and a code waiting is
+// dropped. Answered with Ack; ERROR_CODE_INVALID_REQUEST when it isn't
+// skippable.
+message SkipAccountSignIn {}
 
 // The account service to use; empty for claktory.com's. Only while signed
 // out. Answered with Ack.

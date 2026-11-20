@@ -91,7 +91,7 @@ fn control_aad(vault_id: &str, id: &str, connector: &str, generation: i64) -> Ve
 /// The secret's own key.
 fn dek(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str) -> Result<crypto::Key, VaultError> {
     let (version, sealed): (u32, Vec<u8>) =
-        db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], crate::store::row2)?;
     crypto::open_key(vmk, &sealed, &aad(&["dek", vault_id, id, &version.to_string()]))
         .ok_or_else(|| VaultError::Invalid(format!("The secret {id} can't be opened: the vault was changed outside Claktory.")))
 }
@@ -145,8 +145,7 @@ pub(super) fn public_of(kind: &str, meta: &str) -> Vec<String> {
 impl Vault {
     /// The variables of secret `id` that aren't secret.
     pub(super) fn public_variables(db: &Connection, id: &str) -> Result<Vec<String>, VaultError> {
-        let (kind, meta): (String, String) =
-            db.query_row("SELECT kind, meta FROM secrets WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let (kind, meta): (String, String) = db.query_row("SELECT kind, meta FROM secrets WHERE id = ?1", [id], crate::store::row2)?;
         Ok(public_of(&kind, &meta))
     }
 
@@ -181,14 +180,12 @@ impl Vault {
         let db = Self::db(&inner)?;
         let (id, name) = Self::secret_id(db, id)?;
         let (kind, connector, meta): (String, String, String) =
-            db.query_row("SELECT kind, connector, meta FROM secrets WHERE id = ?1", [&id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            db.query_row("SELECT kind, connector, meta FROM secrets WHERE id = ?1", [&id], crate::store::row3)?;
         if kind != KIND_CONNECTION {
             return Err(VaultError::Invalid(format!("{name} isn't a connected service.")));
         }
         let (generation, sealed): (i64, Vec<u8>) = db
-            .query_row("SELECT version, sealed FROM controls WHERE secret = ?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row("SELECT version, sealed FROM controls WHERE secret = ?1", [&id], crate::store::row2)
             .optional()?
             .ok_or_else(|| VaultError::Invalid(format!("{name} has lost its sign-in: connect it again.")))?;
         let key = dek(db, &inner.vault_id, vmk, &id)?;
@@ -277,11 +274,7 @@ impl Vault {
     fn exports_where(db: &Connection, clause: &str, arg: &str) -> Result<Vec<Export>, VaultError> {
         let mut statement =
             db.prepare(&format!("SELECT id, name, parent, meta FROM secrets WHERE kind = '{KIND_EXPORT}' AND {clause} ORDER BY name"))?;
-        let rows = statement
-            .query_map([arg], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = statement.query_map([arg], crate::store::row4::<String, String, String, String>)?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
             .map(|(id, name, connection, meta)| Export { id, name, connection, meta: serde_json::from_str(&meta).unwrap_or_default() })
@@ -334,9 +327,7 @@ impl Vault {
     /// Fills a secret's connection or export view from its row.
     pub(super) fn connection_view(db: &Connection, secret: &mut v1::SecretInfo) -> Result<(), VaultError> {
         let (kind, connector, parent, meta): (String, String, String, String) =
-            db.query_row("SELECT kind, connector, parent, meta FROM secrets WHERE id = ?1", [&secret.id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
+            db.query_row("SELECT kind, connector, parent, meta FROM secrets WHERE id = ?1", [&secret.id], crate::store::row4)?;
         match kind.as_str() {
             KIND_CONNECTION => {
                 let meta: ConnectionMeta = serde_json::from_str(&meta).unwrap_or_default();
@@ -371,7 +362,7 @@ impl Vault {
         }
         let exports: Vec<(String, String)> = transaction
             .prepare("SELECT id, name FROM secrets WHERE parent = ?1 AND kind = ?2")?
-            .query_map([&id, KIND_EXPORT], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([&id, KIND_EXPORT], crate::store::row2)?
             .collect::<Result<_, _>>()?;
         let mut names = vec![name];
         let mut agents = Vec::new();

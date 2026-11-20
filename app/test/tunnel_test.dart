@@ -80,6 +80,23 @@ class _FreshStatusTunnel extends FakeTunnel {
   TunnelStatus get status => tunnelStatus(path: path);
 }
 
+/// Tunnels that never open.
+class _FailingTunnels implements Tunnels {
+  @override
+  Future<Tunnel> open({
+    required String deviceKey,
+    required String endpointId,
+    required List<String> relays,
+    List<String> addresses = const [],
+  }) async => throw const TunnelOpenFailure('no network');
+
+  @override
+  Future<({String device, String backend})> pairingIds({
+    required String deviceKey,
+    required String endpointId,
+  }) async => (device: 'b' * 64, backend: 'a' * 64);
+}
+
 class FakeTunnels implements Tunnels {
   FakeTunnels(this.tunnel);
 
@@ -284,6 +301,69 @@ void main() {
     expect(endpoint, _endpoint);
     expect(relays, isEmpty);
     expect(tunnels.addresses.single, ['127.0.0.1:4919']);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("this Mac's Factory, its tunnel failing, is reached on its open "
+      "port with its code's token", () async {
+    final (server, hello) = await helloServer();
+    final local = parsePairingCode(
+      'factory://?t=$_token&name=this-mac&e=$_endpoint',
+    )!;
+    final backend = Backend(
+      workspace: WorkspaceStore(),
+      transcript: TranscriptStore(),
+      explorer: ExplorerStore(),
+      extensionView: ExtensionViewStore(),
+      tunnels: _FailingTunnels(),
+      localPairing: () async => local,
+      localEndpoint: 'ws://127.0.0.1:${server.port}',
+    );
+    unawaited(backend.run());
+    final message = await hello.timeout(const Duration(seconds: 10));
+    expect(message.hello.token, _token);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("refused by this Mac's own Factory (its code not written yet), it "
+      'tries again rather than giving up', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var hellos = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (!message.hasHello()) return;
+        hellos++;
+        socket.add(
+          ServerMessage(
+            replyTo: message.id,
+            error: Error(
+              code: ErrorCode.ERROR_CODE_UNAUTHORIZED,
+              message: 'This Claktory needs its token.',
+            ),
+          ).writeToBuffer(),
+        );
+      });
+    });
+    final backend = Backend(
+      workspace: WorkspaceStore(),
+      transcript: TranscriptStore(),
+      explorer: ExplorerStore(),
+      extensionView: ExtensionViewStore(),
+      tunnels: _FailingTunnels(),
+      localPairing: () async => null,
+      localEndpoint: 'ws://127.0.0.1:${server.port}',
+    );
+    unawaited(backend.run());
+    final end = DateTime.now().add(const Duration(seconds: 10));
+    while (hellos < 2 && DateTime.now().isBefore(end)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(hellos, greaterThanOrEqualTo(2));
+    expect(backend.refused.value, isNull);
     await backend.close();
     await server.close(force: true);
   });

@@ -391,6 +391,20 @@ impl Transcript {
         Some(entry)
     }
 
+    /// Shows a device an agent adds as it is now (added, say); the changed
+    /// entry, or None if the conversation doesn't show it.
+    pub fn set_device_pairing(&mut self, pairing: v1::DevicePairing) -> Option<Entry> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(&entry.kind, Some(Kind::DevicePairing(shown)) if shown.id == pairing.id))?;
+        entry.kind = Some(Kind::DevicePairing(pairing));
+        let entry = entry.clone();
+        self.track(&entry);
+        Some(entry)
+    }
+
     /// Adds a harness notice. Notices are for display only and aren't saved.
     pub fn notice(&mut self, text: impl Into<String>, level: NoticeLevel) -> Entry {
         self.push(now_ms(), notice(text.into(), level))
@@ -552,6 +566,10 @@ impl Transcript {
                 if let Some(proposal) = crate::connectors::proposals::proposed(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::ConnectProposal(proposal)));
                 }
+                // And a device the agent adds, with its code.
+                if let Some(pairing) = crate::extensions::devices::started(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::DevicePairing(pairing)));
+                }
                 changed
             }
             Message::System(_) => Vec::new(),
@@ -610,7 +628,13 @@ impl Transcript {
         match message.stop_reason {
             StopReason::Error => {
                 let text = message.error_message.clone().unwrap_or_else(|| "The model request failed.".to_owned());
-                changed.push(self.push(timestamp, notice(text, NoticeLevel::Error)));
+                // The provider refused the credentials: whose, so the app can offer to change them.
+                let refused = factory_agent::accounts::refused(message).map(|refused| v1::CredentialsRefused {
+                    provider_id: message.provider.clone(),
+                    account_id: refused.account,
+                    method_id: refused.method,
+                });
+                changed.push(self.push(timestamp, Kind::Notice(v1::Notice { text, level: NoticeLevel::Error.into(), refused })));
             }
             StopReason::Aborted => changed.push(self.push(timestamp, notice("Stopped.".to_owned(), NoticeLevel::Info))),
             _ => {}
@@ -764,12 +788,15 @@ fn waits(kind: Option<&Kind>) -> bool {
         Some(Kind::SecretRequest(request)) => request.state() == v1::SecretRequestState::Pending,
         Some(Kind::ConnectProposal(proposal)) => proposal.state() == v1::ConnectProposalState::Pending,
         Some(Kind::Proposal(proposal)) => proposal.state() == v1::ProposalState::Pending,
+        Some(Kind::DevicePairing(pairing)) => {
+            matches!(pairing.state(), v1::DevicePairingState::Waiting | v1::DevicePairingState::Asking)
+        }
         _ => false,
     }
 }
 
 fn notice(text: String, level: NoticeLevel) -> Kind {
-    Kind::Notice(v1::Notice { text, level: level.into() })
+    Kind::Notice(v1::Notice { text, level: level.into(), ..Default::default() })
 }
 
 /// The person's message, or an event shown as one, never as theirs.

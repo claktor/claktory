@@ -9,10 +9,12 @@ import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
 import 'compatibility.dart';
+import 'connect_step.dart';
 import 'map.dart';
 import 'pairing.dart';
 import 'marketplace.dart';
 import 'account.dart';
+import 'model_step.dart';
 import 'name_step.dart';
 import 'phone.dart';
 import 'controls.dart';
@@ -27,6 +29,7 @@ import 'setup.dart';
 import 'sidebar.dart';
 import 'state.dart';
 import 'update.dart';
+import 'screens.dart';
 import 'usage_view.dart';
 
 /// The window: the sidebar on the left, the selected agent in the middle under
@@ -118,6 +121,7 @@ class _ShellState extends State<Shell> {
     listenable: Listenable.merge([
       AppScope.of(context).workspace,
       signInPutOff(AppScope.of(context)),
+      modelStepStarted(AppScope.of(context)),
       AppScope.scope(context).page,
     ]),
     builder: (context, _) {
@@ -131,7 +135,10 @@ class _ShellState extends State<Shell> {
       // first launch's questions until it's closed. First of them: this
       // app and its Claktory can't work together (compatibility.dart).
       final mismatch = mismatchIn(context);
-      final question = AppScope.pageShown(context, AppPage.changelog)
+      // A Mac with no Claktory of its own connects to one first.
+      final question = asksToConnect(context)
+          ? const ConnectStep()
+          : AppScope.pageShown(context, AppPage.changelog)
           ? null
           : mismatch != null
           ? VersionStep(which: mismatch)
@@ -139,6 +146,8 @@ class _ShellState extends State<Shell> {
           ? const SignInStep()
           : asksName(context)
           ? const NameStep()
+          : asksModel(context)
+          ? const ModelStep()
           : null;
       final step = setupStep ?? question;
       // Over the questions the update banner stays in reach: they don't
@@ -147,30 +156,34 @@ class _ShellState extends State<Shell> {
         context,
         bannerOnTop: setupStep == null && question != null,
       );
-      if (step == null) return window;
+      // What agents show the person opens here, unless a step covers it.
+      if (step == null) return ScreenOpener(covered: false, child: window);
       // The first launch asks the person to sign in, then their name, over
       // everything but the rail: switching to another Claktory always
       // works, so one that can't go on (too old, say) never traps them.
       final rail = widget.rail == null || isPhoneLayout(context)
           ? 0.0
           : railWidth;
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          ExcludeFocus(child: window),
-          Positioned.fill(
-            left: rail,
-            child: NameStepBarrier(child: step),
-          ),
-          // A phone has no rail: the way back to its Claktories sits on top.
-          if (isPhoneLayout(context))
-            const Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: ClaktoriesBackStrip(),
+      return ScreenOpener(
+        covered: true,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ExcludeFocus(child: window),
+            Positioned.fill(
+              left: rail,
+              child: NameStepBarrier(child: step),
             ),
-        ],
+            // A phone has no rail: the way back to its Claktories sits on top.
+            if (isPhoneLayout(context))
+              const Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: ClaktoriesBackStrip(),
+              ),
+          ],
+        ),
       );
     },
   );
@@ -544,7 +557,7 @@ class _EmptyState extends StatelessWidget {
                     const SizedBox(height: Space.s),
                     Button(
                       label: 'Sign in…',
-                      onPressed: () => AppScope.openSettings(context),
+                      onPressed: () => AppScope.openProviders(context),
                     ),
                   ],
                 ],

@@ -68,3 +68,36 @@ double _shortestSide() {
   final size = view.physicalSize / view.devicePixelRatio;
   return size.shortestSide;
 }
+
+/// This device's own name, told to the backend in every Hello: a device
+/// paired with a code made without a name takes it ("Matt's MacBook").
+/// The Mac's Computer Name; on an iPhone or iPad, which keep their names
+/// from apps, "iPhone" or "iPad". Worked out once.
+Future<String> thisDeviceNameForHello() =>
+    _name ??= deviceNameOf(defaultTargetPlatform);
+
+Future<String>? _name;
+
+@visibleForTesting
+Future<String> deviceNameOf(
+  TargetPlatform platform, {
+  CommandRunner run = _run,
+  double? shortestSide,
+}) async {
+  switch (platform) {
+    case TargetPlatform.macOS:
+      final name = await run('/usr/sbin/scutil', ['--get', 'ComputerName']);
+      final trimmed = name?.trim() ?? '';
+      if (trimmed.isNotEmpty) return trimmed;
+      return Platform.localHostname.replaceAll(RegExp(r'\.local$'), '');
+    case TargetPlatform.iOS:
+      final side = shortestSide ?? _shortestSide();
+      return side >= 600 ? 'iPad' : 'iPhone';
+    case TargetPlatform.linux:
+    case TargetPlatform.windows:
+      return Platform.localHostname;
+    case TargetPlatform.android:
+    case TargetPlatform.fuchsia:
+      return '';
+  }
+}

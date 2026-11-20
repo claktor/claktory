@@ -287,7 +287,7 @@ fn stop_leftovers(setup: &Setup) {
     let Ok(db) = rusqlite::Connection::open_with_flags(setup.home.db_path(), flags) else { return };
     let mut groups: Vec<(u32, i64)> = Vec::new();
     if let Ok(mut statement) = db.prepare("SELECT pid, started FROM tasks WHERE ended IS NULL")
-        && let Ok(rows) = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        && let Ok(rows) = statement.query_map([], crate::store::row2::<i64, i64>)
     {
         groups.extend(rows.filter_map(Result::ok).filter_map(|(pid, started)| Some((u32::try_from(pid).ok()?, started))));
     }

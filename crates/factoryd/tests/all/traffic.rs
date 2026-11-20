@@ -388,9 +388,10 @@ async fn connect(addr: std::net::SocketAddr) -> Socket {
     let hello = v1::Hello {
         protocol_version: PROTOCOL_VERSION,
         client_version: "traffic".into(),
-        token: String::new(),
+        token: crate::common::local_token(addr),
         device_kind: 0,
         workspace_patches: patches(),
+        ..Default::default()
     };
     let message = ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
     socket.send(Frame::Binary(message.encode_to_vec().into())).await.expect("hello");

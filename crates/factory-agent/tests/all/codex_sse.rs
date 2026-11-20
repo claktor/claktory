@@ -85,6 +85,7 @@ async fn every_recorded_sse_exchange_is_reproduced() {
         if let Some(limit) = limit {
             expected["usageLimit"] = limit;
         }
+        crate::support::expect_refused(&case, &mut expected);
         let actual = message_json(message);
         assert!(same_json(&actual, &expected), "{name}: {actual} != {expected}");
         if case["request"].is_null() {

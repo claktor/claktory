@@ -273,6 +273,14 @@ class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_UNREACHABLE =
       ErrorCode._(14, _omitEnumNames ? '' : 'ERROR_CODE_UNREACHABLE');
 
+  /// Hello refused: this device has to show a (fresh) device assertion. A
+  /// paired device whose grace to confirm is over, or a device that found
+  /// this Claktory through its account with an assertion missing or expired.
+  /// The app signs in to the account (or gets a new assertion) and connects
+  /// again. Connection closes.
+  static const ErrorCode ERROR_CODE_SIGN_IN_REQUIRED =
+      ErrorCode._(15, _omitEnumNames ? '' : 'ERROR_CODE_SIGN_IN_REQUIRED');
+
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
     ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
@@ -289,10 +297,11 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_NOT_GRANTED,
     ERROR_CODE_RATE_LIMITED,
     ERROR_CODE_UNREACHABLE,
+    ERROR_CODE_SIGN_IN_REQUIRED,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 14);
+      $pb.ProtobufEnum.$_initByValueList(values, 15);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -492,6 +501,31 @@ class MonitorState extends $pb.ProtobufEnum {
   const MonitorState._(super.value, super.name);
 }
 
+class OnboardingStep extends $pb.ProtobufEnum {
+  static const OnboardingStep ONBOARDING_STEP_UNSPECIFIED =
+      OnboardingStep._(0, _omitEnumNames ? '' : 'ONBOARDING_STEP_UNSPECIFIED');
+  static const OnboardingStep ONBOARDING_STEP_NEEDED =
+      OnboardingStep._(1, _omitEnumNames ? '' : 'ONBOARDING_STEP_NEEDED');
+  static const OnboardingStep ONBOARDING_STEP_SKIPPED =
+      OnboardingStep._(2, _omitEnumNames ? '' : 'ONBOARDING_STEP_SKIPPED');
+  static const OnboardingStep ONBOARDING_STEP_DONE =
+      OnboardingStep._(3, _omitEnumNames ? '' : 'ONBOARDING_STEP_DONE');
+
+  static const $core.List<OnboardingStep> values = <OnboardingStep>[
+    ONBOARDING_STEP_UNSPECIFIED,
+    ONBOARDING_STEP_NEEDED,
+    ONBOARDING_STEP_SKIPPED,
+    ONBOARDING_STEP_DONE,
+  ];
+
+  static final $core.List<OnboardingStep?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static OnboardingStep? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const OnboardingStep._(super.value, super.name);
+}
+
 class LoginPromptKind extends $pb.ProtobufEnum {
   static const LoginPromptKind LOGIN_PROMPT_KIND_UNSPECIFIED =
       LoginPromptKind._(
@@ -608,6 +642,61 @@ class AgentStatus extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const AgentStatus._(super.value, super.name);
+}
+
+class DevicePairingState extends $pb.ProtobufEnum {
+  static const DevicePairingState DEVICE_PAIRING_STATE_UNSPECIFIED =
+      DevicePairingState._(
+          0, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_UNSPECIFIED');
+
+  /// Its code waits to be scanned or pasted on the device.
+  static const DevicePairingState DEVICE_PAIRING_STATE_WAITING =
+      DevicePairingState._(
+          1, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_WAITING');
+
+  /// A device used the code and waits for the person to allow it: it's in
+  /// RemoteAccess.pending_devices, by device_id.
+  static const DevicePairingState DEVICE_PAIRING_STATE_ASKING =
+      DevicePairingState._(
+          2, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_ASKING');
+
+  /// The person allowed it: it's paired.
+  static const DevicePairingState DEVICE_PAIRING_STATE_ADDED =
+      DevicePairingState._(
+          3, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_ADDED');
+
+  /// The person didn't allow the device that used the code.
+  static const DevicePairingState DEVICE_PAIRING_STATE_DENIED =
+      DevicePairingState._(
+          4, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_DENIED');
+
+  /// Cancelled (from the card, Settings → Devices, or the agent) before a
+  /// device was allowed with it.
+  static const DevicePairingState DEVICE_PAIRING_STATE_CANCELLED =
+      DevicePairingState._(
+          5, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_CANCELLED');
+
+  /// Its code ran out before a device was allowed with it.
+  static const DevicePairingState DEVICE_PAIRING_STATE_EXPIRED =
+      DevicePairingState._(
+          6, _omitEnumNames ? '' : 'DEVICE_PAIRING_STATE_EXPIRED');
+
+  static const $core.List<DevicePairingState> values = <DevicePairingState>[
+    DEVICE_PAIRING_STATE_UNSPECIFIED,
+    DEVICE_PAIRING_STATE_WAITING,
+    DEVICE_PAIRING_STATE_ASKING,
+    DEVICE_PAIRING_STATE_ADDED,
+    DEVICE_PAIRING_STATE_DENIED,
+    DEVICE_PAIRING_STATE_CANCELLED,
+    DEVICE_PAIRING_STATE_EXPIRED,
+  ];
+
+  static final $core.List<DevicePairingState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static DevicePairingState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DevicePairingState._(super.value, super.name);
 }
 
 class ProposalState extends $pb.ProtobufEnum {
@@ -791,16 +880,24 @@ class ClaktoryAccountState extends $pb.ProtobufEnum {
       ClaktoryAccountState._(
           4, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_REVOKED');
 
+  /// Not signed in, and the person chose Not now on the sign-in step
+  /// (SkipAccountSignIn): the app doesn't ask again. Settings → Account
+  /// offers to sign in, as from SIGNED_OUT (AccountSignIn works from here).
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_SKIPPED =
+      ClaktoryAccountState._(
+          5, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_SKIPPED');
+
   static const $core.List<ClaktoryAccountState> values = <ClaktoryAccountState>[
     CLAKTORY_ACCOUNT_STATE_UNSPECIFIED,
     CLAKTORY_ACCOUNT_STATE_SIGNED_OUT,
     CLAKTORY_ACCOUNT_STATE_AWAITING_CODE,
     CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
     CLAKTORY_ACCOUNT_STATE_REVOKED,
+    CLAKTORY_ACCOUNT_STATE_SKIPPED,
   ];
 
   static final $core.List<ClaktoryAccountState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 4);
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
   static ClaktoryAccountState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

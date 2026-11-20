@@ -1,6 +1,7 @@
 //! Email: the fixed messages the service sends, and the ways it sends them.
-//! Nothing in a message comes from a stranger but a Claktory's cleaned name,
-//! so the service can't be made to send anyone's words.
+//! Nothing in a message comes from a stranger but a Claktory's or a
+//! device's cleaned name, so the service can't be made to send anyone's
+//! words.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -49,6 +50,11 @@ pub trait Mailer: Send + Sync {
     fn send<'a>(&'a self, mail: &'a Mail) -> Sending<'a>;
 }
 
+/// The address codes come from: `code@<domain>`.
+pub fn code_address(domain: &str) -> String {
+    format!("code@{domain}")
+}
+
 /// The code that signs in, from Claktory, from `code@<domain>`.
 pub fn code_mail(domain: &str, to: &str, code: &str) -> Mail {
     let text = format!(
@@ -60,7 +66,25 @@ pub fn code_mail(domain: &str, to: &str, code: &str) -> Mail {
          <p>It works for 15 minutes.</p>\
          <p>If you didn't ask for it, ignore this email. No one can sign in without the code.</p>"
     ));
-    Mail { from: format!("Claktory <code@{domain}>"), to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
+    let from = format!("Claktory <{}>", code_address(domain));
+    Mail { from, to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
+}
+
+/// The code that signs a device in, such as the app on a phone, naming it
+/// so the person knows which one asked.
+pub fn device_code_mail(domain: &str, to: &str, code: &str, device: &str) -> Mail {
+    let text = format!(
+        "Your code to sign in to Claktory on {device}:\n\n{code}\n\nIt works for 15 minutes.\n\nIf you didn't ask for it, ignore this email. No one can sign in without the code.\n"
+    );
+    let html = page(&format!(
+        "<p>Your code to sign in to Claktory on {device}:</p>\
+         <p style=\"font-size:32px;font-weight:600;letter-spacing:6px;margin:24px 0\">{code}</p>\
+         <p>It works for 15 minutes.</p>\
+         <p>If you didn't ask for it, ignore this email. No one can sign in without the code.</p>",
+        device = escape(device)
+    ));
+    let from = format!("Claktory <{}>", code_address(domain));
+    Mail { from, to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
 }
 
 /// A Claktory got its share after a restart: so its owner learns if anyone

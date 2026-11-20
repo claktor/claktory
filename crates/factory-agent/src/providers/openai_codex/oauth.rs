@@ -97,7 +97,8 @@ async fn read_token_response(response: reqwest::Response, operation: &str) -> Re
     if !status.is_success() {
         let text = response_text(response).await;
         let detail = if text.is_empty() { status.canonical_reason().unwrap_or_default().to_owned() } else { text };
-        return Err(Error::Other(format!("OpenAI Codex token {operation} failed ({}): {detail}", status.as_u16())));
+        let refused = crate::auth::refresh_refused(status.as_u16(), &detail);
+        return Err(crate::auth::refusal(refused, format!("OpenAI Codex token {operation} failed ({}): {detail}", status.as_u16())));
     }
     let json: Value = response.json().await.map_err(|error| Error::Other(error.to_string()))?;
     match (json["access_token"].as_str(), json["refresh_token"].as_str(), json["expires_in"].as_f64()) {

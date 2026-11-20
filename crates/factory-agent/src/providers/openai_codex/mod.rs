@@ -362,6 +362,9 @@ async fn sse_request(
         if let Ok(body) = serde_json::from_str::<Value>(&text) {
             mark_if_usage_limit(&mut parser.output, &body["error"]);
         }
+        if crate::accounts::refused_error(status.as_u16(), &text) {
+            crate::accounts::mark_refused(&mut parser.output, &crate::accounts::Refused::default());
+        }
         return Err(CodexFailure::Api { code: None, message: parse_error_response(status.as_u16(), status.canonical_reason(), &text) });
     }
     if !*start_emitted {

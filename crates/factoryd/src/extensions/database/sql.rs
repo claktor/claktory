@@ -254,7 +254,7 @@ pub(crate) fn tables(db: &Connection, target: &Target) -> Result<Vec<Table>, Str
         .prepare("SELECT name, type FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .map_err(error)?;
     let named: Vec<(String, String)> =
-        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?.collect::<Result<_, _>>().map_err(error)?;
+        statement.query_map([], crate::store::row2).map_err(error)?.collect::<Result<_, _>>().map_err(error)?;
     let mut tables = Vec::new();
     for (name, kind) in named {
         if *target == Target::Factory && private(&name) {

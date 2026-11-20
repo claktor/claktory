@@ -348,9 +348,11 @@ pub(crate) fn presences(db: &Connection) -> rusqlite::Result<Presences> {
 /// ended (by run, not by time), or else from `now`. Returns what's recorded.
 fn add_presence(db: &Connection, agent: &str, now: i64) -> rusqlite::Result<Presence> {
     let last: Option<(i64, Option<String>)> = db
-        .query_row("SELECT ended, outcome FROM runs WHERE agent = ?1 AND ended IS NOT NULL ORDER BY id DESC LIMIT 1", [agent], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        .query_row(
+            "SELECT ended, outcome FROM runs WHERE agent = ?1 AND ended IS NOT NULL ORDER BY id DESC LIMIT 1",
+            [agent],
+            crate::store::row2,
+        )
         .optional()?;
     let (idle_since, failed) = last.map_or((now, false), |(ended, outcome)| (ended, outcome.as_deref() == Some("failed")));
     db.execute("INSERT OR IGNORE INTO agent_presence (agent, idle_since, failed) VALUES (?1, ?2, ?3)", params![agent, idle_since, failed])?;

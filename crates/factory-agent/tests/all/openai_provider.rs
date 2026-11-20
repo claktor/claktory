@@ -60,7 +60,9 @@ async fn every_recorded_exchange_is_reproduced() {
             other => panic!("{name}: {other:?}"),
         };
         let actual = message_json(message);
-        assert!(same_json(&actual, &case["message"]), "{name}: {actual} != {}", case["message"]);
+        let mut expected = case["message"].clone();
+        crate::support::expect_refused(&case, &mut expected);
+        assert!(same_json(&actual, &expected), "{name}: {actual} != {expected}");
         if case["request"].is_null() {
             assert!(server.requests.lock().is_empty(), "{name}");
             continue;

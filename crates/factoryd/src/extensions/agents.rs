@@ -645,7 +645,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.
-fn ago(since: i64, now: i64) -> String {
+pub(crate) fn ago(since: i64, now: i64) -> String {
     let minutes = (now - since).max(0) / 60_000;
     match minutes {
         0 => "<1m".to_owned(),

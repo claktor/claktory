@@ -131,16 +131,24 @@ pub struct Config {
 
 /// Claktory's account at claktory.com, or at a service of the person's own.
 /// What it's signed in with lives in `<home>/account`, never here.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AccountConfig {
-    /// Signing in is on: the app asks for it, and a signed-in Claktory calls
-    /// the service. Off until the whole flow is proven; then on by default.
+    /// Signing in is on (the default): the app asks for it, and a signed-in
+    /// Claktory calls the service. Off, nothing calls the service and the app
+    /// doesn't ask. A Claktory from before it was on may skip the step
+    /// (`crate::account`).
     pub enabled: bool,
     /// The service to sign in at next; empty for claktory.com's
     /// (`crate::account::DEFAULT_SERVICE`).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub service: String,
+}
+
+impl Default for AccountConfig {
+    fn default() -> AccountConfig {
+        AccountConfig { enabled: true, service: String::new() }
+    }
 }
 
 impl AccountConfig {

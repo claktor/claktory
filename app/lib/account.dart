@@ -13,6 +13,7 @@ import 'markdown.dart';
 import 'name_step.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'screens.dart' show ScreenOpener;
 import 'selection.dart';
 import 'settings_view.dart';
 import 'usage.dart';
@@ -26,15 +27,39 @@ import 'usage.dart';
 /// Whether "Continue for now" put off signing in to [backend]'s Claktory
 /// when claktory.com couldn't be reached. It lasts until the app quits, so
 /// the step comes back at the next launch.
-ValueNotifier<bool> signInPutOff(Backend backend) =>
-    _putOff[backend] ??= ValueNotifier(false);
+ValueNotifier<bool> signInPutOff(Backend backend) => _choice(backend);
 
-final _putOff = Expando<ValueNotifier<bool>>('sign-in put off');
+/// The person asked to sign in (Settings → Account's Sign in…) though
+/// they'd said Not now: the step shows again until they sign in or say
+/// Not now once more. Like [signInPutOff], it lasts until the app quits,
+/// and notifies through it.
+void askSignIn(Backend backend) {
+  final choice = _choice(backend);
+  choice.value = false;
+  choice.wanted = true;
+}
+
+_SignInChoice _choice(Backend backend) => _putOff[backend] ??= _SignInChoice();
+
+final _putOff = Expando<_SignInChoice>('sign-in put off');
+
+class _SignInChoice extends ValueNotifier<bool> {
+  _SignInChoice() : super(false);
+
+  bool get wanted => _wanted;
+  var _wanted = false;
+  set wanted(bool wanted) {
+    if (wanted == _wanted) return;
+    _wanted = wanted;
+    notifyListeners();
+  }
+}
 
 /// Whether to ask the person to sign in: the backend is connected, has
 /// said what it knows, and isn't signed in (or is waiting for the code),
 /// unless they've put it off for now. A backend that knows no account
-/// (`Workspace.account` unset) isn't asked about.
+/// (`Workspace.account` unset) isn't asked about, nor one the person said
+/// Not now to (SKIPPED), unless they've asked to sign in since.
 bool asksSignIn(BuildContext context) {
   final backend = AppScope.of(context);
   final store = backend.workspace;
@@ -42,6 +67,9 @@ bool asksSignIn(BuildContext context) {
   final workspace = store.workspace;
   if (!workspace.hasAccount()) return false;
   final state = workspace.account.state;
+  if (state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED) {
+    return _choice(backend).wanted;
+  }
   if (state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT &&
       state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE) {
     return false;
@@ -190,6 +218,27 @@ class _SignInStepState extends State<SignInStep> {
     }
   }
 
+  /// Whether Not now is offered: a Claktory from before sign-in, or one
+  /// the person already said Not now to and came back to.
+  bool get _canSkip =>
+      _account.skippable ||
+      _account.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED;
+
+  Future<void> _skip() async {
+    final backend = _backend;
+    // A Claktory from before with nothing open lands on Rivet, opened
+    // first: once skipped, the step goes, and this with it.
+    final workspace = backend.workspace.workspace;
+    final rivet = rivetIn(workspace);
+    if (workspace.selectedAgentId.isEmpty && rivet != null) {
+      ScreenOpener.openConversation(context, rivet.id);
+    }
+    if (_account.skippable && !await _run(backend.skipAccountSignIn)) {
+      return;
+    }
+    _choice(backend).wanted = false;
+  }
+
   Future<void> _resend() async {
     final backend = _backend;
     if (await _run(backend.accountResend) && mounted) {
@@ -254,13 +303,32 @@ class _SignInStepState extends State<SignInStep> {
           ),
           _errorLine(palette),
           const SizedBox(height: Space.xl),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Button(
-              label: 'Send code',
-              primary: true,
-              onPressed: _email.text.trim().isEmpty || _busy ? null : _sendCode,
-            ),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              if (_canSkip && !_changingEmail)
+                Button(label: 'Not now', onPressed: _busy ? null : _skip),
+              // Back to the code already sent, from typing another address.
+              if (_changingEmail &&
+                  _account.state ==
+                      ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE)
+                Button(
+                  label: 'Back',
+                  onPressed: () => setState(() {
+                    _changingEmail = false;
+                    _error = null;
+                  }),
+                ),
+              Button(
+                label: 'Send code',
+                primary: true,
+                onPressed: _email.text.trim().isEmpty || _busy
+                    ? null
+                    : _sendCode,
+              ),
+            ],
           ),
           const SizedBox(height: Space.l),
           Text(
@@ -301,6 +369,14 @@ class _SignInStepState extends State<SignInStep> {
             onSubmitted: (_) => _code.text.length == 6 ? _verify() : null,
           ),
           _errorLine(palette),
+          const SizedBox(height: Space.s),
+          Text(
+            [
+              if (account.codeFrom.isNotEmpty) "It's from ${account.codeFrom}.",
+              "Can't find it? Check your spam folder.",
+            ].join(' '),
+            style: TextStyles.caption.copyWith(color: palette.textFaint),
+          ),
           if (_offerNewCode) ...[
             const SizedBox(height: Space.s),
             Align(
@@ -344,6 +420,8 @@ class _SignInStepState extends State<SignInStep> {
                         );
                       },
                     ),
+                    if (_canSkip)
+                      Button(label: 'Not now', onPressed: _busy ? null : _skip),
                     Button(
                       label: 'Use a different email',
                       onPressed: () => setState(() {
@@ -438,7 +516,7 @@ class _AccountSettingsState extends State<AccountSettings>
   var _showSent = false;
 
   /// Back to the sign-in step, in front of everything.
-  void _signIn() => signInPutOff(AppScope.of(context)).value = false;
+  void _signIn() => askSignIn(AppScope.of(context));
 
   Future<void> _signInAgain() async {
     final backend = AppScope.of(context);
@@ -457,6 +535,7 @@ class _AccountSettingsState extends State<AccountSettings>
     final state = account.state;
     final signedOut =
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT ||
+        state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED ||
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_UNSPECIFIED;
     final revoked =
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
@@ -749,6 +828,7 @@ class _ServiceFormState extends State<_ServiceForm> {
       // The service changes only while signed out.
       final state = widget.account.state;
       if (state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT &&
+          state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED &&
           state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_UNSPECIFIED) {
         await backend.accountSignOut();
       }

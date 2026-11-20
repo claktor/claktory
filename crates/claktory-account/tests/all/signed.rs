@@ -122,7 +122,7 @@ async fn endpoints_make_the_relay_allowlist() {
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
     let (backend, device) = ("a".repeat(64), "B".repeat(64));
 
-    let endpoints = Endpoints { backend: backend.clone(), devices: vec![device.clone(), device.clone()] };
+    let endpoints = Endpoints { backend: backend.clone(), devices: vec![device.clone(), device.clone()], ..Default::default() };
     let set: EndpointsSet = instance.signed(&claktory, "PUT", "/v1/endpoints", &endpoints, None).await.json();
     assert_eq!(set.count, 2);
 
@@ -141,10 +141,11 @@ async fn endpoints_make_the_relay_allowlist() {
     let answer = instance.relay_allowlist(None, "wrong").await;
     assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"));
 
-    let too_many = Endpoints { backend: backend.clone(), devices: (0..20).map(|number| format!("{number:064x}")).collect() };
+    let too_many =
+        Endpoints { backend: backend.clone(), devices: (0..20).map(|number| format!("{number:064x}")).collect(), ..Default::default() };
     let answer = instance.signed(&claktory, "PUT", "/v1/endpoints", &too_many, None).await;
     assert_eq!((answer.status, answer.error().as_str()), (400, "too_many_endpoints"));
-    let bad = Endpoints { backend: "xyz".into(), devices: vec![] };
+    let bad = Endpoints { backend: "xyz".into(), devices: vec![], ..Default::default() };
     assert_eq!(instance.signed(&claktory, "PUT", "/v1/endpoints", &bad, None).await.error(), "invalid_request");
 
     // A removed Claktory's endpoints leave the list.

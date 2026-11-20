@@ -21,6 +21,7 @@ pub(super) async fn page(service: &Service, call: &Call) -> Reply {
         (&Method::POST, "/account/sign-in") => sign_in(service, call, &form).await,
         (&Method::POST, "/account/verify") => verify(service, call, &form),
         (&Method::POST, "/account/remove") => remove(service, call, &form),
+        (&Method::POST, "/account/remove-device") => remove_device(service, call, &form),
         (&Method::POST, "/account/delete") => delete(service, call, &form),
         (&Method::POST, "/account/sign-out") => Ok(sign_out(service, call)),
         (&Method::GET, "/account/data") => data(service, call),
@@ -121,6 +122,25 @@ fn home(service: &Service, call: &Call, notice: Option<&str>) -> Reply {
             id = escape(&claktory.id),
             csrf = escape(&csrf),
         ));
+    }
+    let devices = account.as_ref().and_then(|account| db::devices(&conn, &account.id).ok()).unwrap_or_default();
+    if !devices.is_empty() {
+        let items: String = devices
+            .iter()
+            .map(|device| {
+                format!(
+                    "<li><form method=\"post\" action=\"/account/remove-device\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                     <input type=\"hidden\" name=\"device\" value=\"{key}\">{name} <span class=\"muted\">· {platform} · last contact {seen}</span> \
+                     <button class=\"plain\">Remove</button></form></li>",
+                    name = escape(&device.name),
+                    platform = escape(&platform_name(&device.platform)),
+                    seen = escape(&format_time(device.last_seen)),
+                    key = escape(&device.account_key),
+                    csrf = escape(&csrf),
+                )
+            })
+            .collect();
+        body.push_str(&format!("<section><h2>Devices signed in</h2><ul class=\"devices\">{items}</ul></section>"));
     }
     if service.config.admins.contains(&email) {
         body.push_str("<p><a href=\"/account/admin\">Usage counts</a></p>");
@@ -280,6 +300,12 @@ fn platform_name(platform: &str) -> String {
         "macos-x86_64" => "macOS (Intel)",
         "linux-x86_64" => "Linux (x86_64)",
         "linux-aarch64" | "linux-arm64" => "Linux (ARM)",
+        "ios" => "iOS",
+        "ipados" => "iPadOS",
+        "macos" => "macOS",
+        "android" => "Android",
+        "linux" => "Linux",
+        "windows" => "Windows",
         other => other,
     }
     .to_owned()
@@ -367,6 +393,37 @@ fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
     }
     db::revoke(&conn, &account.id, &claktory.id, service.now())?;
     tracing::info!("removed: Claktory {} of account {}", claktory.id, account.id);
+    Ok(redirect(None))
+}
+
+fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None)) };
+    let mut conn = service.db();
+    let account = db::account_by_email(&conn, &email)?;
+    let device =
+        db::device(&conn, form.get("device"))?.filter(|device| account.as_ref().is_some_and(|account| account.id == device.account_id));
+    let (Some(account), Some(device)) = (account, device) else {
+        drop(conn);
+        return Ok(home(service, call, None));
+    };
+    if form.get("confirm") != "yes" {
+        return Ok(html(
+            StatusCode::OK,
+            &format!("Remove {}?", device.name),
+            &format!(
+                "<p>{name} is signed out of your account, so it can't find your Claktories here until you sign in on it again. \
+                 Claktories it already connects to still allow it: remove it in their Settings → Devices.</p>\
+                 <form method=\"post\" action=\"/account/remove-device\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"device\" value=\"{key}\"><input type=\"hidden\" name=\"confirm\" value=\"yes\">\
+                 <button class=\"danger\">Remove</button> <a href=\"/account\">Cancel</a></form>",
+                name = escape(&device.name),
+                csrf = escape(form.get("csrf")),
+                key = escape(&device.account_key),
+            ),
+        ));
+    }
+    db::unbind_device(&mut conn, &device.account_key, Some(&account.id))?;
+    tracing::info!("removed: a device of account {}", account.id);
     Ok(redirect(None))
 }
 

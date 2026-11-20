@@ -458,7 +458,7 @@ void main() {
       await harness.apply(tester, workspace(signedIn: false));
       harness.page.value = AppPage.settings;
       await settle(tester);
-      await tester.tap(find.text('Sign in with Anthropic (Claude Pro/Max)'));
+      await tester.tap(find.text('Anthropic (Claude Pro/Max)'));
       await settle(tester);
       final flow = LoginFlow(
         providerId: 'anthropic',
