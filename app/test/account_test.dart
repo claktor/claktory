@@ -23,6 +23,9 @@ const awaiting = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE;
 const signedIn = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN;
 const revoked = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
 
+Int64 ago(Duration duration) =>
+    Int64(DateTime.now().subtract(duration).millisecondsSinceEpoch);
+
 /// A workspace whose Claktory account is in [state]; none when null, as
 /// while the backend has the account off.
 Workspace withAccount(ClaktoryAccountState? state) {
@@ -52,6 +55,8 @@ Workspace withAccount(ClaktoryAccountState? state) {
       lastCheckInJson: state == signedIn
           ? '{"version":"0.1.2","platform":"macos-arm64"}'
           : null,
+      lastSignInMs: state == signedIn ? ago(const Duration(days: 2)) : null,
+      lastCheckInMs: state == signedIn ? ago(const Duration(minutes: 5)) : null,
     );
 }
 
@@ -273,7 +278,8 @@ void main() {
 
     await tester.tap(find.text('Show exactly what was sent'));
     await pumpFrames(tester);
-    expect(find.text('At sign-in'), findsOneWidget);
+    expect(find.text('At sign-in · 2 days ago'), findsOneWidget);
+    expect(find.text('Most recent · 5 min ago'), findsOneWidget);
     expect(
       find.text('{\n  "version": "0.1.2",\n  "platform": "macos-arm64"\n}'),
       findsOneWidget,
@@ -351,6 +357,25 @@ void main() {
     await tester.enterText(field, '123456');
     await tester.pump();
     expect(find.text("Can't reach claktory.com right now."), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Settings → Account fits a 375-point phone, what was sent '
+      'open', (tester) async {
+    final harness = await showAccount(
+      tester,
+      signedIn,
+      size: const Size(375, 667),
+    );
+    await openSettings(tester, harness);
+    final more = find.text('Show exactly what was sent');
+    await reveal(tester, more);
+    await tester.ensureVisible(more);
+    await pumpFrames(tester);
+    await tester.tap(more);
+    await pumpFrames(tester);
+    await reveal(tester, find.textContaining('Most recent · '));
+    await reveal(tester, find.text('Sign out…'));
     expect(tester.takeException(), isNull);
   });
 }

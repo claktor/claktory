@@ -120,9 +120,19 @@ async fn admin_agents_are_told_once_when_memory_or_disk_runs_low() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     view.follow(&mut client, |view| idle(view, "rivet")).await;
     assert_eq!(told(&view, low_memory), 1);
-    // …again after it recovered.
+    // …again after it recovered: once a sample has seen it recover, which
+    // the panel shows (under load a sample can take longer than any fixed wait).
+    let open = v1::OpenPanel { extension_id: "resources".into(), agent_id: "rivet".into() };
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
+    let alerts = |view: &View| match view.extension_view.as_ref().and_then(|view| view.body.as_ref()) {
+        Some(v1::extension_view::Body::Resources(resources)) => {
+            resources.alerts.iter().filter(|alert| alert.starts_with(low_memory)).count()
+        }
+        _ => usize::MAX,
+    };
+    view.follow(&mut client, |view| alerts(view) == 1).await;
     apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(100), ..Default::default() })).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    view.follow(&mut client, |view| alerts(view) == 0).await;
     apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(1), ..Default::default() })).await;
     view.follow(&mut client, |view| told(view, low_memory) == 2).await;
 

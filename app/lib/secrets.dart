@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'account.dart' show signInPutOff;
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
@@ -44,6 +45,14 @@ class SecretsSettings extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (vault.exists && !vault.unlocked) ...[
+              _Locked(
+                account: backend.workspace.workspace.hasAccount()
+                    ? backend.workspace.workspace.account
+                    : null,
+              ),
+              const SizedBox(height: Space.l),
+            ],
             // Asked for in conversations the person may not be watching:
             // the same cards, decided here as there. A decided one leaves.
             for (final request in vault.requests)
@@ -93,6 +102,134 @@ class SecretsSettings extends StatelessWidget {
       },
     );
   }
+}
+
+/// Locked since a restart, and why: with a Claktory account, what the
+/// backend says (claktory.com can't be reached, or the account no longer
+/// opens them), or that this Claktory was removed from the account. The
+/// recovery key opens them meanwhile.
+class _Locked extends StatelessWidget {
+  const _Locked({required this.account});
+
+  /// This Claktory's account, when it has one.
+  final ClaktoryAccount? account;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final account = this.account;
+    final removed =
+        account?.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
+    final why = account == null
+        ? "Secrets are locked. Agents can't use them until you unlock them."
+        : removed
+        ? 'Secrets are locked because this Claktory was removed from your '
+              'account. Sign in again to unlock them, or use your recovery '
+              'key.'
+        // Signed in: the backend's own words; none while it's asking.
+        : 'Secrets are locked. '
+              '${account.problem.isEmpty ? 'Opening them…' : account.problem}';
+    return Container(
+      padding: const EdgeInsets.all(Space.m),
+      decoration: BoxDecoration(
+        color: palette.signal.withValues(alpha: 0.06),
+        border: Border.all(color: palette.signal.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(why, style: TextStyles.body.copyWith(color: palette.text)),
+          const SizedBox(height: Space.m),
+          Wrap(
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              // Signing in again also opens them by themselves after later
+              // restarts, so it comes first.
+              if (removed)
+                Button(
+                  label: 'Sign in again…',
+                  primary: true,
+                  onPressed: () =>
+                      signInPutOff(AppScope.of(context)).value = false,
+                ),
+              Button(
+                label: removed
+                    ? 'Use recovery key…'
+                    : 'Unlock with recovery key…',
+                onPressed: () => showModal(
+                  context,
+                  (context, close) => UnlockSecretsForm(close: close),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Unlock with recovery key": the key, and the backend's word when it
+/// isn't right.
+class UnlockSecretsForm extends StatefulWidget {
+  const UnlockSecretsForm({super.key, required this.close});
+
+  final VoidCallback close;
+
+  @override
+  State<UnlockSecretsForm> createState() => _UnlockSecretsFormState();
+}
+
+class _UnlockSecretsFormState extends State<UnlockSecretsForm> {
+  final _key = TextEditingController();
+  var _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_busy || _key.text.trim().isEmpty) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context).unlockVault(_key.text.trim());
+      widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = failure.message;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FormFrame(
+    title: 'Unlock with recovery key',
+    fields: [
+      Field(
+        label: 'Recovery key',
+        child: TextField(
+          controller: _key,
+          autofocus: true,
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+    ],
+    error: _error,
+    submitLabel: _busy ? 'Unlocking…' : 'Unlock',
+    onSubmit: _busy ? null : _submit,
+    onCancel: widget.close,
+  );
 }
 
 /// A toggle with its label (and a note under it) beside it.
@@ -1271,6 +1408,46 @@ String suggestSecretName(List<String> variables) {
   return word[0].toUpperCase() + word.substring(1).toLowerCase();
 }
 
+/// In an agent's settings, under the Secrets extension: the secrets it has,
+/// so it's clear there too (they're given and taken back under Secrets).
+class AgentSecretsSummary extends StatelessWidget {
+  const AgentSecretsSummary({super.key, required this.agentId});
+
+  final String agentId;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final palette = Palette.of(context);
+        final names = [
+          for (final secret in _vault(backend).secrets)
+            if (secret.grants.any((grant) => grant.agentId == agentId))
+              secret.name,
+        ];
+        return Text(
+          agentSecretsSummary(names),
+          style: TextStyles.caption.copyWith(color: palette.textMuted),
+        );
+      },
+    );
+  }
+}
+
+/// "Has AWS and Cloudflare.", "Has no secrets yet."
+String agentSecretsSummary(List<String> names) {
+  if (names.isEmpty) return 'Has no secrets yet.';
+  final shown = names.length <= 3
+      ? names
+      : [...names.take(2), '${names.length - 2} more'];
+  final listed = shown.length == 1
+      ? shown.single
+      : '${shown.take(shown.length - 1).join(', ')} and ${shown.last}';
+  return 'Has $listed.';
+}
+
 /// In an agent's settings: a toggle for each secret, on while it's given
 /// to the agent. Taking back confirms.
 class AgentSecretsField extends StatefulWidget {
@@ -1356,10 +1533,54 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
   }
 }
 
-/// An agent's request for a secret, in its conversation: what it asks for
-/// and why, in its color; for a new secret, a field for each value; Give
-/// or Dismiss. Decided, how and when. The backend
-/// sends the entry back decided; the card keeps nothing.
+/// Words too common in secrets' names to say two are the same.
+const _commonWords = {
+  'api',
+  'key',
+  'keys',
+  'token',
+  'tokens',
+  'secret',
+  'secrets',
+  'access',
+  'id',
+  'the',
+  'for',
+  'and',
+  'account',
+  'credentials',
+  'password',
+};
+
+/// The person's secret that looks like the one [wanted] describes, if any:
+/// one with a name word in common (Cloudflare DNS for "Cloudflare token"),
+/// or with every variable it asks for. The card picks it to start with.
+SecretInfo? closestSecret(NewSecret wanted, List<SecretInfo> secrets) {
+  Set<String> words(String name) => {
+    for (final word in name.toLowerCase().split(RegExp('[^a-z0-9]+')))
+      if (word.length > 1 && !_commonWords.contains(word)) word,
+  };
+  final asked = words(wanted.name);
+  final variables = {for (final variable in wanted.variables) variable.name};
+  for (final secret in secrets) {
+    if (secret.name.toLowerCase() == wanted.name.toLowerCase()) return secret;
+  }
+  for (final secret in secrets) {
+    if (words(secret.name).intersection(asked).isNotEmpty) return secret;
+  }
+  for (final secret in secrets) {
+    final has = {for (final variable in secret.variables) variable.name};
+    if (variables.isNotEmpty && has.containsAll(variables)) return secret;
+  }
+  return null;
+}
+
+/// An agent's request for a secret, in its conversation and at the top of
+/// Settings → Secrets: what it asks for and why, in its color. Pending, the
+/// person gives one of their secrets (Choose one) or adds a new one filled
+/// in from the request (Add new), or dismisses it with a word why. Decided,
+/// what was given and when. The backend sends the entry back decided; the
+/// card keeps nothing.
 class SecretRequestCard extends StatefulWidget {
   const SecretRequestCard(this.request, {super.key});
 
@@ -1370,61 +1591,95 @@ class SecretRequestCard extends StatefulWidget {
 }
 
 class _SecretRequestCardState extends State<SecretRequestCard> {
+  late final _name = TextEditingController(text: widget.request.newSecret.name);
+  late final _description = TextEditingController(
+    text: widget.request.newSecret.description,
+  );
   late final List<_VariableEdit> _values = [
     for (final variable in widget.request.newSecret.variables)
       _VariableEdit(name: variable.name, file: variable.file),
   ];
+  final _comment = TextEditingController();
+
+  /// Adding a new secret rather than choosing one; set when first built,
+  /// from the person's secrets.
+  bool? _adding;
+
+  /// The secret chosen to give; empty for none yet.
+  var _chosen = '';
   var _deciding = false;
   String? _error;
 
   @override
   void dispose() {
+    _name.dispose();
+    _description.dispose();
     for (final value in _values) {
       value.dispose();
     }
+    _comment.dispose();
     super.dispose();
   }
 
   SecretRequest get request => widget.request;
-  bool get _isNew => request.secretId.isEmpty;
 
-  String get _secretName =>
-      _isNew ? request.newSecret.name : request.secretName;
+  /// From before agents described what they need: it names a secret.
+  bool get _names => request.secretId.isNotEmpty;
 
-  Future<void> _decide({required bool approve}) async {
+  Future<void> _give(List<SecretInfo> secrets) async {
     if (_deciding) return;
-    if (approve && _isNew && _values.any((v) => v.value.text.isEmpty)) {
+    final adding = !_names && _adding == true;
+    final chosen = secrets.any((secret) => secret.id == _chosen);
+    if (!_names && !adding && !chosen) {
+      setState(() => _error = 'Choose a secret to give, or add a new one.');
+      return;
+    }
+    if (adding && _name.text.trim().isEmpty) {
+      setState(() => _error = 'Enter a name for the secret.');
+      return;
+    }
+    if (adding && _values.any((v) => v.value.text.isEmpty)) {
       setState(() => _error = 'Enter a value for each variable.');
       return;
     }
-    final backend = AppScope.of(context);
+    await _decide(
+      () => AppScope.of(context).decideSecretRequest(
+        request.agentId,
+        request.id,
+        approve: true,
+        secretId: _names || adding ? '' : _chosen,
+        name: adding ? _name.text.trim() : '',
+        description: adding ? _description.text.trim() : '',
+        entries: [
+          if (adding)
+            for (final value in _values)
+              SecretEntry(
+                variable: value.name.text,
+                value: value.value.text,
+                file: value.file,
+              ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _dismiss() => _decide(
+    () => AppScope.of(context).decideSecretRequest(
+      request.agentId,
+      request.id,
+      approve: false,
+      comment: _comment.text.trim(),
+    ),
+  );
+
+  Future<void> _decide(Future<void> Function() send) async {
+    if (_deciding) return;
     setState(() {
       _deciding = true;
       _error = null;
     });
     try {
-      if (approve) {
-        final entries = [
-          for (final value in _values)
-            SecretEntry(
-              variable: value.name.text,
-              value: value.value.text,
-              file: value.file,
-            ),
-        ];
-        await backend.decideSecretRequest(
-          request.agentId,
-          request.id,
-          approve: true,
-          entries: entries,
-        );
-      } else {
-        await backend.decideSecretRequest(
-          request.agentId,
-          request.id,
-          approve: false,
-        );
-      }
+      await send();
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
@@ -1452,16 +1707,20 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     final pending =
         request.state != SecretRequestState.SECRET_REQUEST_STATE_GRANTED &&
         request.state != SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
-    final dismissed =
-        request.state == SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
-    final decided = request.decidedMs.toInt();
-    final description = _isNew
-        ? request.newSecret.description
-        : [
+    final description = _names
+        ? [
                 for (final secret in secrets)
                   if (secret.id == request.secretId) secret.description,
               ].firstOrNull ??
-              '';
+              ''
+        : request.newSecret.description;
+    if (pending && !_names && _adding == null) {
+      // Chooses the secret that looks like the one asked for, if any;
+      // otherwise adds the one it describes.
+      final closest = closestSecret(request.newSecret, secrets);
+      _adding = closest == null;
+      _chosen = closest?.id ?? '';
+    }
     return Container(
       padding: const EdgeInsets.all(Space.l),
       decoration: BoxDecoration(
@@ -1472,7 +1731,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         borderRadius: BorderRadius.circular(Radii.panel),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
@@ -1482,9 +1741,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
               ],
               Flexible(
                 child: Text(
-                  _isNew
-                      ? '$name asks for a new secret: $_secretName'
-                      : '$name asks for $_secretName',
+                  _names
+                      ? '$name asks for ${request.secretName}'
+                      : '$name asks for a secret: ${request.newSecret.name}',
                   style: TextStyles.caption.copyWith(
                     color: color,
                     fontWeight: FontWeight.w600,
@@ -1502,106 +1761,250 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           ],
           if (request.reason.isNotEmpty) ...[
             const SizedBox(height: Space.s),
-            Markdown(
-              request.reason,
-              color: dismissed ? palette.textMuted : null,
-            ),
+            Markdown(request.reason, color: pending ? null : palette.textMuted),
           ],
           const SizedBox(height: Space.m),
-          if (pending) ...[
-            if (_isNew)
-              for (final value in _values)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Space.s),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Text(
-                        value.file
-                            ? '${value.name.text} (file)'
-                            : value.name.text,
-                        style: TextStyles.caption.copyWith(
-                          fontFamily: TextStyles.mono,
-                          color: palette.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: Space.xs),
-                      value.file
-                          ? TextField(
-                              controller: value.value,
-                              placeholder: 'Paste the file’s contents',
-                              maxLines: 6,
-                              minLines: 3,
-                            )
-                          : TextField(
-                              controller: value.value,
-                              placeholder: 'Paste the value',
-                              obscureText: true,
-                            ),
-                    ],
-                  ),
-                ),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _error ?? '$name never sees the value.',
-                    style: TextStyles.caption.copyWith(
-                      color: _error == null
-                          ? palette.textFaint
-                          : palette.danger,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  label: 'Dismiss',
-                  onPressed: _deciding ? null : () => _decide(approve: false),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  // Named in full, as a tap gives it at once; short where
-                  // a phone has no room.
-                  label: isPhoneLayout(context)
-                      ? (_isNew ? 'Add and give' : 'Give')
-                      : (_isNew
-                            ? 'Add and give to $name'
-                            : 'Give $_secretName to $name'),
-                  primary: true,
-                  onPressed: _deciding ? null : () => _decide(approve: true),
-                ),
-              ],
+          if (pending)
+            ..._pending(context, palette, name, secrets)
+          else
+            ..._decided(palette, color, name),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _pending(
+    BuildContext context,
+    Palette palette,
+    String agent,
+    List<SecretInfo> secrets,
+  ) {
+    final phone = isPhoneLayout(context);
+    final adding = !_names && _adding == true;
+    final chosen = [
+      for (final secret in secrets)
+        if (secret.id == _chosen) secret.name,
+    ].firstOrNull;
+    final String give;
+    if (_names) {
+      give = phone ? 'Give' : 'Give ${request.secretName} to $agent';
+    } else if (adding) {
+      give = phone ? 'Add and give' : 'Add and give to $agent';
+    } else {
+      give = phone || chosen == null ? 'Give' : 'Give $chosen to $agent';
+    }
+    return [
+      if (!_names) ...[
+        Row(
+          children: [
+            _ModeTab(
+              title: 'Choose one',
+              selected: !adding,
+              onTap: () => setState(() {
+                _adding = false;
+                _error = null;
+              }),
             ),
-          ] else ...[
-            Text.rich(
-              TextSpan(
+            const SizedBox(width: Space.s),
+            _ModeTab(
+              title: 'Add new',
+              selected: adding,
+              onTap: () => setState(() {
+                _adding = true;
+                _error = null;
+              }),
+            ),
+          ],
+        ),
+        const SizedBox(height: Space.m),
+        if (!adding)
+          secrets.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.only(bottom: Space.l),
+                  child: Text(
+                    "You don't have any secrets yet.",
+                    style: TextStyles.body.copyWith(color: palette.textMuted),
+                  ),
+                )
+              : Field(
+                  label: 'Secret',
+                  child: Select<String>(
+                    value: _chosen,
+                    options: [
+                      if (chosen == null)
+                        const SelectOption('', 'Choose a secret'),
+                      for (final secret in secrets)
+                        SelectOption(secret.id, secret.name),
+                    ],
+                    onChanged: (id) => setState(() {
+                      _chosen = id;
+                      _error = null;
+                    }),
+                  ),
+                )
+        else ...[
+          Padding(
+            padding: const EdgeInsets.only(bottom: Space.m),
+            child: Text(
+              "Filled in from $agent's request. Change anything you need.",
+              style: TextStyles.caption.copyWith(color: palette.textFaint),
+            ),
+          ),
+          Field(
+            label: 'Name',
+            child: TextField(controller: _name),
+          ),
+          Field(
+            label: 'Description',
+            child: TextField(controller: _description, maxLines: 3),
+          ),
+          for (final value in _values)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  TextSpan(
-                    text: dismissed ? 'Dismissed' : 'Given to $name',
-                    style: TextStyle(
-                      color: dismissed ? palette.textMuted : color,
-                      fontWeight: FontWeight.w500,
+                  Text(
+                    value.file ? '${value.name.text} (file)' : value.name.text,
+                    style: TextStyles.caption.copyWith(
+                      fontFamily: TextStyles.mono,
+                      color: palette.textMuted,
                     ),
                   ),
-                  if (decided > 0)
-                    TextSpan(
-                      text:
-                          '  ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
-                      style: TextStyle(color: palette.textFaint),
-                    ),
+                  const SizedBox(height: Space.xs),
+                  value.file
+                      ? TextField(
+                          controller: value.value,
+                          placeholder: 'Paste the file’s contents',
+                          maxLines: 6,
+                          minLines: 3,
+                        )
+                      : TextField(
+                          controller: value.value,
+                          placeholder: 'Paste the value',
+                          obscureText: true,
+                        ),
                 ],
               ),
-              style: TextStyles.caption,
             ),
-            if (request.comment.isNotEmpty) ...[
-              const SizedBox(height: Space.xs),
-              Text(
-                request.comment,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
-              ),
-            ],
-          ],
         ],
+      ],
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              _error ?? '$agent never sees the value.',
+              style: TextStyles.caption.copyWith(
+                color: _error == null ? palette.textFaint : palette.danger,
+              ),
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Button(
+            label: give,
+            primary: true,
+            onPressed: _deciding || (!_names && !adding && secrets.isEmpty)
+                ? null
+                : () => _give(secrets),
+          ),
+        ],
+      ),
+      const SizedBox(height: Space.m),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _comment,
+              placeholder: 'Tell $agent why (optional)',
+              onSubmitted: (_) => _dismiss(),
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
+        ],
+      ),
+    ];
+  }
+
+  List<Widget> _decided(Palette palette, Color color, String agent) {
+    final dismissed =
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
+    final decided = request.decidedMs.toInt();
+    final given = request.givenSecretName.isNotEmpty
+        ? request.givenSecretName
+        : request.secretName;
+    return [
+      Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: dismissed ? 'Dismissed' : 'Gave $given to $agent',
+              style: TextStyle(
+                color: dismissed ? palette.textMuted : color,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            if (decided > 0)
+              TextSpan(
+                text:
+                    ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                style: TextStyle(color: palette.textFaint),
+              ),
+          ],
+        ),
+        style: TextStyles.caption,
+      ),
+      if (request.comment.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        Text(
+          '“${request.comment}”',
+          style: TextStyles.body.copyWith(color: palette.textMuted),
+        ),
+      ],
+    ];
+  }
+}
+
+/// One of the request card's two ways to give: Choose one or Add new. The
+/// selected one is underlined in signal, as the Marketplace's tabs are.
+class _ModeTab extends StatelessWidget {
+  const _ModeTab({
+    required this.title,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String title;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, hovered) => Container(
+          height: 28,
+          padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                width: 2,
+                color: selected ? palette.signal : const Color(0x00000000),
+              ),
+            ),
+          ),
+          child: Text(
+            title,
+            style: TextStyles.body.copyWith(
+              color: selected || hovered ? palette.text : palette.textMuted,
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -34,6 +34,6 @@ pub use stream::{CacheTtl, StreamFn, ThinkingLevel};
 pub use tools::bash::{Background, Finished, Task};
 pub use tools::{Handler, Tool, ToolSpec, coding_prompt, coding_tools};
 pub use types::{
-    AgentEvent, AssistantMessage, AssistantPart, Event, EventSource, Message, Model, StopReason, StreamEvent, SystemMessage, ToolResult,
-    ToolResultMessage, ToolResultPart, Usage, UserContent, UserMessage, UserPart,
+    AgentEvent, AssistantMessage, AssistantPart, Event, EventSource, Message, Model, SentFrom, StopReason, StreamEvent, SystemMessage,
+    ToolResult, ToolResultMessage, ToolResultPart, Usage, UserContent, UserMessage, UserPart,
 };

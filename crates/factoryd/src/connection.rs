@@ -101,6 +101,7 @@ pub(crate) async fn serve_stream<S: Stream>(
 
     factory.health.connecting();
     let mut device = None;
+    let kind;
     let hello_id = loop {
         let frame = socket.next().await;
         let message = match read(&mut socket, frame).await? {
@@ -115,13 +116,14 @@ pub(crate) async fn serve_stream<S: Stream>(
             let reason = format!("server speaks protocol {PROTOCOL_VERSION}, client sent {}", hello.protocol_version);
             return reject(socket, message.id, ErrorCode::UnsupportedProtocolVersion, reason).await;
         }
+        kind = hello.device_kind();
         if let Some(peer) = &peer {
             let Some(connected) = factory.authorize(&hello.token, peer).await else {
                 let reason =
                     "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
             };
-            tracing::info!(client_version = %hello.client_version, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
             device = Some(connected);
         } else if !hello.token.is_empty() || !factory.loopback_open() {
             // The loopback port: this machine's app's token (from its local
@@ -134,10 +136,10 @@ pub(crate) async fn serve_stream<S: Stream>(
                 );
                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
             };
-            tracing::info!(client_version = %hello.client_version, "client connected with this machine's token");
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected with this machine's token");
             device = Some(connected);
         } else {
-            tracing::info!(client_version = %hello.client_version, "client connected");
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected");
         }
         break message.id;
     };
@@ -147,22 +149,38 @@ pub(crate) async fn serve_stream<S: Stream>(
     // This machine's own app may do what the loopback port's may.
     let remote = device.as_ref().is_some_and(|connected| !connected.device.local);
     let name = device.as_ref().map_or_else(|| "this computer".to_owned(), |connected| connected.device.name.clone());
-    session(&mut socket, &factory, remote, device.as_ref().map(|connected| connected.closed.clone()), name).await?;
+    // Where the person's messages come from: a paired device by its name,
+    // this computer's own app by the computer's.
+    let from = match &device {
+        Some(connected) if !connected.device.local => connected.device.name.clone(),
+        _ => crate::remote::machine_name().to_owned(),
+    };
+    let sent_from = crate::transcript::device(&from, kind);
+    let connection = Connection { remote, device: name, sent_from };
+    session(&mut socket, &factory, connection, device.as_ref().map(|connected| connected.closed.clone())).await?;
     tracing::info!("client disconnected");
     Ok(())
 }
 
-/// Requests in, events out, until the client leaves. `remote`: a device on
-/// another machine. `unpaired` is a paired device's: notified, the
-/// connection closes.
+/// Who's on the other end of a connection.
+struct Connection {
+    /// A device on another machine.
+    remote: bool,
+    /// The device's name, for the vault: "this computer" on the loopback port.
+    device: String,
+    /// Where the person's messages come from.
+    sent_from: factory_agent::SentFrom,
+}
+
+/// Requests in, events out, until the client leaves. `unpaired` is a paired
+/// device's: notified, the connection closes.
 async fn session<S: Stream>(
     socket: &mut Socket<S>,
     factory: &Arc<Factory>,
-    remote: bool,
+    connection: Connection,
     unpaired: Option<Arc<tokio::sync::Notify>>,
-    device: String,
 ) -> Result<(), ConnectionError> {
-    let mut vault_session = crate::vault::requests::Session::new(device);
+    let mut vault_session = crate::vault::requests::Session::new(connection.device.clone());
     let mut events = sync(socket, factory).await?;
     factory.health.served();
     // A vault still locked after a restart tries the account service again.
@@ -184,7 +202,7 @@ async fn session<S: Stream>(
                     Frame::Skip => continue,
                     Frame::Closed => return Ok(()),
                 };
-                let reply = handle(factory, message.body, remote, &mut vault_session).await;
+                let reply = handle(factory, message.body, &connection, &mut vault_session).await;
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
                 flush(socket, &mut events, factory).await?;
@@ -235,14 +253,15 @@ async fn flush<S: Stream>(socket: &mut Socket<S>, events: &mut Receiver<Event>, 
     }
 }
 
-/// Answers a request. A `remote` device's requests are the same, except that
+/// Answers a request. A remote device's requests are the same, except that
 /// it can't have an app bundle on this machine replaced.
 async fn handle(
     factory: &Arc<Factory>,
     body: Option<client_message::Body>,
-    remote: bool,
+    connection: &Connection,
     vault_session: &mut crate::vault::requests::Session,
 ) -> Body {
+    let remote = connection.remote;
     use crate::vault::requests as vault;
     use client_message::Body as Request;
     let result = match body {
@@ -284,7 +303,7 @@ async fn handle(
             factory.update_agent(&agent_id, change).await
         }
         Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
-        Some(Request::SendMessage(request)) => factory.send_message(&request.agent_id, &request.text),
+        Some(Request::SendMessage(request)) => factory.send_message(&request.agent_id, &request.text, Some(connection.sent_from.clone())),
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
         Some(Request::UpdateProject(request)) => factory.update_project(&request.project_id, request.name.as_deref()).await,

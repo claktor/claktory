@@ -17,8 +17,28 @@ pub const EFFORTS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhig
 
 /// The agent every Factory starts with.
 pub const RIVET: &str = "rivet";
-/// Rivet's prompt; the file's trailing newline isn't part of it.
+/// Rivet's prompt as shipped; the file's trailing newline isn't part of it.
+/// Its `{{user}}`-style placeholders are filled in when the system prompt is
+/// written (`crate::manual::render`), so the saved copy stays this text.
 const RIVET_PROMPT: &str = include_str!("rivet-prompt.md");
+/// SHA-256 (hex) of every Rivet prompt Claktory has shipped, this one
+/// included, each without trailing whitespace. A Rivet whose prompt is one
+/// of them was never edited, so it follows the default: it's given this
+/// version's (`Config::follow_default_prompts`). Changing rivet-prompt.md
+/// means adding its new hash here, never removing one (a test checks).
+const SHIPPED_RIVET_PROMPTS: &[&str] = &[
+    "ed5aab63acd5bfe29585aa8e7c05a7d8bb26ec96e5dd1335c5ac5a5a631c51a1",
+    "bb08afb70c45a65884f0d7e6579839a6840d9ea772340bde8ea48c7c9d7e7c20",
+    "5a60c84c032044246db90d6cf9ed775368b9a614a5323ab514b8071b4bbecc8a",
+    "7bec0e2d35f7d6689af81cdc0d570c5dba134b22c5b348b9a18d470f6e3a52e9",
+    "64894df788d2ada2c1d61feadc84b92fe7d4aae70209c482e46b4b75e640613d",
+    "13667721780258db83e69eaeaf656b9d93dc512073ab17b54967bdf2473edc23",
+    "e2ff2ec11f50a36790e2565154cdd4fb3898bafb4fa533ff31c60beacd5518e0",
+    "3a08dce43408450cf07f61168441c96f43567cf9e3e624ef212183368f3f9fa4",
+    "807640ce610ae87fd1a51f72b439d93cef8fbf6e814eace0b3a76ba9e46e21f0",
+    // {{user}} for "the person".
+    "7d935762bff903785cbbc4d3b57f605b213ddbd4628b6074fa641978c4c88bb7",
+];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
 /// What Rivet does, beside its name.
@@ -428,7 +448,7 @@ impl Default for Config {
             parent: None,
             name: "Rivet".to_owned(),
             role: RIVET_ROLE.to_owned(),
-            prompt: RIVET_PROMPT.trim_end_matches('\n').to_owned(),
+            prompt: RIVET_PROMPT.trim_end().to_owned(),
             model: default_model(),
             effort: RIVET_EFFORT.to_owned(),
             color: AGENT_COLORS[0].to_owned(),
@@ -625,6 +645,14 @@ fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), I
     Ok(())
 }
 
+/// Whether `prompt` is a Rivet prompt some version of Claktory shipped.
+fn shipped_default(prompt: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(prompt.trim_end().as_bytes());
+    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    SHIPPED_RIVET_PROMPTS.contains(&hex.as_str())
+}
+
 pub fn check_model(model: &str) -> Result<(), Invalid> {
     match model.split_once('/') {
         Some((provider, id)) if !provider.is_empty() && !id.is_empty() => Ok(()),
@@ -661,6 +689,30 @@ impl Config {
             return None;
         }
         Some(self.prompt_cache.get(model).or_else(|| self.prompt_cache.get(provider)).copied().unwrap_or_default())
+    }
+
+    /// The default prompt an agent can go back to, with its placeholders:
+    /// Rivet's, as this version ships it. None for any other agent.
+    pub fn default_prompt(agent: &AgentConfig) -> Option<&'static str> {
+        (agent.id == RIVET).then(|| RIVET_PROMPT.trim_end())
+    }
+
+    /// Gives an agent whose prompt is still a default Claktory shipped (any
+    /// version, trailing whitespace aside) this version's, so a prompt nobody
+    /// edited follows the default; a prompt someone edited stays theirs. Says
+    /// whether any changed, so the file is written back.
+    pub fn follow_default_prompts(&mut self) -> bool {
+        let mut changed = false;
+        for agent in &mut self.agents {
+            if let Some(default) = Config::default_prompt(agent)
+                && agent.prompt != default
+                && shipped_default(&agent.prompt)
+            {
+                agent.prompt = default.to_owned();
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Gives every agent without a color one, and says whether any needed
@@ -827,4 +879,22 @@ pub struct FolderView {
     pub expanded: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_all: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A changed rivet-prompt.md needs its hash in SHIPPED_RIVET_PROMPTS, or
+    /// the next version wouldn't know it as a default.
+    #[test]
+    fn this_versions_rivet_prompt_is_a_shipped_default() {
+        assert!(
+            shipped_default(RIVET_PROMPT),
+            "add rivet-prompt.md's SHA-256 (without trailing whitespace) to SHIPPED_RIVET_PROMPTS, keeping the others"
+        );
+        assert!(shipped_default(&format!("{}\n\n \t", RIVET_PROMPT.trim_end())), "trailing whitespace aside");
+        assert!(!shipped_default(&format!("{} Be brief.", RIVET_PROMPT.trim_end())));
+        assert!(!Config::default().follow_default_prompts(), "a new Claktory's is this version's");
+    }
 }

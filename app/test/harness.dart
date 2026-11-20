@@ -369,6 +369,21 @@ class RecordingBackend extends Backend {
   /// What [previewEnv] answers.
   var envPreview = EnvPreview();
 
+  /// The key [unlockVault] takes; anything else is refused as the backend
+  /// does.
+  var unlockKey = 'ABCD-EFGH-IJKL-MNOP';
+
+  @override
+  Future<void> unlockVault(String key) async {
+    await _record(ClientMessage(unlockVault: UnlockVault(passphrase: key)));
+    if (key != unlockKey) {
+      throw const RequestFailure(
+        "That passphrase isn't right.",
+        code: ErrorCode.ERROR_CODE_WRONG_PROOF,
+      );
+    }
+  }
+
   @override
   Future<void> createSecret(
     String name,
@@ -463,6 +478,9 @@ class RecordingBackend extends Backend {
     required bool approve,
     List<SecretEntry> entries = const [],
     String comment = '',
+    String secretId = '',
+    String name = '',
+    String description = '',
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -471,6 +489,9 @@ class RecordingBackend extends Backend {
         approve: approve,
         entries: entries,
         comment: comment,
+        secretId: secretId,
+        name: name,
+        description: description,
       ),
     ),
   );

@@ -101,7 +101,12 @@ async fn open(connection: &Connection) -> Socket {
 
 /// Says hello with `token`; returns the answer.
 async fn hello<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, token: &str) -> Body {
-    let hello = v1::Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token: token.into() };
+    let hello = v1::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_version: "test".into(),
+        token: token.into(),
+        device_kind: v1::DeviceKind::Phone.into(),
+    };
     let message = ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
     socket.send(Message::Binary(message.encode_to_vec().into())).await.expect("send");
     next(socket).await.expect("an answer")
@@ -238,7 +243,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert_eq!(code.relays, [relay], "{}", made.code);
     assert!(!code.addresses.is_empty() && code.addresses.iter().all(|address| !address.ip().is_loopback()), "{}", made.code);
     view.follow(&mut client, |view| remote(view).on && remote(view).devices.len() == 1).await;
-    // This machine's app keeps its code: the same port, on every address now.
+    // This machine's app keeps its code and its port.
     let local = parse(&local_pairing(&dir).await);
     assert!(local.addresses[0].ip().is_loopback() && local.relays.is_empty());
     let shown = remote(&view);
@@ -261,6 +266,20 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     view.follow(&mut client, |view| remote(view).devices[0].connected && remote(view).devices[0].path() == v1::DevicePath::Direct).await;
     let device = &remote(&view).devices[0];
     assert!(device.code_expires_ms == 0 && device.last_seen_ms > 0 && !device.last_address.is_empty(), "{device:?}");
+    // What the person sends from it says it came from it.
+    apply_request(&mut client, &mut view, crate::common::create_agent("", "Ops", "")).await;
+    let message = client_message::Body::SendMessage(v1::SendMessage { agent_id: "ops".into(), text: "From the train".into() });
+    socket.send(Message::Binary(ClientMessage { id: 2, body: Some(message) }.encode_to_vec().into())).await.expect("send");
+    let select = client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "ops".into() });
+    apply_request(&mut client, &mut view, select).await;
+    let from = |view: &View| {
+        view.entries.iter().find_map(|entry| match &entry.kind {
+            Some(v1::entry::Kind::User(user)) if user.text == "From the train" => user.sent_from.clone(),
+            _ => None,
+        })
+    };
+    view.follow(&mut client, |view| from(view).is_some()).await;
+    assert_eq!(from(&view), Some(v1::SentFrom { device_name: "Phone".into(), kind: v1::DeviceKind::Phone.into() }));
 
     // Another key is turned away right after the handshake, before any of
     // Factory's protocol: the code is used, and nothing else is waiting.
@@ -352,4 +371,75 @@ async fn an_app_browses_this_machines_folders() {
             other => panic!("{path}: {other:?}"),
         }
     }
+}
+
+fn list_home() -> client_message::Body {
+    client_message::Body::ListFolders(v1::ListFolders { path: String::new() })
+}
+
+/// Sends a request on a socket; the first answer that isn't a Workspace.
+async fn ask<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    id: u64,
+    body: client_message::Body,
+) -> Body {
+    let message = ClientMessage { id, body: Some(body) };
+    socket.send(Message::Binary(message.encode_to_vec().into())).await.expect("send");
+    loop {
+        if let answer @ (Body::Ack(_) | Body::Error(_) | Body::PairingCode(_) | Body::FolderList(_)) =
+            next(socket).await.expect("an answer, on a connection still open")
+        {
+            return answer;
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let local = parse(&local_pairing(&dir).await);
+    let app = new_device().await;
+    let connection = dial(&app, &local, &local.addresses).await.expect("let in");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    assert!(matches!(ask(&mut socket, 2, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
+
+    // Adding the first device turns remote access on: the answer comes on
+    // the same connection, which stays open.
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Phone".into(), host: String::new() });
+    let code = match ask(&mut socket, 3, pairing).await {
+        Body::PairingCode(made) => parse(&made.code),
+        other => panic!("expected a pairing code, got {other:?}"),
+    };
+    let phone = new_device().await;
+    let phone_link = dial(&phone, &code, &code.addresses).await.expect("the phone reaches the remote endpoint");
+    let mut phone_socket = open(&phone_link).await;
+    assert!(matches!(hello(&mut phone_socket, &code.token).await, Body::Welcome(_)));
+    assert!(matches!(ask(&mut socket, 4, list_home()).await, Body::FolderList(_)), "still connected");
+
+    // Unpairing it turns remote access off; this machine's app stays.
+    let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
+    assert!(matches!(ask(&mut socket, 5, unpair).await, Body::Ack(_)));
+    loop {
+        match next(&mut socket).await.expect("still connected") {
+            Body::Workspace(workspace) if workspace.remote.as_ref().is_some_and(|remote| !remote.on) => break,
+            _ => {}
+        }
+    }
+    // A moment for the remote endpoint to close.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(matches!(ask(&mut socket, 6, list_home()).await, Body::FolderList(_)), "still connected");
+    assert!(connection.close_reason().is_none(), "the tunnel connection never closed");
+    assert_eq!(parse(&local_pairing(&dir).await).addresses, local.addresses, "the same port throughout");
+
+    // Turned on again, the remote endpoint takes the port it had.
+    let again = client_message::Body::CreatePairing(v1::CreatePairing { name: "Tablet".into(), host: String::new() });
+    let second = match ask(&mut socket, 7, again).await {
+        Body::PairingCode(made) => parse(&made.code),
+        other => panic!("expected a pairing code, got {other:?}"),
+    };
+    assert_eq!(second.addresses.first().map(SocketAddr::port), code.addresses.first().map(SocketAddr::port));
 }

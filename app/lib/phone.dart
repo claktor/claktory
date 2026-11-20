@@ -11,6 +11,7 @@ import 'controls.dart';
 import 'extensions.dart';
 import 'identity.dart';
 import 'layout.dart';
+import 'map.dart';
 import 'marketplace.dart';
 import 'panes.dart' show pageOfKind, paneGlyph, paneTitle;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -108,6 +109,8 @@ class _PhoneShellState extends State<PhoneShell> {
               return screen(const MarketplaceView());
             case AppPage.changelog:
               return screen(const ChangelogView());
+            case AppPage.map:
+              return screen(const MapView());
             case AppPage.agent:
           }
           final workspace = backend.workspace.workspace;

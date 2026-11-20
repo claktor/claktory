@@ -25,6 +25,7 @@ mod folders;
 mod highlight;
 mod idle_compaction;
 mod login;
+mod map;
 mod monitors;
 mod origin;
 mod proposals;

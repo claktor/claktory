@@ -428,11 +428,21 @@ class _TranscriptViewState extends State<TranscriptView>
                       left: Space.m,
                       right: Space.m,
                     ),
-                    child: Text(
-                      'Queued',
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (message.source == 'person' &&
+                            message.hasSentFrom()) ...[
+                          DeviceMark(message.sentFrom),
+                          const SizedBox(width: Space.xs),
+                        ],
+                        Text(
+                          'Queued',
+                          style: TextStyles.caption.copyWith(
+                            color: palette.textFaint,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -619,7 +629,13 @@ class _EntryViewState extends State<EntryView> {
     final entry = widget.model.entry;
     final seq = widget.model.seq;
     final (Widget child, double gap) = switch (entry.whichKind()) {
-      Entry_Kind.user => (_UserText(entry.user.text), Space.l),
+      Entry_Kind.user => (
+        _UserText(
+          entry.user.text,
+          sentFrom: entry.user.hasSentFrom() ? entry.user.sentFrom : null,
+        ),
+        Space.l,
+      ),
       Entry_Kind.proposal => (
         _ProposalCard(key: ValueKey(entry.proposal.id), entry.proposal),
         Space.l,
@@ -727,21 +743,91 @@ class AgentTints extends InheritedWidget {
       !mapEquals(old.agents, agents);
 }
 
-/// The person's message: a bubble on the right in the agent's color.
+/// The person's message: a bubble on the right in the agent's color, with
+/// a mark under it for the device it was sent from.
 class _UserText extends StatelessWidget {
-  const _UserText(this.text);
+  const _UserText(this.text, {this.sentFrom});
 
   final String text;
+
+  /// Where it was sent from; null when the backend doesn't know (sent
+  /// before it kept that), and then nothing shows.
+  final SentFrom? sentFrom;
 
   @override
   Widget build(BuildContext context) {
     final color = AgentTints.of(context)?.own ?? Palette.of(context).signal;
-    return Bubble(
+    final bubble = Bubble(
       color: color,
       outgoing: true,
       child: Text(
         text,
         style: TextStyles.body.copyWith(color: const Color(0xFFFFFFFF)),
+      ),
+    );
+    final from = sentFrom;
+    if (from == null) return bubble;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        bubble,
+        Padding(
+          padding: const EdgeInsets.only(right: Space.m, top: 2),
+          child: DeviceMark(from),
+        ),
+      ],
+    );
+  }
+}
+
+/// The Lucide glyph for a kind of device; a generic one when the app that
+/// sent it didn't say.
+String deviceGlyph(DeviceKind kind) => switch (kind) {
+  DeviceKind.DEVICE_KIND_DESKTOP => 'monitor',
+  DeviceKind.DEVICE_KIND_LAPTOP => 'laptop-minimal',
+  DeviceKind.DEVICE_KIND_PHONE => 'smartphone',
+  DeviceKind.DEVICE_KIND_TABLET => 'tablet',
+  _ => 'monitor-smartphone',
+};
+
+/// What the mark under a message says on hover: the device's name, or
+/// its kind when it has none.
+String sentFromText(SentFrom from) {
+  final name = from.deviceName.trim();
+  if (name.isNotEmpty) return 'Sent from $name';
+  return switch (from.kind) {
+    DeviceKind.DEVICE_KIND_DESKTOP => 'Sent from a desktop computer',
+    DeviceKind.DEVICE_KIND_LAPTOP => 'Sent from a laptop',
+    DeviceKind.DEVICE_KIND_PHONE => 'Sent from a phone',
+    DeviceKind.DEVICE_KIND_TABLET => 'Sent from a tablet',
+    _ => 'Sent from another device',
+  };
+}
+
+/// A faint 12px glyph for the device a message was sent from, naming it on
+/// hover, or when touched and held on a phone.
+class DeviceMark extends StatelessWidget {
+  const DeviceMark(this.from, {super.key});
+
+  final SentFrom from;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = sentFromText(from);
+    return Semantics(
+      label: text,
+      child: HoverCard(
+        holdToShow: true,
+        end: true,
+        card: (context) => Text(text),
+        child: ExcludeSemantics(
+          child: ExtensionGlyph(
+            icon: deviceGlyph(from.kind),
+            name: text,
+            color: Palette.of(context).textFaint,
+            size: 12,
+          ),
+        ),
       ),
     );
   }
@@ -989,6 +1075,7 @@ class _AgentMessageState extends State<_AgentMessage> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final tints = AgentTints.of(context);
+    final (message, also) = splitAlsoSentTo(widget.event.text);
     final color = tints?.byId[_sender];
     final known = color != null && tints?.open != null;
     final nameColor = color ?? palette.textMuted;
@@ -1052,13 +1139,31 @@ class _AgentMessageState extends State<_AgentMessage> {
                 )
               : null,
           child: Markdown(
-            widget.event.text,
+            message,
             color: color == null ? null : const Color(0xFFFFFFFF),
           ),
         ),
+        // Who else got it, quietly under the bubble.
+        if (also != null)
+          Padding(
+            padding: const EdgeInsets.only(left: Space.m, top: 2),
+            child: Text(
+              'Also sent to $also',
+              style: TextStyles.caption.copyWith(color: palette.textFaint),
+            ),
+          ),
       ],
     );
   }
+}
+
+/// A message sent to several agents ends with a paragraph naming the
+/// others ("Also sent to: Lena (Backend), Omar (Backend)."): the message
+/// without it, and the names. Null names for a message to one agent.
+(String, String?) splitAlsoSentTo(String text) {
+  final match = RegExp(r'\n\nAlso sent to: ([^\n]+?)\.?\s*$').firstMatch(text);
+  if (match == null) return (text, null);
+  return (text.substring(0, match.start), match.group(1));
 }
 
 /// Whether the person has text selected in the transcript, for clicks that

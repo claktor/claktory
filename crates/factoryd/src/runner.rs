@@ -1242,7 +1242,9 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
         prompt.push_str("Read anything in them, but change files only in yours, with bash too.\n");
     }
     if !agent.prompt.is_empty() {
-        let _ = write!(prompt, "\n## Your instructions\n\n{}\n", agent.prompt);
+        // Placeholders as in the manual ({{user}}, {{home}}…), filled in here
+        // so the saved prompt stays as written: a default stays the default.
+        let _ = write!(prompt, "\n## Your instructions\n\n{}\n", crate::manual::render(&agent.prompt, home, render.user));
     }
     for text in render.sections.iter().chain(render.pinned) {
         let _ = write!(prompt, "\n{text}");
@@ -1283,7 +1285,7 @@ fn user_message(queued: Queued) -> UserMessage {
     let now = factory_agent::clock::now_ms();
     match queued.event {
         Some(event) => UserMessage::event(queued.text, event, now),
-        None => UserMessage::text(queued.text, now),
+        None => UserMessage { sent_from: queued.sent_from, ..UserMessage::text(queued.text, now) },
     }
 }
 

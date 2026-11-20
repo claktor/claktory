@@ -167,7 +167,7 @@ impl RequestError {
                 match error {
                     VaultError::Locked => v1::ErrorCode::VaultLocked,
                     VaultError::ProofRequired => v1::ErrorCode::ProofRequired,
-                    VaultError::WrongProof => v1::ErrorCode::WrongProof,
+                    VaultError::WrongProof(_) => v1::ErrorCode::WrongProof,
                     VaultError::NotGranted { .. } => v1::ErrorCode::NotGranted,
                     VaultError::NoSecret(_) | VaultError::NoRequest(_) => v1::ErrorCode::NotFound,
                     VaultError::NoVault | VaultError::Exists | VaultError::Invalid(_) => v1::ErrorCode::InvalidRequest,
@@ -289,15 +289,17 @@ pub(crate) struct Queued {
     pub(crate) event: Option<factory_agent::Event>,
     /// When it was sent, in ms since 1970.
     pub(crate) created: i64,
+    /// The person's: the device they sent it from, when known.
+    pub(crate) sent_from: Option<factory_agent::SentFrom>,
 }
 
 impl Queued {
-    pub(crate) fn from_person(text: impl Into<String>) -> Queued {
-        Queued { id: 0, text: text.into(), event: None, created: now_ms() }
+    pub(crate) fn from_person(text: impl Into<String>, sent_from: Option<factory_agent::SentFrom>) -> Queued {
+        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from }
     }
 
     pub(crate) fn event(text: String, event: factory_agent::Event) -> Queued {
-        Queued { id: 0, text, event: Some(event), created: now_ms() }
+        Queued { id: 0, text, event: Some(event), created: now_ms(), sent_from: None }
     }
 }
 
@@ -316,8 +318,8 @@ enum Saved {
 impl From<Saved> for Queued {
     fn from(saved: Saved) -> Queued {
         match saved {
-            Saved::Text(text) => Queued::from_person(text),
-            Saved::Queued { text, event } => Queued { id: 0, text, event, created: now_ms() },
+            Saved::Text(text) => Queued::from_person(text, None),
+            Saved::Queued { text, event } => Queued { id: 0, text, event, created: now_ms(), sent_from: None },
         }
     }
 }
@@ -404,8 +406,10 @@ impl Factory {
         let (config, config_error) = match tokio::fs::read_to_string(home.config_path()).await {
             Ok(text) => match Config::parse(&text) {
                 Ok(mut config) => {
-                    // Agents from before colors were saved keep theirs from now on.
-                    if config.keep_colors(None) {
+                    // Agents from before colors were saved keep theirs from now
+                    // on, and a default prompt nobody edited becomes this
+                    // version's.
+                    if config.keep_colors(None) | config.follow_default_prompts() {
                         write_atomic(&home.config_path(), config.to_json()?.as_bytes()).await?;
                     }
                     (config, None)
@@ -911,7 +915,9 @@ impl Factory {
         Ok(())
     }
 
-    pub fn send_message(self: &Arc<Self>, id: &str, text: &str) -> Result<(), RequestError> {
+    /// The person's message for an agent, sent from the device `sent_from`
+    /// names, when known.
+    pub fn send_message(self: &Arc<Self>, id: &str, text: &str, sent_from: Option<factory_agent::SentFrom>) -> Result<(), RequestError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(RequestError::Empty("message"));
@@ -920,7 +926,7 @@ impl Factory {
         if inner.config.agent(id).is_none() {
             return Err(RequestError::UnknownAgent(id.to_owned()));
         }
-        self.enqueue(&mut inner, id, Queued::from_person(text))?;
+        self.enqueue(&mut inner, id, Queued::from_person(text, sent_from))?;
         Ok(())
     }
 
@@ -1025,6 +1031,7 @@ impl Factory {
             let mut config = inner.config.clone();
             let result = edit(&mut config)?;
             config.keep_colors(Some(&inner.config));
+            config.follow_default_prompts();
             config.validate()?;
             let text = config.to_json()?;
             self.apply_config(&mut inner, config);
@@ -1050,13 +1057,17 @@ impl Factory {
             }
         };
         let mut parsed = Config::parse(&text);
-        // An agent written in without a color gets one, saved.
-        if let Ok(config) = &mut parsed
-            && config.agents.iter().any(|agent| agent.color.is_empty())
-        {
-            let before = self.lock().config.clone();
-            config.keep_colors(Some(&before));
-            self.save_colors(&text, config).await;
+        // An agent written in without a color gets one, and a shipped prompt
+        // written in becomes this version's, saved.
+        if let Ok(config) = &mut parsed {
+            let colorless = config.agents.iter().any(|agent| agent.color.is_empty());
+            if colorless {
+                let before = self.lock().config.clone();
+                config.keep_colors(Some(&before));
+            }
+            if config.follow_default_prompts() | colorless {
+                self.save_filled_in(&text, config).await;
+            }
         }
         let mut inner = self.lock();
         match parsed {
@@ -1088,7 +1099,9 @@ impl Factory {
 
     /// Writes `config` with the colors it was given over `read`, the file it
     /// came from, unless the file has changed since (that's read next).
-    async fn save_colors(&self, read: &str, config: &Config) {
+    /// Writes back a config with what was filled in (colors, prompts), unless
+    /// the file changed since `read`.
+    async fn save_filled_in(&self, read: &str, config: &Config) {
         let path = self.home.config_path();
         let saved = match config.to_json() {
             Ok(text) if tokio::fs::read_to_string(&path).await.is_ok_and(|now| now == read) => {
@@ -1098,7 +1111,7 @@ impl Factory {
             Err(error) => Err(error.to_string()),
         };
         if let Err(error) = saved {
-            tracing::warn!(%error, "could not save agents' colors");
+            tracing::warn!(%error, "could not save config.json");
         }
     }
 
@@ -1417,6 +1430,7 @@ impl Factory {
                     text: queued.text.clone(),
                     created: queued.created,
                     summary: event.map(|event| event.summary.clone()).unwrap_or_default(),
+                    sent_from: queued.sent_from.as_ref().map(crate::transcript::sent_from),
                 }
             })
             .collect();
@@ -1503,10 +1517,13 @@ impl Factory {
                 avatar_face_override: None,
                 role: agent.role.clone(),
                 layout: self.viewer.layout(&agent.id),
+                default_prompt: Config::default_prompt(agent).unwrap_or_default().to_owned(),
             });
         }
         let config = &inner.config;
+        let vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
         v1::Workspace {
+            map: Some(crate::map::build(config, &self.home, &vault)),
             projects,
             agents,
             models: inner.models.clone(),
@@ -1516,7 +1533,7 @@ impl Factory {
             latest_backend: inner.latest_release.backend.clone(),
             changelog: inner.latest_release.changelog.iter().map(crate::update::ChangelogVersion::to_proto).collect(),
             remote: Some(self.remote_view(inner)),
-            vault: Some(self.vault.state(|agent, task| self.store.task_running(agent, task))),
+            vault: Some(vault),
             account: self.account.view(&config.account),
             update_error: inner.update_error.clone(),
             next_agent_color: inner.config.next_color().to_owned(),

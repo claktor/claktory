@@ -1,4 +1,6 @@
+import 'package:factory_app/account.dart' show signInPutOff;
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/controls.dart' show TextField, Toggle;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/secrets.dart';
@@ -8,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'app_test.dart' show builder, workspace;
 import 'harness.dart';
 
 SecretInfo _aws({List<SecretGrant> grants = const []}) => SecretInfo(
@@ -78,6 +81,13 @@ List<ClientMessage> _sent(Harness harness, bool Function(ClientMessage) of) => [
 ];
 
 void main() {
+  test("an agent's secrets, in a line", () {
+    expect(agentSecretsSummary([]), 'Has no secrets yet.');
+    expect(agentSecretsSummary(['AWS']), 'Has AWS.');
+    expect(agentSecretsSummary(['A', 'B', 'C']), 'Has A, B and C.');
+    expect(agentSecretsSummary(['A', 'B', 'C', 'D']), 'Has A, B and 2 more.');
+  });
+
   test('a name is suggested from the variables', () {
     expect(suggestSecretName(['AWS_ACCESS_KEY_ID', 'AWS_REGION']), 'AWS');
     expect(suggestSecretName(['CLOUDFLARE_API_TOKEN']), 'Cloudflare');
@@ -290,6 +300,52 @@ void main() {
     expect(given.grantSecret.agentId, 'june');
   });
 
+  testWidgets("an agent's settings list its secrets, above the extensions "
+      'and in the Secrets extension', (tester) async {
+    final w = workspace(agents: [builder(working: false)])
+      ..extensions.add(
+        Extension(
+          id: 'secrets',
+          name: 'Secrets',
+          description: 'Asks you for secrets it needs.',
+        ),
+      )
+      ..vault = VaultState(
+        exists: true,
+        unlocked: true,
+        secrets: [
+          for (final name in ['ASC_KEY_ID', 'CLAKTORY_TEAM_ID'])
+            SecretInfo(
+              id: name,
+              name: name,
+              grants: [SecretGrant(agentId: 'a1')],
+              variables: [SecretVariable(name: name)],
+            ),
+          SecretInfo(id: 'other', name: 'Stripe'),
+        ],
+      );
+    w.agents.single.extensions.add(AgentExtension(id: 'secrets'));
+    final harness = Harness(w);
+    await harness.show(tester);
+    await settle(tester);
+    await tester.tap(find.text('Opus 5.5 · high'));
+    await settle(tester);
+    // Even with the extension off.
+    expect(find.text('Has ASC_KEY_ID and CLAKTORY_TEAM_ID.'), findsOneWidget);
+    bool on(String name) => tester
+        .widget<Toggle>(
+          find.byWidgetPredicate((w) => w is Toggle && w.label == name),
+        )
+        .value;
+    expect(on('ASC_KEY_ID'), isTrue);
+    expect(on('CLAKTORY_TEAM_ID'), isTrue);
+    expect(on('Stripe'), isFalse);
+    expect(
+      tester.getTopLeft(find.text('Stripe')).dy,
+      lessThan(tester.getTopLeft(find.text('Extensions')).dy),
+    );
+  });
+
   testWidgets('no secrets: agent settings say where to add them', (
     tester,
   ) async {
@@ -305,28 +361,68 @@ void main() {
     );
   });
 
-  testWidgets("an agent's request for a new secret: its values, then give", (
-    tester,
-  ) async {
-    final harness = Harness(_workspace());
-    final request = SecretRequest(
-      id: 'r1',
-      agentId: 'june',
-      newSecret: NewSecret(
-        name: 'Resend',
-        description: 'Sends mail from claktory.com',
-        variables: [SecretVariable(name: 'RESEND_API_KEY')],
-      ),
-      reason: 'To send the **launch** email.',
-      state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+  test('the secret that looks like the one asked for', () {
+    final dns = SecretInfo(
+      id: 'cf',
+      name: 'Cloudflare DNS',
+      variables: [SecretVariable(name: 'CF_TOKEN')],
     );
+    final secrets = [_aws(), dns];
+    expect(closestSecret(NewSecret(name: 'Cloudflare token'), secrets), dns);
+    expect(closestSecret(NewSecret(name: 'aws'), secrets)?.id, 's1');
+    expect(
+      closestSecret(
+        NewSecret(
+          name: 'Deploy keys',
+          variables: [SecretVariable(name: 'AWS_ACCESS_KEY_ID')],
+        ),
+        secrets,
+      )?.id,
+      's1',
+    );
+    // A word every secret's name may have says nothing.
+    expect(closestSecret(NewSecret(name: 'Resend API key'), secrets), isNull);
+    expect(closestSecret(NewSecret(name: 'Resend'), []), isNull);
+  });
+
+  SecretRequest resend() => SecretRequest(
+    id: 'r1',
+    agentId: 'june',
+    secretName: 'Resend',
+    newSecret: NewSecret(
+      name: 'Resend',
+      description: 'Sends mail from claktory.com',
+      variables: [SecretVariable(name: 'RESEND_API_KEY')],
+    ),
+    reason: 'To send the **launch** email.',
+    state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+  );
+
+  Finder field(String placeholder) => find.descendant(
+    of: find.byWidgetPredicate(
+      (w) => w is TextField && w.placeholder == placeholder,
+    ),
+    matching: find.byType(EditableText),
+  );
+
+  testWidgets("a request like none of the person's secrets: Add new, filled "
+      'in from it', (tester) async {
+    final harness = Harness(_workspace());
+    final request = resend();
     await _show(tester, harness, SecretRequestCard(request));
-    expect(find.text('June asks for a new secret: Resend'), findsOneWidget);
-    expect(find.text('June never sees the value.'), findsOneWidget);
+    expect(find.text('June asks for a secret: Resend'), findsOneWidget);
+    // Under the header, and in its field to change.
+    expect(find.text('Sends mail from claktory.com'), findsNWidgets(2));
+    expect(
+      find.text("Filled in from June's request. Change anything you need."),
+      findsOneWidget,
+    );
+    expect(find.text('Resend'), findsOneWidget, reason: 'the name, to edit');
     await tester.tap(find.text('Add and give to June'));
     await tester.pump();
     expect(find.text('Enter a value for each variable.'), findsOneWidget);
-    await tester.enterText(find.byType(EditableText).first, 're_123456789');
+    await tester.enterText(field('Paste the value'), 're_123456789');
+    await tester.enterText(find.byType(EditableText).first, 'Resend mail');
     await tester.tap(find.text('Add and give to June'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -335,9 +431,11 @@ void main() {
     ).single.decideSecretRequest;
     expect(decided.approve, isTrue);
     expect(decided.requestId, 'r1');
+    expect(decided.secretId, isEmpty);
+    expect(decided.name, 'Resend mail');
+    expect(decided.description, 'Sends mail from claktory.com');
     expect(decided.entries.single.variable, 'RESEND_API_KEY');
     expect(decided.entries.single.value, 're_123456789');
-    expect(decided.hasProof(), isFalse);
 
     // Decided, the backend sends it back.
     await tester.pumpWidget(const SizedBox());
@@ -347,16 +445,127 @@ void main() {
       SecretRequestCard(
         request.deepCopy()
           ..state = SecretRequestState.SECRET_REQUEST_STATE_GRANTED
+          ..givenSecretId = 's9'
+          ..givenSecretName = 'Resend mail'
           ..decidedMs = Int64(
             DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
           ),
       ),
     );
     expect(find.text('Add and give to June'), findsNothing);
-    expect(find.textContaining('Given to June'), findsOneWidget);
+    expect(find.text('Tell June why (optional)'), findsNothing);
+    expect(
+      find.textContaining('Gave Resend mail to June · ', findRichText: true),
+      findsOneWidget,
+    );
   });
 
-  testWidgets("an agent's request for a secret there is: Give AWS to June", (
+  testWidgets('a request like one of them: Choose one, picked, Give it', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    final request = resend()
+      ..newSecret.name = 'AWS deploy'
+      ..secretName = 'AWS deploy';
+    await _show(tester, harness, SecretRequestCard(request));
+    expect(
+      find.text(
+        'Filled in from June\'s request. Change anything you '
+        'need.',
+      ),
+      findsNothing,
+    );
+    await tester.tap(find.text('Give AWS to June'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.approve, isTrue);
+    expect(decided.secretId, 's1');
+    expect(decided.entries, isEmpty);
+    expect(decided.name, isEmpty);
+  });
+
+  testWidgets('Choose one with nothing chosen says what to do', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, SecretRequestCard(resend()));
+    await tester.tap(find.text('Choose one'));
+    await tester.pump();
+    expect(find.text('Choose a secret'), findsOneWidget);
+    await tester.tap(find.text('Give'));
+    await tester.pump();
+    expect(
+      find.text('Choose a secret to give, or add a new one.'),
+      findsOneWidget,
+    );
+    expect(_sent(harness, (m) => m.hasDecideSecretRequest()), isEmpty);
+    await tester.tap(find.text('Choose a secret'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('AWS').last);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Give AWS to June'));
+    await pumpFrames(tester);
+    expect(
+      _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest.secretId,
+      's1',
+    );
+  });
+
+  testWidgets("no secrets: Choose one says so, and it starts on Add new", (
+    tester,
+  ) async {
+    final harness = Harness(_workspace(secrets: []));
+    await _show(tester, harness, SecretRequestCard(resend()));
+    expect(find.text('Add and give to June'), findsOneWidget);
+    await tester.tap(find.text('Choose one'));
+    await tester.pump();
+    expect(find.text("You don't have any secrets yet."), findsOneWidget);
+  });
+
+  testWidgets('Dismiss tells the agent why, and the card shows it', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    final request = resend();
+    await _show(tester, harness, SecretRequestCard(request));
+    await tester.enterText(
+      field('Tell June why (optional)'),
+      'Use the test account.',
+    );
+    await tester.tap(find.text('Dismiss'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.approve, isFalse);
+    expect(decided.comment, 'Use the test account.');
+
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        request.deepCopy()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_DISMISSED
+          ..comment = 'Use the test account.'
+          ..decidedMs = Int64(
+            DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
+          ),
+      ),
+    );
+    expect(
+      find.textContaining('Dismissed · ', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('“Use the test account.”'), findsOneWidget);
+  });
+
+  testWidgets("an old request for a secret there is: Give AWS to June", (
     tester,
   ) async {
     final harness = Harness(_workspace());
@@ -369,6 +578,8 @@ void main() {
       state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
     );
     await _show(tester, harness, SecretRequestCard(request));
+    expect(find.text('June asks for AWS'), findsOneWidget);
+    expect(find.text('Choose one'), findsNothing);
     await tester.tap(find.text('Give AWS to June'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -377,6 +588,7 @@ void main() {
     ).single.decideSecretRequest;
     expect(decided.approve, isTrue);
     expect(decided.entries, isEmpty);
+    expect(decided.secretId, isEmpty);
   });
 
   testWidgets('requests waiting show at the top of Settings → Secrets', (
@@ -430,6 +642,79 @@ void main() {
       's1',
     );
     expect(find.text('Delete AWS?'), findsNothing);
+  });
+
+  testWidgets('locked after a restart: why, and the recovery key opens them', (
+    tester,
+  ) async {
+    final workspace = _workspace();
+    workspace.vault.unlocked = false;
+    final harness = Harness(workspace);
+    await _show(tester, harness, const SecretsSettings());
+    expect(
+      find.text(
+        "Secrets are locked. Agents can't use them until you unlock them.",
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Unlock with recovery key…'));
+    await pumpFrames(tester);
+    expect(find.text('Unlock with recovery key'), findsOneWidget);
+    await tester.enterText(find.byType(EditableText).last, 'nope');
+    await tester.tap(find.text('Unlock'));
+    await pumpFrames(tester);
+    // The backend's words, as it sends them.
+    expect(find.text("That passphrase isn't right."), findsOneWidget);
+    await tester.enterText(
+      find.byType(EditableText).last,
+      harness.backend.unlockKey,
+    );
+    await tester.tap(find.text('Unlock'));
+    await pumpFrames(tester);
+    expect(find.text('Unlock with recovery key'), findsNothing);
+    final sent = _sent(harness, (m) => m.hasUnlockVault());
+    expect(sent.last.unlockVault.passphrase, harness.backend.unlockKey);
+  });
+
+  testWidgets("with a Claktory account: the backend's reason, or signing in "
+      'again when this Claktory was removed', (tester) async {
+    final workspace = _workspace()
+      ..account = ClaktoryAccount(
+        state: ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
+        problem:
+            "Can't reach claktory.com. Claktory keeps working and tries "
+            'again on its own.',
+      );
+    workspace.vault.unlocked = false;
+    final harness = Harness(workspace);
+    await _show(tester, harness, const SecretsSettings());
+    expect(
+      find.text(
+        "Secrets are locked. Can't reach claktory.com. Claktory keeps "
+        'working and tries again on its own.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Unlock with recovery key…'), findsOneWidget);
+    expect(find.text('Sign in again…'), findsNothing);
+
+    final removed = harness.backend.workspace.workspace.deepCopy()
+      ..account.state = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
+    harness.backend.workspace.apply(removed);
+    await pumpFrames(tester);
+    expect(find.textContaining('removed from your account'), findsOneWidget);
+    expect(find.text('Use recovery key…'), findsOneWidget);
+    signInPutOff(harness.backend).value = true;
+    await tester.tap(find.text('Sign in again…'));
+    await tester.pump();
+    expect(signInPutOff(harness.backend).value, isFalse);
+
+    // Opened (by itself, or with the key): no more banner.
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()..vault.unlocked = true,
+    );
+    await pumpFrames(tester);
+    expect(find.textContaining('Secrets are locked'), findsNothing);
   });
 
   test('a refusal keeps its code', () {

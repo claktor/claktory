@@ -64,7 +64,9 @@ static MANIFEST: Manifest = Manifest {
     ],
 };
 
-const SEND: &str = "Message an agent by id or name. It arrives as an event from you and wakes the agent if it's idle; a working agent reads it after its current step.";
+const SEND: &str = "Message an agent by id or name, or several at once with a list (up to 20), each getting the same text and told who else got it. It arrives as an event from you and wakes the agent if it's idle; a working agent reads it after its current step.";
+/// The most agents one `agents_send` reaches.
+const MAX_RECIPIENTS: usize = 20;
 const MAP: &str =
     "Who can message whom, one line per agent: whom it messages, and by whom it's messaged. `agent` (an id or name) shows just that agent.";
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
@@ -206,7 +208,7 @@ impl Extension for Agents {
     fn prompt(&self, _factory: &Factory, inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let config = &inner.config;
         let mut text = String::from(
-            "## Other agents\n\nMessage agents with agents_send, by id or name, and see who's idle or working with agents_status. Messages from agents arrive as events from them. Say everything the agent needs in the message, since it can't see your conversation. Don't send messages only to acknowledge or thank.\n\n",
+            "## Other agents\n\nMessage agents with agents_send, by id or name (a list sends the same message to several), and see who's idle or working with agents_status. Messages from agents arrive as events from them. Say everything the agent needs in the message, since it can't see your conversation. Don't send messages only to acknowledge or thank.\n\n",
         );
         let others = reachable(config, agent);
         if others.is_empty() {
@@ -322,8 +324,16 @@ fn map_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
 
 #[derive(Deserialize)]
 struct SendArgs {
-    to: String,
+    to: To,
     text: String,
+}
+
+/// One recipient, as before, or several.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum To {
+    One(String),
+    Several(Vec<String>),
 }
 
 #[derive(Deserialize)]
@@ -336,7 +346,13 @@ fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
     let parameters = json!({
         "type": "object",
         "required": ["to", "text"],
-        "properties": {"to": {"type": "string"}, "text": {"type": "string", "minLength": 1}},
+        "properties": {
+            "to": {"anyOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_RECIPIENTS},
+            ]},
+            "text": {"type": "string", "minLength": 1},
+        },
         "additionalProperties": false,
     });
     super::tool(
@@ -344,8 +360,23 @@ fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
         "Message agent",
         SEND,
         parameters,
-        super::typed_handler(factory, sender, |factory, sender, args: SendArgs| send(factory, sender, &args.to, args.text)),
+        super::typed_handler(factory, sender, |factory, sender, args: SendArgs| match args.to {
+            // An agent whose context began before lists were allowed has a
+            // schema that says `to` is a string, so it writes the list in one.
+            To::One(to) if let Some(several) = listed(&to) => send_to_several(factory, sender, &several, args.text),
+            To::One(to) => send(factory, sender, &to, args.text),
+            To::Several(to) => send_to_several(factory, sender, &to, args.text),
+        }),
     )
+}
+
+/// The names in `to` when it's a JSON list written as a string.
+fn listed(to: &str) -> Option<Vec<String>> {
+    let to = to.trim();
+    if !to.starts_with('[') {
+        return None;
+    }
+    serde_json::from_str(to).ok()
 }
 
 fn status_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
@@ -385,28 +416,157 @@ fn resolve<'a>(config: &'a Config, from: &AgentConfig, to: &str) -> Result<&'a A
 
 /// Delivers one agent's message to another; says what happened, or why not.
 /// Its details: whom it went to (`to`, its id, `name` and `role`), and whether it
-/// was `working`, so it reads the message after its current step.
+/// was `working`, so it reads the message after its current step; and, as for
+/// several, `text` and `recipients`.
 pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String) -> Result<ToolResult, String> {
-    let (from, target, name, role, working) = {
+    let target = {
         let inner = factory.lock();
         let config = &inner.config;
         let Some(from) = config.agent(sender) else { return Err("You're no longer in this Claktory.".to_owned()) };
-        let target = resolve(config, from, to)?;
-        let working = inner.agents.get(&target.id).is_some_and(|runtime| runtime.running);
-        (signed(config, from, target), target.id.clone(), target.name.clone(), target.role.clone(), working)
+        resolve(config, from, to)?.id.clone()
     };
-    let event = Event { source: EventSource::Agent, from, id: sender.to_owned(), summary: String::new(), transient: false };
-    factory.deliver_event(&target, text, event);
-    // The person sees who talks to whom: both rows glow.
+    let delivered = deliver(factory, sender, &[target], &text);
+    let Some(recipient) = delivered.first() else { return Err("That agent is no longer in this Claktory.".to_owned()) };
+    let working = recipient.working;
+    let said = if working { "Sent; it's working and reads it after its current step." } else { "Sent." };
+    let (target, name, role) = (recipient.id.clone(), recipient.name.clone(), recipient.role.clone());
+    let recipients = vec![recipient.details(to)];
+    Ok(ToolResult::text(
+        said,
+        json!({"to": target, "name": name, "role": role, "working": working, "text": text, "recipients": recipients}),
+    ))
+}
+
+/// Delivers one agent's message to several, each told who else got it; says
+/// what happened for each. The sender and repeats are left out, and one that
+/// can't be messaged doesn't stop the others; with none it fails. Its details:
+/// `text` and `recipients`, each with `to` as written, its `id`, `name` and
+/// `role`, the `outcome` ("sent", "working": sent, read after its current
+/// step, or "failed") and, failed, `why`.
+fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text: String) -> Result<ToolResult, String> {
+    if names.is_empty() {
+        return Err("Name at least one agent in `to`.".to_owned());
+    }
+    if names.len() > MAX_RECIPIENTS {
+        return Err(format!("Send to at most {MAX_RECIPIENTS} agents at once."));
+    }
+    // Each name: the agent it means, or why not.
+    let mut resolved: Vec<(&str, Result<String, String>)> = Vec::new();
+    {
+        let inner = factory.lock();
+        let config = &inner.config;
+        let Some(from) = config.agent(sender) else { return Err("You're no longer in this Claktory.".to_owned()) };
+        for name in names {
+            let name = name.as_str();
+            if name.trim() == from.id || name.trim().eq_ignore_ascii_case(&from.name) {
+                continue;
+            }
+            let found = resolve(config, from, name).map(|agent| agent.id.clone());
+            if let Ok(id) = &found
+                && resolved.iter().any(|(_, other)| other.as_ref().is_ok_and(|other| other == id))
+            {
+                continue;
+            }
+            resolved.push((name, found));
+        }
+    }
+    let targets: Vec<String> = resolved.iter().filter_map(|(_, found)| found.as_ref().ok().cloned()).collect();
+    if targets.is_empty() {
+        let reasons: Vec<String> = resolved.iter().filter_map(|(_, found)| found.as_ref().err().cloned()).collect();
+        return Err(if reasons.is_empty() { "That's only you.".to_owned() } else { format!("Sent to no one. {}", reasons.join(" ")) });
+    }
+    let delivered = deliver(factory, sender, &targets, &text);
+    let mut lines = Vec::new();
+    let mut recipients = Vec::new();
+    for (name, found) in &resolved {
+        let reached = found.as_ref().ok().and_then(|id| delivered.iter().find(|recipient| &recipient.id == id));
+        match (found, reached) {
+            (_, Some(recipient)) => {
+                let said = if recipient.working { "sent; it's working and reads it after its current step" } else { "sent" };
+                lines.push(format!("{}: {said}.", recipient.label));
+                recipients.push(recipient.details(name));
+            }
+            (Ok(_), None) => {
+                let why = "That agent is no longer in this Claktory.";
+                lines.push(format!("{name}: {why}"));
+                recipients.push(json!({"to": name, "id": "", "name": "", "role": "", "outcome": "failed", "why": why}));
+            }
+            (Err(why), None) => {
+                lines.push(format!("{name}: {why}"));
+                recipients.push(json!({"to": name, "id": "", "name": "", "role": "", "outcome": "failed", "why": why}));
+            }
+        }
+    }
+    Ok(ToolResult::text(lines.join("\n"), json!({"text": text, "recipients": recipients})))
+}
+
+/// An agent a message reached.
+struct Recipient {
+    id: String,
+    name: String,
+    role: String,
+    /// "Lena (backend-2)": how the sender's result names it.
+    label: String,
+    /// It was working, so it reads the message after its current step.
+    working: bool,
+}
+
+impl Recipient {
+    fn details(&self, to: &str) -> serde_json::Value {
+        let outcome = if self.working { "working" } else { "sent" };
+        json!({"to": to, "id": self.id, "name": self.name, "role": self.role, "outcome": outcome})
+    }
+}
+
+/// Delivers `text` from `sender` to each of `targets` (ids), each told who
+/// else got it when there are several, and lights up their rows; the agents
+/// it reached, in order.
+fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str) -> Vec<Recipient> {
+    let mut letters = Vec::new();
+    let mut reached = Vec::new();
+    {
+        let inner = factory.lock();
+        let config = &inner.config;
+        let Some(from) = config.agent(sender) else { return reached };
+        let agents: Vec<&AgentConfig> = targets.iter().filter_map(|id| config.agent(id)).collect();
+        for agent in &agents {
+            let mut text = text.to_owned();
+            let others: Vec<String> =
+                agents.iter().filter(|other| other.id != agent.id).map(|other| signed(config, other, agent)).collect();
+            if !others.is_empty() {
+                let _ = write!(text, "\n\nAlso sent to: {}.", others.join(", "));
+            }
+            let event = Event {
+                source: EventSource::Agent,
+                from: signed(config, from, agent),
+                id: sender.to_owned(),
+                summary: String::new(),
+                transient: false,
+            };
+            letters.push((agent.id.clone(), text, event));
+            reached.push(Recipient {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+                role: agent.role.clone(),
+                label: format!("{} ({})", agent.name, agent.id),
+                working: inner.agents.get(&agent.id).is_some_and(|runtime| runtime.running),
+            });
+        }
+    }
+    for (id, text, event) in letters {
+        factory.deliver_event(&id, text, event);
+    }
+    // The person sees who talks to whom: the rows glow.
     let row = |id: &str| v1::HighlightTarget { kind: "agent".to_owned(), id: id.to_owned() };
+    let mut rows = vec![row(sender)];
+    rows.extend(reached.iter().map(|recipient| row(&recipient.id)));
     factory.send(Body::Highlight(v1::Highlight {
-        targets: vec![row(sender), row(&target)],
+        targets: rows,
         text: String::new(),
         from_agent_id: sender.to_owned(),
         kind: v1::HighlightKind::Message.into(),
     }));
-    let said = if working { "Sent; it's working and reads it after its current step." } else { "Sent." };
-    Ok(ToolResult::text(said, json!({"to": target, "name": name, "role": role, "working": working})))
+    reached
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.

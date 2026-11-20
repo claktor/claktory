@@ -63,6 +63,24 @@ if [ ${#missing[@]} -gt 0 ] || [ ! -f "$key_path" ]; then
   exit 1
 fi
 
+# The newest Xcode in /Applications (Xcode.app, Xcode-26.app…), or
+# CLAKTORY_XCODE: App Store Connect takes only apps built with a recent SDK,
+# and the newest can sit beside the one everyone else builds with.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+  xcode="${CLAKTORY_XCODE:-}"
+  if [ -z "$xcode" ]; then
+    best=""
+    for candidate in /Applications/Xcode*.app; do
+      [ -d "$candidate/Contents/Developer" ] || continue
+      v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$candidate/Contents/Info.plist" 2>/dev/null || echo 0)"
+      key="$(printf '%05d%05d%05d' $(echo "$v.0.0" | tr '.' ' ' | cut -d' ' -f1-3))"
+      if [ -z "$best" ] || [[ "$key" > "$best" ]]; then best="$key"; xcode="$candidate"; fi
+    done
+  fi
+  if [ -n "$xcode" ]; then export DEVELOPER_DIR="$xcode/Contents/Developer"; fi
+fi
+echo "With $(xcodebuild -version | head -1) (${DEVELOPER_DIR:-$(xcode-select -p)})"
+
 version="$(sed -n 's/^## v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$root/docs/CHANGELOG.md" | head -1)"
 if [ -z "$version" ]; then
   echo "No released version in docs/CHANGELOG.md to build." >&2

@@ -14,6 +14,38 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
+class DeviceKind extends $pb.ProtobufEnum {
+  static const DeviceKind DEVICE_KIND_UNSPECIFIED =
+      DeviceKind._(0, _omitEnumNames ? '' : 'DEVICE_KIND_UNSPECIFIED');
+
+  /// A computer at a desk: an iMac, a Mac mini or Studio, a desktop PC.
+  static const DeviceKind DEVICE_KIND_DESKTOP =
+      DeviceKind._(1, _omitEnumNames ? '' : 'DEVICE_KIND_DESKTOP');
+
+  /// A laptop: a MacBook.
+  static const DeviceKind DEVICE_KIND_LAPTOP =
+      DeviceKind._(2, _omitEnumNames ? '' : 'DEVICE_KIND_LAPTOP');
+  static const DeviceKind DEVICE_KIND_PHONE =
+      DeviceKind._(3, _omitEnumNames ? '' : 'DEVICE_KIND_PHONE');
+  static const DeviceKind DEVICE_KIND_TABLET =
+      DeviceKind._(4, _omitEnumNames ? '' : 'DEVICE_KIND_TABLET');
+
+  static const $core.List<DeviceKind> values = <DeviceKind>[
+    DEVICE_KIND_UNSPECIFIED,
+    DEVICE_KIND_DESKTOP,
+    DEVICE_KIND_LAPTOP,
+    DEVICE_KIND_PHONE,
+    DEVICE_KIND_TABLET,
+  ];
+
+  static final $core.List<DeviceKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static DeviceKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DeviceKind._(super.value, super.name);
+}
+
 /// How a device's connection travels.
 class DevicePath extends $pb.ProtobufEnum {
   /// Not connected.
@@ -666,6 +698,88 @@ class ClaktoryAccountState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const ClaktoryAccountState._(super.value, super.name);
+}
+
+class MapNodeKind extends $pb.ProtobufEnum {
+  static const MapNodeKind MAP_NODE_KIND_UNSPECIFIED =
+      MapNodeKind._(0, _omitEnumNames ? '' : 'MAP_NODE_KIND_UNSPECIFIED');
+
+  /// The workspace folder: agents in no project.
+  static const MapNodeKind MAP_NODE_KIND_WORKSPACE =
+      MapNodeKind._(1, _omitEnumNames ? '' : 'MAP_NODE_KIND_WORKSPACE');
+  static const MapNodeKind MAP_NODE_KIND_PROJECT =
+      MapNodeKind._(2, _omitEnumNames ? '' : 'MAP_NODE_KIND_PROJECT');
+
+  /// One of a project's folders.
+  static const MapNodeKind MAP_NODE_KIND_FOLDER =
+      MapNodeKind._(3, _omitEnumNames ? '' : 'MAP_NODE_KIND_FOLDER');
+  static const MapNodeKind MAP_NODE_KIND_AGENT =
+      MapNodeKind._(4, _omitEnumNames ? '' : 'MAP_NODE_KIND_AGENT');
+
+  /// A secret in the vault (its name, never values).
+  static const MapNodeKind MAP_NODE_KIND_SECRET =
+      MapNodeKind._(5, _omitEnumNames ? '' : 'MAP_NODE_KIND_SECRET');
+
+  /// A database: an agent's own, or Claktory's records.
+  static const MapNodeKind MAP_NODE_KIND_DATA =
+      MapNodeKind._(6, _omitEnumNames ? '' : 'MAP_NODE_KIND_DATA');
+
+  static const $core.List<MapNodeKind> values = <MapNodeKind>[
+    MAP_NODE_KIND_UNSPECIFIED,
+    MAP_NODE_KIND_WORKSPACE,
+    MAP_NODE_KIND_PROJECT,
+    MAP_NODE_KIND_FOLDER,
+    MAP_NODE_KIND_AGENT,
+    MAP_NODE_KIND_SECRET,
+    MAP_NODE_KIND_DATA,
+  ];
+
+  static final $core.List<MapNodeKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static MapNodeKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const MapNodeKind._(super.value, super.name);
+}
+
+class MapEdgeKind extends $pb.ProtobufEnum {
+  static const MapEdgeKind MAP_EDGE_KIND_UNSPECIFIED =
+      MapEdgeKind._(0, _omitEnumNames ? '' : 'MAP_EDGE_KIND_UNSPECIFIED');
+
+  /// An agent can message another (and see it): same project, its "also"
+  /// list, or an admin agent.
+  static const MapEdgeKind MAP_EDGE_KIND_MESSAGES =
+      MapEdgeKind._(1, _omitEnumNames ? '' : 'MAP_EDGE_KIND_MESSAGES');
+
+  /// From a secret to an agent that has it.
+  static const MapEdgeKind MAP_EDGE_KIND_SECRET =
+      MapEdgeKind._(2, _omitEnumNames ? '' : 'MAP_EDGE_KIND_SECRET');
+
+  /// From an agent to a folder of its project it can read but not change
+  /// (the project's own folder is the project's node), or to Claktory's
+  /// records.
+  static const MapEdgeKind MAP_EDGE_KIND_READS =
+      MapEdgeKind._(3, _omitEnumNames ? '' : 'MAP_EDGE_KIND_READS');
+
+  /// From an agent to the folder it works in (the workspace's, a project's
+  /// or a project folder's node), or to its own database.
+  static const MapEdgeKind MAP_EDGE_KIND_WRITES =
+      MapEdgeKind._(4, _omitEnumNames ? '' : 'MAP_EDGE_KIND_WRITES');
+
+  static const $core.List<MapEdgeKind> values = <MapEdgeKind>[
+    MAP_EDGE_KIND_UNSPECIFIED,
+    MAP_EDGE_KIND_MESSAGES,
+    MAP_EDGE_KIND_SECRET,
+    MAP_EDGE_KIND_READS,
+    MAP_EDGE_KIND_WRITES,
+  ];
+
+  static final $core.List<MapEdgeKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static MapEdgeKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const MapEdgeKind._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

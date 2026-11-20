@@ -646,7 +646,9 @@ fn notice(text: String, level: NoticeLevel) -> Kind {
 /// The person's message, or an event shown as one, never as theirs.
 fn user_kind(message: &UserMessage) -> Kind {
     let text = user_text(&message.content);
-    let Some(event) = &message.event else { return Kind::User(v1::UserText { text }) };
+    let Some(event) = &message.event else {
+        return Kind::User(v1::UserText { text, sent_from: message.sent_from.as_ref().map(sent_from) });
+    };
     let source = match event.source {
         EventSource::Host => v1::EventSource::Factory,
         EventSource::Agent => v1::EventSource::Agent,
@@ -660,6 +662,31 @@ fn user_kind(message: &UserMessage) -> Kind {
         summary: event.summary.clone(),
         text,
     })
+}
+
+/// Where the person sent a message from, for clients.
+pub(crate) fn sent_from(from: &factory_agent::SentFrom) -> v1::SentFrom {
+    let kind = match from.kind.as_str() {
+        "desktop" => v1::DeviceKind::Desktop,
+        "laptop" => v1::DeviceKind::Laptop,
+        "phone" => v1::DeviceKind::Phone,
+        "tablet" => v1::DeviceKind::Tablet,
+        _ => v1::DeviceKind::Unspecified,
+    };
+    v1::SentFrom { device_name: from.device.clone(), kind: kind.into() }
+}
+
+/// The device a message comes from, as the model reads it: `kind` as the
+/// app said it, none when it didn't.
+pub(crate) fn device(name: &str, kind: v1::DeviceKind) -> factory_agent::SentFrom {
+    let kind = match kind {
+        v1::DeviceKind::Desktop => "desktop",
+        v1::DeviceKind::Laptop => "laptop",
+        v1::DeviceKind::Phone => "phone",
+        v1::DeviceKind::Tablet => "tablet",
+        v1::DeviceKind::Unspecified => "",
+    };
+    factory_agent::SentFrom { device: name.to_owned(), kind: kind.to_owned() }
 }
 
 fn user_text(content: &UserContent) -> String {

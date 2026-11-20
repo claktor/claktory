@@ -66,6 +66,9 @@ At claktory.com's DNS host:
    at 90 a day (`--email-daily-cap`) and tells you at 80%. Move to Pro
    ($20 a month, 50,000) before inviting more than a few dozen people, then
    deploy again with a higher `--email-daily-cap`.
+5. Codes are also limited per person: each email address can ask for 5 an
+   hour and 20 a day, and each internet address 30 a day (enough for a
+   meetup or an office signing in together).
 
 ## 4. Deploy
 

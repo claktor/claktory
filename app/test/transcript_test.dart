@@ -2,6 +2,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/transcript.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -487,6 +488,146 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('never mind'), findsNothing);
     });
+  });
+
+  test('a message to several agents names the others apart', () {
+    expect(
+      splitAlsoSentTo('Hi.\n\nAlso sent to: Lena (Backend), Omar (Backend).'),
+      ('Hi.', 'Lena (Backend), Omar (Backend)'),
+    );
+    expect(splitAlsoSentTo('Hi.'), ('Hi.', null));
+  });
+
+  testWidgets("an agent's message to several says who else got it", (
+    tester,
+  ) async {
+    final store = TranscriptStore()
+      ..load(
+        Transcript(
+          agentId: 'a',
+          entries: [
+            Entry(
+              seq: Int64(1),
+              event: Event(
+                source: EventSource.EVENT_SOURCE_AGENT,
+                from: 'Mike',
+                fromId: 'coordinator',
+                text: 'Release at six.\n\nAlso sent to: Lena (Backend).',
+              ),
+            ),
+          ],
+        ),
+      );
+    await show(tester, store, ValueNotifier(0));
+    expect(find.text('Release at six.'), findsOneWidget);
+    expect(find.textContaining('Also sent to:'), findsNothing);
+    expect(find.text('Also sent to Lena (Backend)'), findsOneWidget);
+  });
+
+  test('the device mark names the device, or its kind without a name', () {
+    expect(
+      sentFromText(
+        SentFrom(
+          deviceName: "Matt's iPhone",
+          kind: DeviceKind.DEVICE_KIND_PHONE,
+        ),
+      ),
+      "Sent from Matt's iPhone",
+    );
+    expect(
+      sentFromText(SentFrom(kind: DeviceKind.DEVICE_KIND_LAPTOP)),
+      'Sent from a laptop',
+    );
+    expect(sentFromText(SentFrom()), 'Sent from another device');
+    expect(deviceGlyph(DeviceKind.DEVICE_KIND_PHONE), 'smartphone');
+    expect(deviceGlyph(DeviceKind.DEVICE_KIND_DESKTOP), 'monitor');
+    expect(deviceGlyph(DeviceKind.DEVICE_KIND_LAPTOP), 'laptop-minimal');
+    expect(deviceGlyph(DeviceKind.DEVICE_KIND_TABLET), 'tablet');
+    expect(
+      deviceGlyph(DeviceKind.DEVICE_KIND_UNSPECIFIED),
+      'monitor-smartphone',
+    );
+  });
+
+  testWidgets('your message shows its device, named on hover or when held', (
+    tester,
+  ) async {
+    final phone = SentFrom(
+      deviceName: "Matt's iPhone",
+      kind: DeviceKind.DEVICE_KIND_PHONE,
+    );
+    final store = TranscriptStore()
+      ..load(
+        Transcript(
+          agentId: 'a',
+          entries: [
+            Entry(
+              seq: Int64(1),
+              user: UserText(text: 'from before'),
+            ),
+            Entry(
+              seq: Int64(2),
+              user: UserText(text: 'on the go', sentFrom: phone),
+            ),
+          ],
+        ),
+      );
+    final queued = QueuedStore()
+      ..apply(
+        QueuedMessages(
+          agentId: 'a',
+          messages: [
+            QueuedMessage(
+              id: Int64(1),
+              source: 'person',
+              text: 'and this',
+              sentFrom: SentFrom(
+                deviceName: 'Studio',
+                kind: DeviceKind.DEVICE_KIND_DESKTOP,
+              ),
+            ),
+          ],
+        ),
+      );
+    await show(tester, store, ValueNotifier(0), queued: queued);
+    // Nothing for a message from before the backend kept where it came
+    // from; one for each that says.
+    expect(find.byType(DeviceMark), findsNWidgets(2));
+    final mark = find.byType(DeviceMark).first;
+    // Under its bubble, at its right.
+    expect(
+      tester.getTopLeft(mark).dy,
+      greaterThan(tester.getBottomLeft(find.text('on the go')).dy),
+    );
+    expect(
+      tester.getCenter(mark).dx,
+      greaterThan(tester.getCenter(find.text('on the go')).dx),
+    );
+    expect(find.text("Sent from Matt's iPhone"), findsNothing);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(tester.getCenter(mark));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text("Sent from Matt's iPhone"), findsOneWidget);
+    await mouse.moveTo(Offset.zero);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text("Sent from Matt's iPhone"), findsNothing);
+
+    final finger = await tester.startGesture(tester.getCenter(mark));
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.text("Sent from Matt's iPhone"), findsOneWidget);
+    await finger.up();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text("Sent from Matt's iPhone"), findsNothing);
+
+    // The queued one's mark sits beside "Queued".
+    final queuedMark = find.byType(DeviceMark).last;
+    expect(
+      tester.getCenter(queuedMark).dy,
+      moreOrLessEquals(tester.getCenter(find.text('Queued')).dy, epsilon: 2),
+    );
   });
 
   testWidgets('a compaction says whether it happened while idle', (

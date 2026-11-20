@@ -89,7 +89,10 @@ else
   BACKEND="$ROOT/target/release/factoryd"
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
-(cd "$ROOT/app" && flutter build macos --release --dart-define=FACTORY_VERSION="$FACTORY_VERSION" ${DEFINES[@]+"${DEFINES[@]}"})
+# Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
+BUNDLE_VERSION="$(sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"$FACTORY_VERSION")"
+BUNDLE_VERSION="${BUNDLE_VERSION:-0.0.0}"
+(cd "$ROOT/app" && flutter build macos --release --build-name "$BUNDLE_VERSION" --build-number "$BUNDLE_VERSION" --dart-define=FACTORY_VERSION="$FACTORY_VERSION" ${DEFINES[@]+"${DEFINES[@]}"})
 
 partial="$RELEASES/$FACTORY_VERSION.partial"
 rm -rf "$partial"

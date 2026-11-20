@@ -8,6 +8,7 @@ import 'package:protobuf/protobuf.dart';
 
 import 'app_update.dart';
 import 'connections.dart';
+import 'device_kind.dart' show thisDeviceKindForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
 import 'state.dart';
@@ -110,6 +111,9 @@ class Backend {
   /// How long a reconnect stays quiet before the app says it can't connect.
   static const quietReconnect = Duration(seconds: 8);
 
+  /// How long a new connection has to open and be welcomed.
+  Duration connectWithin = const Duration(seconds: 10);
+
   Timer? _quiet;
 
   void _reconnectQuietly() {
@@ -136,11 +140,84 @@ class Backend {
             const Duration(seconds: 3)) {
       return;
     }
+    _restart();
+  }
+
+  /// Makes the connection afresh at once, quietly: the old one is most
+  /// likely dead (the tunnel's too), and the backend's snapshot brings what
+  /// shows up to date.
+  void _restart() {
     _reconnectQuietly();
     unawaited(_tunnel?.reconnect());
     _retryDelay = _minRetryDelay;
+    _redialed = _socket;
     unawaited(_socket?.close());
     _wakeUp();
+  }
+
+  /// The connection [_restart] closed, its tunnel already redialed.
+  WebSocket? _redialed;
+
+  /// How long the backend has to answer [check], and to welcome a new
+  /// connection.
+  Duration answerWithin = const Duration(seconds: 4);
+
+  /// A [check] waiting for its answer.
+  var _checking = false;
+
+  /// Makes sure the connection is alive now, as when the window comes back
+  /// to the front or the Mac wakes: a message the backend must answer
+  /// within [answerWithin] (an empty one, which any backend answers as
+  /// unknown); without an answer it reconnects. Not connected, it tries
+  /// again at once rather than after its backoff.
+  void check() {
+    if (_closed || refused.value != null) return;
+    final socket = _socket;
+    if (socket == null || !connected.value) {
+      _retryDelay = _minRetryDelay;
+      _wakeUp();
+      return;
+    }
+    if (_checking) return;
+    _checking = true;
+    final id = _nextId++;
+    final answer = Completer<ServerMessage>();
+    _pending[id] = answer;
+    socket.add(ClientMessage(id: Int64(id)).writeToBuffer());
+    answer.future
+        .timeout(answerWithin)
+        .then<void>(
+          (_) {},
+          onError: (Object error) {
+            if (error is TimeoutException && identical(_socket, socket)) {
+              _log('no answer within ${answerWithin.inSeconds}s: reconnecting');
+              _restart();
+            }
+          },
+        )
+        .whenComplete(() {
+          _pending.remove(id);
+          _checking = false;
+        });
+  }
+
+  /// Notices the Mac (or phone) slept: timers stop while it does, so the
+  /// clock jumps ahead of them. Then the connection is checked at once.
+  Timer? _sleepWatch;
+  DateTime _lastTick = DateTime.now();
+  static const _tick = Duration(seconds: 2);
+
+  void _watchSleep() {
+    _lastTick = DateTime.now();
+    _sleepWatch ??= Timer.periodic(_tick, (_) {
+      final now = DateTime.now();
+      final slept = now.difference(_lastTick) > _tick * 4;
+      _lastTick = now;
+      if (slept) {
+        _log('woke from sleep: checking the connection');
+        check();
+      }
+    });
   }
 
   WebSocket? _socket;
@@ -194,6 +271,7 @@ class Backend {
   Timer? _tunnelWatch;
 
   Future<void> run() async {
+    _watchSleep();
     while (!_closed) {
       if (refused.value != null) {
         await _wake.future;
@@ -219,7 +297,10 @@ class Backend {
           );
           // Plain ws: iroh already encrypts it end to end, to the key the
           // pairing code names.
-          socket = await WebSocket.connect('ws://127.0.0.1:${tunnel.port}');
+          // A dead connection inside the tunnel takes the handshake with
+          // it: given up on, and the tunnel dials afresh.
+          socket = await WebSocket.connect('ws://127.0.0.1:${tunnel.port}')
+              .timeout(connectWithin);
         } else {
           socket = await WebSocket.connect(
             via.endpoint.toString(),
@@ -232,6 +313,14 @@ class Backend {
         }
         socket.pingInterval = const Duration(seconds: 5);
         _socket = socket;
+        // Welcomed within [connectWithin], or it starts again.
+        final welcome = Timer(connectWithin, () {
+          if (identical(_socket, socket) && !connected.value) {
+            _log('no welcome within ${connectWithin.inSeconds}s');
+            unawaited(_tunnel?.reconnect());
+            unawaited(socket.close());
+          }
+        });
         _watchTunnel();
         _send(
           ClientMessage(
@@ -240,19 +329,36 @@ class Backend {
               protocolVersion: _protocolVersion,
               clientVersion: _clientVersion,
               token: via?.token,
+              deviceKind: await thisDeviceKindForHello(),
             ),
           ),
         );
-        await for (final frame in socket) {
-          if (frame is List<int>) _receive(frame);
+        try {
+          await for (final frame in socket) {
+            if (frame is List<int>) _receive(frame);
+          }
+        } finally {
+          welcome.cancel();
         }
         _log('connection closed (code ${socket.closeCode})');
+        // A live connection that dropped (unanswered pings, say): the
+        // tunnel's connection under it is most likely dead too.
+        if (connected.value &&
+            !_closed &&
+            via != null &&
+            via.tunnelled &&
+            !identical(_redialed, socket)) {
+          unawaited(_tunnel?.reconnect());
+        }
       } on HandshakeException catch (error) {
         _log("its certificate isn't the pinned one: $error");
       } on IOException catch (error) {
         _log('connection failed: $error');
       } on TunnelOpenFailure catch (failure) {
         _log("couldn't open the tunnel: ${failure.message}");
+      } on TimeoutException {
+        _log('no connection within ${connectWithin.inSeconds}s');
+        unawaited(_tunnel?.reconnect());
       }
       _disconnected();
       _watchTunnel();
@@ -374,6 +480,7 @@ class Backend {
   Future<void> close() async {
     _closed = true;
     _quiet?.cancel();
+    _sleepWatch?.cancel();
     _wakeUp();
     await _socket?.close();
     await _closeTunnel();
@@ -496,6 +603,11 @@ class Backend {
   Future<void> updateAccount(UpdateAccount update) =>
       _request(ClientMessage(updateAccount: update));
 
+  /// Opens secrets locked since a restart with the recovery key (or a
+  /// passphrase the person set), when they couldn't open by themselves.
+  Future<void> unlockVault(String key) =>
+      _request(ClientMessage(unlockVault: UnlockVault(passphrase: key)));
+
   Future<void> createSecret(
     String name,
     String description,
@@ -590,14 +702,20 @@ class Backend {
     ),
   );
 
-  /// Gives an agent the secret it asked for (creating it from [entries]
-  /// when it's a new one), or dismisses its request.
+  /// Gives an agent one of the person's secrets ([secretId]), or a new one
+  /// made from [name], [description] and [entries], for its request; or
+  /// dismisses the request ([approve] false), telling it [comment]. A request
+  /// from before agents described what they need names its secret, and
+  /// approving it needs neither.
   Future<void> decideSecretRequest(
     String agentId,
     String requestId, {
     required bool approve,
     List<SecretEntry> entries = const [],
     String comment = '',
+    String secretId = '',
+    String name = '',
+    String description = '',
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -606,6 +724,9 @@ class Backend {
         approve: approve,
         entries: entries,
         comment: comment,
+        secretId: secretId,
+        name: name,
+        description: description,
       ),
     ),
   );

@@ -121,14 +121,21 @@ CREATE TABLE requests (
 ";
 
 /// Changes to the schema after the first, in order.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
 -- What the vault keeps for the person, sealed with the vault's key: the
 -- recovery key ('recovery'), to show it again.
 CREATE TABLE kept (
     name TEXT PRIMARY KEY,
     sealed BLOB NOT NULL
 );
-"];
+",
+    "
+-- The secret given for a request, which the person picks: its id and name.
+ALTER TABLE requests ADD COLUMN given TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN given_name TEXT NOT NULL DEFAULT '';
+",
+];
 
 /// A value is too short to hide in output below this many bytes.
 const SHORT: usize = 8;
@@ -148,8 +155,9 @@ pub enum VaultError {
     Exists,
     #[error("The vault is locked: it opens with its passphrase or recovery key.")]
     Locked,
-    #[error("That passphrase isn't right.")]
-    WrongProof,
+    /// What was given doesn't open the vault, in words for the person.
+    #[error("{0}")]
+    WrongProof(&'static str),
     #[error("This needs the vault passphrase.")]
     ProofRequired,
     #[error("There's no secret \"{0}\".")]
@@ -306,16 +314,7 @@ fn private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn open_db(path: &Path) -> Result<Connection, VaultError> {
     let db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
-    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 0 {
-        db.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
-    }
-    for (index, migration) in MIGRATIONS.iter().enumerate() {
-        let target = index as i64 + 2;
-        if version < target {
-            db.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = {target}; COMMIT;"))?;
-        }
-    }
+    crate::store::migrate(&db, SCHEMA, MIGRATIONS)?;
     Ok(db)
 }
 
@@ -1030,7 +1029,9 @@ impl Vault {
                 let yours: Vec<String> =
                     self.granted(agent).into_values().map(|label| label.split(" (sets").next().unwrap_or_default().to_owned()).collect();
                 let yours = if yours.is_empty() { "You have none yet.".to_owned() } else { format!("Yours: {}.", yours.join(", ")) };
-                Err(format!("\"{name}\" isn't one of your secrets. {yours} Ask the person to give it to you in Settings → Secrets."))
+                Err(format!(
+                    "\"{name}\" isn't one of your secrets. {yours} If you need another, describe it and ask with `secrets_request`."
+                ))
             }
         }
     }
@@ -1061,8 +1062,9 @@ impl Vault {
                 .query_row("SELECT id, name FROM secrets WHERE name = ?1", [asked.trim()], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()?;
             let Some((id, name)) = found else { return Err(Refusal::NotYours(asked.trim().to_owned())) };
+            // Said as for a name the vault doesn't have: nothing shows through.
             if !Self::is_granted(&inner, &key, &id, agent)? {
-                return Err(Refusal::NotYours(name));
+                return Err(Refusal::NotYours(asked.trim().to_owned()));
             }
             for value in Self::values_of(db, &inner.vault_id, vmk, &id)? {
                 if let Some(other) = variables.iter().find(|other| other.variable == value.variable) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -73,20 +75,30 @@ class _AgentViewState extends State<AgentView> {
             // Following a message to its sender can be undone with Back.
             open: (id) => AppScope.scope(context).history.follow(agent.id, id),
             child: ListenableBuilder(
-              listenable: transcript,
-              builder: (context, _) => transcript.agentId == agent.id
-                  ? TranscriptView(
-                      key: ValueKey(transcript.loads),
-                      transcript: transcript,
-                      working: _working,
-                      follow: _follow,
-                      queued: backend.queued,
-                      agentId: agent.id,
-                    )
-                  : const SizedBox.shrink(),
+              listenable: Listenable.merge([transcript, backend.queued]),
+              builder: (context, _) {
+                if (transcript.agentId != agent.id) {
+                  return const SizedBox.shrink();
+                }
+                // Nothing said yet: what the agent is for, and how to start.
+                if (transcript.length == 0 &&
+                    backend.queued.of(agent.id).isEmpty &&
+                    !_working) {
+                  return EmptyConversation(agent: agent);
+                }
+                return TranscriptView(
+                  key: ValueKey(transcript.loads),
+                  transcript: transcript,
+                  working: _working,
+                  follow: _follow,
+                  queued: backend.queued,
+                  agentId: agent.id,
+                );
+              },
             ),
           ),
         ),
+        const ReconnectingLine(),
         _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
       ],
     );
@@ -876,3 +888,136 @@ class _Note extends StatelessWidget {
     );
   }
 }
+
+/// While the connection is down (after a second, so a quick reconnect
+/// doesn't flash it): a quiet line above the message box saying it's
+/// reconnecting and that what shows may be out of date. The backend's
+/// snapshot brings the conversation up to date once it's back.
+class ReconnectingLine extends StatefulWidget {
+  const ReconnectingLine({super.key});
+
+  /// How long the connection is down before the line shows.
+  static const after = Duration(seconds: 1);
+
+  @override
+  State<ReconnectingLine> createState() => _ReconnectingLineState();
+}
+
+class _ReconnectingLineState extends State<ReconnectingLine> {
+  Backend? _backend;
+  Timer? _wait;
+  var _shown = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (identical(backend, _backend)) return;
+    _backend?.connected.removeListener(_changed);
+    _backend?.refused.removeListener(_changed);
+    _backend = backend
+      ..connected.addListener(_changed)
+      ..refused.addListener(_changed);
+    _changed();
+  }
+
+  @override
+  void dispose() {
+    _wait?.cancel();
+    _backend?.connected.removeListener(_changed);
+    _backend?.refused.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final backend = _backend!;
+    // Turned away, the footer says so and what to do; this isn't that.
+    final down = !backend.connected.value && backend.refused.value == null;
+    if (!down) {
+      _wait?.cancel();
+      _wait = null;
+      if (_shown) setState(() => _shown = false);
+      return;
+    }
+    _wait ??= Timer(ReconnectingLine.after, () {
+      if (mounted) setState(() => _shown = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_shown) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Space.xl, Space.s, Space.xl, 0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const LiveDot(),
+          const SizedBox(width: Space.s),
+          Flexible(
+            child: Text(
+              reconnectingText,
+              textAlign: TextAlign.center,
+              style: TextStyles.caption.copyWith(color: palette.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// What [ReconnectingLine] says.
+const reconnectingText = "Reconnecting… You can send once it's back.";
+
+/// A conversation with nothing in it yet: the agent, what it's for (its
+/// role), and that you start by telling it what to do. Quiet, centered.
+class EmptyConversation extends StatelessWidget {
+  const EmptyConversation({super.key, required this.agent});
+
+  final Agent agent;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final name = agent.name.isEmpty ? agent.id : agent.name;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(Space.xl),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AgentCharacter(agent: identityOf(agent), size: 48),
+              const SizedBox(height: Space.m),
+              Text(
+                name,
+                textAlign: TextAlign.center,
+                style: TextStyles.label.copyWith(color: palette.text),
+              ),
+              if (agent.role.isNotEmpty)
+                Text(
+                  agent.role,
+                  textAlign: TextAlign.center,
+                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                ),
+              const SizedBox(height: Space.s),
+              Text(
+                emptyConversationHint(name),
+                textAlign: TextAlign.center,
+                style: TextStyles.body.copyWith(color: palette.textMuted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// What the empty conversation says under the agent.
+String emptyConversationHint(String name) =>
+    "Tell $name what you'd like done. It remembers this conversation, "
+    'so you can pick up anytime.';

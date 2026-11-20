@@ -104,10 +104,19 @@ pub(super) fn counts(factory: &Factory) -> Counts {
     Counts { agents: count(agents), projects: count(projects), devices: count(devices) }
 }
 
+/// The models' names as the app shows them ("Claude Opus 4.8"), by
+/// "provider/model".
+pub(super) type Names = std::collections::HashMap<String, String>;
+
+/// The names of the models Claktory lists now.
+pub(super) fn names(factory: &Factory) -> Names {
+    factory.lock().models.iter().map(|model| (model.id.clone(), model.name.clone())).collect()
+}
+
 /// The periods from `since` (unix seconds, a whole hour; 0 for none yet)
 /// to the last whole hour before `now`: none when no hour has passed. Also
 /// deletes usage too old to report.
-pub(super) fn new_periods(db: &Connection, since: i64, now: i64) -> rusqlite::Result<Vec<Period>> {
+pub(super) fn new_periods(db: &Connection, since: i64, now: i64, names: &Names) -> rusqlite::Result<Vec<Period>> {
     db.execute("DELETE FROM model_usage WHERE hour < ?1", [now - KEEP])?;
     let to = now / HOUR * HOUR;
     let mut from = since.max(to - OLDEST);
@@ -118,7 +127,7 @@ pub(super) fn new_periods(db: &Connection, since: i64, now: i64) -> rusqlite::Re
             id: api::b64(&api::random_32()[..18]),
             from,
             to: end,
-            usage: usage(db, from, end)?,
+            usage: usage(db, from, end, names)?,
             activity: activity(db, from, end, now)?,
         });
         from = end;
@@ -126,17 +135,22 @@ pub(super) fn new_periods(db: &Connection, since: i64, now: i64) -> rusqlite::Re
     Ok(periods)
 }
 
-fn usage(db: &Connection, from: i64, to: i64) -> rusqlite::Result<Vec<Usage>> {
+fn usage(db: &Connection, from: i64, to: i64, names: &Names) -> rusqlite::Result<Vec<Usage>> {
     let mut statement = db.prepare(
         "SELECT provider, model, SUM(requests), SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) FROM model_usage
          WHERE hour >= ?1 AND hour < ?2 GROUP BY provider, model ORDER BY SUM(requests) DESC",
     )?;
     let rows = statement.query_map([from, to], |row| {
+        let (provider, model): (String, String) = (row.get(0)?, row.get(1)?);
+        let model_name = names
+            .get(&format!("{provider}/{model}"))
+            .map(|name| name.trim().to_owned())
+            .filter(|name| (1..=100).contains(&name.chars().count()) && !name.chars().any(|c| c.is_control() || c == '<' || c == '>'));
         let number = |index: usize| row.get::<_, i64>(index).map(|value| u64::try_from(value).unwrap_or(0));
         Ok(Usage {
-            provider: row.get(0)?,
-            model: row.get(1)?,
-            model_name: None,
+            provider,
+            model,
+            model_name,
             requests: number(2)?,
             input_tokens: number(3)?,
             output_tokens: number(4)?,
@@ -277,7 +291,8 @@ mod tests {
         ))
         .expect("runs");
 
-        let periods = new_periods(&db, hour, hour + 2 * HOUR + 59).expect("periods");
+        let names: Names = [("anthropic/claude-opus-4-8".to_owned(), "Claude Opus 4.8".to_owned())].into();
+        let periods = new_periods(&db, hour, hour + 2 * HOUR + 59, &names).expect("periods");
         assert_eq!(periods.len(), 1, "one period, up to the last whole hour");
         let period = &periods[0];
         assert_eq!((period.from, period.to), (hour, hour + 2 * HOUR));
@@ -285,6 +300,8 @@ mod tests {
         let usage: Vec<(&str, u64, u64)> =
             period.usage.iter().map(|usage| (usage.model.as_str(), usage.requests, usage.input_tokens)).collect();
         assert_eq!(usage, [("claude-opus-4-8", 2, 150), ("gpt-5.5", 1, 7)], "names the service wouldn't take are left out");
+        let shown: Vec<Option<&str>> = period.usage.iter().map(|usage| usage.model_name.as_deref()).collect();
+        assert_eq!(shown, [Some("Claude Opus 4.8"), None], "as the app names them, when Claktory lists the model");
         assert_eq!(
             period.activity,
             [
@@ -296,9 +313,9 @@ mod tests {
             assert!(activity.agent_minutes <= activity.agents_working * 60);
         }
 
-        assert!(new_periods(&db, hour + 2 * HOUR, hour + 2 * HOUR + 3000).expect("periods").is_empty(), "no whole hour yet");
+        assert!(new_periods(&db, hour + 2 * HOUR, hour + 2 * HOUR + 3000, &names).expect("periods").is_empty(), "no whole hour yet");
         // After two days offline: a period a day.
-        let later = new_periods(&db, hour, hour + 2 * DAY + 10).expect("periods");
+        let later = new_periods(&db, hour, hour + 2 * DAY + 10, &names).expect("periods");
         assert_eq!(later.iter().map(|period| period.to - period.from).collect::<Vec<_>>(), [DAY, DAY]);
         assert_eq!(to_send(&later, 100, hour + 2 * DAY).len(), 2);
         assert_eq!(to_send(&later, BODY_BUDGET, hour + 2 * DAY).len(), 0, "kept for the next check-in");

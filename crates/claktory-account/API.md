@@ -74,7 +74,7 @@ Emails a 6-digit code (it works for 15 minutes, 5 tries). Answers the same
 whether or not the account exists:
 `200 {"request_id": "…", "expires_in": 900}`.
 Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`
-(per email 5 an hour and 20 a day, per IP 5 sign-ins a day),
+(per email 5 an hour and 20 a day, per IP 30 sign-ins a day),
 `503 email_unavailable` (the day's email cap is reached, or the mail
 provider failed).
 

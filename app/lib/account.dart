@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -461,11 +462,18 @@ class _AccountSettingsState extends State<AccountSettings>
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
     final muted = TextStyles.body.copyWith(color: palette.textMuted);
     final caption = TextStyles.caption.copyWith(color: palette.textMuted);
+
+    /// "At sign-in · 2 h ago": what was sent, and when.
+    String sentLabel(String label, Int64 ms) =>
+        ms == 0 ? label : '$label · ${formatAge(ms.toInt(), DateTime.now())}';
     final sent = [
       if (account.lastSignInJson.isNotEmpty)
-        ('At sign-in', account.lastSignInJson),
+        (sentLabel('At sign-in', account.lastSignInMs), account.lastSignInJson),
       if (account.lastCheckInJson.isNotEmpty)
-        ('Most recent', account.lastCheckInJson),
+        (
+          sentLabel('Most recent', account.lastCheckInMs),
+          account.lastCheckInJson,
+        ),
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -549,6 +557,7 @@ class _AccountSettingsState extends State<AccountSettings>
           ),
         SettingRow(
           label: 'Shared with claktory.com',
+          top: true,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -577,10 +586,12 @@ class _AccountSettingsState extends State<AccountSettings>
                           down: _showSent,
                         ),
                         const SizedBox(width: Space.xs),
-                        Text(
-                          'Show exactly what was sent',
-                          style: TextStyles.label.copyWith(
-                            color: hovered ? palette.text : palette.textMuted,
+                        Flexible(
+                          child: Text(
+                            'Show exactly what was sent',
+                            style: TextStyles.label.copyWith(
+                              color: hovered ? palette.text : palette.textMuted,
+                            ),
                           ),
                         ),
                       ],

@@ -1,0 +1,70 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+import 'protocol/factory/v1/factory.pb.dart';
+
+/// What kind of device this app runs on, told to the backend in every
+/// Hello so agents know where the person's messages come from (a desk, a
+/// laptop, a phone) and fit their replies to it. Worked out once.
+Future<DeviceKind> thisDeviceKindForHello() =>
+    _kind ??= deviceKindOf(defaultTargetPlatform);
+
+Future<DeviceKind>? _kind;
+
+/// Runs a command and answers its output; null if it couldn't run.
+typedef CommandRunner = Future<String?> Function(
+  String command,
+  List<String> args,
+);
+
+Future<String?> _run(String command, List<String> args) async {
+  try {
+    final result = await Process.run(command, args);
+    return result.exitCode == 0 ? result.stdout as String : null;
+  } on Exception {
+    return null;
+  }
+}
+
+/// iPhone or iPad from the screen's shorter side (an iPad's is 744 points
+/// or more, an iPhone's at most 440); on a Mac, a laptop when it has a
+/// built-in battery or is a MacBook, else a desktop.
+@visibleForTesting
+Future<DeviceKind> deviceKindOf(
+  TargetPlatform platform, {
+  CommandRunner run = _run,
+  double? shortestSide,
+}) async {
+  switch (platform) {
+    case TargetPlatform.iOS:
+      final side = shortestSide ?? _shortestSide();
+      return side >= 600
+          ? DeviceKind.DEVICE_KIND_TABLET
+          : DeviceKind.DEVICE_KIND_PHONE;
+    case TargetPlatform.macOS:
+      final battery = await run('/usr/bin/pmset', ['-g', 'batt']);
+      if (battery != null && battery.contains('InternalBattery')) {
+        return DeviceKind.DEVICE_KIND_LAPTOP;
+      }
+      final model = await run('/usr/sbin/sysctl', ['-n', 'hw.model']);
+      if (model != null && model.trim().startsWith('MacBook')) {
+        return DeviceKind.DEVICE_KIND_LAPTOP;
+      }
+      return DeviceKind.DEVICE_KIND_DESKTOP;
+    case TargetPlatform.linux:
+    case TargetPlatform.windows:
+      return DeviceKind.DEVICE_KIND_DESKTOP;
+    case TargetPlatform.android:
+    case TargetPlatform.fuchsia:
+      return DeviceKind.DEVICE_KIND_UNSPECIFIED;
+  }
+}
+
+double _shortestSide() {
+  final views = PlatformDispatcher.instance.views;
+  if (views.isEmpty) return 0;
+  final view = views.first;
+  final size = view.physicalSize / view.devicePixelRatio;
+  return size.shortestSide;
+}

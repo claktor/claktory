@@ -109,3 +109,29 @@ fn an_event_reaches_the_model_tagged_with_where_it_is_from_and_reloads_as_an_eve
     // Messages the person wrote are saved as before, without an event.
     assert!(!serde_json::to_string(&Message::User(UserMessage::text("hi", 1))).unwrap().contains("event"));
 }
+
+#[test]
+fn the_persons_message_reaches_the_model_tagged_with_the_device_it_came_from() {
+    use factory_agent::SentFrom;
+    let phone = SentFrom { device: "Matt's \"work\" iPhone".into(), kind: "phone".into() };
+    let message = UserMessage { sent_from: Some(phone.clone()), ..UserMessage::text("Ship it?", 7) };
+    let seen = message.for_model();
+    assert_eq!(seen.sent_from, None);
+    assert_eq!(
+        serde_json::to_value(&seen.content).unwrap(),
+        json!([
+            {"type": "text", "text": "<sent from=\"Matt's 'work' iPhone\" device=\"phone\">\n"},
+            {"type": "text", "text": "Ship it?"},
+            {"type": "text", "text": "\n</sent>"},
+        ])
+    );
+    // Saved with it, and read back.
+    let saved = serde_json::to_string(&Message::User(message.clone())).unwrap();
+    assert!(saved.contains(r#""sentFrom":{"device":"Matt's \"work\" iPhone","kind":"phone"}"#), "{saved}");
+    assert_eq!(serde_json::from_str::<Message>(&saved).unwrap(), Message::User(message));
+    // An app that didn't say what kind of device it is: just the name.
+    let unknown = UserMessage { sent_from: Some(SentFrom { device: "Studio".into(), kind: String::new() }), ..UserMessage::text("Hi", 8) };
+    assert_eq!(serde_json::to_value(&unknown.for_model().content).unwrap()[0], json!({"type": "text", "text": "<sent from=\"Studio\">\n"}));
+    // Messages from before it, and events, read as they did.
+    assert_eq!(UserMessage::text("hi", 1).for_model(), UserMessage::text("hi", 1));
+}

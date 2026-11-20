@@ -227,7 +227,7 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
         return Err(RequestError::Proposal("This proposal was already decided.".to_owned()));
     }
     if let Some((rivet, message)) = &delivery
-        && let Err(error) = factory.send_message(rivet, message)
+        && let Err(error) = factory.send_message(rivet, message, None)
     {
         factory.store.db().execute("UPDATE proposals SET state = 'pending', comment = '', decided = NULL WHERE id = ?1", [number])?;
         return Err(error);

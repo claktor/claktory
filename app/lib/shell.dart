@@ -8,6 +8,7 @@ import 'agent_view.dart';
 import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
+import 'map.dart';
 import 'marketplace.dart';
 import 'account.dart';
 import 'name_step.dart';
@@ -385,6 +386,8 @@ class _Content extends StatelessWidget {
             return const MarketplaceView();
           case AppPage.changelog:
             return const ChangelogView();
+          case AppPage.map:
+            return const MapView();
           case AppPage.agent:
         }
         final store = backend.workspace;

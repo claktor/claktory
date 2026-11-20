@@ -6,6 +6,18 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.3
+Released 2026-11-20 03:53 UTC.
+- Added: See how your Claktory is arranged on the Map: Rivet, each project with its folders and agents, who can message whom and who has which secret. Open it with Map at the bottom of the sidebar. Hover an agent to see what it reaches, and click it to open its conversation.
+- Changed: Agents see only the secrets you've given them, and an agent's settings show which ones it has. When an agent needs another, it describes it in its conversation, and you give it one of yours or add a new one. Rivet gives secrets only to agents whose work needs them, and asks you first when an agent asks for more.
+- Added: Agents know which device you're writing from, and keep replies short when it's your phone. Each of your messages shows a small mark for its device; hover it, or touch and hold on iPhone, to see the device's name.
+- Added: An agent can send one message to several agents at once, and each sees who else got it, so handing out work to a team takes one step.
+- Changed: Rivet's prompt stays up to date: each update brings the newest one, unless you've changed it yourself. To go back to the default, click Reset to default in Rivet's settings. Any agent's prompt can also mention you by name.
+- Changed: A new agent's conversation says who it is and how to start, instead of being empty.
+- Changed: Claktory goes by your Mac's name, such as "Lee's Mac mini", from System Settings → General → Sharing.
+- Fixed: After your Mac sleeps or changes network, Claktory reconnects by itself within seconds, and the conversation says so while it does, instead of quietly showing what may be out of date.
+- Fixed: Adding your first device no longer disconnects the app on this Mac for half a minute.
+
 ## v0.1.2
 Released 2026-11-20 02:08 UTC.
 - Changed: Settings, the Marketplace and What's new open beside the conversation instead of covering it, so you can read an agent's messages while you change a setting. Drag the line between them to resize, or click × to close.

@@ -153,6 +153,13 @@ void main() {
       'book-open',
       'database',
       'globe',
+      // The app's own: the Map, and the devices messages come from.
+      'network',
+      'monitor',
+      'laptop-minimal',
+      'smartphone',
+      'tablet',
+      'monitor-smartphone',
     ]) {
       await tester.pumpWidget(
         Directionality(

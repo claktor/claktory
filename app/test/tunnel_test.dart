@@ -317,6 +317,74 @@ void main() {
     await server.close(force: true);
   });
 
+  test('a check the backend answers changes nothing; one it doesn\'t '
+      'answer reconnects afresh', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var hellos = 0;
+    var silent = false;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          hellos++;
+          silent = false;
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        } else if (!silent) {
+          // As factoryd answers a message it doesn't know.
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              error: Error(
+                code: ErrorCode.ERROR_CODE_UNKNOWN_MESSAGE,
+                message: 'unknown message',
+              ),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final backend = backendWith(tunnels)
+      ..answerWithin = const Duration(seconds: 1)
+      ..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 250 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(
+        done(),
+        isTrue,
+        reason:
+            'hellos $hellos reconnects ${tunnels.tunnel.reconnects} connected ${backend.connected.value}',
+      );
+    }
+
+    await until(() => backend.connected.value);
+    backend.check();
+    // Past the time to answer, so a reconnect would have begun.
+    await Future<void>.delayed(const Duration(milliseconds: 1400));
+    expect(hellos, 1, reason: 'answered: the connection stays');
+    expect(tunnels.tunnel.reconnects, 0);
+
+    // The other end has gone quiet, as after the Mac slept.
+    silent = true;
+    backend.check();
+    await until(() => tunnels.tunnel.reconnects == 1);
+    expect(backend.reconnecting.value, isTrue);
+    await until(() => hellos == 2 && backend.connected.value);
+    expect(tunnels.tunnel.reconnects, 1, reason: 'the tunnel redials once');
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('turned away at the tunnel, it stops trying and says why', () async {
     // Nothing listens: the tunnel closes every socket at once.
     final unused = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);

@@ -470,3 +470,146 @@ async fn a_tool_call_says_when_it_ran_and_its_timeout_even_after_a_restart() {
     let (_client, _, transcript) = Client::connect(restarted).await;
     assert_eq!(calls(&transcript.expect("transcript").entries), calls(&view.entries));
 }
+
+#[tokio::test]
+async fn the_persons_messages_say_which_device_they_came_from_even_waiting_across_a_restart() {
+    let dir = temp_dir();
+    let (addr, _old) = start(&dir).await;
+    let (mut client, _, _) = Client::connect_as(addr, v1::DeviceKind::Phone).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, create_agent("", "Builder", "")).await;
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hang")).await;
+    view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working && view.agent("builder").queued_messages == 0)
+        .await;
+    // Waiting, it says where it came from: this computer's name, as a phone.
+    apply_request(&mut client, &mut view, send_message("builder", "on my way")).await;
+    let waiting = view.queued.as_ref().expect("the queue").messages[0].sent_from.clone().expect("where it came from");
+    assert!(!waiting.device_name.is_empty());
+    assert_eq!(waiting.kind(), v1::DeviceKind::Phone);
+    delivered(&dir, "hang").await;
+
+    // It keeps that across a restart, and the model reads it with it.
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _new) = start_with(&dir, models).await;
+    let last = || requests.lock().expect("lock").last().expect("a request").prompt.clone();
+    // Builder is still selected, so its conversation comes with the connection.
+    let (mut client, workspace, transcript) = Client::connect(addr).await;
+    let mut view = View { workspace, entries: transcript.map(|transcript| transcript.entries).unwrap_or_default(), ..View::default() };
+    view.follow(&mut client, |view| view.entries.len() == 4 && idle(view, "builder")).await;
+    let name = &waiting.device_name;
+    let Some(v1::entry::Kind::User(user)) = &view.entries[2].kind else { panic!("the person's message") };
+    assert_eq!((user.text.as_str(), user.sent_from.as_ref()), ("on my way", Some(&waiting)));
+    assert_eq!(last(), format!("<sent from=\"{name}\" device=\"phone\">\non my way\n</sent>"));
+    // An app that doesn't say what it runs on: the name alone.
+    apply_request(&mut client, &mut view, send_message("builder", "at the desk")).await;
+    view.follow(&mut client, |view| view.entries.len() == 6 && idle(view, "builder")).await;
+    assert_eq!(last(), format!("<sent from=\"{name}\">\nat the desk\n</sent>"));
+    // Events don't: they say where they're from their own way.
+    let Some(v1::entry::Kind::Event(note)) = &view.entries[1].kind else { panic!("the restart note") };
+    assert!(note.text.starts_with("Claktory restarted"), "{}", note.text);
+}
+
+/// The Rivet prompt the version before placeholders shipped: today's with
+/// "the person" where it says {{user}}.
+fn last_shipped_rivet_prompt(current: &str) -> String {
+    current.replace("{{user}}", "the person").replace("{{User}}", "The person")
+}
+
+#[tokio::test]
+async fn a_rivet_prompt_nobody_edited_follows_the_default() {
+    let dir = temp_dir();
+    let current = Config::default().agents[0].prompt.clone();
+    assert!(current.contains("You help {{user}} achieve"), "the default has placeholders");
+    let old = last_shipped_rivet_prompt(&current);
+    let mut config = Config::default();
+    config.user.name = "Matt".into();
+    config.agents[0].prompt = format!("{old}\n\n  ");
+    config.agents[0].model = MODEL.into();
+    config.agents[0].effort = "off".into();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), config.to_json().expect("json")).expect("config");
+
+    let models = Scripted::signed_in();
+    let system_prompt = models.system_prompt.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let rivet = &workspace.agents[0];
+    assert_eq!(rivet.prompt, current, "an old default became this version's");
+    assert_eq!(rivet.default_prompt, current);
+    let written = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    assert_eq!(written.agents[0].prompt, current, "saved with its placeholders");
+
+    // The placeholders are filled in for the person.
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    apply_request(&mut client, &mut view, send_message("rivet", "Hi")).await;
+    view.follow(&mut client, |view| view.entries.len() == 2 && idle(view, "rivet")).await;
+    let prompt = system_prompt.lock().expect("lock").clone();
+    assert!(prompt.contains("## Your instructions\n\nYou are Rivet. You help Matt achieve what they want"), "{prompt}");
+    assert!(!prompt.contains("{{user}}") && !prompt.contains("{{User}}"));
+
+    // Edited, it's the person's: a new version leaves it alone.
+    let edited = format!("{old}\n- Be brief.");
+    let edit = v1::UpdateAgent { agent_id: "rivet".into(), prompt: Some(edited.clone()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(edit)).await;
+    assert_eq!(view.agent("rivet").prompt, edited);
+    drop(client);
+    let (addr, _again) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(workspace.agents[0].prompt, edited, "kept across a restart");
+
+    // Reset to the default: the app sets it to default_prompt.
+    let mut view = View { workspace, ..View::default() };
+    let reset =
+        v1::UpdateAgent { agent_id: "rivet".into(), prompt: Some(view.agent("rivet").default_prompt.clone()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(reset)).await;
+    assert_eq!(view.agent("rivet").prompt, current);
+
+    // Pasting an old default into the file follows too.
+    let mut config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    config.agents[0].prompt = old;
+    std::fs::write(dir.join("home/config.json"), config.to_json().expect("json")).expect("config");
+    let saved = || {
+        Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"))
+            .ok()
+            .map(|config| config.agents[0].prompt.clone())
+    };
+    for _ in 0..100 {
+        if saved().as_deref() == Some(current.as_str()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(saved().as_deref(), Some(current.as_str()), "read, followed and saved");
+    assert_eq!(view.agent("rivet").prompt, current);
+}
+
+#[tokio::test]
+async fn placeholders_work_in_any_agents_prompt() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let system_prompt = models.system_prompt.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(
+        &mut client,
+        &mut view,
+        create_agent("site", "Writer", "{{User}} reads what you write. Report to {{user}}; notes go in {{workspace}}/notes."),
+    )
+    .await;
+    assert_eq!(view.agent("writer").default_prompt, "", "only Rivet has a default");
+    apply_request(&mut client, &mut view, send_message("writer", "Hi")).await;
+    view.follow(&mut client, |view| view.entries.len() == 2 && idle(view, "writer")).await;
+    let prompt = system_prompt.lock().expect("lock").clone();
+    let notes = format!("{}/notes", dir.join("home/workspace").display());
+    assert!(prompt.contains(&format!("The person reads what you write. Report to the person; notes go in {notes}.")), "{prompt}");
+    assert_eq!(
+        view.agent("writer").prompt,
+        "{{User}} reads what you write. Report to {{user}}; notes go in {{workspace}}/notes.",
+        "kept as written"
+    );
+}

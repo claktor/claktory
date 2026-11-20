@@ -28,7 +28,7 @@ class PhoneNavigation extends InheritedNotifier<ValueNotifier<bool>> {
 }
 
 /// What the content area shows.
-enum AppPage { agent, settings, marketplace, changelog }
+enum AppPage { agent, settings, marketplace, changelog, map }
 
 /// What widgets below the app share: the backend with its stores, the
 /// browser side of sign-in, which page is showing, this app's own build and

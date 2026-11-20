@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart' show showModal;
 import 'package:factory_app/devices.dart' show FactoryChooser;
@@ -247,6 +248,83 @@ void main() {
     await tester.tap(find.text('Done').last);
     await pumpFrames(tester);
     expect(find.text('Scan with your iPhone'), findsNothing);
+  });
+
+  testWidgets("the first device's code comes even though turning access on "
+      'drops the connection', (tester) async {
+    final harness = await showSettings(tester, workspace(on: false));
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var first = true;
+    harness.backend.onSend = (message) {
+      if (!message.hasCreatePairing() || !first) return;
+      first = false;
+      // The backend made the device, then restarted the tunnel this app
+      // reaches it through: the answer is lost.
+      final next = harness.backend.workspace.workspace.deepCopy();
+      next.remote.on = true;
+      next.remote.devices.add(
+        PairedDevice(
+          id: 'iphone',
+          name: 'iPhone',
+          pairedMs: Int64(now),
+          codeExpiresMs: Int64(now + 600000),
+        ),
+      );
+      harness.backend.reconnecting.value = true;
+      harness.backend.connected.value = false;
+      Future<void>.delayed(const Duration(seconds: 3), () {
+        harness.backend.connected.value = true;
+        harness.backend.reconnecting.value = false;
+        harness.backend.workspace.apply(next);
+      });
+      throw const RequestFailure('Connection lost.');
+    };
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+      find.text('Preparing the code… This takes a few seconds the first time.'),
+      findsOneWidget,
+    );
+    expect(find.text('Connection lost.'), findsNothing);
+    // Back after 3 s; its state, at the latest 3 s after that.
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent
+          .where((m) => m.hasCreatePairing() || m.hasUnpairDevice())
+          .map((m) => m.whichBody()),
+      [
+        ClientMessage_Body.createPairing,
+        ClientMessage_Body.unpairDevice,
+        ClientMessage_Body.createPairing,
+      ],
+      reason: 'the device the lost answer made is taken back',
+    );
+    expect(harness.last.createPairing.name, 'iPhone');
+    expect(find.text('Scan with your iPhone'), findsOneWidget);
+  });
+
+  testWidgets("a refusal while connected shows as it is", (tester) async {
+    final harness = await showSettings(tester, workspace());
+    harness.backend.refuse = 'The private tunnel isn\'t running.';
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await pumpFrames(tester);
+    expect(find.text("The private tunnel isn't running."), findsOneWidget);
+    expect(
+      harness.backend.sent.where((m) => m.hasCreatePairing()),
+      hasLength(1),
+    );
   });
 
   testWidgets('the chooser connects to another Factory from its code', (

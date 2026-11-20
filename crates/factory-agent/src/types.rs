@@ -124,11 +124,34 @@ pub struct UserMessage {
     /// Set when the person didn't write it: it's an event the harness delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<Event>,
+    /// The person's: the device they sent it from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_from: Option<SentFrom>,
+}
+
+/// The device the person sent a message from, which the model reads with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SentFrom {
+    /// "Matt's iPhone", "Studio".
+    pub device: String,
+    /// "desktop", "laptop", "phone" or "tablet"; empty when the app didn't say.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+
+impl SentFrom {
+    /// `<sent from="Matt's iPhone" device="phone">`: how the model reads it.
+    fn tag(&self) -> String {
+        let attribute = |value: &str| value.replace('"', "'").replace(['\n', '\r'], " ");
+        let kind = if self.kind.is_empty() { String::new() } else { format!(" device=\"{}\"", attribute(&self.kind)) };
+        format!("<sent from=\"{}\"{kind}>\n", attribute(&self.device))
+    }
 }
 
 impl UserMessage {
     pub fn text(text: impl Into<String>, timestamp: u64) -> UserMessage {
-        UserMessage { content: UserContent::Parts(vec![UserPart::Text { text: text.into() }]), timestamp, event: None }
+        UserMessage { content: UserContent::Parts(vec![UserPart::Text { text: text.into() }]), timestamp, event: None, sent_from: None }
     }
 
     pub fn event(text: impl Into<String>, event: Event, timestamp: u64) -> UserMessage {
@@ -136,13 +159,18 @@ impl UserMessage {
     }
 
     /// What the model reads: an event comes wrapped in a tag naming where it's
-    /// from, so it's never mistaken for the person.
+    /// from, so it's never mistaken for the person; the person's message, in
+    /// one naming the device they sent it from, when known.
     pub fn for_model(&self) -> UserMessage {
-        let Some(event) = &self.event else { return self.clone() };
-        // An agent's id too, when its name doesn't say it, so a reply reaches it.
-        let id = if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", event.id) };
-        let open = format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), event.from);
-        let close = "\n</event>";
+        let (open, close) = match (&self.event, &self.sent_from) {
+            (Some(event), _) => {
+                // An agent's id too, when its name doesn't say it, so a reply reaches it.
+                let id = if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", event.id) };
+                (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), event.from), "\n</event>")
+            }
+            (None, Some(sent_from)) => (sent_from.tag(), "\n</sent>"),
+            (None, None) => return self.clone(),
+        };
         let content = match &self.content {
             UserContent::Text(text) => UserContent::Text(format!("{open}{text}{close}")),
             UserContent::Parts(parts) => {
@@ -153,7 +181,7 @@ impl UserMessage {
                 UserContent::Parts(wrapped)
             }
         };
-        UserMessage { content, timestamp: self.timestamp, event: None }
+        UserMessage { content, timestamp: self.timestamp, event: None, sent_from: None }
     }
 }
 

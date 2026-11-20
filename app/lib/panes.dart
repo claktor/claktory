@@ -13,6 +13,7 @@ import 'marketplace.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'pane_chrome.dart';
+import 'map.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
 
@@ -35,6 +36,7 @@ const pageKinds = {
   AppPage.settings: 'settings',
   AppPage.marketplace: 'marketplace',
   AppPage.changelog: 'changelog',
+  AppPage.map: 'map',
 };
 
 /// The page a leaf of [kind] shows, or null for a file's viewer or the
@@ -291,6 +293,8 @@ class _PaneLayoutState extends State<PaneLayout> {
               AppPage.settings => const _PagePane(child: SettingsView()),
               AppPage.marketplace => const _PagePane(child: MarketplaceView()),
               AppPage.changelog => const _PagePane(child: ChangelogView()),
+              // A canvas pans by itself: no sideways scroll around it.
+              AppPage.map => const InPane(child: MapView()),
               _ => Builder(builder: (context) => viewerBody(context, leaf)),
             },
           );
@@ -507,6 +511,7 @@ String paneTitle(ViewLeaf leaf) {
     AppPage.settings => 'Settings',
     AppPage.marketplace => 'Marketplace',
     AppPage.changelog => "What's new",
+    AppPage.map => 'Map',
     _ => viewerTitle(leaf),
   };
 }
@@ -526,6 +531,12 @@ Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
     AppPage.changelog => ExtensionGlyph(
       icon: 'scroll-text',
       name: '',
+      color: color,
+      size: 14,
+    ),
+    AppPage.map => ExtensionGlyph(
+      icon: 'network',
+      name: 'Map',
       color: color,
       size: 14,
     ),

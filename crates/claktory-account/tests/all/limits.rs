@@ -18,11 +18,16 @@ async fn codes_are_limited_per_email_and_per_ip() {
     instance.advance(3600);
     assert_eq!(instance.start_sign_in(&Claktory::new("198.51.102.10"), "matt@example.com", "Mac").await.status, 200);
 
-    // Per IP: 5 a day.
+    // Per IP: 30 a day (a minute apart now and then: 30 requests a minute is
+    // a limit of its own).
     let claktory = Claktory::new("198.51.103.1");
-    for number in 0..5 {
-        assert_eq!(instance.start_sign_in(&claktory, &format!("person{number}@example.com"), "Mac").await.status, 200);
+    for number in 0..30 {
+        if number % 20 == 0 {
+            instance.advance(61);
+        }
+        assert_eq!(instance.start_sign_in(&claktory, &format!("person{number}@example.com"), "Mac").await.status, 200, "{number}");
     }
+    instance.advance(61);
     let answer = instance.start_sign_in(&claktory, "someone@example.com", "Mac").await;
     assert_eq!(answer.error(), "rate_limited");
     // Refused, it sent nothing.

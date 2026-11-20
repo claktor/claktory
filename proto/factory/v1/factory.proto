@@ -144,6 +144,29 @@ message Hello {
   // through the private tunnel (iroh); on the loopback port (7420) it isn't
   // needed.
   string token = 3;
+  // What kind of device this is, so agents can fit their replies to it
+  // (shorter on a phone). Its name the backend knows: the paired device's,
+  // or this computer's for its own app. Unspecified from apps before it.
+  DeviceKind device_kind = 4;
+}
+
+enum DeviceKind {
+  DEVICE_KIND_UNSPECIFIED = 0;
+  // A computer at a desk: an iMac, a Mac mini or Studio, a desktop PC.
+  DEVICE_KIND_DESKTOP = 1;
+  // A laptop: a MacBook.
+  DEVICE_KIND_LAPTOP = 2;
+  DEVICE_KIND_PHONE = 3;
+  DEVICE_KIND_TABLET = 4;
+}
+
+// Where the person sent a message from: the device their app ran on.
+message SentFrom {
+  // The paired device's name (Settings → Devices), or this computer's name
+  // (its Computer Name on a Mac) for the app running on it.
+  string device_name = 1;
+  // As the app said in Hello; unspecified from apps before it.
+  DeviceKind kind = 2;
 }
 
 message Welcome {
@@ -884,6 +907,9 @@ message Workspace {
   VaultState vault = 20;
   // This Claktory's sign-in at claktory.com: the same on every device.
   ClaktoryAccount account = 21;
+  // How this Claktory is arranged, for the Map: computed here, laid out by
+  // the app.
+  ClaktoryMap map = 22;
 }
 
 message ChangelogVersion {
@@ -1645,6 +1671,12 @@ message Agent {
   // How the agent's main area is laid out: its conversation and the viewers
   // open beside it (SetLayout, the show tool). Unset: just its conversation.
   ViewNode layout = 30;
+  // The default prompt the agent can go back to, as this version of
+  // Claktory ships it, with its placeholders ({{user}}…); empty when it has
+  // none (only Rivet has one). While `prompt` equals it, the prompt follows
+  // the default: a new version's default replaces it. To go back to the
+  // default, set the prompt to this text (UpdateAgent).
+  string default_prompt = 31;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -1728,6 +1760,8 @@ message QueuedMessage {
   // One line for people, for events that have one (a task that finished,
   // Factory restarted); empty otherwise, then show `text`.
   string summary = 7;
+  // The person's: the device it was sent from (see UserText.sent_from).
+  SentFrom sent_from = 8;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -1818,6 +1852,9 @@ enum EventSource {
 
 message UserText {
   string text = 1;
+  // The device it was sent from; unset for messages from before it, and for
+  // those Claktory sent for the person (an approved proposal to Rivet).
+  SentFrom sent_from = 2;
 }
 
 message AssistantText {
@@ -2094,8 +2131,12 @@ message ImportEnv {
   bool one_per_variable = 4;
 }
 
-// Grants (approve) or dismisses an agent's secret request. For a new secret, `entries` holds its values, and the secret is
-// made with the request's name and description and granted to the agent.
+// Grants (approve) or dismisses an agent's secret request. To give one of
+// the vault's secrets, `secret_id` names it. To add a new one, `entries`
+// hold its variables and values, and `name` and `description` its name and
+// description (empty: the request's), and it's made and given. A request
+// from before agents described what they need, naming a secret, is given
+// that secret when neither is set. The agent is told only what it got.
 message DecideSecretRequest {
   string agent_id = 1;
   string request_id = 2;
@@ -2104,6 +2145,11 @@ message DecideSecretRequest {
   repeated SecretEntry entries = 5;
   // Told to the agent; may be empty.
   string comment = 6;
+  // An existing secret to give (SecretInfo.id).
+  string secret_id = 7;
+  // A new secret's name and description.
+  string name = 8;
+  string description = 9;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -2186,17 +2232,24 @@ message SecretUse {
 
 // An agent's request (secrets_request), shown in its conversation after the
 // call, for the person to grant or dismiss with DecideSecretRequest. The
-// entry is sent again when it's decided.
+// entry is sent again when it's decided. Agents don't know which secrets
+// the vault holds: they describe what they need in `new_secret` (a name,
+// what it's for and the variables they expect), and the person gives an
+// existing secret or adds one. Requests from before that name an existing
+// secret in `secret_id`.
 message SecretRequest {
   string id = 1;
   // The agent that asked.
   string agent_id = 2;
-  // An existing secret it asks for; empty when it asks for a new one.
+  // Only in requests from before agents described what they need: the
+  // existing secret it asked for. Empty otherwise.
   string secret_id = 3;
-  // That secret's name, as the agent asked for it.
+  // What it asks for, in a word: the name it gave (new_secret.name), or the
+  // existing secret's.
   string secret_name = 4;
-  // A new secret it asks for: name, description and variables (no values;
-  // the person fills them in). Unset for an existing one.
+  // What it needs: a name, what it's for (which service, what access) and
+  // the variables it expects (no values). Prefills a new secret, if the
+  // person adds one. Unset only in requests that name an existing secret.
   NewSecret new_secret = 5;
   // Why it needs it, in the agent's words.
   string reason = 6;
@@ -2205,6 +2258,9 @@ message SecretRequest {
   int64 decided_ms = 8;
   // The person's comment; may be empty.
   string comment = 9;
+  // GRANTED: the secret given, which may be another than the one described.
+  string given_secret_id = 10;
+  string given_secret_name = 11;
 }
 
 message NewSecret {
@@ -2292,3 +2348,102 @@ message SetAccountService {
 // The vault's recovery key, to note down. Answered with RecoveryKey, to the
 // asker only; logged in the vault's uses.
 message ShowRecoveryKey {}
+
+// How this Claktory is arranged: where agents are, whom they can message,
+// which secrets they have, what data they read and write, and their
+// extensions that grant reach or power. Computed by the backend from the
+// same rules agents follow, so the app only lays it out. Nodes are sorted by
+// id and edges by from_id, to_id and kind, so the same Claktory gives the
+// same map.
+message ClaktoryMap {
+  repeated MapNode nodes = 1;
+  repeated MapEdge edges = 2;
+}
+
+message MapNode {
+  // Unique in the map and the same every time: "workspace",
+  // "project:<project id>", "folder:<project id>/<folder id>",
+  // "agent:<agent id>", "secret:<secret id>", "data:records" (Claktory's
+  // records) and "data:agent:<agent id>" (an agent's own database).
+  string id = 1;
+  MapNodeKind kind = 2;
+  // A name to show: the agent's, project's, folder's or secret's;
+  // "Workspace", "Claktory's records", or "<agent name>'s database".
+  string label = 3;
+  // A line about it: an agent's role, a project's, folder's or database's
+  // path, a secret's description; may be empty.
+  string detail = 4;
+  // The node it sits under, as in the sidebar: a folder under its project,
+  // an agent under the agent it's nested under, else its folder, else its
+  // project, else the workspace; an agent's database under the agent.
+  // Empty at the top: the workspace, projects, admin agents (wherever they
+  // are), secrets and Claktory's records.
+  string parent_id = 5;
+  // An admin agent: sees and messages every agent.
+  bool admin = 6;
+  // An agent's color (Agent.color); empty for other nodes.
+  string color = 7;
+  // An agent's extensions that grant reach or power, in a fixed order.
+  repeated MapBadge badges = 8;
+  // The id of what it stands for, to open it: the agent's, project's,
+  // folder's (within project_id) or secret's id; for an agent's database,
+  // the agent's. Empty for the workspace and Claktory's records.
+  string ref_id = 9;
+  // The project a folder or an agent (or its database) is in; empty
+  // otherwise.
+  string project_id = 10;
+}
+
+enum MapNodeKind {
+  MAP_NODE_KIND_UNSPECIFIED = 0;
+  // The workspace folder: agents in no project.
+  MAP_NODE_KIND_WORKSPACE = 1;
+  MAP_NODE_KIND_PROJECT = 2;
+  // One of a project's folders.
+  MAP_NODE_KIND_FOLDER = 3;
+  MAP_NODE_KIND_AGENT = 4;
+  // A secret in the vault (its name, never values).
+  MAP_NODE_KIND_SECRET = 5;
+  // A database: an agent's own, or Claktory's records.
+  MAP_NODE_KIND_DATA = 6;
+}
+
+// An extension an agent has on that grants reach or power.
+message MapBadge {
+  // Stable: "agents:admin" (sees and messages every agent), "secrets:give"
+  // (gives secrets to agents), "tasks:see_all" (sees and stops every
+  // agent's tasks), "web", "tree" (own checkout: lands on the main branch),
+  // "database", "database:factory" (Claktory's records), "memory:factory"
+  // (the Claktory manual: can change Claktory's settings).
+  string key = 1;
+  // To show, e.g. "Web".
+  string label = 2;
+  // An icon name, as Extension.icon.
+  string icon = 3;
+}
+
+message MapEdge {
+  // Node ids.
+  string from_id = 1;
+  string to_id = 2;
+  MapEdgeKind kind = 3;
+  // MESSAGES only: each can message the other. Such a pair is one edge,
+  // from the lower id.
+  bool both_ways = 4;
+}
+
+enum MapEdgeKind {
+  MAP_EDGE_KIND_UNSPECIFIED = 0;
+  // An agent can message another (and see it): same project, its "also"
+  // list, or an admin agent.
+  MAP_EDGE_KIND_MESSAGES = 1;
+  // From a secret to an agent that has it.
+  MAP_EDGE_KIND_SECRET = 2;
+  // From an agent to a folder of its project it can read but not change
+  // (the project's own folder is the project's node), or to Claktory's
+  // records.
+  MAP_EDGE_KIND_READS = 3;
+  // From an agent to the folder it works in (the workspace's, a project's
+  // or a project folder's node), or to its own database.
+  MAP_EDGE_KIND_WRITES = 4;
+}

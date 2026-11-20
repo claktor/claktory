@@ -655,6 +655,79 @@ String _count(int count, String one, [String? many]) =>
 // ---------------------------------------------------------------------------
 // Messaging.
 
+/// One agent an agents_send call is for, and how it went.
+typedef _Recipient = ({
+  String id,
+  String name,
+  String role,
+  String outcome,
+  String why,
+});
+
+/// Whom [call] messaged: from its details' recipients, its single-send
+/// details, or else its input (`to`, a string or a list), resolved against
+/// the agents the app knows.
+List<_Recipient> _recipients(BuildContext context, ToolCallInfo call) {
+  final details = call.details;
+  final listed = _list(details['recipients']).map(_map).toList();
+  if (listed.isNotEmpty) {
+    return [
+      for (final r in listed)
+        (
+          id: _string(r['id']),
+          name: _string(r['name']).ifEmpty(_string(r['to'])),
+          role: _string(r['role']),
+          outcome: _string(r['outcome']),
+          why: _string(r['why']),
+        ),
+    ];
+  }
+  if (_string(details['to']).isNotEmpty) {
+    return [
+      (
+        id: _string(details['to']),
+        name: _string(details['name']),
+        role: _string(details['role']),
+        outcome: details['working'] == true ? 'working' : 'sent',
+        why: '',
+      ),
+    ];
+  }
+  final self = ToolViewScope.of(context)?.agentId ?? '';
+  var to = call.input?['to'];
+  // An agent on the old schema writes a list as a string holding JSON.
+  if (to is String && to.trim().startsWith('[')) {
+    try {
+      to = jsonDecode(to);
+    } on FormatException {
+      // Not a list after all: a name.
+    }
+  }
+  final asked = to is List
+      ? to.map(_string).toList()
+      : [call.argument('to') ?? ''];
+  return [
+    for (final name in asked)
+      if (name.trim().isNotEmpty)
+        if (resolveAgent(context, name, self: self) case final agent?)
+          (
+            id: agent.id,
+            name: agent.name,
+            role: agent.role,
+            outcome: '',
+            why: '',
+          )
+        else
+          (id: '', name: name, role: '', outcome: '', why: ''),
+  ];
+}
+
+/// At most this many recipients are named on the line; more, and it says
+/// how many, with each under it.
+const recipientsOnLine = 3;
+
+/// agents_send: "→" and whom it went to, each a link to its conversation,
+/// then Sent or Queued.
 class _SendLine extends StatelessWidget {
   const _SendLine(this.call);
 
@@ -663,36 +736,44 @@ class _SendLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final to = call.argument('to') ?? '';
-    final details = call.details;
-    final self = ToolViewScope.of(context)?.agentId ?? '';
-    final id = _string(details['to']);
-    final agent = id.isNotEmpty
-        ? AgentTints.of(context)?.agents[id]
-        : resolveAgent(context, to, self: self);
+    final all = _recipients(context, call);
+    final reached = [
+      for (final r in all)
+        if (r.outcome != 'failed') r,
+    ];
     final String result;
-    if (!call.done) {
+    if (!call.done || reached.isEmpty || reached.first.outcome.isEmpty) {
       result = '';
-    } else if (details['working'] == true) {
+    } else if (reached.every((r) => r.outcome == 'working')) {
       result = 'Queued';
     } else {
       result = 'Sent';
     }
+    final single = all.length == 1;
+    Widget who(_Recipient r) => r.id.isEmpty
+        ? ToolLine('', subject: r.name)
+        : ToolAgent(
+            id: r.id,
+            name: r.name,
+            // Its role then, or now when the call didn't say.
+            role: !single ? '' : (r.role.isEmpty ? null : r.role),
+          );
+    final words = TextStyles.body.copyWith(color: palette.textMuted);
     return Row(
       children: [
-        Text('→', style: TextStyles.body.copyWith(color: palette.textMuted)),
+        Text('→', style: words),
         const SizedBox(width: Space.s),
-        Flexible(
-          child: agent != null
-              ? ToolAgent(
-                  id: agent.id,
-                  name: _string(details['name']),
-                  role: details['role'] is String
-                      ? details['role'] as String
-                      : null,
-                )
-              : ToolLine('', subject: _string(details['name']).ifEmpty(to)),
-        ),
+        if (reached.length > recipientsOnLine)
+          Flexible(child: ToolLine('', subject: '${reached.length} agents'))
+        else
+          for (var i = 0; i < reached.length; i++) ...[
+            if (i > 0) Text(', ', style: words),
+            Flexible(child: who(reached[i])),
+          ],
+        if (reached.isEmpty && all.isNotEmpty)
+          Flexible(
+            child: ToolLine('', subject: all.map((r) => r.name).join(', ')),
+          ),
         if (result.isNotEmpty) ...[
           const SizedBox(width: Space.s),
           _Trailing(result),
@@ -703,9 +784,43 @@ class _SendLine extends StatelessWidget {
 }
 
 Widget? _sendBody(BuildContext context, ToolCallInfo call) {
-  final text = call.argument('text') ?? '';
-  if (text.trim().isEmpty) return null;
-  return FirstLine(text.trim());
+  final all = _recipients(context, call);
+  final reached = [
+    for (final r in all)
+      if (r.outcome != 'failed') r,
+  ];
+  final failed = [
+    for (final r in all)
+      if (r.outcome == 'failed') r,
+  ];
+  final text = (call.argument('text') ?? _string(call.details['text'])).trim();
+  final rows = <Widget>[
+    // Too many to name on the line: each here.
+    if (reached.length > recipientsOnLine)
+      Padding(
+        padding: const EdgeInsets.only(bottom: 2),
+        child: Wrap(
+          spacing: Space.s,
+          runSpacing: 2,
+          children: [
+            for (final r in reached)
+              r.id.isEmpty
+                  ? ToolLine('', subject: r.name)
+                  : ToolAgent(id: r.id, name: r.name, role: ''),
+          ],
+        ),
+      ),
+    for (final r in failed)
+      _Faint(
+        r.why.isEmpty
+            ? 'Not sent to ${r.name}'
+            : 'Not sent to ${r.name}: ${r.why}',
+        lines: 2,
+        color: Palette.of(context).textFaint,
+      ),
+    if (text.isNotEmpty) FirstLine(text),
+  ];
+  return rows.isEmpty ? null : _rows(rows);
 }
 
 /// A message folded to its first line, as plain text cut with an ellipsis,

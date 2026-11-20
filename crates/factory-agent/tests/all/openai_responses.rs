@@ -151,7 +151,7 @@ fn fallback_message_ids_skip_messages_without_items() {
     assert_eq!(items[2]["id"], "msg_pi_2", "{items:?}");
     let messages = vec![
         Message::User(UserMessage::text("Fix", 1)),
-        Message::User(UserMessage { content: UserContent::Parts(Vec::new()), timestamp: 2, event: None }),
+        Message::User(UserMessage { content: UserContent::Parts(Vec::new()), timestamp: 2, event: None, sent_from: None }),
         foreign(vec![text("Done"), text("Again")]),
     ];
     let context = LlmContext { system_prompt: None, messages, tools: Vec::new() };

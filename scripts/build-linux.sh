@@ -58,7 +58,10 @@ IMAGE="docker.io/library/rust:1-alpine"
     rustup target add "$3" >/dev/null 2>&1
     mkdir /work
     cd /src
-    tar --exclude=./target --exclude=./app --exclude=./.git -cf - . | tar -xf - -C /work
+    # Fresh modification times (-m): cargo tells what changed by them, and a
+    # checkout whose files are older than what another checkout built into
+    # the same volume would otherwise get those stale crates linked in.
+    tar --exclude=./target --exclude=./app --exclude=./.git -cf - . | tar -xmf - -C /work
     cd /work
     cargo zigbuild --release --locked -p factoryd --target "$3" -j "$1"
     file="/target/$3/release/factoryd"

@@ -832,3 +832,107 @@ async fn agents_have_a_role_beside_their_name_that_other_agents_see() {
     assert_eq!(view.agent("mike").role, "");
     assert!(config(&dir)["agents"][1].get("role").is_none());
 }
+
+#[tokio::test]
+async fn one_message_reaches_several_agents_each_told_who_else_got_it() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_project("Lab", &dir.join("lab"))).await;
+    let hire = |project: &str, name: &str, role: &str| {
+        let client_message::Body::CreateAgent(mut agent) = create_agent(project, name, "") else { unreachable!() };
+        agent.role = role.into();
+        client_message::Body::CreateAgent(agent)
+    };
+    for (project, name, role) in
+        [("site", "Mike", "Coordinator"), ("site", "Ana", "Frontend"), ("site", "Sam", "Backend"), ("lab", "Zoe", "Researcher")]
+    {
+        ack(apply_request(&mut client, &mut view, hire(project, name, role)).await);
+    }
+    // The tool's answer and its details.
+    async fn send(
+        client: &mut Client,
+        view: &mut View,
+        agent: &str,
+        args: serde_json::Value,
+    ) -> (String, serde_json::Value, v1::ToolCallState) {
+        apply_request(client, view, select(agent)).await;
+        let before = view.entries.len();
+        apply_request(client, view, send_message(agent, &format!("call agents_send {args}"))).await;
+        view.follow(client, |view| view.entries.len() >= before + 3 && view.agent(agent).status() == AgentStatus::Idle).await;
+        let call = view.entries[before..]
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                Some(Kind::ToolCall(call)) => Some(call.clone()),
+                _ => None,
+            })
+            .expect("a tool call");
+        let details = if call.details.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&call.details).expect("JSON") };
+        (call.output.clone(), details, call.state())
+    }
+    async fn received(client: &mut Client, view: &mut View, agent: &str, starts: &str) -> String {
+        view.follow(client, |view| idle(view, agent)).await;
+        apply_request(client, view, select(agent)).await;
+        view.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) if event.text.starts_with(starts) => Some(event.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{agent} got no message starting {starts:?}"))
+    }
+
+    // Mike is busy; Ana sends to him, Sam, herself, Mike again by role, and
+    // someone who isn't there. She and the repeat are left out, the one
+    // missing is said, and the others get it.
+    apply_request(&mut client, &mut view, send_message("mike", r#"call bash {"command": "sleep 4"}"#)).await;
+    let to = serde_json::json!({"to": ["mike", "Sam", "ana", "Coordinator", "Nobody"], "text": "Standup at 10"});
+    let (said, details, state) = send(&mut client, &mut view, "ana", to).await;
+    assert_eq!(state, v1::ToolCallState::Done);
+    assert_eq!(
+        said,
+        "Mike (mike): sent; it's working and reads it after its current step.\nSam (sam): sent.\nNobody: No agent you can message is called \"Nobody\"; you can message: mike, sam."
+    );
+    assert_eq!(
+        details,
+        serde_json::json!({"text": "Standup at 10", "recipients": [
+            {"to": "mike", "id": "mike", "name": "Mike", "role": "Coordinator", "outcome": "working"},
+            {"to": "Sam", "id": "sam", "name": "Sam", "role": "Backend", "outcome": "sent"},
+            {"to": "Nobody", "id": "", "name": "", "role": "", "outcome": "failed",
+             "why": "No agent you can message is called \"Nobody\"; you can message: mike, sam."},
+        ]})
+    );
+    assert_eq!(received(&mut client, &mut view, "mike", "Standup").await, "Standup at 10\n\nAlso sent to: Sam (Backend).");
+    assert_eq!(received(&mut client, &mut view, "sam", "Standup").await, "Standup at 10\n\nAlso sent to: Mike (Coordinator).");
+
+    // Others are named as the recipient knows them: from another project, with it.
+    let to = serde_json::json!({"to": ["mike", "zoe"], "text": "Plans?"});
+    assert_eq!(send(&mut client, &mut view, "rivet", to).await.0, "Mike (mike): sent.\nZoe (zoe): sent.");
+    assert_eq!(received(&mut client, &mut view, "zoe", "Plans").await, "Plans?\n\nAlso sent to: Mike (Coordinator, Site).");
+    // A list of one is a plain message.
+    let to = serde_json::json!({"to": ["sam"], "text": "Just you"});
+    assert_eq!(send(&mut client, &mut view, "ana", to).await.0, "Sam (sam): sent.");
+    assert_eq!(received(&mut client, &mut view, "sam", "Just").await, "Just you");
+
+    // An agent whose tools are from before lists writes one as a string.
+    let to = serde_json::json!({"to": r#"["mike", "sam"]"#, "text": "Old schema"});
+    assert_eq!(send(&mut client, &mut view, "ana", to).await.0, "Mike (mike): sent.\nSam (sam): sent.");
+    assert_eq!(received(&mut client, &mut view, "sam", "Old").await, "Old schema\n\nAlso sent to: Mike (Coordinator).");
+
+    // Reaching no one fails, with why; so does too long a list.
+    let to = serde_json::json!({"to": ["ana", "Nobody", "zoe"], "text": "Hello?"});
+    let (said, details, state) = send(&mut client, &mut view, "ana", to).await;
+    assert_eq!(state, v1::ToolCallState::Failed);
+    assert!(said.starts_with("Sent to no one. No agent you can message is called \"Nobody\""), "{said}");
+    assert!(said.contains("called \"zoe\""), "{said}");
+    assert_eq!(details, serde_json::Value::Null);
+    let many: Vec<String> = (0..21).map(|n| format!("agent-{n}")).collect();
+    let (said, _, state) = send(&mut client, &mut view, "ana", serde_json::json!({"to": many, "text": "Hi"})).await;
+    assert_eq!(state, v1::ToolCallState::Failed);
+    assert!(said.contains("to: must not have more than 20 items"), "{said}");
+}

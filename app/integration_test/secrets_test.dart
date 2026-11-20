@@ -6,10 +6,11 @@
 //
 //   cd app && flutter test integration_test/secrets_test.dart -d <simulator> \
 //     --dart-define=FACTORY_DEV=true --dart-define=PAIRING_CODE='factory://…' \
-//     --dart-define=AGENT=Builder
+//     --dart-define=AGENT=Builder [--dart-define=RECOVERY_KEY=…]
 //
 // The agent's model runs for real. It holds each step for a few seconds, for
 // screenshots (`xcrun simctl io booted screenshot …`).
+import 'package:factory_app/controls.dart' show TextField;
 import 'package:factory_app/main.dart' as app;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -24,6 +25,9 @@ import 'phone_test.dart' show hold, waitFor;
 
 const _code = String.fromEnvironment('PAIRING_CODE');
 const _agent = String.fromEnvironment('AGENT', defaultValue: 'Builder');
+
+/// The recovery key, for when it finds secrets locked.
+const _recoveryKey = String.fromEnvironment('RECOVERY_KEY');
 Finder _labeled(String label) => find.byWidgetPredicate(
   (w) => w is Semantics && w.properties.label == label,
 );
@@ -92,6 +96,30 @@ void main() {
     // Settings → Secrets.
     scope.page.value = AppPage.settings;
     await hold(tester, seconds: 1);
+    // Locked after a restart (claktory.com out of reach, say): the banner
+    // says why, and the recovery key opens them.
+    if (!vault().unlocked) {
+      // Locked, Claktory won't show it: whoever runs this gives it.
+      expect(_recoveryKey, isNotEmpty, reason: 'pass RECOVERY_KEY=…');
+      const key = _recoveryKey;
+      await _scrollTo(tester, find.textContaining('Secrets are locked'));
+      await hold(tester, seconds: 4);
+      final unlock = find.textContaining('recovery key…');
+      await tester.tap(unlock.first);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.enterText(_fields(UnlockSecretsForm).first, 'not-the-key');
+      await tester.tap(find.text('Unlock'));
+      await waitFor(tester, find.textContaining("isn't right"));
+      await hold(tester, seconds: 3);
+      await tester.enterText(_fields(UnlockSecretsForm).first, key);
+      await tester.tap(find.text('Unlock'));
+      await waitFor(tester, find.byType(UnlockSecretsForm), gone: true);
+      await waitFor(
+        tester,
+        find.textContaining('Secrets are locked'),
+        gone: true,
+      );
+    }
     expect(vault().unlocked, isTrue);
 
     // Add a secret.
@@ -252,15 +280,39 @@ void main() {
     }
     scope.page.value = AppPage.settings;
     await tester.pump(const Duration(milliseconds: 300));
-    final card = find.text('$_agent asks for a new secret: $asked');
+    final card = find.text('$_agent asks for a secret: $asked');
     await _scrollTo(tester, card);
-    final settings = find.descendant(
-      of: find.byType(SettingsView),
+    // This request's card, among any others waiting.
+    final settings = find.ancestor(
+      of: find.descendant(of: find.byType(SettingsView), matching: card),
       matching: find.byType(SecretRequestCard),
     );
     expect(settings, findsOneWidget);
+    // One of the person's secrets may look like it (one from an earlier
+    // run, with the same variable): the card starts on it. Add new instead.
+    final addNew = find.descendant(
+      of: settings,
+      matching: find.text('Add new'),
+    );
+    if (find
+        .descendant(of: settings, matching: find.text('Add and give'))
+        .evaluate()
+        .isEmpty) {
+      await hold(tester, seconds: 3);
+      await tester.tap(addNew);
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+    // Add new, filled in from the request: only its value to paste.
     await tester.enterText(
-      find.descendant(of: settings, matching: find.byType(EditableText)).first,
+      find.descendant(
+        of: find.descendant(
+          of: settings,
+          matching: find.byWidgetPredicate(
+            (w) => w is TextField && w.placeholder == 'Paste the value',
+          ),
+        ),
+        matching: find.byType(EditableText),
+      ),
       'req-value-$stamp',
     );
     await tester.pump();

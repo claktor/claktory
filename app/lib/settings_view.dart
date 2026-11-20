@@ -369,6 +369,7 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
         ),
         SettingRow(
           label: 'Idle conversations',
+          top: true,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -788,10 +789,19 @@ class _Switch extends StatelessWidget {
 }
 
 class SettingRow extends StatelessWidget {
-  const SettingRow({super.key, required this.label, required this.child});
+  const SettingRow({
+    super.key,
+    required this.label,
+    required this.child,
+    this.top = false,
+  });
 
   final String label;
   final Widget child;
+
+  /// The label at the top of a tall control (a paragraph, switches with
+  /// notes) rather than beside its middle.
+  final bool top;
 
   @override
   Widget build(BuildContext context) {
@@ -827,6 +837,9 @@ class SettingRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.m),
       child: Row(
+        crossAxisAlignment: top
+            ? CrossAxisAlignment.start
+            : CrossAxisAlignment.center,
         children: [
           SizedBox(
             width: 160,
@@ -836,7 +849,10 @@ class SettingRow extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Align(alignment: Alignment.centerLeft, child: child),
+            child: Align(
+              alignment: top ? Alignment.topLeft : Alignment.centerLeft,
+              child: child,
+            ),
           ),
         ],
       ),

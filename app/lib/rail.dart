@@ -81,15 +81,16 @@ class Claktories extends ChangeNotifier {
     connections.addListener(_sync);
     _sync();
     // iOS suspends the app in the background, and its connections die
-    // without a word: back in front, each reconnects at once. (A Mac's
-    // app keeps running hidden, and its connections with it.)
+    // without a word: back in front, each reconnects at once.
     final suspends = switch (defaultTargetPlatform) {
       TargetPlatform.iOS || TargetPlatform.android => true,
       _ => false,
     };
-    _lifecycle = !suspends
-        ? null
-        : AppLifecycleListener(
+    // A Mac's app keeps running behind other windows, but its connections
+    // can die meanwhile (the network changed, the other machine slept):
+    // back in front, each checks its connection is alive.
+    _lifecycle = suspends
+        ? AppLifecycleListener(
             onHide: () {
               for (final claktory in _open.values) {
                 claktory.backend.hidden();
@@ -100,10 +101,17 @@ class Claktories extends ChangeNotifier {
                 claktory.backend.resumed();
               }
             },
+          )
+        : AppLifecycleListener(
+            onResume: () {
+              for (final claktory in _open.values) {
+                claktory.backend.check();
+              }
+            },
           );
   }
 
-  late final AppLifecycleListener? _lifecycle;
+  late final AppLifecycleListener _lifecycle;
 
   final Connections connections;
 
@@ -164,7 +172,7 @@ class Claktories extends ChangeNotifier {
 
   @override
   void dispose() {
-    _lifecycle?.dispose();
+    _lifecycle.dispose();
     connections.removeListener(_sync);
     for (final claktory in _open.values) {
       unawaited(claktory.close());

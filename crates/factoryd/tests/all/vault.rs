@@ -186,7 +186,7 @@ async fn a_key_the_person_holds_can_open_the_vault_after_a_restart() {
     let refused = client.request(Request::RevealSecret(v1::RevealSecret { id: id.clone(), proof: None })).await;
     assert_eq!(failure(&refused.body).0, ErrorCode::VaultLocked);
     let wrong = client.request(Request::UnlockVault(v1::UnlockVault { passphrase: PASSPHRASE.into() })).await;
-    assert_eq!(failure(&wrong.body).0, ErrorCode::WrongProof);
+    assert_eq!(failure(&wrong.body), (ErrorCode::WrongProof, "That recovery key isn't right.".to_owned()));
     // The recovery key sets a passphrase, and opens it.
     let changed = client
         .request(Request::ChangePassphrase(v1::ChangePassphrase { old_passphrase: recovery.clone(), new_passphrase: PASSPHRASE.into() }))
@@ -285,8 +285,12 @@ async fn agents_use_the_secrets_they_are_given_without_seeing_them() {
     assert!(tools.lock().expect("lock").contains("\"secrets\""), "its bash takes secrets now");
     let prompt = system_prompt.lock().expect("lock").clone();
     assert!(prompt.contains("## Secrets") && prompt.contains("- Cloudflare (sets CLOUDFLARE_API_TOKEN)"), "{prompt}");
+    assert!(!prompt.contains("Resend"), "nothing of secrets it wasn't given");
+    // A secret it wasn't given is refused as one the vault doesn't have.
     let refused = call(&mut client, &mut view, "builder", "bash", r#"{"command":"true","secrets":["Resend"]}"#).await;
     assert!(refused.contains("\"Resend\" isn't one of your secrets. Yours: Cloudflare."), "{refused}");
+    let missing = call(&mut client, &mut view, "builder", "bash", r#"{"command":"true","secrets":["Stripe"]}"#).await;
+    assert_eq!(missing.replace("Stripe", "Resend"), refused, "the same either way");
 
     // A task that got it shows in the vault; revoking it can stop the task.
     let command = r#"{"command":"echo $CLOUDFLARE_API_TOKEN; sleep 30","run_in_background":true,"secrets":["Cloudflare"]}"#;
@@ -398,67 +402,98 @@ fn requests(view: &View) -> Vec<String> {
     describe(&view.entries).into_iter().filter(|line| line.starts_with("secret request")).collect()
 }
 
-fn decide(agent: &str, id: &str, approve: bool, entries: Vec<v1::SecretEntry>, comment: &str) -> Request {
-    Request::DecideSecretRequest(v1::DecideSecretRequest {
+fn decide(agent: &str, id: &str, approve: bool, entries: Vec<v1::SecretEntry>, comment: &str) -> v1::DecideSecretRequest {
+    v1::DecideSecretRequest {
         agent_id: agent.into(),
         request_id: id.into(),
         approve,
         proof: None,
         entries,
         comment: comment.into(),
-    })
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
-async fn agents_ask_for_secrets_and_the_person_gives_or_dismisses() {
+async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_or_dismisses() {
     let dir = temp_dir();
-    let (addr, _factory) = start(&dir).await;
+    let models = Scripted::signed_in();
+    let system_prompt = models.system_prompt.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
     apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
-    add(&mut client, "Cloudflare", "CLOUDFLARE_API_TOKEN", TOKEN).await;
+    let cloudflare = add(&mut client, "Cloudflare", "CLOUDFLARE_API_TOKEN", TOKEN).await;
 
-    // An existing secret, by name: the request shows in its conversation and the vault.
-    let asked =
-        call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"cloudflare","reason":"To deploy the site."}"#).await;
-    assert_eq!(asked, "Asked for Cloudflare; the person will give it to you or dismiss the request, and you'll be told.");
+    // It describes what it needs; the answer is the same whether or not the
+    // vault has such a secret.
+    let need = r#"{"name":"Cloudflare token","description":"DNS edit on claktory.com","variables":[{"name":"CLOUDFLARE_API_TOKEN"}],"reason":"To deploy the site."}"#;
+    let asked = call(&mut client, &mut view, "builder", "secrets_request", need).await;
+    assert_eq!(asked, "Asked for Cloudflare token; the person will give it to you or dismiss the request, and you'll be told.");
+    let prompt = system_prompt.lock().expect("lock").clone();
+    assert!(prompt.contains("secrets_request") && !prompt.contains("Cloudflare (sets"), "{prompt}");
     let pending = vault(&view.workspace).requests;
     assert_eq!(pending.len(), 1);
-    let first = pending[0].id.clone();
-    assert_eq!(requests(&view), [format!("secret request {first} (Pending): To deploy the site.")]);
-    let again = call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"Cloudflare","reason":"Still."}"#).await;
+    let first = pending[0].clone();
+    assert_eq!((first.secret_id.as_str(), first.secret_name.as_str()), ("", "Cloudflare token"));
+    let wanted = first.new_secret.clone().expect("what it needs");
+    assert_eq!((wanted.description.as_str(), wanted.variables[0].name.as_str()), ("DNS edit on claktory.com", "CLOUDFLARE_API_TOKEN"));
+    assert_eq!(requests(&view), [format!("secret request {} (Pending): To deploy the site.", first.id)]);
+    let again = call(&mut client, &mut view, "builder", "secrets_request", need).await;
     assert!(again.contains("waiting for the person"), "{again}");
-    let missing = call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"Stripe","reason":"Payments."}"#).await;
-    assert!(missing.contains("describe it in `new`"), "{missing}");
+    // From an agent whose tools are from before: a name it guessed reads as
+    // a description, whether the vault has it or not.
+    let named = call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"Cloudflare","reason":"Deploys."}"#).await;
+    let guessed = call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"Stripe","reason":"Deploys."}"#).await;
+    assert_eq!(guessed.replace("Stripe", "Cloudflare"), named);
+    assert!(named.starts_with("Asked for Cloudflare;"), "{named}");
+    for request in vault(&view.workspace).requests.into_iter().filter(|request| request.id != first.id) {
+        apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &request.id, false, Vec::new(), ""))).await;
+    }
 
-    // Given: its entry shows it, Builder hears and can use it.
-    apply_request(&mut client, &mut view, decide("builder", &first, true, Vec::new(), "")).await;
+    // Given one of the vault's: it hears what it got, and only that.
+    let nothing =
+        apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &first.id, true, Vec::new(), ""))).await;
+    assert!(failure(&nothing).1.contains("Pick a secret"), "{nothing:?}");
+    let give = v1::DecideSecretRequest { secret_id: cloudflare.clone(), ..decide("builder", &first.id, true, Vec::new(), "") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(give)).await;
     view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you Cloudflare")) && idle(view, "builder")).await;
-    assert_eq!(requests(&view)[0], format!("secret request {first} (Granted): To deploy the site."));
+    assert!(
+        events(&view).iter().any(|line| line == "event from Claktory: The person gave you Cloudflare: pass it in bash's `secrets`."),
+        "{:?}",
+        events(&view)
+    );
+    assert_eq!(requests(&view)[0], format!("secret request {} (Granted): To deploy the site.", first.id));
+    let decided = view.entries.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::SecretRequest(request)) if request.id == first.id => Some(request.clone()),
+        _ => None,
+    });
+    let decided = decided.expect("the entry");
+    assert_eq!((decided.given_secret_id.as_str(), decided.given_secret_name.as_str()), (cloudflare.as_str(), "Cloudflare"));
     assert!(vault(&view.workspace).requests.is_empty());
     let output =
         call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo $CLOUDFLARE_API_TOKEN","secrets":["Cloudflare"]}"#).await;
     assert!(output.starts_with("[secret Cloudflare/CLOUDFLARE_API_TOKEN]"), "{output}");
 
-    // A new one, described: the person fills in its value.
-    let new = r#"{"new":{"name":"Resend","description":"Mail for the site.","variables":[{"name":"RESEND_API_KEY"}]},"reason":"To send sign-up mail."}"#;
+    // A new one, from the description: the person names it and fills in its value.
+    let new =
+        r#"{"name":"Mail","description":"Mail for the site.","variables":[{"name":"RESEND_API_KEY"}],"reason":"To send sign-up mail."}"#;
     call(&mut client, &mut view, "builder", "secrets_request", new).await;
     let request = vault(&view.workspace).requests[0].clone();
-    let wanted = request.new_secret.clone().expect("a new secret");
-    assert_eq!((wanted.name.as_str(), wanted.variables[0].name.as_str()), ("Resend", "RESEND_API_KEY"));
-    let empty = client.request(decide("builder", &request.id, true, Vec::new(), "")).await;
-    assert!(failure(&empty.body).1.contains("values"), "{:?}", empty.body);
-    apply_request(&mut client, &mut view, decide("builder", &request.id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], ""))
-        .await;
+    let add_new = v1::DecideSecretRequest {
+        name: "Resend".into(),
+        ..decide("builder", &request.id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], "")
+    };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(add_new)).await;
     let resend = vault(&view.workspace).secrets.into_iter().find(|secret| secret.name == "Resend").expect("made");
     assert_eq!((resend.description.as_str(), resend.grants[0].agent_id.as_str()), ("Mail for the site.", "builder"));
 
     // Dismissed, with a comment it reads.
-    let other = r#"{"new":{"name":"Stripe","variables":[{"name":"STRIPE_KEY"}]},"reason":"Payments."}"#;
+    let other = r#"{"name":"Stripe","description":"Payments.","reason":"Payments."}"#;
     call(&mut client, &mut view, "builder", "secrets_request", other).await;
     let id = vault(&view.workspace).requests[0].id.clone();
-    apply_request(&mut client, &mut view, decide("builder", &id, false, Vec::new(), "Not yet.")).await;
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &id, false, Vec::new(), "Not yet."))).await;
     view.follow(&mut client, |view| {
         events(view).iter().any(|line| line.contains("dismissed your request for Stripe")) && idle(view, "builder")
     })
@@ -468,7 +503,7 @@ async fn agents_ask_for_secrets_and_the_person_gives_or_dismisses() {
         "{:?}",
         events(&view)
     );
-    let twice = client.request(decide("builder", &id, true, Vec::new(), "")).await;
+    let twice = client.request(Request::DecideSecretRequest(decide("builder", &id, true, Vec::new(), ""))).await;
     assert!(failure(&twice.body).1.contains("decided already"), "{:?}", twice.body);
     drop(client);
     drop(_factory);
@@ -479,5 +514,5 @@ async fn agents_ask_for_secrets_and_the_person_gives_or_dismisses() {
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     let states: Vec<String> = requests(&view).iter().map(|line| line.split(' ').nth(3).unwrap_or_default().to_owned()).collect();
-    assert_eq!(states, ["(Granted):", "(Granted):", "(Dismissed):"]);
+    assert_eq!(states, ["(Granted):", "(Dismissed):", "(Dismissed):", "(Granted):", "(Dismissed):"]);
 }

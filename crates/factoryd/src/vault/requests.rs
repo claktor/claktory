@@ -26,16 +26,19 @@ async fn blocking<T: Send + 'static>(
 /// one is refused after a second.
 pub(crate) async fn prove(factory: &Arc<Factory>, given: &str) -> Result<Key, RequestError> {
     let given = zeroize::Zeroizing::new(given.to_owned());
-    let found = blocking(factory, move |vault| {
+    let (found, passphrase) = blocking(factory, move |vault| {
         let (vault_id, protectors) = vault.protectors()?;
-        Ok(Vault::check(&vault_id, &protectors, &given))
+        let passphrase = protectors.iter().any(|protector| protector.kind == "passphrase");
+        Ok((Vault::check(&vault_id, &protectors, &given), passphrase))
     })
     .await?;
     match found {
         Some(vmk) => Ok(vmk),
         None => {
             tokio::time::sleep(WRONG_DELAY).await;
-            Err(RequestError::Vault(VaultError::WrongProof))
+            // Only vaults from before Claktory made them by itself have a passphrase.
+            let said = if passphrase { "That passphrase or recovery key isn't right." } else { "That recovery key isn't right." };
+            Err(RequestError::Vault(VaultError::WrongProof(said)))
         }
     }
 }
@@ -298,21 +301,27 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         return Err(RequestError::UnknownAgent(agent.to_owned()));
     }
     let asked = factory.vault.pending_request(agent, &request.request_id)?;
-    let mut name = asked.secret_name.clone();
-    if request.approve {
-        let secret = match &asked.new_secret {
-            Some(wanted) => {
-                let entries = values(&request.entries);
-                if entries.is_empty() {
-                    return Err(VaultError::Invalid("Enter the values of the secret it asked for.".to_owned()).into());
-                }
-                factory.vault.create_secret(&wanted.name, &wanted.description, &entries, "")?
-            }
-            None => asked.secret_id.clone(),
+    let given = if request.approve {
+        let secret = if !request.secret_id.is_empty() {
+            request.secret_id.clone()
+        } else if !request.entries.is_empty() {
+            let wanted = asked.new_secret.clone().unwrap_or_default();
+            let pick = |chosen: &str, asked: &str| if chosen.trim().is_empty() { asked.to_owned() } else { chosen.to_owned() };
+            let name = pick(&request.name, if wanted.name.is_empty() { &asked.secret_name } else { &wanted.name });
+            let description = pick(&request.description, &wanted.description);
+            factory.vault.create_secret(&name, &description, &values(&request.entries), "")?
+        } else if !asked.secret_id.is_empty() {
+            asked.secret_id.clone()
+        } else {
+            return Err(VaultError::Invalid("Pick a secret to give, or add a new one with its values.".to_owned()).into());
         };
-        name = give(factory, &secret, agent, "")?;
-    }
-    let decided = factory.vault.decide_request(agent, &asked.id, request.approve, &request.comment)?;
+        let name = give(factory, &secret, agent, "")?;
+        Some((secret, name))
+    } else {
+        None
+    };
+    let decided =
+        factory.vault.decide_request(agent, &asked.id, given.as_ref().map(|(id, name)| (id.as_str(), name.as_str())), &request.comment)?;
     factory.vault_changed();
     // Its entry shows the decision.
     {
@@ -328,16 +337,19 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     }
     let person = factory.lock().config.person_capitalized().to_owned();
     let comment = request.comment.trim();
-    let mut summary = if request.approve {
-        format!("{person} gave you {name}: pass it in bash's `secrets`")
-    } else {
-        format!("{person} dismissed your request for {name}")
+    // What it got, and nothing else of the vault.
+    let (mut summary, what) = match &given {
+        Some((id, name)) => {
+            let label = factory.vault.granted(agent).remove(id).unwrap_or_else(|| name.clone());
+            (format!("{person} gave you {name}: pass it in bash's `secrets`"), format!("\n\nIt's {label}."))
+        }
+        None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
     };
     if !comment.is_empty() {
         summary.push_str(&format!(" (comment: {comment})"));
     }
     summary.push('.');
-    let text = format!("{summary}\n\nYou asked because: {}", asked.reason);
+    let text = format!("{summary}{what}\n\nYou asked because: {}", asked.reason);
     let event = factory_agent::Event {
         source: factory_agent::EventSource::Host,
         from: "Claktory".to_owned(),

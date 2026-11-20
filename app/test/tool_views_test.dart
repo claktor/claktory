@@ -31,6 +31,12 @@ Workspace _workspace({ViewNode? layout}) => Workspace(
       color: 'green',
       modelAvailable: true,
     ),
+    for (final (id, name) in [
+      ('lena', 'Lena'),
+      ('omar', 'Omar'),
+      ('zoe', 'Zoe'),
+    ])
+      Agent(id: id, projectId: 'p1', name: name, modelAvailable: true),
   ],
   selectedAgentId: 'a1',
   highlights: true,
@@ -151,6 +157,112 @@ void main() {
       ]);
       expect(find.text('Done.'), findsOneWidget);
       expect(find.text('Show more'), findsNothing);
+    });
+
+    testWidgets('a message to several names each, and who it missed', (
+      tester,
+    ) async {
+      final harness = await showing(tester, [
+        call(
+          'agents_send',
+          {
+            'to': ['Sam', 'lena', 'ghost'],
+            'text': 'Release at six.',
+          },
+          details: {
+            'text': 'Release at six.',
+            'recipients': [
+              {
+                'to': 'Sam',
+                'id': 'builder',
+                'name': 'Sam',
+                'role': 'Backend',
+                'outcome': 'working',
+              },
+              {
+                'to': 'lena',
+                'id': 'lena',
+                'name': 'Lena',
+                'role': '',
+                'outcome': 'sent',
+              },
+              {
+                'to': 'ghost',
+                'id': '',
+                'name': '',
+                'role': '',
+                'outcome': 'failed',
+                'why': 'No agent you can message is called "ghost".',
+              },
+            ],
+          },
+        ),
+      ]);
+      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Lena')), findsOneWidget);
+      expect(find.text('Sent'), findsOneWidget);
+      expect(
+        find.text(
+          'Not sent to ghost: No agent you can message is called "ghost".',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Release at six.'), findsOneWidget);
+      await tester.tap(inTranscript(find.text('Lena')));
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'lena');
+    });
+
+    testWidgets('more than three are counted, and listed under the line', (
+      tester,
+    ) async {
+      await showing(tester, [
+        call(
+          'agents_send',
+          {
+            'to': ['builder', 'lena', 'omar', 'zoe'],
+            'text': 'Hi all',
+          },
+          details: {
+            'recipients': [
+              for (final (id, name) in [
+                ('builder', 'Sam'),
+                ('lena', 'Lena'),
+                ('omar', 'Omar'),
+                ('zoe', 'Zoe'),
+              ])
+                {'to': id, 'id': id, 'name': name, 'outcome': 'working'},
+            ],
+          },
+        ),
+      ]);
+      expect(find.text('4 agents'), findsOneWidget);
+      expect(find.text('Queued'), findsOneWidget);
+      for (final name in ['Sam', 'Lena', 'Omar', 'Zoe']) {
+        expect(inTranscript(find.text(name)), findsOneWidget, reason: name);
+      }
+    });
+
+    testWidgets('a list written as a string is read as a list', (tester) async {
+      await showing(tester, [
+        call('agents_send', {
+          'to': '["sam", "omar"]',
+          'text': 'Hi',
+        }, state: ToolCallState.TOOL_CALL_STATE_RUNNING),
+      ]);
+      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Omar')), findsOneWidget);
+    });
+
+    testWidgets('a list without details resolves each name', (tester) async {
+      await showing(tester, [
+        call('agents_send', {
+          'to': ['sam', 'Omar'],
+          'text': 'Hi',
+        }, state: ToolCallState.TOOL_CALL_STATE_RUNNING),
+      ]);
+      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Omar')), findsOneWidget);
     });
 
     testWidgets('a failed send shows its error', (tester) async {

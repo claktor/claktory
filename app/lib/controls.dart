@@ -900,19 +900,26 @@ class Field extends StatelessWidget {
 
 /// Floats [card] above [child] while the pointer rests on [child], like a
 /// tooltip: a floating layer in the sidebar's color, left-aligned with
-/// [child], or with [beside] to its right, centered on it. It never takes
-/// the pointer itself.
+/// [child] (or [end]-aligned), or with [beside] to its right, centered on it. It never takes
+/// the pointer itself. With [holdToShow], touching and holding [child]
+/// shows it too, until the finger lifts (on a phone, with no pointer).
 class HoverCard extends StatefulWidget {
   const HoverCard({
     super.key,
     required this.card,
     required this.child,
     this.beside = false,
+    this.end = false,
+    this.holdToShow = false,
   });
 
   final WidgetBuilder card;
   final Widget child;
   final bool beside;
+
+  /// Right-aligned with [child] instead, for one near a right edge.
+  final bool end;
+  final bool holdToShow;
 
   @override
   State<HoverCard> createState() => _HoverCardState();
@@ -936,7 +943,9 @@ class _HoverCardState extends State<HoverCard> {
     _wait = Timer(const Duration(milliseconds: 300), _portal.show);
   }
 
-  void _exit(PointerExitEvent _) {
+  void _exit(PointerExitEvent _) => _hide();
+
+  void _hide() {
     _wait?.cancel();
     if (_portal.isShowing) _portal.hide();
   }
@@ -952,9 +961,13 @@ class _HoverCardState extends State<HoverCard> {
           link: _link,
           targetAnchor: widget.beside
               ? Alignment.centerRight
+              : widget.end
+              ? Alignment.topRight
               : Alignment.topLeft,
           followerAnchor: widget.beside
               ? Alignment.centerLeft
+              : widget.end
+              ? Alignment.bottomRight
               : Alignment.bottomLeft,
           offset: widget.beside
               ? const Offset(Space.xs, 0)
@@ -962,6 +975,8 @@ class _HoverCardState extends State<HoverCard> {
           child: Align(
             alignment: widget.beside
                 ? Alignment.centerLeft
+                : widget.end
+                ? Alignment.bottomRight
                 : Alignment.bottomLeft,
             child: IgnorePointer(
               child: TweenAnimationBuilder<double>(
@@ -988,7 +1003,19 @@ class _HoverCardState extends State<HoverCard> {
             ),
           ),
         ),
-        child: MouseRegion(onEnter: _enter, onExit: _exit, child: widget.child),
+        child: MouseRegion(
+          onEnter: _enter,
+          onExit: _exit,
+          child: widget.holdToShow
+              ? GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onLongPressStart: (_) => _portal.show(),
+                  onLongPressEnd: (_) => _hide(),
+                  onLongPressCancel: _hide,
+                  child: widget.child,
+                )
+              : widget.child,
+        ),
       ),
     );
   }
@@ -1890,6 +1917,12 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'send': _drawSend,
   'panels-top-left': _drawPanelsTopLeft,
   'key-round': _drawKeyRound,
+  'monitor': _drawMonitor,
+  'laptop-minimal': _drawLaptopMinimal,
+  'smartphone': _drawSmartphone,
+  'tablet': _drawTablet,
+  'monitor-smartphone': _drawMonitorSmartphone,
+  'network': _drawNetwork,
 };
 
 final _drawEllipsis = _paths(const [
@@ -1917,6 +1950,42 @@ final _drawSend = _paths(const [
   'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635'
       'l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z',
   'm21.854 2.147-10.94 10.939',
+]);
+
+final _drawMonitor = _paths(const [
+  'M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+  'M8 21h8',
+  'M12 17v4',
+]);
+
+final _drawNetwork = _paths(const [
+  'M17 16h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z',
+  'M3 16h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z',
+  'M10 2h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z',
+  'M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3',
+  'M12 12V8',
+]);
+
+final _drawMonitorSmartphone = _paths(const [
+  'M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8',
+  'M10 15v4',
+  'M7 19h5',
+  'M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z',
+]);
+
+final _drawLaptopMinimal = _paths(const [
+  'M6 4h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',
+  'M2 20h20',
+]);
+
+final _drawSmartphone = _paths(const [
+  'M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z',
+  'M12 18h.01',
+]);
+
+final _drawTablet = _paths(const [
+  'M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z',
+  'M12 18h.01',
 ]);
 
 final _drawKeyRound = _paths(const [

@@ -1864,11 +1864,13 @@ class Hello extends $pb.GeneratedMessage {
     $core.int? protocolVersion,
     $core.String? clientVersion,
     $core.String? token,
+    DeviceKind? deviceKind,
   }) {
     final result = Hello._();
     if (protocolVersion != null) result.protocolVersion = protocolVersion;
     if (clientVersion != null) result.clientVersion = clientVersion;
     if (token != null) result.token = token;
+    if (deviceKind != null) result.deviceKind = deviceKind;
     return result;
   }
 
@@ -1889,6 +1891,8 @@ class Hello extends $pb.GeneratedMessage {
         fieldType: $pb.PbFieldType.OU3)
     ..aOS(2, _omitFieldNames ? '' : 'clientVersion')
     ..aOS(3, _omitFieldNames ? '' : 'token')
+    ..aE<DeviceKind>(4, _omitFieldNames ? '' : 'deviceKind',
+        enumValues: DeviceKind.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1940,6 +1944,90 @@ class Hello extends $pb.GeneratedMessage {
   $core.bool hasToken() => $_has(2);
   @$pb.TagNumber(3)
   void clearToken() => $_clearField(3);
+
+  /// What kind of device this is, so agents can fit their replies to it
+  /// (shorter on a phone). Its name the backend knows: the paired device's,
+  /// or this computer's for its own app. Unspecified from apps before it.
+  @$pb.TagNumber(4)
+  DeviceKind get deviceKind => $_getN(3);
+  @$pb.TagNumber(4)
+  set deviceKind(DeviceKind value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDeviceKind() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDeviceKind() => $_clearField(4);
+}
+
+/// Where the person sent a message from: the device their app ran on.
+class SentFrom extends $pb.GeneratedMessage {
+  factory SentFrom({
+    $core.String? deviceName,
+    DeviceKind? kind,
+  }) {
+    final result = SentFrom._();
+    if (deviceName != null) result.deviceName = deviceName;
+    if (kind != null) result.kind = kind;
+    return result;
+  }
+
+  SentFrom._();
+
+  factory SentFrom.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SentFrom()..mergeFromBuffer(data, registry);
+  factory SentFrom.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SentFrom()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SentFrom',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SentFrom.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceName')
+    ..aE<DeviceKind>(2, _omitFieldNames ? '' : 'kind',
+        enumValues: DeviceKind.values)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SentFrom clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SentFrom copyWith(void Function(SentFrom) updates) =>
+      super.copyWith((message) => updates(message as SentFrom)) as SentFrom;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SentFrom() / SentFrom.new instead')
+  static SentFrom create() => SentFrom._();
+  static $pb.GeneratedMessage $_createMessage() => SentFrom._();
+  @$core.override
+  SentFrom createEmptyInstance() => SentFrom._();
+  @$core.pragma('dart2js:noInline')
+  static SentFrom getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SentFrom>(SentFrom.$_createMessage);
+  static SentFrom? _defaultInstance;
+
+  /// The paired device's name (Settings → Devices), or this computer's name
+  /// (its Computer Name on a Mac) for the app running on it.
+  @$pb.TagNumber(1)
+  $core.String get deviceName => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceName($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceName() => $_clearField(1);
+
+  /// As the app said in Hello; unspecified from apps before it.
+  @$pb.TagNumber(2)
+  DeviceKind get kind => $_getN(1);
+  @$pb.TagNumber(2)
+  set kind(DeviceKind value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasKind() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearKind() => $_clearField(2);
 }
 
 class Welcome extends $pb.GeneratedMessage {
@@ -6842,6 +6930,7 @@ class Workspace extends $pb.GeneratedMessage {
     RemoteAccess? remote,
     VaultState? vault,
     ClaktoryAccount? account,
+    ClaktoryMap? map,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -6865,6 +6954,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (remote != null) result.remote = remote;
     if (vault != null) result.vault = vault;
     if (account != null) result.account = account;
+    if (map != null) result.map = map;
     return result;
   }
 
@@ -6913,6 +7003,8 @@ class Workspace extends $pb.GeneratedMessage {
         subBuilder: VaultState.$_createMessage)
     ..aOM<ClaktoryAccount>(21, _omitFieldNames ? '' : 'account',
         subBuilder: ClaktoryAccount.$_createMessage)
+    ..aOM<ClaktoryMap>(22, _omitFieldNames ? '' : 'map',
+        subBuilder: ClaktoryMap.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -7127,6 +7219,19 @@ class Workspace extends $pb.GeneratedMessage {
   void clearAccount() => $_clearField(21);
   @$pb.TagNumber(21)
   ClaktoryAccount ensureAccount() => $_ensure(20);
+
+  /// How this Claktory is arranged, for the Map: computed here, laid out by
+  /// the app.
+  @$pb.TagNumber(22)
+  ClaktoryMap get map => $_getN(21);
+  @$pb.TagNumber(22)
+  set map(ClaktoryMap value) => $_setField(22, value);
+  @$pb.TagNumber(22)
+  $core.bool hasMap() => $_has(21);
+  @$pb.TagNumber(22)
+  void clearMap() => $_clearField(22);
+  @$pb.TagNumber(22)
+  ClaktoryMap ensureMap() => $_ensure(21);
 }
 
 class ChangelogVersion extends $pb.GeneratedMessage {
@@ -11813,6 +11918,7 @@ class Agent extends $pb.GeneratedMessage {
     $core.String? avatarFaceOverride,
     $core.String? role,
     ViewNode? layout,
+    $core.String? defaultPrompt,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -11848,6 +11954,7 @@ class Agent extends $pb.GeneratedMessage {
       result.avatarFaceOverride = avatarFaceOverride;
     if (role != null) result.role = role;
     if (layout != null) result.layout = layout;
+    if (defaultPrompt != null) result.defaultPrompt = defaultPrompt;
     return result;
   }
 
@@ -11905,6 +12012,7 @@ class Agent extends $pb.GeneratedMessage {
     ..aOS(29, _omitFieldNames ? '' : 'role')
     ..aOM<ViewNode>(30, _omitFieldNames ? '' : 'layout',
         subBuilder: ViewNode.$_createMessage)
+    ..aOS(31, _omitFieldNames ? '' : 'defaultPrompt')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -12240,6 +12348,20 @@ class Agent extends $pb.GeneratedMessage {
   void clearLayout() => $_clearField(30);
   @$pb.TagNumber(30)
   ViewNode ensureLayout() => $_ensure(29);
+
+  /// The default prompt the agent can go back to, as this version of
+  /// Claktory ships it, with its placeholders ({{user}}…); empty when it has
+  /// none (only Rivet has one). While `prompt` equals it, the prompt follows
+  /// the default: a new version's default replaces it. To go back to the
+  /// default, set the prompt to this text (UpdateAgent).
+  @$pb.TagNumber(31)
+  $core.String get defaultPrompt => $_getSZ(30);
+  @$pb.TagNumber(31)
+  set defaultPrompt($core.String value) => $_setString(30, value);
+  @$pb.TagNumber(31)
+  $core.bool hasDefaultPrompt() => $_has(30);
+  @$pb.TagNumber(31)
+  void clearDefaultPrompt() => $_clearField(31);
 }
 
 class SlashCommand extends $pb.GeneratedMessage {
@@ -12556,6 +12678,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     $core.String? text,
     $fixnum.Int64? created,
     $core.String? summary,
+    SentFrom? sentFrom,
   }) {
     final result = QueuedMessage._();
     if (id != null) result.id = id;
@@ -12565,6 +12688,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     if (text != null) result.text = text;
     if (created != null) result.created = created;
     if (summary != null) result.summary = summary;
+    if (sentFrom != null) result.sentFrom = sentFrom;
     return result;
   }
 
@@ -12588,6 +12712,8 @@ class QueuedMessage extends $pb.GeneratedMessage {
     ..aOS(5, _omitFieldNames ? '' : 'text')
     ..aInt64(6, _omitFieldNames ? '' : 'created')
     ..aOS(7, _omitFieldNames ? '' : 'summary')
+    ..aOM<SentFrom>(8, _omitFieldNames ? '' : 'sentFrom',
+        subBuilder: SentFrom.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -12683,6 +12809,18 @@ class QueuedMessage extends $pb.GeneratedMessage {
   $core.bool hasSummary() => $_has(6);
   @$pb.TagNumber(7)
   void clearSummary() => $_clearField(7);
+
+  /// The person's: the device it was sent from (see UserText.sent_from).
+  @$pb.TagNumber(8)
+  SentFrom get sentFrom => $_getN(7);
+  @$pb.TagNumber(8)
+  set sentFrom(SentFrom value) => $_setField(8, value);
+  @$pb.TagNumber(8)
+  $core.bool hasSentFrom() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSentFrom() => $_clearField(8);
+  @$pb.TagNumber(8)
+  SentFrom ensureSentFrom() => $_ensure(7);
 }
 
 /// Adds an entry or replaces the one with the same `seq`.
@@ -13336,9 +13474,11 @@ class Proposal extends $pb.GeneratedMessage {
 class UserText extends $pb.GeneratedMessage {
   factory UserText({
     $core.String? text,
+    SentFrom? sentFrom,
   }) {
     final result = UserText._();
     if (text != null) result.text = text;
+    if (sentFrom != null) result.sentFrom = sentFrom;
     return result;
   }
 
@@ -13356,6 +13496,8 @@ class UserText extends $pb.GeneratedMessage {
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: UserText.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..aOM<SentFrom>(2, _omitFieldNames ? '' : 'sentFrom',
+        subBuilder: SentFrom.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -13386,6 +13528,19 @@ class UserText extends $pb.GeneratedMessage {
   $core.bool hasText() => $_has(0);
   @$pb.TagNumber(1)
   void clearText() => $_clearField(1);
+
+  /// The device it was sent from; unset for messages from before it, and for
+  /// those Claktory sent for the person (an approved proposal to Rivet).
+  @$pb.TagNumber(2)
+  SentFrom get sentFrom => $_getN(1);
+  @$pb.TagNumber(2)
+  set sentFrom(SentFrom value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSentFrom() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSentFrom() => $_clearField(2);
+  @$pb.TagNumber(2)
+  SentFrom ensureSentFrom() => $_ensure(1);
 }
 
 class AssistantText extends $pb.GeneratedMessage {
@@ -15566,8 +15721,12 @@ class ImportEnv extends $pb.GeneratedMessage {
   void clearOnePerVariable() => $_clearField(4);
 }
 
-/// Grants (approve) or dismisses an agent's secret request. For a new secret, `entries` holds its values, and the secret is
-/// made with the request's name and description and granted to the agent.
+/// Grants (approve) or dismisses an agent's secret request. To give one of
+/// the vault's secrets, `secret_id` names it. To add a new one, `entries`
+/// hold its variables and values, and `name` and `description` its name and
+/// description (empty: the request's), and it's made and given. A request
+/// from before agents described what they need, naming a secret, is given
+/// that secret when neither is set. The agent is told only what it got.
 class DecideSecretRequest extends $pb.GeneratedMessage {
   factory DecideSecretRequest({
     $core.String? agentId,
@@ -15576,6 +15735,9 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     VaultProof? proof,
     $core.Iterable<SecretEntry>? entries,
     $core.String? comment,
+    $core.String? secretId,
+    $core.String? name,
+    $core.String? description,
   }) {
     final result = DecideSecretRequest._();
     if (agentId != null) result.agentId = agentId;
@@ -15584,6 +15746,9 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     if (proof != null) result.proof = proof;
     if (entries != null) result.entries.addAll(entries);
     if (comment != null) result.comment = comment;
+    if (secretId != null) result.secretId = secretId;
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
     return result;
   }
 
@@ -15608,6 +15773,9 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     ..pPM<SecretEntry>(5, _omitFieldNames ? '' : 'entries',
         subBuilder: SecretEntry.$_createMessage)
     ..aOS(6, _omitFieldNames ? '' : 'comment')
+    ..aOS(7, _omitFieldNames ? '' : 'secretId')
+    ..aOS(8, _omitFieldNames ? '' : 'name')
+    ..aOS(9, _omitFieldNames ? '' : 'description')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -15683,6 +15851,35 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
   $core.bool hasComment() => $_has(5);
   @$pb.TagNumber(6)
   void clearComment() => $_clearField(6);
+
+  /// An existing secret to give (SecretInfo.id).
+  @$pb.TagNumber(7)
+  $core.String get secretId => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set secretId($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasSecretId() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSecretId() => $_clearField(7);
+
+  /// A new secret's name and description.
+  @$pb.TagNumber(8)
+  $core.String get name => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set name($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasName() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearName() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get description => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set description($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasDescription() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearDescription() => $_clearField(9);
 }
 
 /// Who used a secret and when, newest first; `id` empty for every secret.
@@ -16417,7 +16614,11 @@ class SecretUse extends $pb.GeneratedMessage {
 
 /// An agent's request (secrets_request), shown in its conversation after the
 /// call, for the person to grant or dismiss with DecideSecretRequest. The
-/// entry is sent again when it's decided.
+/// entry is sent again when it's decided. Agents don't know which secrets
+/// the vault holds: they describe what they need in `new_secret` (a name,
+/// what it's for and the variables they expect), and the person gives an
+/// existing secret or adds one. Requests from before that name an existing
+/// secret in `secret_id`.
 class SecretRequest extends $pb.GeneratedMessage {
   factory SecretRequest({
     $core.String? id,
@@ -16429,6 +16630,8 @@ class SecretRequest extends $pb.GeneratedMessage {
     SecretRequestState? state,
     $fixnum.Int64? decidedMs,
     $core.String? comment,
+    $core.String? givenSecretId,
+    $core.String? givenSecretName,
   }) {
     final result = SecretRequest._();
     if (id != null) result.id = id;
@@ -16440,6 +16643,8 @@ class SecretRequest extends $pb.GeneratedMessage {
     if (state != null) result.state = state;
     if (decidedMs != null) result.decidedMs = decidedMs;
     if (comment != null) result.comment = comment;
+    if (givenSecretId != null) result.givenSecretId = givenSecretId;
+    if (givenSecretName != null) result.givenSecretName = givenSecretName;
     return result;
   }
 
@@ -16467,6 +16672,8 @@ class SecretRequest extends $pb.GeneratedMessage {
         enumValues: SecretRequestState.values)
     ..aInt64(8, _omitFieldNames ? '' : 'decidedMs')
     ..aOS(9, _omitFieldNames ? '' : 'comment')
+    ..aOS(10, _omitFieldNames ? '' : 'givenSecretId')
+    ..aOS(11, _omitFieldNames ? '' : 'givenSecretName')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -16510,7 +16717,8 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   void clearAgentId() => $_clearField(2);
 
-  /// An existing secret it asks for; empty when it asks for a new one.
+  /// Only in requests from before agents described what they need: the
+  /// existing secret it asked for. Empty otherwise.
   @$pb.TagNumber(3)
   $core.String get secretId => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -16520,7 +16728,8 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   void clearSecretId() => $_clearField(3);
 
-  /// That secret's name, as the agent asked for it.
+  /// What it asks for, in a word: the name it gave (new_secret.name), or the
+  /// existing secret's.
   @$pb.TagNumber(4)
   $core.String get secretName => $_getSZ(3);
   @$pb.TagNumber(4)
@@ -16530,8 +16739,9 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearSecretName() => $_clearField(4);
 
-  /// A new secret it asks for: name, description and variables (no values;
-  /// the person fills them in). Unset for an existing one.
+  /// What it needs: a name, what it's for (which service, what access) and
+  /// the variables it expects (no values). Prefills a new secret, if the
+  /// person adds one. Unset only in requests that name an existing secret.
   @$pb.TagNumber(5)
   NewSecret get newSecret => $_getN(4);
   @$pb.TagNumber(5)
@@ -16581,6 +16791,25 @@ class SecretRequest extends $pb.GeneratedMessage {
   $core.bool hasComment() => $_has(8);
   @$pb.TagNumber(9)
   void clearComment() => $_clearField(9);
+
+  /// GRANTED: the secret given, which may be another than the one described.
+  @$pb.TagNumber(10)
+  $core.String get givenSecretId => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set givenSecretId($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasGivenSecretId() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearGivenSecretId() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.String get givenSecretName => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set givenSecretName($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasGivenSecretName() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearGivenSecretName() => $_clearField(11);
 }
 
 class NewSecret extends $pb.GeneratedMessage {
@@ -17156,6 +17385,433 @@ class ShowRecoveryKey extends $pb.GeneratedMessage {
       _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ShowRecoveryKey>(
           ShowRecoveryKey.$_createMessage);
   static ShowRecoveryKey? _defaultInstance;
+}
+
+/// How this Claktory is arranged: where agents are, whom they can message,
+/// which secrets they have, what data they read and write, and their
+/// extensions that grant reach or power. Computed by the backend from the
+/// same rules agents follow, so the app only lays it out. Nodes are sorted by
+/// id and edges by from_id, to_id and kind, so the same Claktory gives the
+/// same map.
+class ClaktoryMap extends $pb.GeneratedMessage {
+  factory ClaktoryMap({
+    $core.Iterable<MapNode>? nodes,
+    $core.Iterable<MapEdge>? edges,
+  }) {
+    final result = ClaktoryMap._();
+    if (nodes != null) result.nodes.addAll(nodes);
+    if (edges != null) result.edges.addAll(edges);
+    return result;
+  }
+
+  ClaktoryMap._();
+
+  factory ClaktoryMap.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClaktoryMap()..mergeFromBuffer(data, registry);
+  factory ClaktoryMap.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ClaktoryMap()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ClaktoryMap',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ClaktoryMap.$_createMessage)
+    ..pPM<MapNode>(1, _omitFieldNames ? '' : 'nodes',
+        subBuilder: MapNode.$_createMessage)
+    ..pPM<MapEdge>(2, _omitFieldNames ? '' : 'edges',
+        subBuilder: MapEdge.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClaktoryMap clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ClaktoryMap copyWith(void Function(ClaktoryMap) updates) =>
+      super.copyWith((message) => updates(message as ClaktoryMap))
+          as ClaktoryMap;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ClaktoryMap() / ClaktoryMap.new instead')
+  static ClaktoryMap create() => ClaktoryMap._();
+  static $pb.GeneratedMessage $_createMessage() => ClaktoryMap._();
+  @$core.override
+  ClaktoryMap createEmptyInstance() => ClaktoryMap._();
+  @$core.pragma('dart2js:noInline')
+  static ClaktoryMap getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ClaktoryMap>(
+          ClaktoryMap.$_createMessage);
+  static ClaktoryMap? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<MapNode> get nodes => $_getList(0);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<MapEdge> get edges => $_getList(1);
+}
+
+class MapNode extends $pb.GeneratedMessage {
+  factory MapNode({
+    $core.String? id,
+    MapNodeKind? kind,
+    $core.String? label,
+    $core.String? detail,
+    $core.String? parentId,
+    $core.bool? admin,
+    $core.String? color,
+    $core.Iterable<MapBadge>? badges,
+    $core.String? refId,
+    $core.String? projectId,
+  }) {
+    final result = MapNode._();
+    if (id != null) result.id = id;
+    if (kind != null) result.kind = kind;
+    if (label != null) result.label = label;
+    if (detail != null) result.detail = detail;
+    if (parentId != null) result.parentId = parentId;
+    if (admin != null) result.admin = admin;
+    if (color != null) result.color = color;
+    if (badges != null) result.badges.addAll(badges);
+    if (refId != null) result.refId = refId;
+    if (projectId != null) result.projectId = projectId;
+    return result;
+  }
+
+  MapNode._();
+
+  factory MapNode.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapNode()..mergeFromBuffer(data, registry);
+  factory MapNode.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapNode()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'MapNode',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: MapNode.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aE<MapNodeKind>(2, _omitFieldNames ? '' : 'kind',
+        enumValues: MapNodeKind.values)
+    ..aOS(3, _omitFieldNames ? '' : 'label')
+    ..aOS(4, _omitFieldNames ? '' : 'detail')
+    ..aOS(5, _omitFieldNames ? '' : 'parentId')
+    ..aOB(6, _omitFieldNames ? '' : 'admin')
+    ..aOS(7, _omitFieldNames ? '' : 'color')
+    ..pPM<MapBadge>(8, _omitFieldNames ? '' : 'badges',
+        subBuilder: MapBadge.$_createMessage)
+    ..aOS(9, _omitFieldNames ? '' : 'refId')
+    ..aOS(10, _omitFieldNames ? '' : 'projectId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapNode clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapNode copyWith(void Function(MapNode) updates) =>
+      super.copyWith((message) => updates(message as MapNode)) as MapNode;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use MapNode() / MapNode.new instead')
+  static MapNode create() => MapNode._();
+  static $pb.GeneratedMessage $_createMessage() => MapNode._();
+  @$core.override
+  MapNode createEmptyInstance() => MapNode._();
+  @$core.pragma('dart2js:noInline')
+  static MapNode getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<MapNode>(MapNode.$_createMessage);
+  static MapNode? _defaultInstance;
+
+  /// Unique in the map and the same every time: "workspace",
+  /// "project:<project id>", "folder:<project id>/<folder id>",
+  /// "agent:<agent id>", "secret:<secret id>", "data:records" (Claktory's
+  /// records) and "data:agent:<agent id>" (an agent's own database).
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  MapNodeKind get kind => $_getN(1);
+  @$pb.TagNumber(2)
+  set kind(MapNodeKind value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasKind() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearKind() => $_clearField(2);
+
+  /// A name to show: the agent's, project's, folder's or secret's;
+  /// "Workspace", "Claktory's records", or "<agent name>'s database".
+  @$pb.TagNumber(3)
+  $core.String get label => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set label($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLabel() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLabel() => $_clearField(3);
+
+  /// A line about it: an agent's role, a project's, folder's or database's
+  /// path, a secret's description; may be empty.
+  @$pb.TagNumber(4)
+  $core.String get detail => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set detail($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDetail() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDetail() => $_clearField(4);
+
+  /// The node it sits under, as in the sidebar: a folder under its project,
+  /// an agent under the agent it's nested under, else its folder, else its
+  /// project, else the workspace; an agent's database under the agent.
+  /// Empty at the top: the workspace, projects, admin agents (wherever they
+  /// are), secrets and Claktory's records.
+  @$pb.TagNumber(5)
+  $core.String get parentId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set parentId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasParentId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearParentId() => $_clearField(5);
+
+  /// An admin agent: sees and messages every agent.
+  @$pb.TagNumber(6)
+  $core.bool get admin => $_getBF(5);
+  @$pb.TagNumber(6)
+  set admin($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasAdmin() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAdmin() => $_clearField(6);
+
+  /// An agent's color (Agent.color); empty for other nodes.
+  @$pb.TagNumber(7)
+  $core.String get color => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set color($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasColor() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearColor() => $_clearField(7);
+
+  /// An agent's extensions that grant reach or power, in a fixed order.
+  @$pb.TagNumber(8)
+  $pb.PbList<MapBadge> get badges => $_getList(7);
+
+  /// The id of what it stands for, to open it: the agent's, project's,
+  /// folder's (within project_id) or secret's id; for an agent's database,
+  /// the agent's. Empty for the workspace and Claktory's records.
+  @$pb.TagNumber(9)
+  $core.String get refId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set refId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasRefId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearRefId() => $_clearField(9);
+
+  /// The project a folder or an agent (or its database) is in; empty
+  /// otherwise.
+  @$pb.TagNumber(10)
+  $core.String get projectId => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set projectId($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasProjectId() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearProjectId() => $_clearField(10);
+}
+
+/// An extension an agent has on that grants reach or power.
+class MapBadge extends $pb.GeneratedMessage {
+  factory MapBadge({
+    $core.String? key,
+    $core.String? label,
+    $core.String? icon,
+  }) {
+    final result = MapBadge._();
+    if (key != null) result.key = key;
+    if (label != null) result.label = label;
+    if (icon != null) result.icon = icon;
+    return result;
+  }
+
+  MapBadge._();
+
+  factory MapBadge.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapBadge()..mergeFromBuffer(data, registry);
+  factory MapBadge.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapBadge()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'MapBadge',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: MapBadge.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'key')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aOS(3, _omitFieldNames ? '' : 'icon')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapBadge clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapBadge copyWith(void Function(MapBadge) updates) =>
+      super.copyWith((message) => updates(message as MapBadge)) as MapBadge;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use MapBadge() / MapBadge.new instead')
+  static MapBadge create() => MapBadge._();
+  static $pb.GeneratedMessage $_createMessage() => MapBadge._();
+  @$core.override
+  MapBadge createEmptyInstance() => MapBadge._();
+  @$core.pragma('dart2js:noInline')
+  static MapBadge getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<MapBadge>(MapBadge.$_createMessage);
+  static MapBadge? _defaultInstance;
+
+  /// Stable: "agents:admin" (sees and messages every agent), "secrets:give"
+  /// (gives secrets to agents), "tasks:see_all" (sees and stops every
+  /// agent's tasks), "web", "tree" (own checkout: lands on the main branch),
+  /// "database", "database:factory" (Claktory's records), "memory:factory"
+  /// (the Claktory manual: can change Claktory's settings).
+  @$pb.TagNumber(1)
+  $core.String get key => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set key($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKey() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKey() => $_clearField(1);
+
+  /// To show, e.g. "Web".
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// An icon name, as Extension.icon.
+  @$pb.TagNumber(3)
+  $core.String get icon => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set icon($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasIcon() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearIcon() => $_clearField(3);
+}
+
+class MapEdge extends $pb.GeneratedMessage {
+  factory MapEdge({
+    $core.String? fromId,
+    $core.String? toId,
+    MapEdgeKind? kind,
+    $core.bool? bothWays,
+  }) {
+    final result = MapEdge._();
+    if (fromId != null) result.fromId = fromId;
+    if (toId != null) result.toId = toId;
+    if (kind != null) result.kind = kind;
+    if (bothWays != null) result.bothWays = bothWays;
+    return result;
+  }
+
+  MapEdge._();
+
+  factory MapEdge.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapEdge()..mergeFromBuffer(data, registry);
+  factory MapEdge.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      MapEdge()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'MapEdge',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: MapEdge.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'fromId')
+    ..aOS(2, _omitFieldNames ? '' : 'toId')
+    ..aE<MapEdgeKind>(3, _omitFieldNames ? '' : 'kind',
+        enumValues: MapEdgeKind.values)
+    ..aOB(4, _omitFieldNames ? '' : 'bothWays')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapEdge clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  MapEdge copyWith(void Function(MapEdge) updates) =>
+      super.copyWith((message) => updates(message as MapEdge)) as MapEdge;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use MapEdge() / MapEdge.new instead')
+  static MapEdge create() => MapEdge._();
+  static $pb.GeneratedMessage $_createMessage() => MapEdge._();
+  @$core.override
+  MapEdge createEmptyInstance() => MapEdge._();
+  @$core.pragma('dart2js:noInline')
+  static MapEdge getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<MapEdge>(MapEdge.$_createMessage);
+  static MapEdge? _defaultInstance;
+
+  /// Node ids.
+  @$pb.TagNumber(1)
+  $core.String get fromId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set fromId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFromId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFromId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get toId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set toId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasToId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearToId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  MapEdgeKind get kind => $_getN(2);
+  @$pb.TagNumber(3)
+  set kind(MapEdgeKind value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasKind() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearKind() => $_clearField(3);
+
+  /// MESSAGES only: each can message the other. Such a pair is one edge,
+  /// from the lower id.
+  @$pb.TagNumber(4)
+  $core.bool get bothWays => $_getBF(3);
+  @$pb.TagNumber(4)
+  set bothWays($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasBothWays() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearBothWays() => $_clearField(4);
 }
 
 const $core.bool _omitFieldNames =

@@ -1,8 +1,12 @@
-//! Agents' requests for secrets (`secrets_request`): an existing secret by
-//! name, or a new one described (name, description, variables, never
-//! values). Each shows in the agent's conversation after the call, and in
-//! the vault's state while it waits; the person gives it or dismisses it
-//! (`requests::decide`), and the agent is told.
+//! Agents' requests for secrets (`secrets_request`). An agent doesn't know
+//! which secrets the vault holds: it describes what it needs (a name, what
+//! it's for, the variables it expects, never values) and why, and is
+//! answered the same whether or not the vault has such a secret. Each
+//! request shows in the agent's conversation after the call, and in the
+//! vault's state while it waits; the person gives one of the vault's
+//! secrets, adds a new one from the description, or dismisses it
+//! (`requests::decide_request`), and the agent is told only what it got.
+//! Requests from before named an existing secret (`secret`).
 
 use factory_protocol::v1::{self, SecretRequestState};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -41,7 +45,7 @@ fn state_of(state: &str) -> SecretRequestState {
     }
 }
 
-const COLUMNS: &str = "id, agent, secret, secret_name, new_secret, reason, state, decided, comment";
+const COLUMNS: &str = "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let new_secret: String = row.get(4)?;
@@ -65,6 +69,8 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         state: state_of(&state).into(),
         decided_ms: row.get(7)?,
         comment: row.get(8)?,
+        given_secret_id: row.get(9)?,
+        given_secret_name: row.get(10)?,
     })
 }
 
@@ -117,6 +123,8 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
         state: SecretRequestState::Pending.into(),
         decided_ms: 0,
         comment: String::new(),
+        given_secret_id: String::new(),
+        given_secret_name: String::new(),
     })
 }
 
@@ -128,15 +136,11 @@ pub(super) fn pending(db: &Connection) -> Result<Vec<v1::SecretRequest>, VaultEr
 }
 
 impl Vault {
-    /// Records `agent`'s request for `secret` (an existing one, by name) or
-    /// for a new one, `wanted`; exactly one of them. Errors say what to do.
-    pub(crate) fn ask(
-        &self,
-        agent: &str,
-        secret: Option<&str>,
-        wanted: Option<Wanted>,
-        reason: &str,
-    ) -> Result<v1::SecretRequest, VaultError> {
+    /// Records `agent`'s request for what `wanted` describes. Whether or
+    /// not the vault has such a secret, or has given it one, makes no
+    /// difference to the answer: nothing of the vault shows through. Errors
+    /// say what to fix.
+    pub(crate) fn ask(&self, agent: &str, wanted: Wanted, reason: &str) -> Result<v1::SecretRequest, VaultError> {
         let reason = reason.trim();
         if reason.is_empty() {
             return Err(VaultError::Invalid("Say why you need it, in reason: the person reads it.".to_owned()));
@@ -144,72 +148,48 @@ impl Vault {
         if reason.chars().count() > MAX_REASON {
             return Err(VaultError::Invalid(format!("Keep reason under {MAX_REASON} characters.")));
         }
+        let name = check_name(&wanted.name).map_err(|_| {
+            VaultError::Invalid(
+                "Give what you need a short name, such as \"Cloudflare token\": letters, digits, spaces, '-', '_' or '.', up to 64."
+                    .to_owned(),
+            )
+        })?;
+        let description = wanted.description.trim();
+        if description.chars().count() > MAX_REASON {
+            return Err(VaultError::Invalid(format!("Keep description under {MAX_REASON} characters.")));
+        }
+        if wanted.variables.len() > MAX_VARIABLES {
+            return Err(VaultError::Invalid(format!("Name {MAX_VARIABLES} variables at most.")));
+        }
+        let mut variables = Vec::new();
+        for variable in &wanted.variables {
+            let variable_name = variable.name.trim();
+            if !valid_variable(variable_name) {
+                return Err(VaultError::Invalid(format!(
+                    "\"{variable_name}\" isn't a variable name: letters, digits and _, not starting with a digit."
+                )));
+            }
+            if variables.iter().any(|seen: &WantedVariable| seen.name == variable_name) {
+                return Err(VaultError::Invalid(format!("{variable_name} is named twice.")));
+            }
+            variables.push(WantedVariable { name: variable_name.to_owned(), file: variable.file });
+        }
+        let wanted = Wanted { name: name.clone(), description: description.to_owned(), variables };
+        let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
-        let (secret_id, secret_name, new_secret) = match (secret.map(str::trim).filter(|name| !name.is_empty()), wanted) {
-            (Some(name), None) => {
-                let found: Option<(String, String)> = db
-                    .query_row("SELECT id, name FROM secrets WHERE name = ?1", [name], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .optional()?;
-                let Some((id, name)) = found else {
-                    return Err(VaultError::Invalid(format!(
-                        "There's no secret named \"{name}\". To ask for a new one, describe it in `new` (name, description, variables) instead."
-                    )));
-                };
-                let granted: bool =
-                    db.query_row("SELECT COUNT(*) > 0 FROM grants WHERE secret = ?1 AND agent = ?2", [&id, agent], |row| row.get(0))?;
-                if granted {
-                    return Err(VaultError::Invalid(format!("You have {name} already: pass it in bash's `secrets`.")));
-                }
-                (id, name, String::new())
-            }
-            (None, Some(wanted)) => {
-                let name = check_name(&wanted.name)?;
-                let taken: Option<String> =
-                    db.query_row("SELECT name FROM secrets WHERE name = ?1", [&name], |row| row.get(0)).optional()?;
-                if let Some(taken) = taken {
-                    return Err(VaultError::Invalid(format!("There's a secret named {taken} already: ask for it by name, in `secret`.")));
-                }
-                if wanted.variables.is_empty() || wanted.variables.len() > MAX_VARIABLES {
-                    return Err(VaultError::Invalid(format!(
-                        "Name the environment variables it sets, 1 to {MAX_VARIABLES}, such as AWS_SECRET_ACCESS_KEY."
-                    )));
-                }
-                let mut variables = Vec::new();
-                for variable in &wanted.variables {
-                    let variable_name = variable.name.trim();
-                    if !valid_variable(variable_name) {
-                        return Err(VaultError::Invalid(format!(
-                            "\"{variable_name}\" isn't a variable name: letters, digits and _, not starting with a digit."
-                        )));
-                    }
-                    if variables.iter().any(|seen: &WantedVariable| seen.name == variable_name) {
-                        return Err(VaultError::Invalid(format!("{variable_name} is named twice.")));
-                    }
-                    variables.push(WantedVariable { name: variable_name.to_owned(), file: variable.file });
-                }
-                let wanted = Wanted { name: name.clone(), description: wanted.description.trim().to_owned(), variables };
-                let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
-                (String::new(), name, json)
-            }
-            _ => {
-                return Err(VaultError::Invalid(
-                    "Ask for one secret: an existing one by name in `secret`, or a new one described in `new`.".to_owned(),
-                ));
-            }
-        };
         let waiting: bool = db.query_row(
             "SELECT COUNT(*) > 0 FROM requests WHERE agent = ?1 AND secret_name = ?2 COLLATE NOCASE AND state = 'pending'",
-            [agent, &secret_name],
+            [agent, &name],
             |row| row.get(0),
         )?;
         if waiting {
-            return Err(VaultError::Invalid(format!("You asked for {secret_name} already; it's waiting for the person.")));
+            return Err(VaultError::Invalid(format!("You asked for {name} already; it's waiting for the person.")));
         }
         let id = format!("r{}", crypto::hex(&crypto::random::<4>()));
         db.execute(
-            "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
-            params![id, agent, secret_id, secret_name, new_secret, reason, now_ms()],
+            "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created) VALUES (?1, ?2, '', ?3, ?4, ?5, 'pending', ?6)",
+            params![id, agent, name, json, reason, now_ms()],
         )?;
         let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [&id], row)?;
         inner.state = None;
@@ -231,14 +211,23 @@ impl Vault {
         }
     }
 
-    /// Marks the request given or dismissed; returns it as it is now.
-    pub(crate) fn decide_request(&self, agent: &str, id: &str, granted: bool, comment: &str) -> Result<v1::SecretRequest, VaultError> {
+    /// Marks the request given (the secret `given`: its id and name) or
+    /// dismissed (None); returns it as it is now.
+    pub(crate) fn decide_request(
+        &self,
+        agent: &str,
+        id: &str,
+        given: Option<(&str, &str)>,
+        comment: &str,
+    ) -> Result<v1::SecretRequest, VaultError> {
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
-        let state = if granted { "granted" } else { "dismissed" };
+        let state = if given.is_some() { "granted" } else { "dismissed" };
+        let (given, given_name) = given.unwrap_or_default();
         let changed = db.execute(
-            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
-            params![id, agent, state, now_ms(), comment.trim()],
+            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7
+             WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![id, agent, state, now_ms(), comment.trim(), given, given_name],
         )?;
         if changed == 0 {
             return Err(VaultError::Invalid("This request was decided already.".to_owned()));

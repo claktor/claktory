@@ -107,10 +107,20 @@ if $BUILT; then
   VERSION="$(cat "$HOME_DIR/releases/latest" 2>/dev/null)" || { echo "no release in $HOME_DIR/releases to publish" >&2; exit 1; }
   RELEASE="$HOME_DIR/releases/$VERSION"
   HEAD="$(git -C "$ROOT" rev-parse HEAD)"
-  [[ "$(cat "$RELEASE/source" 2>/dev/null)" == "$HEAD" ]] || {
-    echo "$VERSION was built from $(cat "$RELEASE/source" 2>/dev/null || echo "an unrecorded commit"), not this checkout's $HEAD; build it again from here" >&2
-    exit 1
-  }
+  BUILT_FROM="$(cat "$RELEASE/source" 2>/dev/null || true)"
+  if [[ "$BUILT_FROM" != "$HEAD" ]]; then
+    # Only files that neither build nor ship in a release may have changed
+    # since (a secret-check exception, say): then what was built is still
+    # this commit's release, and the source pushed with it is HEAD.
+    NOT_SHIPPED='^(\.gitleaks\.toml|AGENTS\.md|scripts/(publish|check-secrets|push-source|testflight)\.sh)$'
+    CHANGED="$(git -C "$ROOT" diff --name-only "$BUILT_FROM" "$HEAD" 2>/dev/null)" &&
+      git -C "$ROOT" merge-base --is-ancestor "$BUILT_FROM" "$HEAD" &&
+      { [[ -z "$CHANGED" ]] || ! grep -Eqv "$NOT_SHIPPED" <<<"$CHANGED"; } || {
+      echo "$VERSION was built from ${BUILT_FROM:-an unrecorded commit}, and this checkout ($HEAD) changed what goes into a release since; build it again from here" >&2
+      exit 1
+    }
+    echo "$VERSION was built from ${BUILT_FROM:0:7}; since then only $(tr '\n' ' ' <<<"$CHANGED")changed, which a release doesn't contain"
+  fi
   [[ "$(cat "$RELEASE/update-url" 2>/dev/null)" == "$MANIFEST_URL" ]] || {
     echo "$VERSION's backend checks \"$(cat "$RELEASE/update-url" 2>/dev/null || true)\" for updates, not this channel; build it with:" >&2
     echo "  FACTORY_UPDATE_URL=$MANIFEST_URL scripts/release.sh ${DEV[*]-}" >&2

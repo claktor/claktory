@@ -1,6 +1,7 @@
 import 'package:factory_app/changelog.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/layout.dart' show leaves;
+import 'package:factory_app/map.dart';
 import 'package:factory_app/marketplace.dart';
 import 'package:factory_app/panes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -124,5 +125,29 @@ void main() {
     expect(harness.page.value, AppPage.settings);
     expect(find.text('Done'), findsOneWidget);
     expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+  });
+
+  testWidgets('the Map opens beside the conversation as a canvas of its '
+      'own, and closes again', (tester) async {
+    final harness = await showWith(tester);
+    await tester.tap(glyphButton('Map'));
+    await settle(tester);
+    expect(kinds(harness), ['chat', 'map']);
+    expect(find.byType(MapView), findsOneWidget);
+    // No sideways scroll around it, and no bar of its own.
+    expect(
+      find.ancestor(
+        of: find.byType(MapView),
+        matching: find.byType(SingleChildScrollView),
+      ),
+      findsNothing,
+    );
+    expect(find.text('Done'), findsNothing);
+    expect(active('Map'), isTrue);
+
+    await tester.tap(glyphButton('Map'));
+    await settle(tester);
+    expect(find.byType(MapView), findsNothing);
+    expect(active('Map'), isFalse);
   });
 }

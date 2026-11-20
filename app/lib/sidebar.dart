@@ -1406,6 +1406,14 @@ class _Footer extends StatelessWidget {
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
               ),
+              const SizedBox(width: Space.xs),
+              GlyphButton(
+                label: 'Map',
+                active: AppScope.pageShown(context, AppPage.map),
+                onTap: () => AppScope.togglePage(context, AppPage.map),
+                glyph: (color) =>
+                    ExtensionGlyph(icon: 'network', name: 'Map', color: color),
+              ),
             ],
           ),
           Padding(

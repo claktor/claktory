@@ -200,12 +200,10 @@ fn service_name(service: &str) -> String {
     reqwest::Url::parse(service).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_else(|| service.to_owned())
 }
 
-/// This computer's name as the service shows it: its host name without the
-/// network's domain ("lees-mac-mini", not "lees-mac-mini.lan",
-/// which would read as a link and be left out).
+/// This computer's name as the service shows it: the one devices show
+/// (`remote::machine_name`), tidied as the service wants it.
 fn computer_name() -> String {
-    let host = crate::remote::machine_name();
-    api::clean_name(host.split('.').next().unwrap_or(host))
+    api::clean_name(crate::remote::machine_name())
 }
 
 /// This build's platform, as the service counts them: "macos-arm64".
@@ -237,6 +235,21 @@ fn refused(code: ErrorCode, message: impl Into<String>) -> RequestError {
     RequestError::Account(code, message.into())
 }
 
+/// When to try again, `seconds` after `now`: "in 5 minutes" up to an hour and
+/// a half, then "tomorrow" if it's on a later day here, else "in 3 hours".
+fn try_again(seconds: i64, now: &jiff::ZonedDateTime) -> String {
+    let seconds = seconds.max(1);
+    let minutes = (seconds + 59) / 60;
+    if minutes <= 90 {
+        return if minutes == 1 { "in 1 minute".to_owned() } else { format!("in {minutes} minutes") };
+    }
+    let later_day = now.checked_add(jiff::SignedDuration::from_secs(seconds)).is_ok_and(|then| then.date() > now.date());
+    if later_day {
+        return "tomorrow".to_owned();
+    }
+    format!("in {} hours", (minutes + 59) / 60)
+}
+
 /// A sign-in request's failure, in the app's words.
 fn sign_in_error(service: &str, failure: Failure) -> RequestError {
     let name = service_name(service);
@@ -248,9 +261,8 @@ fn sign_in_error(service: &str, failure: Failure) -> RequestError {
         Failure::Refused(_, body) => match body.error.as_str() {
             "invalid_email" => refused(ErrorCode::InvalidRequest, "Enter an email address, like you@example.com."),
             "rate_limited" => {
-                let minutes = (body.retry_after.unwrap_or(60).max(1) + 59) / 60;
-                let when = if minutes == 1 { "1 minute".to_owned() } else { format!("{minutes} minutes") };
-                refused(ErrorCode::RateLimited, format!("Too many codes requested. Try again in {when}."))
+                let when = try_again(body.retry_after.unwrap_or(60), &jiff::ZonedDateTime::now());
+                refused(ErrorCode::RateLimited, format!("Too many codes requested. Try again {when}."))
             }
             "email_unavailable" => refused(ErrorCode::Unreachable, format!("{name} can't send email right now. Try again later.")),
             "wrong_code" => match body.attempts_left.unwrap_or(0) {
@@ -861,7 +873,8 @@ async fn check_in(factory: &Arc<Factory>) {
     let account = &factory.account;
     let made = {
         let since = account.lock().saved.periods_until;
-        analytics::new_periods(&factory.store.db(), since, now_s())
+        let names = analytics::names(factory);
+        analytics::new_periods(&factory.store.db(), since, now_s(), &names)
     };
     match made {
         Ok(made) => {
@@ -901,6 +914,9 @@ async fn check_in(factory: &Arc<Factory>) {
                     inner.problem.clear();
                 }
             }
+            // Accepted periods are gone from disk at once, before anything
+            // else is awaited (and broadcast).
+            account.save();
             reseal(factory, checked.epoch).await;
             register_endpoints(factory).await;
         }
@@ -1064,4 +1080,19 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
         next = next.min(inner.next_unlock.saturating_duration_since(now));
     }
     next.max(Duration::from_millis(100))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_long_wait_says_hours_or_tomorrow() {
+        let at = |time: &str| -> jiff::ZonedDateTime { time.parse().expect("a time") };
+        let morning = at("2026-11-20T09:00:00[Europe/Amsterdam]");
+        assert_eq!(super::try_again(30, &morning), "in 1 minute");
+        assert_eq!(super::try_again(90 * 60, &morning), "in 90 minutes");
+        assert_eq!(super::try_again(91 * 60, &morning), "in 2 hours");
+        assert_eq!(super::try_again(10 * 3600, &morning), "in 10 hours");
+        assert_eq!(super::try_again(1316 * 60, &morning), "tomorrow");
+        assert_eq!(super::try_again(2 * 3600, &at("2026-11-20T23:00:00[Europe/Amsterdam]")), "tomorrow");
+    }
 }

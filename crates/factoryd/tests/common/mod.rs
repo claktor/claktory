@@ -118,6 +118,8 @@ pub struct Request {
     pub tools: Vec<String>,
     /// How long the prompt cache was asked to last: "5m" or "1h".
     pub cache_ttl: String,
+    /// The last message's text as the model read it, tags and all.
+    pub prompt: String,
 }
 
 const ACCOUNT: &str = "Scripted account";
@@ -295,6 +297,10 @@ impl Models for Scripted {
                 system_prompt: context.system_prompt.clone().unwrap_or_default(),
                 tools: context.tools.iter().map(|tool| tool.name.to_string()).collect(),
                 cache_ttl: options.cache_ttl.as_str().to_owned(),
+                prompt: match context.messages.last() {
+                    Some(Message::User(user)) => text_of(&user.content),
+                    _ => String::new(),
+                },
             });
             *system_prompt.lock().expect("lock") = context.system_prompt.clone().unwrap_or_default();
             *tools.lock().expect("lock") = serde_json::to_string(&context.tools).expect("tools");
@@ -311,6 +317,7 @@ impl Models for Scripted {
                 }
                 _ => String::new(),
             };
+            let prompt = without_device(prompt);
             // Asked to compact, it summarizes like a real model would.
             let reply = if prompt.contains("<summary>") {
                 let texts: Vec<String> = context
@@ -416,6 +423,18 @@ impl Models for Scripted {
     }
 }
 
+/// The person's message without the tag naming the device it came from,
+/// which a real model reads past.
+fn without_device(text: String) -> String {
+    if let Some(rest) = text.strip_prefix("<sent ")
+        && let Some((_, inner)) = rest.split_once(">\n")
+        && let Some(inner) = inner.strip_suffix("\n</sent>")
+    {
+        return inner.to_owned();
+    }
+    text
+}
+
 fn text_of(content: &UserContent) -> String {
     match content {
         UserContent::Text(text) => text.clone(),
@@ -451,8 +470,14 @@ impl Client {
 
     /// Connects and completes the handshake. Returns the initial state.
     pub async fn connect(addr: SocketAddr) -> (Client, v1::Workspace, Option<v1::Transcript>) {
+        Client::connect_as(addr, v1::DeviceKind::Unspecified).await
+    }
+
+    /// Connects as an app on the kind of device given.
+    pub async fn connect_as(addr: SocketAddr, kind: v1::DeviceKind) -> (Client, v1::Workspace, Option<v1::Transcript>) {
         let mut client = Client::open(addr).await;
-        let hello = Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token: String::new() };
+        let hello =
+            Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token: String::new(), device_kind: kind.into() };
         client.send(ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) }).await;
         match client.receive().await.body {
             Some(Body::Welcome(_)) => {}

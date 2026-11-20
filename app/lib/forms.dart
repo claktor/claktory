@@ -691,6 +691,7 @@ class _AgentFields extends StatelessWidget {
     required this.offerDefault,
     required this.offerWorkspace,
     this.outsideLabel = 'Workspace',
+    this.defaultPrompt = '',
     required this.close,
   });
 
@@ -725,6 +726,10 @@ class _AgentFields extends StatelessWidget {
   /// What to call the place outside any project: "Admin" for an admin
   /// agent, else "Workspace".
   final String outsideLabel;
+
+  /// The prompt Claktory ships for this agent, to go back to; empty when it
+  /// has none (only Rivet has one).
+  final String defaultPrompt;
 
   /// Closes the form, for leaving it to sign in.
   final VoidCallback close;
@@ -766,11 +771,18 @@ class _AgentFields extends StatelessWidget {
         ),
         Field(
           label: 'Prompt',
-          child: TextField(
-            controller: prompt,
-            placeholder: 'What this agent does and how',
-            minLines: 4,
-            maxLines: 10,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: prompt,
+                placeholder: 'What this agent does and how',
+                minLines: 4,
+                maxLines: 10,
+              ),
+              if (defaultPrompt.isNotEmpty)
+                _DefaultPrompt(prompt: prompt, defaultPrompt: defaultPrompt),
+            ],
           ),
         ),
         if (workspace.projects.isNotEmpty)
@@ -1036,6 +1048,56 @@ class _CreateAgentFormState extends State<CreateAgentForm> with _Submitting {
   }
 }
 
+/// Under an agent's prompt, when Claktory ships a default for it: says the
+/// prompt is the default, or offers to put the default back (applied with
+/// Save).
+class _DefaultPrompt extends StatelessWidget {
+  const _DefaultPrompt({required this.prompt, required this.defaultPrompt});
+
+  final TextEditingController prompt;
+  final String defaultPrompt;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return ListenableBuilder(
+      listenable: prompt,
+      builder: (context, _) {
+        // As the backend compares them: trailing whitespace aside.
+        final isDefault = prompt.text.trim() == defaultPrompt.trim();
+        return Padding(
+          padding: const EdgeInsets.only(top: Space.xs + 2),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  isDefault
+                      ? "Claktory's default. Each update brings the newest "
+                            'version until you change it.'
+                      : 'Changed from the default.',
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                ),
+              ),
+              if (!isDefault) ...[
+                const SizedBox(width: Space.s),
+                Button(
+                  label: 'Reset to default',
+                  onPressed: () => prompt.value = TextEditingValue(
+                    text: defaultPrompt,
+                    selection: TextSelection.collapsed(
+                      offset: defaultPrompt.length,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Edits an agent's name, color, prompt, project, model and effort, sending only
 /// what changed, or deletes the agent.
 class AgentSettingsForm extends StatefulWidget {
@@ -1093,7 +1155,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     if (name != agent.name) update.name = name;
     final role = _role.text.trim();
     if (role != agent.role) update.role = role;
-    if (prompt != agent.prompt) update.prompt = prompt;
+    if (prompt != agent.prompt.trim()) update.prompt = prompt;
     if (_project != agent.projectId) update.projectId = _project;
     // Moving to another project leaves its folder; the backend clears it.
     if (_folder != agent.folderId &&
@@ -1299,6 +1361,12 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               // As the backend has it now, with what's changed here: the
               // admin option turned on or off makes it an admin agent.
               outsideLabel: outsideProjectsLabel(_edited),
+              defaultPrompt:
+                  [
+                    for (final candidate in workspace.agents)
+                      if (candidate.id == agent.id) candidate.defaultPrompt,
+                  ].firstOrNull ??
+                  agent.defaultPrompt,
               close: widget.close,
             ),
             Field(
@@ -1315,6 +1383,8 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                     'Message ${_name.text.trim().isEmpty ? agent.name : _name.text.trim()}',
               ),
             ),
+            // Above the extensions, so it's in sight: which secrets it has.
+            AgentSecretsField(agent: agent),
             if (workspace.extensions.isNotEmpty)
               Field(
                 label: 'Extensions',
@@ -1343,7 +1413,6 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                   ],
                 ),
               ),
-            AgentSecretsField(agent: agent),
           ],
         );
       },
@@ -1410,6 +1479,15 @@ class _ExtensionSettings extends StatelessWidget {
             value: enabled,
             onChanged: onEnabled,
           ),
+          // Given secrets work whether or not it's on: say which it has.
+          if (extension.id == 'secrets')
+            Padding(
+              padding: const EdgeInsets.only(
+                top: Space.s,
+                left: Space.l + Space.s,
+              ),
+              child: AgentSecretsSummary(agentId: agentId),
+            ),
           if (enabled)
             for (final option in extension.options)
               Padding(

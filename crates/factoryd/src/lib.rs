@@ -17,6 +17,7 @@ mod idle;
 pub mod launch_agent;
 mod login;
 mod manual;
+mod map;
 pub mod models;
 mod proposals;
 pub mod remote;

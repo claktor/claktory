@@ -5,13 +5,17 @@ use hyper::StatusCode;
 use super::{ApiError, Call, Reply, Service, db, mail};
 use crate::protocol::{self, *};
 
+/// Sign-ins an IP may start a day.
+pub const SIGN_INS_PER_IP: u32 = 30;
+
 /// What a sign-in may make of the limits: per email 5 an hour and 20 a day,
-/// per IP 5 a day.
+/// per IP 30 a day (people behind one address, at a meetup or an office,
+/// sign in together).
 pub(super) fn sign_in_limits(service: &Service, email: &str, ip: &str) -> Result<(), ApiError> {
     let hour = db::email_key("email-hour", email);
     let day = db::email_key("email-day", email);
     let ip = format!("ip-sign-in:{ip}");
-    service.limit(&[(&hour, 3600, 5), (&day, 86_400, 20), (&ip, 86_400, 5)])
+    service.limit(&[(&hour, 3600, 5), (&day, 86_400, 20), (&ip, 86_400, SIGN_INS_PER_IP)])
 }
 
 /// Six random digits, every one as likely.

@@ -360,10 +360,27 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
     Ok(())
 }
 
-/// This machine's name, as devices show it ("mac-mini").
+/// This machine's name, as devices, the app's footer and claktory.com show
+/// it: on a Mac, its Computer Name (System Settings → General → Sharing,
+/// such as "Lee's Mac mini"); elsewhere, its host name without the
+/// network's domain ("lees-mini", not "lees-mini.lan" or ".local").
 pub(crate) fn machine_name() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
+        let mac = if cfg!(target_os = "macos") {
+            std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        } else {
+            None
+        };
+        if let Some(name) = mac {
+            return name;
+        }
         // The system call, not the `hostname` program, which a minimal
         // Linux (NixOS, say) may not have.
         let mut buffer = [0u8; 256];
@@ -371,7 +388,7 @@ pub(crate) fn machine_name() -> &'static str {
         let got = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
         let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
         let name = if got { String::from_utf8_lossy(&buffer[..end]).trim().to_owned() } else { String::new() };
-        let name = name.strip_suffix(".local").unwrap_or(&name).to_owned();
+        let name = name.split('.').next().unwrap_or_default().to_owned();
         if name.is_empty() { "factory".to_owned() } else { name }
     })
 }
@@ -487,9 +504,17 @@ struct Wanted {
     relays: Vec<String>,
 }
 
+/// The tunnel is two endpoints with the same key. One answers on 127.0.0.1
+/// only, for this machine's app, and runs for as long as Factory does, so
+/// remote access turning on or off never drops this machine's connections
+/// (adding the first device from the app used to cut the app off for half
+/// a minute). The other answers on every address, with relays, while
+/// remote access is on.
 #[derive(Default)]
 struct Tunnel {
-    running: Option<(Wanted, Endpoint, tokio::task::JoinHandle<()>)>,
+    local: Option<(Endpoint, tokio::task::JoinHandle<()>)>,
+    /// With the relays it was started with.
+    remote: Option<(Vec<String>, Endpoint, tokio::task::JoinHandle<()>)>,
     /// What failed to start last, so it isn't tried every second.
     failed: Option<Wanted>,
 }
@@ -511,7 +536,7 @@ pub(crate) struct State {
     /// The open tunnel connections of each key, numbered.
     links: Mutex<HashMap<String, Vec<(u64, Connection)>>>,
     next_link: AtomicU64,
-    /// The running endpoint.
+    /// The endpoint devices on other machines reach, while remote access is on.
     endpoint: Mutex<Option<Endpoint>>,
     tunnel: tokio::sync::Mutex<Tunnel>,
     /// How long making a code waits for the relay; tests make it shorter.
@@ -911,9 +936,10 @@ fn plain_error(error: &std::io::Error) -> String {
     }
 }
 
-/// Keeps the tunnel as it should be: on 127.0.0.1 only, or on every address
-/// with relays while a device on another machine can connect, rebuilt within
-/// a second of a change. Also keeps what the Workspace shows of it current.
+/// Keeps the tunnel as it should be: on 127.0.0.1 always, and also on
+/// every address with relays while a device on another machine can connect,
+/// within a second of a change. Also keeps what the Workspace shows of it
+/// current.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     while let Some(strong) = factory.upgrade() {
         sync_tunnel(&strong).await;
@@ -923,8 +949,10 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     }
 }
 
-/// Starts the tunnel, or starts it again when it should change. Boxed: a
-/// client the tunnel serves can pair a device, which comes back here.
+/// Starts the tunnel's endpoints, or changes them when they should change:
+/// the loopback one once, the remote one as remote access and its relays
+/// say. Boxed: a client the tunnel serves can pair a device, which comes
+/// back here.
 fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
     Box::pin(async move {
         let devices = devices(&factory.home).unwrap_or_else(|error| {
@@ -934,47 +962,51 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
         let relays = factory.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
         let wanted = Wanted { on: remote_on(&devices, now_ms()), relays };
         let mut tunnel = factory.remote.tunnel.lock().await;
-        if tunnel.running.as_ref().is_some_and(|(running, ..)| *running == wanted) || tunnel.failed.as_ref() == Some(&wanted) {
+        let remote_as_wanted = match &tunnel.remote {
+            Some((relays, ..)) => wanted.on && *relays == wanted.relays,
+            None => !wanted.on,
+        };
+        if (tunnel.local.is_some() && remote_as_wanted) || tunnel.failed.as_ref() == Some(&wanted) {
             return;
         }
-        let mut port = local_port(&factory.home);
-        if let Some((_, endpoint, accept)) = tunnel.running.take() {
-            accept.abort();
-            port = loopback_port(&endpoint).unwrap_or(port);
-            lock(&factory.remote.endpoint).take();
-            endpoint.close().await;
+        let mut failed = None;
+        if tunnel.local.is_none() {
+            match start_local(factory).await {
+                Ok(endpoint) => {
+                    let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
+                    let id = endpoint.id().to_string();
+                    tracing::info!(endpoint = %id, "private tunnel started on 127.0.0.1");
+                    tunnel.local = Some((endpoint, accept));
+                    factory.set_remote_shown(|shown| shown.endpoint_id = id);
+                }
+                Err(error) => failed = Some(error),
+            }
         }
-        let home = factory.home.clone();
-        let started = async {
-            let key = {
-                let home = home.clone();
-                tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
-            };
-            let endpoint = bind(&home, key, &wanted, port).await?;
-            let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
-            let written =
-                tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
-            if let Err(error) = written {
+        if failed.is_none() && !remote_as_wanted {
+            if let Some((_, endpoint, accept)) = tunnel.remote.take() {
+                lock(&factory.remote.endpoint).take();
+                accept.abort();
                 endpoint.close().await;
-                return Err(error);
+                tracing::info!("remote access stopped");
             }
-            Ok::<_, RemoteError>(endpoint)
+            if wanted.on {
+                match start_remote(&factory.home, &wanted).await {
+                    Ok(endpoint) => {
+                        tracing::info!(endpoint = %endpoint.id(), "remote access started");
+                        let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
+                        *lock(&factory.remote.endpoint) = Some(endpoint.clone());
+                        tunnel.remote = Some((wanted.relays.clone(), endpoint, accept));
+                    }
+                    Err(error) => failed = Some(error),
+                }
+            }
         }
-        .await;
-        match started {
-            Ok(endpoint) => {
-                tracing::info!(remote_access = wanted.on, endpoint = %endpoint.id(), "private tunnel started");
-                let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
-                *lock(&factory.remote.endpoint) = Some(endpoint.clone());
-                let id = endpoint.id().to_string();
-                tunnel.running = Some((wanted, endpoint, accept));
+        match failed {
+            None => {
                 tunnel.failed = None;
-                factory.set_remote_shown(|shown| {
-                    shown.error.clear();
-                    shown.endpoint_id = id;
-                });
+                factory.set_remote_shown(|shown| shown.error.clear());
             }
-            Err(error) => {
+            Some(error) => {
                 tracing::error!(%error, "could not start the private tunnel");
                 tunnel.failed = Some(wanted);
                 factory.set_remote_shown(|shown| shown.error = error.to_string());
@@ -983,7 +1015,45 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
     })
 }
 
-/// The port the endpoint answers on at 127.0.0.1.
+/// The loopback endpoint, on the port this machine's pairing code names
+/// when it's free, and the code written for it.
+async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
+    let home = factory.home.clone();
+    let key = {
+        let home = home.clone();
+        tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
+    };
+    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, local_port(&home)).await?;
+    let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
+    let written = tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
+    if let Err(error) = written {
+        endpoint.close().await;
+        return Err(error);
+    }
+    Ok(endpoint)
+}
+
+/// The endpoint for devices on other machines, on the port it had before
+/// when it's free, so the addresses in their codes stay right.
+async fn start_remote(home: &Home, wanted: &Wanted) -> Result<Endpoint, RemoteError> {
+    let key = {
+        let home = home.clone();
+        tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
+    };
+    let path = dir(home).join("remote-port");
+    let port = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+    let endpoint = bind(home, key, wanted, port).await?;
+    if let Some(bound) = loopback_port(&endpoint)
+        && bound != port
+        && let Err(error) = write_private(&path, format!("{bound}\n").as_bytes())
+    {
+        tracing::warn!(%error, "could not save the remote access port");
+    }
+    Ok(endpoint)
+}
+
+/// The port the endpoint answers on over IPv4 (at 127.0.0.1 for the
+/// loopback one).
 fn loopback_port(endpoint: &Endpoint) -> Option<u16> {
     endpoint.bound_sockets().into_iter().find(SocketAddr::is_ipv4).map(|address| address.port())
 }

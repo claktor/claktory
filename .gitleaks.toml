@@ -28,7 +28,17 @@ description = "Placeholder home folders in tests and docs"
 regexTarget = "match"
 regexes = ['''^/(?:Users|home)/(?:me|x|you|user|runner|linuxbrew|Shared)$''']
 
-# Exceptions.
+[[rules.allowlists]]
+description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"
+condition = "AND"
+paths = ['''^app/test/map_fixture\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+# Exceptions. One here, at the top level, names exact values only: given
+# paths, gitleaks (8.30) skips those files whole, whatever its condition. One
+# that holds only in some files goes under its rule, as above, where the
+# paths and the values must both match.
 
 [[allowlists]]
 description = "Sec-WebSocket-Key: a random nonce each WebSocket handshake sends, never a credential (RFC 6455's sample in crates/factoryd/tests/origin.rs, recorded handshakes in the Codex WebSocket fixtures)"
@@ -37,14 +47,10 @@ regexes = ['''(?i)sec-websocket-key''']
 
 [[allowlists]]
 description = "The Codex test fixtures' fake ChatGPT token: an unsigned JWT (alg none, signature 'sig') for the made-up account acct_123"
-condition = "AND"
-paths = ['''^crates/factory-agent/tests/fixtures/openai_codex(?:_ws)?\.json$''']
 regexTarget = "secret"
 regexes = ['''^eyJhbGciOiJub25lIn0\.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0\.sig$''']
 
 [[allowlists]]
 description = "The secrets tests' made-up values (vault and bash's secrets): a fake Stripe-shaped key, a fake Resend key and AWS's documented sample secret key, cut short; they only check that values are hidden in output and sealed on disk"
-condition = "AND"
-paths = ['''^crates/factory-agent/tests/all/secrets\.rs$''', '''^crates/factory-agent/src/secrets\.rs$''', '''^crates/factoryd/src/vault/mod\.rs$''']
 regexTarget = "secret"
 regexes = ['''^(?:sk_live_4f9a8b7c6d5e4f3a2b1c|re_123456789abcdef|wJalrXUtnFEMI/K7MDENG)$''']

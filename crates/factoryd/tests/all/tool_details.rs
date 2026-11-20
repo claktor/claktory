@@ -57,6 +57,13 @@ async fn extension_tools_say_what_they_did_in_details() {
     assert_eq!(sent["name"], "Writer");
     assert_eq!(sent["role"], "");
     assert!(sent["working"].is_boolean());
+    assert_eq!(sent["text"], "Hello");
+    assert_eq!(sent["recipients"][0]["id"], "writer");
+    assert_eq!(sent["recipients"][0]["to"], "Writer");
+    let several = details(client, view, "agents_send", json!({"to": ["Writer", "nobody"], "text": "Hi"})).await;
+    assert_eq!(several["recipients"][0]["name"], "Writer");
+    assert_eq!(several["recipients"][1]["outcome"], "failed");
+    assert!(several.get("to").is_none());
 
     // Checklist: the items added, then each one as it is after a change.
     let added = details(client, view, "checklist_add", json!({"items": ["Fix login", "Dark mode"], "owner": "writer"})).await;

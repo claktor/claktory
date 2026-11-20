@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -251,6 +252,9 @@ class PairDeviceForm extends StatefulWidget {
 class _PairDeviceFormState extends State<PairDeviceForm> {
   final _name = TextEditingController();
   var _submitting = false;
+
+  /// The connection dropped while the code was asked for: waiting for it.
+  var _reconnecting = false;
   String? _error;
   PairingCode? _code;
 
@@ -276,6 +280,10 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
         final ready = !_submitting && _name.text.trim().isNotEmpty;
         return FormFrame(
           title: 'Add a device',
+          body: _reconnecting
+              ? 'Preparing the code… This takes a few seconds the first '
+                    'time.'
+              : null,
           error: _error,
           submitLabel: 'Show code',
           onSubmit: ready ? _add : null,
@@ -306,16 +314,75 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
       _error = null;
     });
     final backend = AppScope.of(context);
+    final started = DateTime.now().millisecondsSinceEpoch;
     try {
       // A code waiting to be used is what lets the device in: the backend
       // turns remote access on by itself.
-      final code = await backend.createPairing(name, '');
+      PairingCode code;
+      try {
+        code = await backend.createPairing(name, '');
+      } on RequestFailure {
+        if (backend.connected.value) rethrow;
+        // The first device turns access from other devices on, which
+        // restarts the tunnel this app reaches its own Claktory through:
+        // the connection drops before the code arrives. Wait for it to
+        // come back, take back the device the lost answer made, and ask
+        // again.
+        if (mounted) setState(() => _reconnecting = true);
+        if (!await _reconnected(backend)) rethrow;
+        for (final device in backend.workspace.workspace.remote.devices) {
+          if (device.name == name &&
+              device.lastSeenMs == 0 &&
+              device.codeExpiresMs > 0 &&
+              device.pairedMs.toInt() >= started - 5000) {
+            await backend.unpairDevice(device.id);
+          }
+        }
+        code = await backend.createPairing(name, '');
+      }
       if (mounted) setState(() => _code = code);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
-      if (mounted) setState(() => _submitting = false);
+      if (mounted) {
+        setState(() {
+          _submitting = false;
+          _reconnecting = false;
+        });
+      }
     }
+  }
+
+  /// Waits up to [timeout] for [backend] to connect again and send its
+  /// state; false if it doesn't.
+  static Future<bool> _reconnected(
+    Backend backend, {
+    Duration timeout = const Duration(seconds: 45),
+  }) async {
+    final done = Completer<bool>();
+    void connected() {
+      if (backend.connected.value && !done.isCompleted) done.complete(true);
+    }
+
+    backend.connected.addListener(connected);
+    final timer = Timer(timeout, () {
+      if (!done.isCompleted) done.complete(false);
+    });
+    connected();
+    final ok = await done.future;
+    backend.connected.removeListener(connected);
+    timer.cancel();
+    if (!ok) return false;
+    // Its state follows its welcome: wait for it, briefly.
+    final state = Completer<void>();
+    void received() {
+      if (!state.isCompleted) state.complete();
+    }
+
+    backend.workspace.addListener(received);
+    await state.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+    backend.workspace.removeListener(received);
+    return backend.connected.value;
   }
 }
 

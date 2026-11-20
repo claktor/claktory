@@ -415,7 +415,7 @@ impl Agent {
         };
         for message in &mut messages {
             if let Message::User(user) = message
-                && user.event.is_some()
+                && (user.event.is_some() || user.sent_from.is_some())
             {
                 *user = user.for_model();
             }

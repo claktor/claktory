@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 12] = [
+const MIGRATIONS: [&str; 13] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -148,6 +148,11 @@ ALTER TABLE tasks ADD COLUMN alerted INTEGER;
     crate::proposals::SCHEMA,
     crate::extensions::viewer::SCHEMA,
     crate::account::analytics::SCHEMA,
+    "
+-- The device the person sent a message from, as JSON ({\"device\", \"kind\"});
+-- null for events, and for messages from before it.
+ALTER TABLE messages ADD COLUMN sent_from TEXT;
+",
 ];
 
 /// A background task as recorded.
@@ -193,22 +198,28 @@ pub(crate) struct Store {
     db: Mutex<Connection>,
 }
 
+/// Creates version 1 when needed, then applies later schemas in order, each in its own transaction.
+pub(crate) fn migrate(db: &Connection, schema: &str, migrations: &[&str]) -> rusqlite::Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 0 {
+        db.execute_batch(&format!("BEGIN; {schema} PRAGMA user_version = 1; COMMIT;"))?;
+    }
+    for (index, migration) in migrations.iter().enumerate() {
+        let target = index as i64 + 2;
+        if version < target {
+            db.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = {target}; COMMIT;"))?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Store, rusqlite::Error> {
         let db = Connection::open(path)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
-        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == 0 {
-            db.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
-        }
-        for (index, migration) in MIGRATIONS.iter().enumerate() {
-            let target = index as i64 + 2;
-            if version < target {
-                db.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = {target}; COMMIT;"))?;
-            }
-        }
+        migrate(&db, SCHEMA, &MIGRATIONS)?;
         Ok(Store { db: Mutex::new(db) })
     }
 
@@ -223,10 +234,11 @@ impl Store {
             None => ("", "", ""),
             Some(event) => (event.from.as_str(), event.id.as_str(), event.summary.as_str()),
         };
+        let sent_from = queued.sent_from.as_ref().and_then(|from| serde_json::to_string(from).ok());
         let db = self.db();
         db.execute(
-            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![agent, source, sender, sender_id, summary, queued.text, queued.created],
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from],
         )?;
         Ok(db.last_insert_rowid())
     }
@@ -251,7 +263,7 @@ impl Store {
     pub(crate) fn waiting(&self) -> Result<BTreeMap<String, Vec<Queued>>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT id, agent, source, sender, sender_id, summary, text, created FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
+            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
         )?;
         let mut rows = statement.query([])?;
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
@@ -261,7 +273,15 @@ impl Store {
                 None => None,
                 Some(source) => Some(Event { source, from: row.get(3)?, id: row.get(4)?, summary: row.get(5)?, transient: false }),
             };
-            waiting.entry(row.get(1)?).or_default().push(Queued { id: row.get(0)?, text: row.get(6)?, event, created: row.get(7)? });
+            let sent_from: Option<String> = row.get(8)?;
+            let sent_from = sent_from.and_then(|from| serde_json::from_str(&from).ok());
+            waiting.entry(row.get(1)?).or_default().push(Queued {
+                id: row.get(0)?,
+                text: row.get(6)?,
+                event,
+                created: row.get(7)?,
+                sent_from,
+            });
         }
         Ok(waiting)
     }
