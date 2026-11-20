@@ -1,9 +1,11 @@
 //! `factoryd [--dev]` serves a Factory; `factoryd [--dev] supervise` keeps
 //! one running and undoes updates that don't start (see `update`);
 //! `factoryd [--dev] login [PROVIDER]` signs it in to a model provider;
-//! `factoryd [--dev] pair NAME` pairs a device on another machine and prints
-//! its pairing code, `unpair DEVICE` unpairs one and `devices` lists them;
-//! remote access is on while any is paired (see `remote`).
+//! `factoryd [--dev] pair NAME` pairs a device on another machine: prints
+//! its pairing code and, in a terminal, asks whether to allow the device
+//! that uses it; `allow DEVICE` and `deny DEVICE` answer a device waiting to
+//! be allowed, `unpair DEVICE` unpairs one and `devices` lists them; remote
+//! access is on while any is paired (see `remote`).
 //!
 //! `FACTORY_HOME` and `FACTORY_PORT` override where the Factory lives and
 //! which port it serves, for tests and side-by-side Factories.
@@ -23,7 +25,8 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: factoryd [--dev] [supervise | login [PROVIDER] | pair NAME | unpair DEVICE | devices]";
+const USAGE: &str =
+    "usage: factoryd [--dev] [supervise | login [PROVIDER] | pair NAME | allow DEVICE | deny DEVICE | unpair DEVICE | devices]";
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
@@ -121,7 +124,7 @@ async fn run() -> Result<(), MainError> {
             if name.is_empty() {
                 return Err(MainError::Usage);
             }
-            let (code, _) = factoryd::remote::pair_offline(&instance.home, &name.join(" "))?;
+            let (code, device) = factoryd::remote::pair_offline(&instance.home, &name.join(" "))?;
             let minutes = factoryd::remote::CODE_LIFETIME.as_secs() / 60;
             // A terminal gets the code as a QR code too, to scan from the
             // screen; piped elsewhere, just the text.
@@ -141,7 +144,17 @@ async fn run() -> Result<(), MainError> {
                     "Paste this code into Claktory on your other device (on a Mac: Add a Claktory, the + at the far left of the window):\n\n{code}\n"
                 ),
             }
-            println!("It works once, for {minutes} minutes. Don't share it: it lets a device into your Claktory.");
+            println!("It works once, for {minutes} minutes. You'll be asked to allow the device that uses it.");
+            allow_in_terminal(&instance.home, &device).await
+        }
+        [allow, device @ ..] if allow == "allow" && !device.is_empty() => {
+            let device = factoryd::remote::approve(&instance.home, &device.join(" "))?;
+            println!("Allowed {}: it can connect now.", device.name);
+            Ok(())
+        }
+        [deny, device @ ..] if deny == "deny" && !device.is_empty() => {
+            let device = factoryd::remote::deny(&instance.home, &device.join(" "))?;
+            println!("Not allowed. {} can't connect. To try again, run factoryd pair.", device.name);
             Ok(())
         }
         [unpair, device @ ..] if unpair == "unpair" && !device.is_empty() => {
@@ -152,6 +165,11 @@ async fn run() -> Result<(), MainError> {
         [devices] if devices == "devices" => {
             for device in factoryd::remote::devices(&instance.home)?.into_iter().filter(|device| !device.local) {
                 let seen = match device.last_seen.map(jiff::Timestamp::from_millisecond) {
+                    _ if device.is_pending(now_ms()) => {
+                        let claktory = factoryd::remote::secret_key(&instance.home)?.public().to_string();
+                        let number = factoryd::remote::approval_number(&claktory, &device.pending_endpoint_id, &device.token_sha256);
+                        format!("waiting to be allowed: allow it with factoryd allow {} if it shows {number}", device.id)
+                    }
                     Some(Ok(seen)) => format!("last connected {seen}"),
                     _ => "never connected".to_owned(),
                 };
@@ -165,6 +183,76 @@ async fn run() -> Result<(), MainError> {
             Ok(())
         }
         _ => Err(MainError::Usage),
+    }
+}
+
+fn now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
+}
+
+/// After `factoryd pair` prints a code in a terminal: waits for the device
+/// that uses it, and asks whether to allow it, with the number it shows.
+/// Ctrl-C ends the code. With no terminal it returns at once: the device
+/// is allowed in the app, or with `factoryd allow`.
+async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Result<(), MainError> {
+    use factoryd::remote;
+    use std::io::{BufRead, Write};
+    let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else {
+        println!("Allow the device in Claktory when it asks, or run factoryd allow {}.", device.id);
+        return Ok(());
+    };
+    let claktory = remote::secret_key(home)?.public().to_string();
+    println!("\nWaiting for a device to use the code… (Ctrl-C cancels it)");
+    loop {
+        let now = now_ms();
+        match remote::devices(home)?.into_iter().find(|known| known.id == device.id) {
+            Some(known) if !known.endpoint_id.is_empty() => {
+                println!("Allowed in Claktory. {} can connect now.", known.name);
+                return Ok(());
+            }
+            Some(known) if known.is_pending(now) => {
+                let number = remote::approval_number(&claktory, &known.pending_endpoint_id, &known.token_sha256);
+                print!("\nA device wants to connect as \"{}\". Its screen should show {number}. Allow it? [y/N] ", known.name);
+                std::io::stdout().flush().map_err(remote::RemoteError::from)?;
+                let answer = tokio::task::spawn_blocking(move || {
+                    let mut line = String::new();
+                    std::io::BufReader::new(tty).read_line(&mut line).map(|_| line)
+                });
+                let answer = tokio::select! {
+                    answer = answer => answer.map_err(std::io::Error::other).and_then(|line| line).map_err(remote::RemoteError::from)?,
+                    _ = tokio::signal::ctrl_c() => {
+                        let _ = remote::cancel(home, &device.id);
+                        println!("\nCancelled. The code no longer works.");
+                        std::process::exit(130);
+                    }
+                };
+                let allowed = if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                    remote::approve(home, &device.id).map(|_| true)
+                } else {
+                    remote::deny(home, &device.id).map(|_| false)
+                };
+                match allowed {
+                    Ok(true) => println!("Allowed. {} can connect now.", known.name),
+                    Ok(false) => println!("Not allowed. To try again, run factoryd pair."),
+                    Err(_) => println!("The code expired or was cancelled. Run factoryd pair for a new one."),
+                }
+                return Ok(());
+            }
+            Some(known) if known.code_expires.is_some_and(|expires| expires > now) => {}
+            _ => {
+                let _ = remote::cancel(home, &device.id);
+                println!("The code expired or was cancelled. Run factoryd pair for a new one.");
+                return Ok(());
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                let _ = remote::cancel(home, &device.id);
+                println!("\nCancelled. The code no longer works.");
+                return Ok(());
+            }
+        }
     }
 }
 

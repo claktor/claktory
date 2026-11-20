@@ -59,6 +59,7 @@ fn check(factory: &Arc<Factory>, after: Duration, reminded: &mut HashMap<String,
                 working.push(agent.id.clone());
             } else if super::enabled(agent, checklist::ID)
                 && super::switch(agent, checklist::ID, "nudge")
+                && !inner.config.archived(agent)
                 && runtime.is_none_or(|runtime| runtime.queue.is_empty())
             {
                 idle.push(agent.id.clone());

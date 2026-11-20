@@ -9,6 +9,7 @@ import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
 import 'map.dart';
+import 'pairing.dart';
 import 'marketplace.dart';
 import 'account.dart';
 import 'name_step.dart';
@@ -376,9 +377,18 @@ class _Content extends StatelessWidget {
       listenable: Listenable.merge([
         backend.workspace,
         backend.connected,
+        backend.pairing,
         scope.page,
       ]),
       builder: (context, _) {
+        // Another Claktory's code used, waiting to be allowed there: the
+        // number to compare.
+        final waiting = scope.connections.current;
+        if (backend.pairing.value != null && waiting != null) {
+          return PairingWaitView(
+            onCancel: () => scope.connections.forget(waiting),
+          );
+        }
         switch (scope.page.value) {
           case AppPage.settings:
             return const SettingsView();

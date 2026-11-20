@@ -179,12 +179,25 @@ class TranscriptStore extends ChangeNotifier {
 
   EntryModel operator [](int index) => _entries[index];
 
+  /// Whether the conversation has entries before the first one held: the
+  /// backend sends only the latest, and earlier ones load as the person
+  /// scrolls up.
+  bool get hasEarlier => _hasEarlier;
+  var _hasEarlier = false;
+
+  /// How many entries have been put before the first one held since the
+  /// load, so views can tell them from new ones and keep their place.
+  int get earlier => _earlier;
+  var _earlier = 0;
+
   void load(Transcript transcript) {
     for (final entry in _entries) {
       entry.dispose();
     }
     _agentId = transcript.agentId;
     _loads++;
+    _hasEarlier = transcript.hasEarlier;
+    _earlier = 0;
     _entries.clear();
     _bySeq.clear();
     for (final entry in transcript.entries) {
@@ -193,14 +206,41 @@ class TranscriptStore extends ChangeNotifier {
     _changed(listChanged: true);
   }
 
+  /// Puts [entries], earlier ones the backend sent for [agentId], before
+  /// the first one held; [hasEarlier] says whether more remain.
+  void prepend(
+    String agentId,
+    List<Entry> entries, {
+    required bool hasEarlier,
+  }) {
+    if (agentId != _agentId) return;
+    final first = _entries.isEmpty ? null : _entries.first.seq;
+    final added = [
+      for (final entry in entries)
+        if ((first == null || entry.seq.toInt() < first) &&
+            !_bySeq.containsKey(entry.seq.toInt()))
+          EntryModel(entry),
+    ]..sort((a, b) => a.seq.compareTo(b.seq));
+    for (final entry in added) {
+      _bySeq[entry.seq] = entry;
+    }
+    _entries.insertAll(0, added);
+    _earlier += added.length;
+    _hasEarlier = hasEarlier;
+    _changed(listChanged: true);
+  }
+
   void update(EntryUpdate update) {
     if (update.agentId != _agentId) return;
-    final existing = _bySeq[update.entry.seq.toInt()];
+    final seq = update.entry.seq.toInt();
+    final existing = _bySeq[seq];
     if (existing != null) {
       existing.replace(update.entry);
       _changed(listChanged: false);
       return;
     }
+    // Older than what's held: it comes as it is now when paged in.
+    if (_hasEarlier && _entries.isNotEmpty && seq < _entries.first.seq) return;
     _insert(EntryModel(update.entry));
     _changed(listChanged: true);
   }

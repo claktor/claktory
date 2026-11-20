@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'connection.dart';
 import 'connections.dart';
 import 'controls.dart';
 import 'devices.dart';
@@ -19,7 +20,6 @@ import 'phone.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
-import 'tunnel_client.dart';
 
 /// The rail of Claktories at the window's far left, as thin as the
 /// extension bar.
@@ -269,44 +269,38 @@ class ClaktoriesScope extends InheritedNotifier<Claktories> {
 class _Glance {
   _Glance(Claktory claktory) {
     final backend = claktory.backend;
-    final agents = backend.workspace.workspace.agents;
+    final workspace = backend.workspace.workspace;
+    // Archived projects' agents don't run, and their news waits.
+    final agents = [
+      for (final agent in workspace.agents)
+        if (archivedProjectOf(workspace, agent) == null) agent,
+    ];
     connected = backend.connected.value;
     working =
         connected &&
         agents.any((agent) => agent.status == AgentStatus.AGENT_STATUS_WORKING);
     unseen = agents.any((agent) => agent.unseen);
-    final tunnel = backend.tunnel.value;
-    final machine = claktory.target?.label ?? 'this Claktory';
-    if (backend.refused.value != null) {
-      problem = "This device isn't paired with $machine any more";
-    } else if (!connected &&
-        // Back from the background or a network change, it reconnects
-        // without a word for a few seconds first.
-        !backend.reconnecting.value &&
-        tunnel != null &&
-        tunnel.failure != TunnelFailure.none) {
-      problem = "Can't connect to $machine";
-    } else {
-      problem = null;
-    }
+    connection = Connection(backend);
+    problem = connection.problem ? connection.line : null;
   }
 
   late final bool connected;
   late final bool working;
   late final bool unseen;
 
+  /// How it's connected.
+  late final Connection connection;
+
   /// Why it can't connect; null while it can (or is trying).
   late final String? problem;
 
-  String get status => problem ?? (connected ? 'Connected' : 'Connecting…');
+  /// Opening, or coming back: its tile's mark pulses.
+  bool get connecting => connection.link == Link.connecting;
 
   /// What a Claktory's glance depends on.
   static Listenable of(Claktory claktory) => Listenable.merge([
     claktory.backend.workspace,
-    claktory.backend.connected,
-    claktory.backend.refused,
-    claktory.backend.tunnel,
-    claktory.backend.reconnecting,
+    Connection.of(claktory.backend),
   ]);
 }
 
@@ -465,11 +459,17 @@ class _RailTile extends StatelessWidget {
                       style: TextStyles.label.copyWith(color: palette.text),
                     ),
                     Text(
-                      glance.status,
+                      glance.connection.line,
                       style: TextStyles.caption.copyWith(
                         color: glance.problem != null
                             ? palette.danger
                             : palette.textMuted,
+                      ),
+                    ),
+                    Text(
+                      glance.connection.details,
+                      style: TextStyles.caption.copyWith(
+                        color: palette.textFaint,
                       ),
                     ),
                   ],
@@ -572,12 +572,17 @@ class _Tile extends StatelessWidget {
                     ),
                   ),
           ),
-          if (glance.problem != null || glance.unseen)
+          // Its connection first (can't, or connecting), then its news.
+          if (glance.problem != null || glance.connecting || glance.unseen)
             Positioned(
               right: -3,
               top: -3,
               child: Semantics(
-                label: glance.problem ?? '$name has something new',
+                label:
+                    glance.problem ??
+                    (glance.connecting
+                        ? glance.connection.line
+                        : '$name has something new'),
                 child: Container(
                   width: 11,
                   height: 11,
@@ -586,12 +591,14 @@ class _Tile extends StatelessWidget {
                     color: palette.sidebar,
                     shape: BoxShape.circle,
                   ),
-                  child: Dot(
-                    color: glance.problem != null
-                        ? palette.danger
-                        : palette.text,
-                    size: 7,
-                  ),
+                  child: glance.problem == null && glance.connecting
+                      ? const LiveDot()
+                      : Dot(
+                          color: glance.problem != null
+                              ? palette.danger
+                              : palette.text,
+                          size: 7,
+                        ),
                 ),
               ),
             ),
@@ -747,25 +754,37 @@ class ClaktoriesBackRow extends StatelessWidget {
       for (final claktory in claktories.all)
         if (claktory != claktories.selected) claktory,
     ];
+    final shown = claktories.selected;
     return ListenableBuilder(
       listenable: Listenable.merge([
         for (final other in others) _Glance.of(other),
+        Connection.of(shown.backend),
       ]),
       builder: (context, _) => _BackRow(
         label: 'Claktories',
         news: others.any((other) => _Glance(other).unseen),
         onTap: back.back,
+        // How the one showing is connected, at the top of its agents.
+        trailing: _PhoneConnection(shown.backend),
       ),
     );
   }
 }
 
 class _BackRow extends StatelessWidget {
-  const _BackRow({required this.label, required this.onTap, this.news = false});
+  const _BackRow({
+    required this.label,
+    required this.onTap,
+    this.news = false,
+    this.trailing,
+  });
 
   final String label;
   final VoidCallback onTap;
   final bool news;
+
+  /// At its end, such as [_PhoneConnection].
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -798,8 +817,59 @@ class _BackRow extends StatelessWidget {
                     const SizedBox(width: Space.s),
                     Dot(color: palette.text, size: 7),
                   ],
+                  if (trailing case final trailing?) ...[
+                    const Spacer(),
+                    trailing,
+                  ],
                 ],
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// On a phone, the connection of the Claktory showing, in a word with its
+/// mark ("Connected", "Reconnecting…"); a tap opens [ConnectionDialog].
+class _PhoneConnection extends StatelessWidget {
+  const _PhoneConnection(this.backend);
+
+  final Backend backend;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final connection = Connection(backend);
+    return Semantics(
+      button: true,
+      label: connection.line,
+      child: Pressable(
+        onTap: () => showModal(
+          context,
+          (context, close) => ConnectionDialog(backend: backend, close: close),
+        ),
+        builder: (context, hovered) => ExcludeSemantics(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.xs,
+              vertical: Space.s,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ConnectionDot(link: connection.link),
+                const SizedBox(width: Space.xs + 2),
+                Text(
+                  connection.short,
+                  style: TextStyles.caption.copyWith(
+                    color: connection.problem
+                        ? palette.danger
+                        : palette.textFaint,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1078,7 +1148,10 @@ class _ListRow extends StatelessWidget {
                             ),
                           ),
                           Text(
-                            glance.working ? 'Working' : glance.status,
+                            glance.connection.link == Link.live &&
+                                    glance.working
+                                ? 'Working'
+                                : glance.connection.short,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyles.caption.copyWith(

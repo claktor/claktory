@@ -114,8 +114,10 @@ if $first; then
     echo "Claktory is running on this machine while you're logged in (see above to keep it running)."
   fi
   echo
+  # Before pair: in a terminal, pair waits there until the device is allowed.
+  echo "To connect: on your iPhone, open Claktory and tap Scan code. On your Mac, click Add a Claktory (+) at the far left of the window and paste the code. It works for 10 minutes."
+  echo
   "$BIN" pair "First device"
   echo
-  echo "To connect: on your iPhone, open Claktory and tap Scan code. On your Mac, click Add a Claktory (+) at the far left of the window and paste the code. It works for 10 minutes."
   echo "To connect another device later, run: ~/.factory/bin/factoryd pair \"Device name\""
 fi

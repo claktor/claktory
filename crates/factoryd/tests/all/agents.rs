@@ -472,7 +472,7 @@ async fn a_tool_call_says_when_it_ran_and_its_timeout_even_after_a_restart() {
 }
 
 #[tokio::test]
-async fn the_persons_messages_say_which_device_they_came_from_even_waiting_across_a_restart() {
+async fn the_persons_messages_say_which_device_they_came_from_and_their_apps_id_even_waiting_across_a_restart() {
     let dir = temp_dir();
     let (addr, _old) = start(&dir).await;
     let (mut client, _, _) = Client::connect_as(addr, v1::DeviceKind::Phone).await;
@@ -483,7 +483,10 @@ async fn the_persons_messages_say_which_device_they_came_from_even_waiting_acros
     view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working && view.agent("builder").queued_messages == 0)
         .await;
     // Waiting, it says where it came from: this computer's name, as a phone.
-    apply_request(&mut client, &mut view, send_message("builder", "on my way")).await;
+    // With the id the app made up for it, so it can match what it showed.
+    let send = v1::SendMessage { agent_id: "builder".into(), text: "on my way".into(), client_id: "c-1".into() };
+    apply_request(&mut client, &mut view, client_message::Body::SendMessage(send)).await;
+    assert_eq!(view.queued.as_ref().expect("the queue").messages[0].client_id, "c-1");
     let waiting = view.queued.as_ref().expect("the queue").messages[0].sent_from.clone().expect("where it came from");
     assert!(!waiting.device_name.is_empty());
     assert_eq!(waiting.kind(), v1::DeviceKind::Phone);
@@ -501,11 +504,25 @@ async fn the_persons_messages_say_which_device_they_came_from_even_waiting_acros
     let name = &waiting.device_name;
     let Some(v1::entry::Kind::User(user)) = &view.entries[2].kind else { panic!("the person's message") };
     assert_eq!((user.text.as_str(), user.sent_from.as_ref()), ("on my way", Some(&waiting)));
+    assert_eq!(user.client_id, "c-1");
     assert_eq!(last(), format!("<sent from=\"{name}\" device=\"phone\">\non my way\n</sent>"));
     // An app that doesn't say what it runs on: the name alone.
     apply_request(&mut client, &mut view, send_message("builder", "at the desk")).await;
     view.follow(&mut client, |view| view.entries.len() == 6 && idle(view, "builder")).await;
     assert_eq!(last(), format!("<sent from=\"{name}\">\nat the desk\n</sent>"));
+    // A client connecting now gets it with the conversation; one sent
+    // without an id has none.
+    let (_other, _, transcript) = Client::connect(addr).await;
+    let users: Vec<(String, String)> = transcript
+        .expect("the conversation")
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(v1::entry::Kind::User(user)) => Some((user.text.clone(), user.client_id.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users[1..], [("on my way".into(), "c-1".into()), ("at the desk".into(), String::new())]);
     // Events don't: they say where they're from their own way.
     let Some(v1::entry::Kind::Event(note)) = &view.entries[1].kind else { panic!("the restart note") };
     assert!(note.text.starts_with("Claktory restarted"), "{}", note.text);

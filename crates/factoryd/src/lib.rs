@@ -9,6 +9,7 @@ mod characters;
 mod commands;
 pub mod config;
 mod connection;
+mod encoding;
 mod explorer;
 mod extensions;
 pub mod factory;

@@ -117,6 +117,8 @@ pub enum RequestError {
     /// A build cache that can't be cleared, and why.
     #[error("{0}")]
     BuildCache(String),
+    #[error("before_seq {0} is beyond the end of the transcript")]
+    NoEntries(u64),
     /// A layout that can't be used, and why.
     #[error("{0}")]
     Layout(String),
@@ -157,7 +159,8 @@ impl RequestError {
             | RequestError::Remote(_)
             | RequestError::Proposal(_)
             | RequestError::BuildCache(_)
-            | RequestError::Layout(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Layout(_)
+            | RequestError::NoEntries(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
                 v1::ErrorCode::Internal
@@ -251,6 +254,8 @@ pub struct Factory {
     pub(crate) redaction: factory_agent::Redaction,
     /// This Claktory's account at claktory.com (`crate::account`).
     pub(crate) account: crate::account::State,
+    /// Notified when a project is unarchived: its agents read what waited.
+    unarchived: tokio::sync::Notify,
 }
 
 pub(crate) struct Inner {
@@ -291,15 +296,17 @@ pub(crate) struct Queued {
     pub(crate) created: i64,
     /// The person's: the device they sent it from, when known.
     pub(crate) sent_from: Option<factory_agent::SentFrom>,
+    /// The person's: the id their app made up for this send; empty without one.
+    pub(crate) client_id: String,
 }
 
 impl Queued {
     pub(crate) fn from_person(text: impl Into<String>, sent_from: Option<factory_agent::SentFrom>) -> Queued {
-        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from }
+        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from, client_id: String::new() }
     }
 
     pub(crate) fn event(text: String, event: factory_agent::Event) -> Queued {
-        Queued { id: 0, text, event: Some(event), created: now_ms(), sent_from: None }
+        Queued { id: 0, text, event: Some(event), created: now_ms(), sent_from: None, client_id: String::new() }
     }
 }
 
@@ -319,7 +326,7 @@ impl From<Saved> for Queued {
     fn from(saved: Saved) -> Queued {
         match saved {
             Saved::Text(text) => Queued::from_person(text, None),
-            Saved::Queued { text, event } => Queued { id: 0, text, event, created: now_ms(), sent_from: None },
+            Saved::Queued { text, event } => Queued { id: 0, text, event, created: now_ms(), sent_from: None, client_id: String::new() },
         }
     }
 }
@@ -491,6 +498,7 @@ impl Factory {
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
             account,
+            unarchived: tokio::sync::Notify::new(),
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
@@ -514,6 +522,18 @@ impl Factory {
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
+        // The agent the app opens on, read before an app asks for it.
+        if let Some(selected) = factory.lock().state.selected_agent.clone() {
+            let factory = Arc::downgrade(&factory);
+            tokio::spawn(async move {
+                if let Some(factory) = factory.upgrade()
+                    && let Err(error) = factory.ensure_loaded(&selected).await
+                {
+                    tracing::warn!(agent = %selected, %error, "could not read the selected agent's transcript");
+                }
+            });
+        }
+        tokio::spawn(resume_unarchived(Arc::downgrade(&factory)));
         Ok(factory)
     }
 
@@ -598,7 +618,7 @@ impl Factory {
             .edit_config(|config| {
                 let id = config::unique_id(name, "project", |id| config.project(id).is_some());
                 let path = chosen.unwrap_or_else(|| workspace.join(&id));
-                config.projects.push(ProjectConfig { id, name: name.to_owned(), path: path.clone(), folders: Vec::new() });
+                config.projects.push(ProjectConfig { id, name: name.to_owned(), path: path.clone(), folders: Vec::new(), archived: false });
                 Ok(path)
             })
             .await?;
@@ -610,13 +630,17 @@ impl Factory {
         Ok(())
     }
 
-    pub async fn update_project(&self, id: &str, name: Option<&str>) -> Result<(), RequestError> {
+    /// Renames a project, or archives it or brings it back (`archived`).
+    pub async fn update_project(&self, id: &str, name: Option<&str>, archived: Option<bool>) -> Result<(), RequestError> {
         self.edit_config(|config| {
             let Some(project) = config.projects.iter_mut().find(|project| project.id == id) else {
                 return Err(RequestError::UnknownProject(id.to_owned()));
             };
             if let Some(name) = name {
                 project.name = name.trim().to_owned();
+            }
+            if let Some(archived) = archived {
+                project.archived = archived;
             }
             Ok(())
         })
@@ -915,9 +939,32 @@ impl Factory {
         Ok(())
     }
 
+    /// Earlier entries of an agent's transcript (LoadEntries), read from its
+    /// files first if it isn't loaded.
+    pub async fn load_entries(&self, request: &v1::LoadEntries) -> Result<v1::EntryPage, RequestError> {
+        let id = request.agent_id.as_str();
+        if self.lock().config.agent(id).is_none() {
+            return Err(RequestError::UnknownAgent(id.to_owned()));
+        }
+        self.ensure_loaded(id).await?;
+        let inner = self.lock();
+        let transcript = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());
+        let page = transcript.and_then(|transcript| transcript.page(request.before_seq, request.limit, request.from_seq));
+        let Some((entries, has_earlier)) = page else {
+            return Err(RequestError::NoEntries(request.before_seq));
+        };
+        Ok(v1::EntryPage { agent_id: id.to_owned(), entries, has_earlier })
+    }
+
     /// The person's message for an agent, sent from the device `sent_from`
-    /// names, when known.
-    pub fn send_message(self: &Arc<Self>, id: &str, text: &str, sent_from: Option<factory_agent::SentFrom>) -> Result<(), RequestError> {
+    /// names, when known, with the id their app made up for it (`client_id`).
+    pub fn send_message(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        sent_from: Option<factory_agent::SentFrom>,
+        client_id: &str,
+    ) -> Result<(), RequestError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(RequestError::Empty("message"));
@@ -926,7 +973,8 @@ impl Factory {
         if inner.config.agent(id).is_none() {
             return Err(RequestError::UnknownAgent(id.to_owned()));
         }
-        self.enqueue(&mut inner, id, Queued::from_person(text, sent_from))?;
+        let queued = Queued { client_id: client_id.to_owned(), ..Queued::from_person(text, sent_from) };
+        self.enqueue(&mut inner, id, queued)?;
         Ok(())
     }
 
@@ -966,7 +1014,9 @@ impl Factory {
         {
             abort.abort();
         }
-        if !runtime.running {
+        if inner.config.agent(id).is_some_and(|agent| inner.config.archived(agent)) {
+            // Its project is archived: it waits for it to come back.
+        } else if !runtime.running {
             runtime.running = true;
             tokio::spawn(self.clone().run(id.to_owned()));
         } else {
@@ -1186,13 +1236,38 @@ impl Factory {
             }
         }
         self.add_presences(&config.agents);
+        // Agents whose project was archived stop, keeping what's queued for
+        // them; those whose project came back read it.
+        let mut unarchived = false;
+        for agent in &config.agents {
+            let (was, is) = (inner.config.agent(&agent.id).is_some_and(|before| inner.config.archived(before)), config.archived(agent));
+            if is
+                && !was
+                && let Some(runtime) = inner.agents.get_mut(&agent.id)
+            {
+                runtime.stopped = true;
+                if let Some(abort) = runtime.abort.take() {
+                    abort.abort();
+                }
+                self.end_run(runtime, "stopped");
+            }
+            unarchived |= was && !is;
+        }
+        // An archived project's out of view: it isn't focused any more.
+        let unfocused = inner.state.focused_project.as_deref().is_some_and(|id| config.project(id).is_some_and(|project| project.archived));
+        if unfocused {
+            inner.state.focused_project = None;
+        }
         inner.config = config;
+        if unarchived {
+            self.unarchived.notify_one();
+        }
         if selected_gone {
             // The workspace broadcast that follows tells clients nothing is selected.
             inner.state.selected_agent = None;
         }
         // Otherwise an agent added later with a removed one's id would inherit its marks.
-        if (pruned || selected_gone)
+        if (pruned || selected_gone || unfocused)
             && let Err(error) = self.store.save_state(&inner.state)
         {
             tracing::error!(%error, "could not forget removed agents' sidebar marks");
@@ -1431,6 +1506,7 @@ impl Factory {
                     created: queued.created,
                     summary: event.map(|event| event.summary.clone()).unwrap_or_default(),
                     sent_from: queued.sent_from.as_ref().map(crate::transcript::sent_from),
+                    client_id: queued.client_id.clone(),
                 }
             })
             .collect();
@@ -1477,6 +1553,7 @@ impl Factory {
                 name: project.name.clone(),
                 path: project.path.display().to_string(),
                 folders,
+                archived: project.archived,
             });
         }
         let mut agents = Vec::new();
@@ -1642,12 +1719,43 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
     };
     let notice = v1::Notice { text, level: v1::NoticeLevel::Error.into() };
     let entry = v1::Entry { seq: 0, timestamp_ms: crate::transcript::now_ms(), kind: Some(v1::entry::Kind::Notice(notice)), reply: 0 };
-    v1::Transcript { agent_id: id.to_owned(), entries: vec![entry] }
+    v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false }
 }
 
+/// The agent's transcript as a snapshot sends it: its latest entries.
 pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
     let transcript = inner.agents.get(id)?.transcript.as_ref()?;
-    Some(v1::Transcript { agent_id: id.to_owned(), entries: transcript.entries().to_vec() })
+    let (entries, has_earlier) = transcript.recent();
+    Some(v1::Transcript { agent_id: id.to_owned(), entries, has_earlier })
+}
+
+/// Starts the agents of a project brought back from the archive on what
+/// waited for them.
+async fn resume_unarchived(factory: Weak<Factory>) {
+    loop {
+        let Some(notified) = factory.upgrade() else { return };
+        notified.unarchived.notified().await;
+        drop(notified);
+        let Some(factory) = factory.upgrade() else { return };
+        let mut inner = factory.lock();
+        let ready: Vec<String> = inner
+            .config
+            .agents
+            .iter()
+            .filter(|agent| !inner.config.archived(agent))
+            .filter(|agent| inner.agents.get(&agent.id).is_some_and(|runtime| !runtime.running && !runtime.queue.is_empty()))
+            .map(|agent| agent.id.clone())
+            .collect();
+        for id in ready {
+            if let Some(runtime) = inner.agents.get_mut(&id) {
+                tracing::info!(agent = %id, waiting = runtime.queue.len(), "its project is back: reading what waited");
+                runtime.running = true;
+                runtime.stopped = false;
+                tokio::spawn(factory.clone().run(id));
+            }
+        }
+        factory.broadcast_workspace(&inner);
+    }
 }
 
 /// Picks up edits to config.json, new logins in auth.json and newly published

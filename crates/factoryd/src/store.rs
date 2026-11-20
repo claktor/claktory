@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 13] = [
+const MIGRATIONS: [&str; 14] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -152,6 +152,10 @@ ALTER TABLE tasks ADD COLUMN alerted INTEGER;
 -- The device the person sent a message from, as JSON ({\"device\", \"kind\"});
 -- null for events, and for messages from before it.
 ALTER TABLE messages ADD COLUMN sent_from TEXT;
+",
+    "
+-- The id the person's app made up for the message; null without one.
+ALTER TABLE messages ADD COLUMN client_id TEXT;
 ",
 ];
 
@@ -235,10 +239,11 @@ impl Store {
             Some(event) => (event.from.as_str(), event.id.as_str(), event.summary.as_str()),
         };
         let sent_from = queued.sent_from.as_ref().and_then(|from| serde_json::to_string(from).ok());
+        let client_id = Some(queued.client_id.as_str()).filter(|id| !id.is_empty());
         let db = self.db();
         db.execute(
-            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from],
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from, client_id],
         )?;
         Ok(db.last_insert_rowid())
     }
@@ -263,7 +268,7 @@ impl Store {
     pub(crate) fn waiting(&self) -> Result<BTreeMap<String, Vec<Queued>>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
+            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
         )?;
         let mut rows = statement.query([])?;
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
@@ -281,6 +286,7 @@ impl Store {
                 event,
                 created: row.get(7)?,
                 sent_from,
+                client_id: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
             });
         }
         Ok(waiting)

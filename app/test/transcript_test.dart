@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/outbox.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/transcript.dart';
 import 'package:fixnum/fixnum.dart';
@@ -26,6 +30,8 @@ Future<void> show(
   TranscriptStore store,
   Listenable follow, {
   QueuedStore? queued,
+  Outbox? outbox,
+  Future<void> Function()? loadEarlier,
 }) async {
   tester.view.physicalSize = const Size(900, windowHeight);
   tester.view.devicePixelRatio = 1;
@@ -41,6 +47,8 @@ Future<void> show(
               working: false,
               follow: follow,
               queued: queued,
+              outbox: outbox,
+              loadEarlier: loadEarlier,
               agentId: 'a',
             ),
           ),
@@ -487,6 +495,385 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('never mind'), findsNothing);
+    });
+  });
+
+  group('earlier entries', () {
+    Entry numbered(int seq) => Entry(
+      seq: Int64(seq),
+      user: UserText(text: 'message $seq'),
+    );
+
+    testWidgets('load as you scroll up, and what you see stays put', (
+      tester,
+    ) async {
+      final store = TranscriptStore()
+        ..load(
+          Transcript(
+            agentId: 'a',
+            entries: [for (var i = 100; i < 160; i++) numbered(i)],
+            hasEarlier: true,
+          ),
+        );
+      final asked = <Completer<void>>[];
+      await show(
+        tester,
+        store,
+        ValueNotifier(0),
+        loadEarlier: () {
+          final done = Completer<void>();
+          asked.add(done);
+          return done.future;
+        },
+      );
+      // At the bottom, far from the top: nothing asked yet.
+      expect(asked, isEmpty);
+      expect(onScreen(tester, 'message 159'), isTrue);
+
+      // Up near the top: the earlier ones are asked for, once.
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 1500));
+      await tester.pump();
+      await tester.pump();
+      expect(asked, hasLength(1));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 50));
+      await tester.pump();
+      expect(asked, hasLength(1), reason: 'one at a time');
+      final shown = [
+        for (var i = 100; i < 160; i++)
+          if (onScreen(tester, 'message $i')) i,
+      ].first;
+      final place = tester.getTopLeft(find.text('message $shown'));
+
+      store.prepend('a', [
+        for (var i = 70; i < 100; i++) numbered(i),
+      ], hasEarlier: false);
+      asked.single.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(tester.getTopLeft(find.text('message $shown')), place);
+      expect(find.text('Loading earlier messages…'), findsNothing);
+
+      // The earlier ones are there above.
+      for (var i = 0; i < 4; i++) {
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, 3000));
+        await tester.pump();
+      }
+      expect(find.text('message 70'), findsOneWidget);
+      expect(asked, hasLength(1), reason: 'none left');
+    });
+
+    testWidgets("why they couldn't load, with Retry", (tester) async {
+      final store = TranscriptStore()
+        ..load(
+          Transcript(agentId: 'a', entries: [numbered(100)], hasEarlier: true),
+        );
+      var asks = 0;
+      // Too short to scroll: it loads at once.
+      await show(
+        tester,
+        store,
+        ValueNotifier(0),
+        loadEarlier: () async {
+          asks++;
+          if (asks == 1) throw const RequestFailure('Not connected.');
+          store.prepend('a', [numbered(99)], hasEarlier: false);
+        },
+      );
+      expect(asks, 1);
+      expect(
+        find.text("Couldn't load earlier messages. Not connected."),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      await tester.pump();
+      expect(asks, 2);
+      expect(find.text('message 99'), findsOneWidget);
+      expect(find.textContaining('earlier messages'), findsNothing);
+    });
+
+    test('an update older than what is held waits to be paged in', () {
+      final store = TranscriptStore()
+        ..load(
+          Transcript(agentId: 'a', entries: [numbered(100)], hasEarlier: true),
+        );
+      store.update(EntryUpdate(agentId: 'a', entry: numbered(50)));
+      expect(store.length, 1);
+      store.update(EntryUpdate(agentId: 'a', entry: numbered(101)));
+      expect(store.length, 2);
+      store.prepend('a', [numbered(50), numbered(99)], hasEarlier: true);
+      expect(
+        [for (var i = 0; i < store.length; i++) store[i].seq],
+        [50, 99, 100, 101],
+      );
+      expect(store.earlier, 2);
+    });
+  });
+
+  group('sending', () {
+    QueuedMessages queue(List<QueuedMessage> messages) =>
+        QueuedMessages(agentId: 'a', messages: messages);
+    QueuedMessage person(int id, String text) =>
+        QueuedMessage(id: Int64(id), source: 'person', text: text);
+    double opacityOf(WidgetTester tester, String text) {
+      var opacity = 1.0;
+      for (final element
+          in find
+              .ancestor(of: find.text(text), matching: find.byType(Opacity))
+              .evaluate()) {
+        opacity *= (element.widget as Opacity).opacity;
+      }
+      for (final element
+          in find
+              .ancestor(
+                of: find.text(text),
+                matching: find.byType(FadeTransition),
+              )
+              .evaluate()) {
+        opacity *= (element.widget as FadeTransition).opacity.value;
+      }
+      return opacity;
+    }
+
+    /// An outbox whose sends wait for [answers], in order.
+    (Outbox, List<Completer<void>>) outbox() {
+      final answers = <Completer<void>>[];
+      final outbox = Outbox((agentId, text, clientId) {
+        final answer = Completer<void>();
+        answers.add(answer);
+        return answer.future;
+      });
+      return (outbox, answers);
+    }
+
+    testWidgets('a message sent shows at once, and its queued one takes its '
+        'place where it is', (tester) async {
+      final store = transcriptOf(3);
+      final queued = QueuedStore();
+      final (box, answers) = outbox();
+      await show(tester, store, ValueNotifier(0), queued: queued, outbox: box);
+
+      box.send('a', 'ship it');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('ship it'), findsOneWidget);
+      expect(find.text('Sending…'), findsOneWidget);
+      expect(opacityOf(tester, 'ship it'), 0.5);
+      final place = tester.getTopLeft(find.text('ship it'));
+
+      // The backend queued it (the agent is working), then answered.
+      queued.apply(queue([person(7, 'ship it')]));
+      answers.single.complete();
+      await tester.pump();
+      expect(find.text('ship it'), findsOneWidget);
+      expect(tester.getTopLeft(find.text('ship it')), place);
+      expect(opacityOf(tester, 'ship it'), 0.5);
+      expect(box.of('a'), isEmpty);
+      // An idle agent takes it at once, so it doesn't flash "Queued".
+      expect(find.text('Sending…'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Queued'), findsOneWidget);
+
+      // Then delivered: it brightens in place.
+      store.update(
+        EntryUpdate(
+          agentId: 'a',
+          entry: Entry(
+            seq: Int64(3),
+            user: UserText(text: 'ship it'),
+          ),
+        ),
+      );
+      queued.apply(queue([]));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('ship it'), findsOneWidget);
+      expect(opacityOf(tester, 'ship it'), 1);
+      expect(tester.getTopLeft(find.text('ship it')).dy, place.dy);
+    });
+
+    testWidgets('its entry can take its place straight away', (tester) async {
+      final store = transcriptOf(3);
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        store,
+        ValueNotifier(0),
+        queued: QueuedStore(),
+        outbox: box,
+      );
+      box.send('a', 'ship it');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final place = tester.getTopLeft(find.text('ship it'));
+
+      store.update(
+        EntryUpdate(
+          agentId: 'a',
+          entry: Entry(
+            seq: Int64(3),
+            user: UserText(text: 'ship it'),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('ship it'), findsOneWidget);
+      expect(find.text('Sending…'), findsNothing);
+      expect(box.of('a'), isEmpty);
+      for (var i = 0; i < 6; i++) {
+        expect(opacityOf(tester, 'ship it'), greaterThanOrEqualTo(0.5));
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+      await tester.pump(const Duration(seconds: 1));
+      expect(opacityOf(tester, 'ship it'), 1);
+      expect(tester.getTopLeft(find.text('ship it')).dy, place.dy);
+      answers.single.complete();
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('ship it'), findsOneWidget);
+    });
+
+    testWidgets('one the backend has, but whose own never shows here, goes', (
+      tester,
+    ) async {
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        transcriptOf(3),
+        ValueNotifier(0),
+        queued: QueuedStore(),
+        outbox: box,
+      );
+      box.send('a', 'ship it');
+      await tester.pump();
+      expect(find.text('ship it'), findsOneWidget);
+      // The backend sends what it became before it answers: had it shown
+      // here, it would have taken its place already.
+      answers.single.complete();
+      await tester.pump();
+      expect(find.text('ship it'), findsNothing);
+      expect(box.of('a'), isEmpty);
+    });
+
+    testWidgets("one that isn't sent stays, with Retry", (tester) async {
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        transcriptOf(3),
+        ValueNotifier(0),
+        queued: QueuedStore(),
+        outbox: box,
+      );
+      box.send('a', 'ship it');
+      await tester.pump();
+      answers.single.completeError(
+        const RequestFailure('Not connected to the backend.'),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.text('ship it'), findsOneWidget);
+      expect(find.text('Not sent'), findsOneWidget);
+      expect(find.text('Sending…'), findsNothing);
+      // "Not sent" isn't faded with the bubble.
+      expect(opacityOf(tester, 'Not sent'), 1);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      expect(answers, hasLength(2));
+      expect(find.text('Not sent'), findsNothing);
+      expect(find.text('Sending…'), findsOneWidget);
+      answers.last.complete();
+      await tester.pump(const Duration(seconds: 2));
+      expect(box.of('a'), isEmpty);
+    });
+
+    testWidgets('matched by the id it was sent with, not its text', (
+      tester,
+    ) async {
+      final store = transcriptOf(3);
+      final queued = QueuedStore();
+      final ids = <String>[];
+      final answers = <Completer<void>>[];
+      final box = Outbox((agentId, text, clientId) {
+        ids.add(clientId);
+        final answer = Completer<void>();
+        answers.add(answer);
+        return answer.future;
+      });
+      await show(tester, store, ValueNotifier(0), queued: queued, outbox: box);
+      box
+        ..send('a', 'ok')
+        ..send('a', 'my key is hunter2');
+      await tester.pump();
+      expect(ids, hasLength(2));
+      expect(ids.toSet(), hasLength(2), reason: 'one id per send');
+
+      // The second comes back first, its secret hidden; the first after.
+      queued.apply(
+        QueuedMessages(
+          agentId: 'a',
+          messages: [
+            QueuedMessage(
+              id: Int64(8),
+              source: 'person',
+              text: 'my key is [secret KEY]',
+              clientId: ids[1],
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      expect(find.text('my key is hunter2'), findsNothing);
+      expect(find.text('my key is [secret KEY]'), findsOneWidget);
+      expect(box.of('a').single.text, 'ok');
+
+      store.update(
+        EntryUpdate(
+          agentId: 'a',
+          entry: Entry(
+            seq: Int64(3),
+            user: UserText(text: 'ok', clientId: ids[0]),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(box.of('a'), isEmpty);
+      expect(find.text('ok'), findsOneWidget);
+      for (final answer in answers) {
+        answer.complete();
+      }
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a message queued before it stays before it', (tester) async {
+      final queued = QueuedStore();
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        transcriptOf(3),
+        ValueNotifier(0),
+        queued: queued,
+        outbox: box,
+      );
+      box.send('a', 'mine');
+      await tester.pump();
+      queued.apply(
+        queue([
+          QueuedMessage(
+            id: Int64(1),
+            source: 'agent',
+            sender: 'Lead',
+            senderId: 'lead',
+            text: 'from Lead',
+          ),
+        ]),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        tester.getTopLeft(find.text('from Lead')).dy,
+        lessThan(tester.getTopLeft(find.text('mine')).dy),
+      );
+      answers.single.complete();
+      await tester.pump(const Duration(seconds: 2));
     });
   });
 

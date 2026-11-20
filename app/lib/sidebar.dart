@@ -7,8 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'agent_name.dart';
 import 'backend.dart';
 import 'characters/character.dart';
+import 'connection.dart';
 import 'controls.dart';
-import 'devices.dart';
 import 'forms.dart';
 import 'highlights.dart';
 import 'identity.dart';
@@ -18,7 +18,6 @@ import 'scope.dart';
 import 'state.dart' show isAdminAgent;
 import 'usage.dart';
 import 'tell_rivet.dart';
-import 'tunnel_client.dart';
 
 /// The workspace's own agents, then projects with their agents nested under
 /// them. Agents can be dragged between the workspace and projects. With a
@@ -143,15 +142,24 @@ class Sidebar extends StatelessWidget {
                                 ),
                               ),
                               for (final project in workspace.projects)
-                                _Place(
-                                  projectId: project.id,
-                                  header: _ProjectRow(project: project),
-                                  folders: project.folders,
-                                  agents: backend.workspace.agentsIn(
-                                    project.id,
+                                if (!project.archived)
+                                  _Place(
+                                    projectId: project.id,
+                                    header: _ProjectRow(project: project),
+                                    folders: project.folders,
+                                    agents: backend.workspace.agentsIn(
+                                      project.id,
+                                    ),
+                                    selectedAgentId: selected,
+                                    indent: Space.l,
                                   ),
-                                  selectedAgentId: selected,
-                                  indent: Space.l,
+                              // Out of the way, and back with a click.
+                              if (workspace.projects.any((p) => p.archived))
+                                _Archived(
+                                  projects: [
+                                    for (final project in workspace.projects)
+                                      if (project.archived) project,
+                                  ],
                                 ),
                             ],
                     ),
@@ -184,7 +192,10 @@ bool _elsewhere(
   if (key.startsWith('folder:')) return !key.startsWith('folder:$projectId/');
   final others = {
     for (final agent in workspace.agents)
-      if (agent.projectId != projectId && agent.id != shown) agent.id,
+      if (agent.projectId != projectId &&
+          agent.id != shown &&
+          archivedProjectOf(workspace, agent) == null)
+        agent.id,
   };
   return matchesAgents(key, others);
 }
@@ -663,6 +674,7 @@ Set<String> _descendants(List<Agent> agents, String agentId) {
 /// A focusable sidebar row: hover tint, signal focus ring, Enter activates.
 class _Row extends StatefulWidget {
   const _Row({
+    super.key,
     required this.onTap,
     required this.builder,
     this.selected = false,
@@ -710,6 +722,8 @@ class _RowState extends State<_Row> {
       child: GestureDetector(
         onTap: widget.onTap,
         onSecondaryTap: widget.onSecondaryTap,
+        // A phone's right click.
+        onLongPress: widget.onSecondaryTap,
         child: AnimatedContainer(
           duration: Motion.fast,
           curve: Curves.easeOut,
@@ -1216,6 +1230,117 @@ class _QuietRow extends StatelessWidget {
   }
 }
 
+/// Archived projects, at the bottom of the project list: "Archived (N)",
+/// which opens in place to list them, each with Unarchive. A click on one
+/// opens its settings.
+class _Archived extends StatefulWidget {
+  const _Archived({required this.projects});
+
+  final List<Project> projects;
+
+  @override
+  State<_Archived> createState() => _ArchivedState();
+}
+
+class _ArchivedState extends State<_Archived> {
+  var _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _Row(
+            onTap: () => setState(() => _open = !_open),
+            builder: (context, hovered) => Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Archived (${widget.projects.length})',
+                    style: TextStyles.body.copyWith(
+                      color: hovered ? palette.textMuted : palette.textFaint,
+                    ),
+                  ),
+                ),
+                Chevron(
+                  color: hovered ? palette.textMuted : palette.textFaint,
+                  down: _open,
+                ),
+              ],
+            ),
+          ),
+          if (_open)
+            for (final project in widget.projects)
+              _Row(
+                key: ValueKey('archived:${project.id}'),
+                onTap: () => _openProjectSettings(context, project),
+                onSecondaryTap: () => _openProjectSettings(context, project),
+                builder: (context, hovered) => Row(
+                  children: [
+                    SizedBox(
+                      width: Space.l + 2,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: FolderGlyph(color: palette.textFaint),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        project.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.body.copyWith(
+                          color: hovered
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        ),
+                      ),
+                    ),
+                    _Unarchive(project: project),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A quiet "Unarchive" at the end of an archived project's row.
+class _Unarchive extends StatelessWidget {
+  const _Unarchive({required this.project});
+
+  final Project project;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    return Semantics(
+      button: true,
+      label: 'Unarchive ${project.name}',
+      child: Pressable(
+        onTap: () => fireAndLog(unarchiveProject(backend, project)),
+        builder: (context, hovered) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+          child: ExcludeSemantics(
+            child: Text(
+              'Unarchive',
+              style: TextStyles.caption.copyWith(
+                color: hovered ? palette.text : palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Settings and the Marketplace, the version, and sign-in, connection and
 /// settings-file state when there is any.
 class _Footer extends StatelessWidget {
@@ -1236,69 +1361,8 @@ class _Footer extends StatelessWidget {
     final scope = AppScope.scope(context);
     final appVersion = scope.appBuild.version;
     void openSettings() => AppScope.openSettings(context);
-    void chooseFactory() =>
-        showModal(context, (context, close) => FactoryChooser(close: close));
     final remote = scope.backend.target;
-    final refused = scope.backend.refused.value;
     final status = <Widget>[];
-    if (refused != null) {
-      // Retrying won't help: it's up to the person to pick a Factory again.
-      status.add(
-        Pressable(
-          onTap: chooseFactory,
-          builder: (context, hovered) => Text(
-            '${remote?.label ?? 'This Claktory'} no longer allows this device',
-            style: TextStyles.caption.copyWith(
-              color: palette.danger,
-              decoration: hovered ? TextDecoration.underline : null,
-              decorationColor: palette.danger,
-            ),
-          ),
-        ),
-      );
-    } else if (!connected && !scope.backend.reconnecting.value) {
-      // Back from the background or a network change, it reconnects
-      // without a word for a few seconds first.
-      status.add(
-        ValueListenableBuilder(
-          valueListenable: scope.backend.tunnel,
-          builder: (context, tunnel, _) {
-            // Through the tunnel, once a dial has failed it says so, and
-            // why on a click, rather than "Connecting…" for ever.
-            final failing =
-                remote != null &&
-                tunnel != null &&
-                tunnel.failure != TunnelFailure.none;
-            return Pressable(
-              onTap: failing
-                  ? () => showModal(
-                      context,
-                      (context, close) => TunnelProblem(close: close),
-                    )
-                  : chooseFactory,
-              builder: (context, hovered) => Text(
-                failing
-                    ? "Can't connect to ${remote.label}"
-                    : remote == null
-                    ? 'Connecting…'
-                    : 'Connecting to ${remote.label}…',
-                style: TextStyles.caption.copyWith(
-                  color: failing
-                      ? palette.danger
-                      : hovered
-                      ? palette.textMuted
-                      : palette.textFaint,
-                  decoration: failing && hovered
-                      ? TextDecoration.underline
-                      : null,
-                  decorationColor: palette.danger,
-                ),
-              ),
-            );
-          },
-        ),
-      );
-    }
     if (workspace.hasLogin() &&
         !AppScope.pageShown(context, AppPage.settings)) {
       final login = workspace.login;
@@ -1416,16 +1480,25 @@ class _Footer extends StatelessWidget {
               ),
             ],
           ),
+          // How it's connected, always in sight: which Claktory this is,
+          // and whether what shows is live.
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.s, Space.xs, Space.s, 0),
-            // Which Claktory this is, and the versions: plain text, as the
-            // rail switches and adds Claktories (a phone's list of them).
+            child: ConnectionLine(
+              backend: scope.backend,
+              machine: remote == null
+                  ? null
+                  : workspace.remote.machine.isEmpty
+                  ? remote.label
+                  : workspace.remote.machine,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.s, 2, Space.s, 0),
+            // The versions: plain text, as the rail switches and adds
+            // Claktories (a phone's list of them).
             child: Text(
-              [
-                if (remote != null)
-                  'on ${workspace.remote.machine.isEmpty ? remote.label : workspace.remote.machine}',
-                _versions(workspace.version, appVersion),
-              ].join(' · '),
+              _versions(workspace.version, appVersion),
               style: TextStyles.caption.copyWith(
                 color: palette.textFaint,
                 fontSize: 11,

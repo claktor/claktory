@@ -167,11 +167,27 @@ pub struct Transcript {
     live: Live,
 }
 
+/// What a snapshot of the conversation holds at most: the latest entries,
+/// this many, and about this many bytes (at least one entry, however big).
+const PAGE_ENTRIES: usize = 200;
+const PAGE_BYTES: usize = 256 * 1024;
+/// The most entries one page may be asked for.
+const MAX_PAGE_ENTRIES: usize = 1000;
+
 /// What a cleared conversation starts with.
 const CLEARED: &str = "Conversation cleared";
 
 impl Transcript {
+    /// Reads the agent's conversation from its files, off the async threads:
+    /// a long one is megabytes of JSON.
     pub async fn load(dir: PathBuf) -> Result<Transcript, TranscriptError> {
+        match tokio::task::spawn_blocking(move || Transcript::read(dir)).await {
+            Ok(result) => result,
+            Err(error) => Err(TranscriptError::Io(std::io::Error::other(error))),
+        }
+    }
+
+    fn read(dir: PathBuf) -> Result<Transcript, TranscriptError> {
         let mut transcript = Transcript {
             dir,
             entries: Vec::new(),
@@ -185,10 +201,10 @@ impl Transcript {
             live: Live::default(),
         };
         let mut numbers = Vec::new();
-        match tokio::fs::read_dir(&transcript.dir).await {
-            Ok(mut files) => {
-                while let Some(file) = files.next_entry().await? {
-                    if let Some(number) = segment_number(&file.file_name()) {
+        match std::fs::read_dir(&transcript.dir) {
+            Ok(files) => {
+                for file in files {
+                    if let Some(number) = segment_number(&file?.file_name()) {
                         numbers.push(number);
                     }
                 }
@@ -199,7 +215,7 @@ impl Transcript {
         numbers.sort_unstable();
         for number in numbers {
             let path = transcript.segment_path(number);
-            let bytes = tokio::fs::read(&path).await?;
+            let bytes = std::fs::read(&path)?;
             let segment = serde_json::from_slice(&bytes).map_err(|source| TranscriptError::Corrupt { path, source })?;
             transcript.restore(number, segment);
         }
@@ -235,6 +251,53 @@ impl Transcript {
         transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
         let persist = transcript.persist()?;
         Ok((transcript, persist))
+    }
+
+    /// The latest entries, as a snapshot sends them, and whether there are
+    /// earlier ones.
+    pub fn recent(&self) -> (Vec<Entry>, bool) {
+        self.page(self.entries.len() as u64, 0, None).unwrap_or_default()
+    }
+
+    /// Entries before `before` (a seq, exclusive): from `from` on when set,
+    /// else the latest, at most `limit` (0 for `PAGE_ENTRIES`) and about
+    /// `PAGE_BYTES`, and never starting partway through a model response
+    /// unless that response alone is bigger. Whether there are earlier ones.
+    /// None when `before` is beyond the end.
+    pub fn page(&self, before: u64, limit: u32, from: Option<u64>) -> Option<(Vec<Entry>, bool)> {
+        let end = usize::try_from(before).ok().filter(|end| *end <= self.entries.len())?;
+        let start = match from {
+            Some(from) => usize::try_from(from).unwrap_or(usize::MAX).min(end),
+            None => {
+                let limit = match limit {
+                    0 => PAGE_ENTRIES,
+                    limit => (limit as usize).min(MAX_PAGE_ENTRIES),
+                };
+                let mut start = end;
+                let mut bytes = 0usize;
+                while start > 0 && end - start < limit {
+                    let size = prost::Message::encoded_len(&self.entries[start - 1]);
+                    if start < end && bytes + size > PAGE_BYTES {
+                        break;
+                    }
+                    bytes += size;
+                    start -= 1;
+                }
+                // The whole model response the first entry is part of.
+                if let Some(first) = self.entries.get(start)
+                    && first.reply != 0
+                    && (first.reply as usize) < start
+                {
+                    let response = first.reply as usize;
+                    let extra: usize = self.entries[response..start].iter().map(prost::Message::encoded_len).sum();
+                    if bytes + extra <= PAGE_BYTES * 2 {
+                        start = response;
+                    }
+                }
+                start
+            }
+        };
+        Some((self.entries[start..end].to_vec(), start > 0))
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -647,7 +710,11 @@ fn notice(text: String, level: NoticeLevel) -> Kind {
 fn user_kind(message: &UserMessage) -> Kind {
     let text = user_text(&message.content);
     let Some(event) = &message.event else {
-        return Kind::User(v1::UserText { text, sent_from: message.sent_from.as_ref().map(sent_from) });
+        return Kind::User(v1::UserText {
+            text,
+            sent_from: message.sent_from.as_ref().map(sent_from),
+            client_id: message.client_id.clone(),
+        });
     };
     let source = match event.source {
         EventSource::Host => v1::EventSource::Factory,

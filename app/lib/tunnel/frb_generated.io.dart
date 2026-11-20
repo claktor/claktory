@@ -62,6 +62,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  PairingIds dco_decode_pairing_ids(dynamic raw);
+
+  @protected
   TunnelFailure dco_decode_tunnel_failure(dynamic raw);
 
   @protected
@@ -120,6 +123,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  PairingIds sse_decode_pairing_ids(SseDeserializer deserializer);
 
   @protected
   TunnelFailure sse_decode_tunnel_failure(SseDeserializer deserializer);
@@ -189,6 +195,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_pairing_ids(PairingIds self, SseSerializer serializer);
 
   @protected
   void sse_encode_tunnel_failure(TunnelFailure self, SseSerializer serializer);

@@ -127,6 +127,10 @@ pub struct UserMessage {
     /// The person's: the device they sent it from, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_from: Option<SentFrom>,
+    /// The person's: the id their app made up for this send, so it can match
+    /// the message it showed at once to this one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
 }
 
 /// The device the person sent a message from, which the model reads with it.
@@ -151,7 +155,13 @@ impl SentFrom {
 
 impl UserMessage {
     pub fn text(text: impl Into<String>, timestamp: u64) -> UserMessage {
-        UserMessage { content: UserContent::Parts(vec![UserPart::Text { text: text.into() }]), timestamp, event: None, sent_from: None }
+        UserMessage {
+            content: UserContent::Parts(vec![UserPart::Text { text: text.into() }]),
+            timestamp,
+            event: None,
+            sent_from: None,
+            client_id: String::new(),
+        }
     }
 
     pub fn event(text: impl Into<String>, event: Event, timestamp: u64) -> UserMessage {
@@ -181,7 +191,7 @@ impl UserMessage {
                 UserContent::Parts(wrapped)
             }
         };
-        UserMessage { content, timestamp: self.timestamp, event: None, sent_from: None }
+        UserMessage { content, timestamp: self.timestamp, event: None, sent_from: None, client_id: String::new() }
     }
 }
 

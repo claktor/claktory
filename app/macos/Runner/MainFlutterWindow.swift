@@ -59,9 +59,9 @@ class MainFlutterWindow: NSWindow {
         UserDefaults.standard.set(call.arguments as? [String: String] ?? [:], forKey: Self.draftsKey)
         result(nil)
       case "connections":
-        result(UserDefaults.standard.dictionary(forKey: Self.connectionsKey) ?? [:])
+        result(Self.connections.read())
       case "setConnections":
-        UserDefaults.standard.set(call.arguments as? [String: Any] ?? [:], forKey: Self.connectionsKey)
+        Self.connections.write(call.arguments as? [String: Any] ?? [:])
         result(nil)
       case "qrCode":
         result(Self.qrCode(call.arguments as? String ?? ""))
@@ -136,8 +136,10 @@ class MainFlutterWindow: NSWindow {
   // Which Factory the app shows (a pairing code, or empty for this Mac's) and
   // the others it has connected to (app/lib/connections.dart): the person's
   // decision, the third thing kept on the device, since a device can't ask
-  // a backend where its backend is.
-  private static let connectionsKey = "Connections"
+  // a backend where its backend is. Their codes hold tokens, so they're in
+  // the Keychain (ConnectionStore.swift).
+  private static let connections = ConnectionStore.forThisApp(
+    displayName: AppDelegate.displayName)
 
   /// `text` as a QR code from Core Image (medium error correction): its
   /// modules row by row, top first, 1 for dark; nil if it can't be made.

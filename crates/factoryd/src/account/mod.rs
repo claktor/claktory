@@ -39,6 +39,7 @@ use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
 use crate::config::AccountConfig;
+use crate::encoding::unhex;
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
 
@@ -221,14 +222,6 @@ fn now_s() -> i64 {
 
 fn hex(bytes: &[u8]) -> String {
     api::hex(bytes)
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
 }
 
 fn refused(code: ErrorCode, message: impl Into<String>) -> RequestError {

@@ -39,8 +39,9 @@ fn config(dir: &std::path::Path) -> Config {
             name: "Claktory".into(),
             path: dir.join("factory"),
             folders: vec![folder("app", "App"), folder("research", "Research")],
+            archived: false,
         },
-        ProjectConfig { id: "site".into(), name: "Site".into(), path: dir.join("site"), folders: Vec::new() },
+        ProjectConfig { id: "site".into(), name: "Site".into(), path: dir.join("site"), folders: Vec::new(), archived: false },
     ];
     let mut lena = agent(&rivet, "lena", "factory", "app", "Backend", json!({}));
     lena.parent = Some("sam".into());

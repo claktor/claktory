@@ -33,6 +33,20 @@ pub async fn open_tunnel(device_key: String, endpoint_id: String, relays: Vec<St
         .await?
 }
 
+/// The endpoint ids, as lowercase hex, that the number a device shows while
+/// it waits to be allowed is worked out from: [device]'s, from its key
+/// [device_key], and the [backend]'s, from its pairing code's `e=`.
+pub struct PairingIds {
+    pub device: String,
+    pub backend: String,
+}
+
+#[frb(sync)]
+pub fn pairing_ids(device_key: String, endpoint_id: String) -> anyhow::Result<PairingIds> {
+    let (device, backend) = tunnel::pairing_ids(&device_key, &endpoint_id)?;
+    Ok(PairingIds { device, backend })
+}
+
 impl TunnelHandle {
     /// Where the app connects: ws://127.0.0.1:<port>.
     #[frb(sync)]

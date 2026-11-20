@@ -456,9 +456,47 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
                 ],
               ),
             ),
+            _archiveField(backend),
           ],
         );
       },
+    );
+  }
+
+  /// Archives the project at once (nothing is lost, so nothing to
+  /// confirm), or unarchives it.
+  Widget _archiveField(Backend backend) {
+    final archived =
+        [
+          for (final project in backend.workspace.workspace.projects)
+            if (project.id == widget.project.id) project.archived,
+        ].firstOrNull ??
+        widget.project.archived;
+    return Field(
+      label: 'Archive',
+      note: archived
+          ? "Archived: it's hidden from the sidebar, and its agents don't "
+                'work until you unarchive it.'
+          : 'Hides the project and its agents from the sidebar, and its '
+                'agents stop working. Nothing is deleted, and you can '
+                'unarchive it anytime.',
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Button(
+          label: archived ? 'Unarchive project' : 'Archive project',
+          onPressed: submitting
+              ? null
+              : () => submitRequest(
+                  backend.updateProject(
+                    UpdateProject(
+                      projectId: widget.project.id,
+                      archived: !archived,
+                    ),
+                  ),
+                  widget.close,
+                ),
+        ),
+      ),
     );
   }
 }
@@ -1867,6 +1905,21 @@ class _AgentChip extends StatelessWidget {
     );
   }
 }
+
+/// The archived project [agent] is in, if it's in one. Its agents don't
+/// run, and the app hides them (sidebar, rail) until it's unarchived.
+Project? archivedProjectOf(Workspace workspace, Agent agent) {
+  if (agent.projectId.isEmpty) return null;
+  for (final project in workspace.projects) {
+    if (project.id == agent.projectId) return project.archived ? project : null;
+  }
+  return null;
+}
+
+/// Unarchives [project]: it and its agents come back to the sidebar, and
+/// its agents read what waited for them.
+Future<void> unarchiveProject(Backend backend, Project project) => backend
+    .updateProject(UpdateProject(projectId: project.id, archived: false));
 
 /// Rivet: the workspace's agent with Messaging's admin option on, or else
 /// the agent with id "rivet"; null when there's neither.

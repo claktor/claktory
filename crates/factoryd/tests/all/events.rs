@@ -187,8 +187,12 @@ async fn the_persons_message_moves_a_running_command_to_the_background_and_anoth
     apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
     apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
     apply_request(&mut client, &mut view, select("builder")).await;
-    let wait_for =
-        |file: &str| format!(r#"call bash {{"command":"echo started; until [ -e {file} ]; do sleep 0.05; done; echo finished"}}"#);
+    // Waits for the file, for a minute at most, so a failing test leaves nothing running.
+    let wait_for = |file: &str| {
+        format!(
+            r#"call bash {{"command":"echo started; n=0; until [ -e {file} ] || [ $n -ge 600 ]; do sleep 0.1; n=$((n+1)); done; echo finished"}}"#
+        )
+    };
 
     // The person's message: the command moves at once and runs on.
     apply_request(&mut client, &mut view, send_message("builder", &wait_for("go"))).await;

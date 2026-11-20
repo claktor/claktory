@@ -258,20 +258,89 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
   String? _error;
   PairingCode? _code;
 
+  /// The device was let in: nothing to cancel as the form closes.
+  var _allowed = false;
+
+  /// Allow or Don't allow is on its way.
+  var _deciding = false;
+
+  late final Backend _backend = AppScope.of(context);
+
   @override
   void dispose() {
     _name.dispose();
+    // A code lasts only while it's shown: closing ends it, unless it let
+    // its device in (then this does nothing).
+    final code = _code;
+    if (code != null && !_allowed) {
+      fireAndLog(_backend.cancelPairing(code.deviceId));
+    }
     super.dispose();
+  }
+
+  Future<void> _decide(PendingDevice device, {required bool allow}) async {
+    setState(() {
+      _deciding = true;
+      _error = null;
+    });
+    try {
+      if (allow) {
+        await _backend.approveDevice(device.deviceId);
+        _allowed = true;
+      } else {
+        await _backend.denyDevice(device.deviceId);
+      }
+      widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(
+          () => _error = failure.code == ErrorCode.ERROR_CODE_NOT_FOUND
+              ? '${device.name} stopped waiting. To add it, make a new code.'
+              : failure.message,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _deciding = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final code = _code;
     if (code != null) {
-      return PairingCodeView(
-        code: code.code,
-        device: _name.text.trim(),
-        close: widget.close,
+      return ListenableBuilder(
+        listenable: _backend.workspace,
+        builder: (context, _) {
+          final remote = _backend.workspace.workspace.remote;
+          final waiting = remote.pendingDevices
+              .where((device) => device.deviceId == code.deviceId)
+              .firstOrNull;
+          // The device used the code: let it in, or not.
+          if (waiting != null || _deciding || _error != null) {
+            final device = waiting ?? PendingDevice(name: _name.text.trim());
+            return FormFrame(
+              title: 'Allow ${device.name} to connect?',
+              body: device.number.isEmpty
+                  ? null
+                  : 'Check that its screen shows ${device.number}.',
+              error: _error,
+              fields: const [],
+              submitLabel: 'Allow',
+              onSubmit: waiting == null || _deciding
+                  ? null
+                  : () => _decide(waiting, allow: true),
+              cancelLabel: waiting == null ? 'Close' : "Don't allow",
+              onCancel: waiting == null || _deciding
+                  ? widget.close
+                  : () => _decide(waiting, allow: false),
+            );
+          }
+          return PairingCodeView(
+            code: code.code,
+            device: _name.text.trim(),
+            close: widget.close,
+          );
+        },
       );
     }
     return ListenableBuilder(
@@ -419,7 +488,11 @@ class _PairingCodeViewState extends State<PairingCodeView> {
     final palette = Palette.of(context);
     final device = widget.device.isEmpty ? 'the device' : widget.device;
     return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.enter): widget.close},
+      // Escape closes it, as every form; Enter doesn't, since closing ends
+      // the code.
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): widget.close,
+      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -456,7 +529,8 @@ class _PairingCodeViewState extends State<PairingCodeView> {
               const Spacer(),
               Button(label: 'Copy code', onPressed: _copy),
               const SizedBox(width: Space.s),
-              Button(label: 'Done', onPressed: widget.close, primary: true),
+              // Closing ends the code: it lasts only while it's shown.
+              Button(label: 'Cancel', onPressed: widget.close),
             ],
           ),
         ],

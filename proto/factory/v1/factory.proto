@@ -95,6 +95,13 @@ message ClientMessage {
     AccountSignOut account_sign_out = 63;
     SetAccountService set_account_service = 64;
     ShowRecoveryKey show_recovery_key = 65;
+    // Pairing a device: allowing or turning away the device that used a
+    // code, and cancelling a code (see PendingDevice).
+    ApproveDevice approve_device = 66;
+    DenyDevice deny_device = 67;
+    CancelPairing cancel_pairing = 68;
+    // Earlier entries of a transcript (see Transcript.has_earlier).
+    LoadEntries load_entries = 69;
   }
 }
 
@@ -132,6 +139,11 @@ message ServerMessage {
     RecoveryKey recovery_key = 23;
     // The answer to ListSecretUses, to the asker only.
     SecretUses secret_uses = 24;
+    // To a device's Hello, with its pairing code's token, while it waits for
+    // the person to allow it (see PendingDevice).
+    PairingPending pairing_pending = 25;
+    // The answer to LoadEntries, to the asker only.
+    EntryPage entry_page = 26;
   }
 }
 
@@ -198,6 +210,7 @@ message PairingCode {
   // each r= a relay it can be reached through (percent-encoded). Until it's
   // first used it expires (PairedDevice.code_expires_ms); the first device
   // to connect with it binds its key to it, and no other key can use it.
+  // That device gets in once the person allows it (PendingDevice).
   string code = 1;
   // The new device's id in RemoteAccess.devices.
   string device_id = 2;
@@ -207,6 +220,49 @@ message PairingCode {
 // close. Answered with Ack.
 message UnpairDevice {
   string device_id = 1;
+}
+
+// Allows a device that's waiting (RemoteAccess.pending_devices): it's
+// paired, and its waiting connection gets Welcome. Answered with Ack;
+// ERROR_CODE_NOT_FOUND when no device with that id is waiting (its code
+// expired or was cancelled meanwhile).
+message ApproveDevice {
+  string device_id = 1;
+}
+
+// Turns away a device that's waiting: its code stops working, the device is
+// forgotten (make a new code to pair it), and its waiting connection gets
+// ERROR_CODE_UNAUTHORIZED. Answered with Ack; ERROR_CODE_NOT_FOUND when no
+// device with that id is waiting.
+message DenyDevice {
+  string device_id = 1;
+}
+
+// Cancels a pairing code that hasn't let a device in yet, when the person
+// closes Add a device: the code stops working and the device is forgotten
+// (a device waiting with it is turned away). A code exists only while the
+// person is pairing: this, or its 10 minutes running out, ends it. Answered
+// with Ack, also when the device is already gone; a device already allowed
+// stays paired.
+message CancelPairing {
+  string device_id = 1;
+}
+
+// The answer to a device's Hello while it waits to be allowed. The
+// connection stays open: Welcome follows (replying to the Hello) once the
+// person allows it, or Error ERROR_CODE_UNAUTHORIZED, with why, once it's
+// turned away, cancelled or its code expires. Meanwhile the device shows
+// PendingDevice.number, worked out on its own side.
+message PairingPending {
+  // Its id in RemoteAccess.devices.
+  string device_id = 1;
+  // The name it was given when its code was made.
+  string name = 2;
+  // The name of the computer Claktory runs on, which asks the person
+  // (RemoteAccess.machine).
+  string machine = 3;
+  // When its code stops working, in ms since 1970.
+  int64 expires_ms = 4;
 }
 
 // Turns remote access (devices on other machines reaching this Factory
@@ -257,6 +313,37 @@ message RemoteAccess {
   // empty and false while off or offline.
   string home_relay = 12;
   bool relay_connected = 13;
+  // Devices that used a pairing code and wait for the person to allow them,
+  // oldest first. Each is also in `devices`, with its code_expires_ms.
+  repeated PendingDevice pending_devices = 14;
+}
+
+// A device that connected with a pairing code and waits to be allowed: a
+// code lets a device in only once the person allows it, on a device that's
+// already in (ApproveDevice), or turns it away (DenyDevice). Only the first
+// device to use a code asks; any other is turned away. The new device shows
+// the same number (see `number`), so the person can tell it's theirs and
+// not one that copied the code.
+message PendingDevice {
+  // Its id in RemoteAccess.devices (PairingCode.device_id).
+  string device_id = 1;
+  // The name it was given when its code was made.
+  string name = 2;
+  // What it says it is, from its Hello.
+  DeviceKind kind = 3;
+  // Four digits, e.g. "0427", that the new device shows too. Both sides
+  // work it out: SHA-256 of the UTF-8 text "claktory pairing\n" + this
+  // Claktory's endpoint id (the code's e=, lowercase hex) + "\n" + the
+  // device's own endpoint id (lowercase hex) + "\n" + the SHA-256 of the
+  // code's token (t=, the SHA-256 of its text) in lowercase hex; its first
+  // four bytes as a big-endian unsigned number, modulo 10000, with leading
+  // zeros. For example, with endpoint ids of 64 "a"s and 64 "b"s and the
+  // token "0123456789abcdef": "0722".
+  string number = 4;
+  // When it asked, in ms since 1970.
+  int64 requested_ms = 5;
+  // When its code stops working, and it's turned away, unless allowed.
+  int64 expires_ms = 6;
 }
 
 // How a device's connection travels.
@@ -377,6 +464,10 @@ message SelectAgent {
 message SendMessage {
   string agent_id = 1;
   string text = 2;
+  // Made up by the app for this send, so it can show the message at once and
+  // match it to the queued message and transcript entry it becomes, which
+  // carry it (QueuedMessage.client_id, UserText.client_id). Optional.
+  string client_id = 3;
 }
 
 // Stops the agent's current run.
@@ -424,6 +515,9 @@ message DeleteFolder {
 message UpdateProject {
   string project_id = 1;
   optional string name = 2;
+  // Archives the project (true) or brings it back (false); see
+  // Project.archived.
+  optional bool archived = 3;
 }
 
 // Changes Factory-wide settings. Unset fields stay as they are. An empty
@@ -1572,6 +1666,13 @@ message Project {
   // Folders inside the project, each where some of its agents work (see
   // Agent.folder_id). In the person's order.
   repeated ProjectFolder folders = 4;
+  // Archived: put away, with nothing deleted. Its agents stay in
+  // Workspace.agents with their conversations, checklists, memory and
+  // files, but don't run: one that was working is stopped, and messages and
+  // events for them wait, queued, until the project is unarchived. Their
+  // monitors pause, other agents can't message them, and the Map leaves the
+  // project out. Unarchived, all of that resumes as it was.
+  bool archived = 5;
 }
 
 // A folder that some of a project's agents work in. It only scopes where they
@@ -1730,7 +1831,36 @@ message Model {
 // The selected agent's whole transcript, oldest entry first.
 message Transcript {
   string agent_id = 1;
+  // The latest entries only: at most 200, and at most about 256 KB encoded
+  // (at least one, however big), starting at a model response's first entry.
+  // Older ones come with LoadEntries.
   repeated Entry entries = 2;
+  // There are entries before the first of `entries`.
+  bool has_earlier = 3;
+}
+
+// Earlier entries of an agent's transcript, answered with EntryPage to the
+// asker only. NOT_FOUND for an unknown agent, INVALID_REQUEST when
+// `before_seq` is beyond the end.
+message LoadEntries {
+  string agent_id = 1;
+  // Entries before this seq (exclusive): the seq of the first entry the app
+  // holds.
+  uint64 before_seq = 2;
+  // Without `from_seq`: the latest entries before `before_seq`, cut as
+  // Transcript's are, at most `limit` (0 for 200; 1000 at most).
+  uint32 limit = 3;
+  // Every entry from this seq up to `before_seq`, uncut: to jump to an older
+  // entry and keep what the app holds one run with no gaps.
+  optional uint64 from_seq = 4;
+}
+
+// The answer to LoadEntries: entries oldest first.
+message EntryPage {
+  string agent_id = 1;
+  repeated Entry entries = 2;
+  // There are entries before the first of `entries`.
+  bool has_earlier = 3;
 }
 
 // What waits for the selected agent, not yet taken by it. Sent on connect,
@@ -1762,6 +1892,8 @@ message QueuedMessage {
   string summary = 7;
   // The person's: the device it was sent from (see UserText.sent_from).
   SentFrom sent_from = 8;
+  // The person's: SendMessage.client_id, as sent; empty without one.
+  string client_id = 9;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -1855,6 +1987,9 @@ message UserText {
   // The device it was sent from; unset for messages from before it, and for
   // those Claktory sent for the person (an approved proposal to Rivet).
   SentFrom sent_from = 2;
+  // SendMessage.client_id, as sent; empty without one, and for messages from
+  // before it.
+  string client_id = 3;
 }
 
 message AssistantText {

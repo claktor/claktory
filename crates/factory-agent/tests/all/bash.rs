@@ -203,22 +203,11 @@ async fn shell_failures_cannot_be_hidden_by_later_commands_or_pipeline_consumers
 #[tokio::test]
 async fn a_background_command_returns_at_once_and_reports_when_it_finishes() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (sender, mut finished) = tokio::sync::mpsc::unbounded_channel();
-    let started: Arc<Mutex<Vec<factory_agent::Task>>> = Arc::default();
-    let background = factory_agent::Background {
-        dir: dir.path().join("tasks"),
-        started: {
-            let started = started.clone();
-            Arc::new(move |task: &factory_agent::Task| started.lock().push(task.clone()))
-        },
-        finished: Arc::new(move |done| {
-            let _ = sender.send(done);
-        }),
-    };
-    let tools = coding_tools(dir.path(), &[], Some(background));
-    let bash = tools.into_iter().find(|tool| tool.spec.name == "bash").expect("bash");
+    let Watched { background, started, mut finished, .. } = watched(dir.path());
+    let _reaper = Reaper(started.clone());
+    let bash = bash_with(dir.path(), &background);
     // The command can't end before the test makes `go`, so returning at all means bash didn't wait for it.
-    let command = "echo first; until [ -e go ]; do sleep 0.01; done; echo second; exit 4";
+    let command = &format!("echo first; {}; echo second; exit 4", until_file("go"));
     let args = serde_json::json!({"command": command, "run_in_background": true});
     let result = tokio::time::timeout(HANG, bash.execute(&args, &CancellationToken::new(), &|_| {}))
         .await
@@ -232,7 +221,7 @@ async fn a_background_command_returns_at_once_and_reports_when_it_finishes() {
     assert_eq!(done.tail, "first\nsecond\n");
     assert_eq!(std::fs::read_to_string(&done.log).expect("log"), "first\nsecond\n");
     assert!(
-        done.summary().starts_with("task-1 finished (exit 4, ") && done.summary().ends_with(&format!("s): {command}")),
+        done.summary().starts_with("task-1 finished (exit 4, ") && done.summary().contains("s): echo first; n=0; until [ -e go ]"),
         "{}",
         done.summary()
     );
@@ -266,11 +255,37 @@ async fn a_background_task_outlives_whoever_started_it_and_can_be_picked_up_agai
     assert_eq!(done.tail, "late\n");
 }
 
+/// A shell loop that waits for `file` to appear, checking every 0.1 s, but
+/// for a minute at most: a test that fails, or ends, first never leaves it
+/// running.
+fn until_file(file: &str) -> String {
+    format!("n=0; until [ -e {file} ] || [ $n -ge 600 ]; do sleep 0.1; n=$((n+1)); done")
+}
+
+/// Kills the process groups of the tasks it holds when dropped, when the test
+/// ends, passed or failed, so none outlives it.
+struct Reaper(Arc<Mutex<Vec<factory_agent::Task>>>);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        for task in self.0.lock().iter() {
+            if let Ok(group) = i32::try_from(task.pid)
+                && group > 1
+            {
+                // SAFETY: killpg only sends a signal.
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+            }
+        }
+    }
+}
+
 /// A Background whose started tasks and finished events the test can see.
+/// Its tasks are killed when it's dropped.
 struct Watched {
     background: factory_agent::Background,
     started: Arc<Mutex<Vec<factory_agent::Task>>>,
     finished: tokio::sync::mpsc::UnboundedReceiver<factory_agent::Finished>,
+    _reaper: Reaper,
 }
 
 fn watched(dir: &Path) -> Watched {
@@ -286,7 +301,7 @@ fn watched(dir: &Path) -> Watched {
             let _ = sender.send(done);
         }),
     };
-    Watched { background, started, finished }
+    Watched { background, _reaper: Reaper(started.clone()), started, finished }
 }
 
 fn bash_with(dir: &Path, background: &factory_agent::Background) -> Tool {
@@ -334,7 +349,7 @@ async fn a_command_past_its_timeout_moves_to_the_background_and_reports_when_it_
     let dir = tempfile::tempdir().expect("tempdir");
     let mut watched = watched(dir.path());
     let bash = bash_with(dir.path(), &watched.background);
-    let command = "echo first; until [ -e go ]; do sleep 0.01; done; echo second; exit 4";
+    let command = &format!("echo first; {}; echo second; exit 4", until_file("go"));
     let result =
         tokio::time::timeout(HANG, bash.execute(&json!({"command": command, "timeout": 0.3}), &CancellationToken::new(), &no_update))
             .await
@@ -368,7 +383,7 @@ async fn a_command_that_only_sleeps_is_stopped_at_its_timeout_and_cancel_stops_a
         tokio::time::sleep(Duration::from_millis(100)).await;
         cancel.cancel();
     });
-    let aborted = bash.execute(&json!({"command": "until [ -e never ]; do sleep 0.01; done"}), &token, &no_update).await.expect("ran");
+    let aborted = bash.execute(&json!({"command": until_file("never")}), &token, &no_update).await.expect("ran");
     assert_eq!(aborted.details["stopped"], "aborted");
     assert!(watched.started.lock().is_empty());
     assert!(!dir.path().join("late").exists());
@@ -379,7 +394,7 @@ async fn a_background_command_is_stopped_at_its_time_limit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut watched = watched(dir.path());
     let bash = bash_with(dir.path(), &watched.background);
-    let args = json!({"command": "until [ -e never ]; do sleep 0.01; done", "run_in_background": true, "timeout": 0.2});
+    let args = json!({"command": until_file("never"), "run_in_background": true, "timeout": 0.2});
     let started = bash.execute(&args, &CancellationToken::new(), &no_update).await.expect("started");
     assert!(text(&started).contains("It's stopped if it runs past 0.2s."), "{}", text(&started));
     let done = tokio::time::timeout(HANG, watched.finished.recv()).await.expect("finished in time").expect("finished");
@@ -491,7 +506,7 @@ async fn detaching_moves_a_running_command_to_the_background_so_a_message_can_re
         tokio::time::sleep(Duration::from_millis(300)).await;
         later.cancel();
     });
-    let command = "echo first; until [ -e go ]; do sleep 0.01; done; echo second";
+    let command = &format!("echo first; {}; echo second", until_file("go"));
     let result =
         tokio::time::timeout(HANG, bash.execute_detachable(&json!({"command": command}), &CancellationToken::new(), &detach, &no_update))
             .await

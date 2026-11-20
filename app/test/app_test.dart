@@ -804,7 +804,7 @@ void main() {
     });
   });
 
-  testWidgets('a message that fails to send comes back to the composer', (
+  testWidgets("a message that isn't sent stays, and Edit takes it back", (
     tester,
   ) async {
     final harness = await showApp(tester, workspace());
@@ -813,15 +813,19 @@ void main() {
     await tester.enterText(find.byType(EditableText).first, 'run the tests');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
-    expect(
-      find.text("Couldn't send: Not connected to the backend."),
-      findsOneWidget,
-    );
-    final editable = tester.widget<EditableText>(
-      find.byType(EditableText).first,
-    );
-    expect(editable.controller.text, 'run the tests');
+    // It shows at once, and stays in the conversation, not sent.
+    expect(find.text('run the tests'), findsOneWidget);
+    expect(find.text('Not sent'), findsOneWidget);
+    EditableText editable() =>
+        tester.widget<EditableText>(find.byType(EditableText).first);
+    expect(editable().controller.text, '');
+
+    await tester.tap(find.text('Edit'));
+    await tester.pump();
+    expect(editable().controller.text, 'run the tests');
+    expect(find.text('Not sent'), findsNothing);
   });
 
   testWidgets('new agents go in projects, never the workspace', (tester) async {

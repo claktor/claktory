@@ -8,8 +8,14 @@
 //! - Each paired device has a token, given once in its pairing code; Factory
 //!   keeps only the token's SHA-256 (`<home>/remote/devices.json`), read
 //!   afresh at every handshake, so `factoryd unpair` applies at once.
-//! - The first device to connect with a code binds its key to it; from then
-//!   on only that key may use it. A code nobody used expires.
+//! - The first device to connect with a code claims it: no other key may
+//!   use it, and it waits, its Hello answered with PairingPending, until the
+//!   person allows it on a device that's already in (or `factoryd pair` in a
+//!   terminal); then its key is bound to the code. Both show the same four
+//!   digits (`approval_number`), so the person can tell their device from
+//!   one that copied the code. A code lasts only while the person pairs:
+//!   turning the device away, cancelling (Add a device closed) or its ten
+//!   minutes running out ends it, and its device is forgotten.
 //! - Right after iroh's handshake, a key that isn't a paired device's is
 //!   turned away, before any of Factory's protocol, unless a code is waiting
 //!   for its device or it connects from this machine.
@@ -42,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{Config, RemoteConfig};
+use crate::encoding::{hex, unhex};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::home::Home;
 use crate::transcript::now_ms;
@@ -78,6 +85,8 @@ pub enum RemoteError {
     Config(PathBuf, String),
     #[error("no device named \"{0}\" is paired")]
     NoDevice(String),
+    #[error("no device named \"{0}\" is waiting to be allowed")]
+    NotWaiting(String),
     #[error("{0} isn't a key Claktory can read: delete it, and Claktory makes a new one (devices then need pairing again)")]
     BadKey(PathBuf),
     #[error("the private tunnel can't start: {0}")]
@@ -100,18 +109,6 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(partial, path)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
 }
 
 /// Factory's iroh key, made the first time: its public half is the
@@ -160,12 +157,41 @@ pub struct Device {
     /// This machine's own app (`LOCAL_DEVICE`), which Devices doesn't list.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local: bool,
+    /// The key of the first device to use its code, waiting for the person
+    /// to allow it; empty until then, and once it's allowed (its key is
+    /// then `endpoint_id`). Kept apart from `endpoint_id` so a backend from
+    /// before approvals, after a rollback, takes the code as unused rather
+    /// than letting that device in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pending_endpoint_id: String,
+    /// What the waiting device says it is (a `v1::DeviceKind`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pending_kind: i32,
+    /// When it asked, in ms since 1970.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<i64>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if passes a reference
+fn is_zero(value: &i32) -> bool {
+    *value == 0
 }
 
 impl Device {
     /// Its code is waiting for its device: not used yet and not expired.
+    /// It may have a device waiting to be allowed.
     fn awaiting(&self, now: i64) -> bool {
         !self.local && self.endpoint_id.is_empty() && self.code_expires.is_some_and(|expires| expires > now)
+    }
+
+    /// A device used its code and waits for the person to allow it.
+    pub fn is_pending(&self, now: i64) -> bool {
+        self.awaiting(now) && !self.pending_endpoint_id.is_empty()
+    }
+
+    /// Its code ran out before a device was allowed with it.
+    fn expired(&self, now: i64) -> bool {
+        !self.local && self.endpoint_id.is_empty() && self.code_expires.is_some_and(|expires| expires <= now)
     }
 
     /// It can connect from another machine.
@@ -257,6 +283,9 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
         endpoint_id: String::new(),
         code_expires: Some(now + CODE_LIFETIME.as_millis() as i64),
         local: false,
+        pending_endpoint_id: String::new(),
+        pending_kind: 0,
+        pending_since: None,
     };
     devices.push(device.clone());
     save_devices(home, &devices)?;
@@ -298,6 +327,85 @@ pub fn unpair(home: &Home, device: &str) -> Result<Device, RemoteError> {
     let removed = devices.remove(index);
     save_devices(home, &devices)?;
     Ok(removed)
+}
+
+/// The four digits both the person's device and the new one show while it
+/// waits to be allowed, from both ends of its handshake and its code: see
+/// `v1::PendingDevice.number`. A device that copied the code has a key of
+/// its own, so it shows other digits than the one the person is pairing.
+pub fn approval_number(claktory: &str, device: &str, token_sha256: &str) -> String {
+    let digest = Sha256::digest(format!("claktory pairing\n{claktory}\n{device}\n{token_sha256}").as_bytes());
+    let number = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 10_000;
+    format!("{number:04}")
+}
+
+/// How a code that let no device in ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// The person turned the device away.
+    Denied,
+    /// The person closed Add a device, or `factoryd pair` was stopped.
+    Cancelled,
+    /// Its time ran out.
+    Expired,
+}
+
+/// Changes a device that hasn't been let in yet: `Some(Ended)` removes it
+/// (only one not allowed yet), None allows the device waiting with its code.
+/// Err(NotWaiting) when there's none so (for Denied and allowing, one that
+/// isn't waiting).
+fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<Device, RemoteError> {
+    let _changing = devices_lock();
+    let mut devices = devices(home)?;
+    let now = now_ms();
+    let waiting = |known: &Device| match ended {
+        None | Some(Ended::Denied) => known.is_pending(now),
+        Some(_) => known.endpoint_id.is_empty() && !known.local,
+    };
+    let Some(index) = devices.iter().position(|known| (known.id == device || known.name == device) && waiting(known)) else {
+        return Err(RemoteError::NotWaiting(device.to_owned()));
+    };
+    if ended.is_some() {
+        let removed = devices.remove(index);
+        save_devices(home, &devices)?;
+        return Ok(removed);
+    }
+    let allowed = &mut devices[index];
+    allowed.endpoint_id = std::mem::take(&mut allowed.pending_endpoint_id);
+    allowed.pending_kind = 0;
+    allowed.pending_since = None;
+    allowed.code_expires = None;
+    let allowed = allowed.clone();
+    save_devices(home, &devices)?;
+    Ok(allowed)
+}
+
+/// Lets in the device waiting with this device's code (by id or name).
+pub fn approve(home: &Home, device: &str) -> Result<Device, RemoteError> {
+    settle(home, device, None)
+}
+
+/// Turns away the device waiting with this device's code, and forgets it.
+pub fn deny(home: &Home, device: &str) -> Result<Device, RemoteError> {
+    settle(home, device, Some(Ended::Denied))
+}
+
+/// Ends a code that hasn't let a device in, and forgets its device.
+pub fn cancel(home: &Home, device: &str) -> Result<Device, RemoteError> {
+    settle(home, device, Some(Ended::Cancelled))
+}
+
+/// Forgets devices whose codes ran out before one was let in with them: a
+/// code lasts only while the person pairs. Returns them.
+fn forget_expired(home: &Home) -> Result<Vec<Device>, RemoteError> {
+    let _changing = devices_lock();
+    let mut devices = devices(home)?;
+    let now = now_ms();
+    let (expired, kept): (Vec<Device>, Vec<Device>) = devices.drain(..).partition(|device| device.expired(now));
+    if !expired.is_empty() {
+        save_devices(home, &kept)?;
+    }
+    Ok(expired)
 }
 
 fn local_pairing_path(home: &Home) -> PathBuf {
@@ -346,6 +454,9 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
                 endpoint_id,
                 code_expires: None,
                 local: true,
+                pending_endpoint_id: String::new(),
+                pending_kind: 0,
+                pending_since: None,
             };
             match local {
                 Some(index) => devices[index] = device,
@@ -453,8 +564,9 @@ pub(crate) struct Peer {
 }
 
 /// Turns away, right after the handshake, a key that isn't a paired
-/// device's, unless a code is waiting for its device or it comes from this
-/// machine (whose app proves itself with the local pairing code's token).
+/// device's, unless a code is waiting for its device (no other key once a
+/// device used it) or it comes from this machine (whose app proves itself
+/// with the local pairing code's token).
 #[derive(Debug)]
 struct Gate {
     home: Home,
@@ -468,9 +580,10 @@ impl Gate {
         let id = connection.remote_id().to_string();
         let now = now_ms();
         match devices(&self.home) {
-            Ok(devices) => {
-                devices.iter().any(|device| (!device.endpoint_id.is_empty() && device.endpoint_id == id) || device.awaiting(now))
-            }
+            Ok(devices) => devices.iter().any(|device| {
+                (!device.endpoint_id.is_empty() && device.endpoint_id == id)
+                    || (device.awaiting(now) && (device.pending_endpoint_id.is_empty() || device.pending_endpoint_id == id))
+            }),
             Err(error) => {
                 tracing::error!(%error, "could not read the paired devices");
                 false
@@ -541,6 +654,43 @@ pub(crate) struct State {
     tunnel: tokio::sync::Mutex<Tunnel>,
     /// How long making a code waits for the relay; tests make it shorter.
     online_wait: Mutex<Option<Duration>>,
+    /// Notified when a waiting device is allowed or its code ends.
+    pairing: tokio::sync::Notify,
+    /// How each code that let no device in ended, by its device's id, for
+    /// the device waiting with it.
+    ended: Mutex<HashMap<String, Ended>>,
+    /// Connections of devices waiting to be allowed, or being told they
+    /// weren't: remote access stays on for them until they've heard.
+    waiting: AtomicU64,
+}
+
+/// A device's connection waiting to be allowed, while it lives.
+pub(crate) struct Waiting {
+    factory: Weak<Factory>,
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some(factory) = self.factory.upgrade() {
+            factory.remote.waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What became of a device's Hello with its token.
+pub(crate) enum Authorized {
+    Connected(Connected),
+    /// It used a pairing code first and waits for the person to allow it.
+    Pending(Device),
+    Refused,
+}
+
+/// Where a device waiting to be allowed stands.
+pub(crate) enum Pairing {
+    Waiting,
+    Allowed,
+    /// Turned away, cancelled or expired: what to tell it.
+    Ended(String),
 }
 
 impl State {
@@ -606,14 +756,16 @@ impl Drop for Connected {
 
 impl Factory {
     /// The paired device whose token this is, if `peer` may use it: the key
-    /// bound to it, or the first key to use its code; for this machine's app,
-    /// any key from this machine. Connected until the returned `Connected`
-    /// goes. A wrong token is answered no sooner than a second after the
-    /// key's last wrong one.
-    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer) -> Option<Connected> {
+    /// bound to it; for this machine's app, any key from this machine.
+    /// Connected until the returned `Connected` goes. The first key to use a
+    /// code waits for the person to allow it (`Pending`), and no other key
+    /// can use the code. A wrong token is answered no sooner than a second
+    /// after the key's last wrong one.
+    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer, kind: v1::DeviceKind) -> Authorized {
         let digest = token_hash(token);
         let now = now_ms();
         let mut found = None;
+        let mut pending = None;
         let changing = devices_lock();
         match devices(&self.home) {
             Ok(mut devices) => {
@@ -631,8 +783,15 @@ impl Factory {
                     } else if !device.endpoint_id.is_empty() {
                         device.endpoint_id == peer.endpoint_id
                     } else if device.awaiting(now) {
-                        device.code_expires = None;
-                        true
+                        if device.pending_endpoint_id.is_empty() {
+                            device.pending_endpoint_id.clone_from(&peer.endpoint_id);
+                            device.pending_since = Some(now);
+                        }
+                        if device.pending_endpoint_id == peer.endpoint_id {
+                            device.pending_kind = kind.into();
+                            pending = Some(device.clone());
+                        }
+                        false
                     } else {
                         false
                     };
@@ -645,15 +804,23 @@ impl Factory {
                         found = Some(device.clone());
                     }
                 }
-                if found.is_some()
+                if (found.is_some() || pending.is_some())
                     && let Err(error) = save_devices(&self.home, &devices)
                 {
                     tracing::warn!(%error, "could not note when a device connected");
+                    pending = None;
                 }
             }
             Err(error) => tracing::error!(%error, "could not read the paired devices"),
         }
         drop(changing);
+        if let Some(device) = pending {
+            tracing::info!(device = %device.id, endpoint = %peer.endpoint_id, "a device used its pairing code and waits to be allowed");
+            // An earlier code's device by the same id ended some way: not this one.
+            lock(&self.remote.ended).remove(&device.id);
+            self.refresh_remote();
+            return Authorized::Pending(device);
+        }
         let Some(device) = found else {
             let wait = {
                 let now = Instant::now();
@@ -662,13 +829,93 @@ impl Factory {
             };
             tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
             tokio::time::sleep(wait).await;
-            return None;
+            return Authorized::Refused;
         };
         let closed = Arc::new(tokio::sync::Notify::new());
         let session = Session { closed: closed.clone(), endpoint_id: peer.endpoint_id.clone() };
         lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
         self.refresh_remote();
-        Some(Connected { device, closed, factory: Arc::downgrade(self) })
+        Authorized::Connected(Connected { device, closed, factory: Arc::downgrade(self) })
+    }
+
+    /// Where the device `id`, waiting with key `endpoint_id`, stands.
+    pub(crate) fn pairing(&self, id: &str, endpoint_id: &str) -> Pairing {
+        let now = now_ms();
+        let device = devices(&self.home).ok().and_then(|devices| devices.into_iter().find(|device| device.id == id));
+        let ended = match &device {
+            Some(device) if device.endpoint_id == endpoint_id => return Pairing::Allowed,
+            Some(device) if device.is_pending(now) && device.pending_endpoint_id == endpoint_id => return Pairing::Waiting,
+            Some(device) if device.expired(now) => Some(Ended::Expired),
+            _ => lock(&self.remote.ended).get(id).copied(),
+        };
+        let machine = machine_name();
+        Pairing::Ended(match ended {
+            Some(Ended::Expired) => {
+                format!("The code expired before this device was allowed. Add it again on {machine} in Settings → Devices.")
+            }
+            Some(Ended::Cancelled) => {
+                format!("Adding this device was cancelled on {machine}. To try again, add it again there in Settings → Devices.")
+            }
+            Some(Ended::Denied) | None => {
+                format!("{machine} didn't allow this device. To try again, add it again on {machine} in Settings → Devices.")
+            }
+        })
+    }
+
+    /// Keeps remote access on, while it lives, for a device's connection
+    /// that waits to be allowed, so it hears how that ended.
+    pub(crate) fn waiting(self: &Arc<Self>) -> Waiting {
+        self.remote.waiting.fetch_add(1, Ordering::Relaxed);
+        Waiting { factory: Arc::downgrade(self) }
+    }
+
+    /// Waits until a waiting device is allowed or its code ends, or a second.
+    pub(crate) async fn pairing_changed(&self) {
+        let _ = tokio::time::timeout(CHECK, self.remote.pairing.notified()).await;
+    }
+
+    /// A code that let no device in ended: the device waiting with it hears
+    /// why at once.
+    fn pairing_ended(&self, device: &Device, ended: Ended) {
+        tracing::info!(device = %device.id, ?ended, "a pairing code ended");
+        lock(&self.remote.ended).insert(device.id.clone(), ended);
+        self.remote.pairing.notify_waiters();
+    }
+
+    /// Allows the device waiting with this device's code, from the app.
+    pub async fn approve_device(&self, id: &str) -> Result<(), RequestError> {
+        match approve(&self.home, id) {
+            Ok(device) => tracing::info!(device = %device.id, "the person allowed a device"),
+            Err(RemoteError::NotWaiting(id)) => return Err(RequestError::UnknownDevice(id)),
+            Err(error) => return Err(RequestError::Remote(error.to_string())),
+        }
+        self.remote.pairing.notify_waiters();
+        self.refresh_remote();
+        Ok(())
+    }
+
+    /// Turns away the device waiting with this device's code, from the app,
+    /// and forgets it.
+    pub async fn deny_device(&self, id: &str) -> Result<(), RequestError> {
+        match deny(&self.home, id) {
+            Ok(device) => self.pairing_ended(&device, Ended::Denied),
+            Err(RemoteError::NotWaiting(id)) => return Err(RequestError::UnknownDevice(id)),
+            Err(error) => return Err(RequestError::Remote(error.to_string())),
+        }
+        self.refresh_remote();
+        Ok(())
+    }
+
+    /// Ends a code that hasn't let a device in, from the app (Add a device
+    /// closed). Nothing to do for one that's gone or let a device in.
+    pub async fn cancel_pairing(&self, id: &str) -> Result<(), RequestError> {
+        match cancel(&self.home, id) {
+            Ok(device) => self.pairing_ended(&device, Ended::Cancelled),
+            Err(RemoteError::NotWaiting(_)) => return Ok(()),
+            Err(error) => return Err(RequestError::Remote(error.to_string())),
+        }
+        self.refresh_remote();
+        Ok(())
     }
 
     /// The loopback port lets in a client with no token: only while this
@@ -779,6 +1026,21 @@ impl Factory {
     pub(crate) fn remote_view(&self, _inner: &Inner) -> v1::RemoteAccess {
         let shown = lock(&self.remote.shown).clone();
         let connected = lock(&self.remote.connected);
+        let now = now_ms();
+        let mut pending: Vec<v1::PendingDevice> = shown
+            .devices
+            .iter()
+            .filter(|device| device.is_pending(now))
+            .map(|device| v1::PendingDevice {
+                device_id: device.id.clone(),
+                name: device.name.clone(),
+                kind: device.pending_kind,
+                number: approval_number(&shown.endpoint_id, &device.pending_endpoint_id, &device.token_sha256),
+                requested_ms: device.pending_since.unwrap_or_default(),
+                expires_ms: device.code_expires.unwrap_or_default(),
+            })
+            .collect();
+        pending.sort_by_key(|device| device.requested_ms);
         v1::RemoteAccess {
             on: shown.on,
             port: 0,
@@ -808,6 +1070,7 @@ impl Factory {
                     }
                 })
                 .collect(),
+            pending_devices: pending,
             machine: machine_name().to_owned(),
             endpoint_id: shown.endpoint_id,
             relays: shown.relays,
@@ -939,9 +1202,17 @@ fn plain_error(error: &std::io::Error) -> String {
 /// Keeps the tunnel as it should be: on 127.0.0.1 always, and also on
 /// every address with relays while a device on another machine can connect,
 /// within a second of a change. Also keeps what the Workspace shows of it
-/// current.
+/// current, and forgets codes that ran out.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     while let Some(strong) = factory.upgrade() {
+        match forget_expired(&strong.home) {
+            Ok(expired) => {
+                for device in &expired {
+                    strong.pairing_ended(device, Ended::Expired);
+                }
+            }
+            Err(error) => tracing::error!(%error, "could not forget expired pairing codes"),
+        }
         sync_tunnel(&strong).await;
         strong.refresh_remote();
         drop(strong);
@@ -960,7 +1231,8 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
             Vec::new()
         });
         let relays = factory.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
-        let wanted = Wanted { on: remote_on(&devices, now_ms()), relays };
+        let waiting = factory.remote.waiting.load(Ordering::Relaxed) > 0;
+        let wanted = Wanted { on: remote_on(&devices, now_ms()) || waiting, relays };
         let mut tunnel = factory.remote.tunnel.lock().await;
         let remote_as_wanted = match &tunnel.remote {
             Some((relays, ..)) => wanted.on && *relays == wanted.relays,
@@ -1175,6 +1447,15 @@ mod tests {
         assert_eq!(code_values(&code, "t").collect::<Vec<_>>(), ["ab"]);
     }
 
+    /// The example the app checks its side against.
+    #[test]
+    fn the_approval_number_is_four_digits_both_sides_work_out() {
+        let token = "0123456789abcdef";
+        assert_eq!(token_hash(token), "9f9f5111f7b27a781f1f1ddde5ebc2dd2b796bfc7365c9c28b548e564176929f");
+        assert_eq!(approval_number(&"a".repeat(64), &"b".repeat(64), &token_hash(token)), "0722");
+        assert_ne!(approval_number(&"a".repeat(64), &"c".repeat(64), &token_hash(token)), "0722", "another device's key");
+    }
+
     #[test]
     fn remote_access_is_on_while_a_device_can_connect() {
         let device = |endpoint_id: &str, code_expires: Option<i64>, local: bool| Device {
@@ -1187,6 +1468,9 @@ mod tests {
             endpoint_id: endpoint_id.into(),
             code_expires,
             local,
+            pending_endpoint_id: String::new(),
+            pending_kind: 0,
+            pending_since: None,
         };
         assert!(!remote_on(&[], 100));
         assert!(!remote_on(&[device("k", None, true)], 100), "this machine's app alone");

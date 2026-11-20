@@ -69,7 +69,7 @@ ClaktoryMap fakeMap({
       id: 'workspace',
       kind: MapNodeKind.MAP_NODE_KIND_WORKSPACE,
       label: 'Workspace',
-      detail: '/Users/matt/.factory/workspace',
+      detail: '/Users/me/.factory/workspace',
     ),
   ];
   final edges = <MapEdge>[];
@@ -79,7 +79,7 @@ ClaktoryMap fakeMap({
         id: 'project:${project.id}',
         kind: MapNodeKind.MAP_NODE_KIND_PROJECT,
         label: project.name,
-        detail: '/Users/matt/${project.id}',
+        detail: '/Users/me/${project.id}',
         refId: project.id,
       ),
     );
@@ -89,7 +89,7 @@ ClaktoryMap fakeMap({
           id: 'folder:${project.id}/${folder.toLowerCase()}',
           kind: MapNodeKind.MAP_NODE_KIND_FOLDER,
           label: folder,
-          detail: '/Users/matt/${project.id}/${folder.toLowerCase()}',
+          detail: '/Users/me/${project.id}/${folder.toLowerCase()}',
           parentId: 'project:${project.id}',
           refId: folder.toLowerCase(),
           projectId: project.id,
@@ -195,7 +195,7 @@ ClaktoryMap fakeMap({
         id: 'data:records',
         kind: MapNodeKind.MAP_NODE_KIND_DATA,
         label: "Claktory's records",
-        detail: '/Users/matt/.factory/factory.db',
+        detail: '/Users/me/.factory/factory.db',
       ),
     );
   }
@@ -399,7 +399,7 @@ Workspace claktoryWorkspace() => Workspace(
       Project(
         id: project.id,
         name: project.name,
-        path: '/Users/matt/${project.id}',
+        path: '/Users/me/${project.id}',
         folders: [
           for (final folder in project.folders)
             ProjectFolder(id: folder.toLowerCase(), name: folder),
@@ -422,7 +422,38 @@ Workspace claktoryWorkspace() => Workspace(
   ],
   settings: Settings(userName: 'Matt'),
   map: claktoryMap(),
-);
+  extensions: claktoryExtensions(),
+)..agents.forEach(_extensionsOn);
+
+/// Some of Claktory's extensions, for the agents' cards.
+List<Extension> claktoryExtensions() => [
+  Extension(id: 'agents', name: 'Messaging', icon: 'users'),
+  Extension(id: 'checklist', name: 'Checklist', icon: 'list-checks'),
+  Extension(id: 'memory', name: 'Memory', icon: 'brain'),
+  Extension(
+    id: 'memory:factory',
+    name: 'Claktory manual',
+    icon: 'brain',
+    base: 'memory',
+  ),
+  Extension(id: 'tasks', name: 'Tasks', icon: 'terminal'),
+  Extension(id: 'web', name: 'Web', icon: 'globe'),
+];
+
+/// Mike has Web and the Claktory manual (badges), and Messaging, Checklist
+/// and Tasks; Memory is off. Rivet has Messaging, Tasks and Web; the rest
+/// Messaging.
+void _extensionsOn(Agent agent) {
+  final on = switch (agent.id) {
+    'coordinator' => {'agents', 'checklist', 'memory:factory', 'tasks', 'web'},
+    'rivet' => {'agents', 'tasks', 'web'},
+    _ => {'agents'},
+  };
+  agent.extensions.addAll([
+    for (final extension in claktoryExtensions())
+      AgentExtension(id: extension.id, enabled: on.contains(extension.id)),
+  ]);
+}
 
 /// The sidebar's order for [claktoryMap]: as its config lists them.
 Map<String, int> claktoryOrder() {

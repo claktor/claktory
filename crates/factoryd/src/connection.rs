@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use crate::factory::{AgentChange, Event, Factory, RequestError};
+use crate::remote::{Authorized, Pairing};
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -118,10 +119,28 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
         kind = hello.device_kind();
         if let Some(peer) = &peer {
-            let Some(connected) = factory.authorize(&hello.token, peer).await else {
-                let reason =
-                    "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
-                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+            let connected = match factory.authorize(&hello.token, peer, kind).await {
+                Authorized::Connected(connected) => connected,
+                Authorized::Pending(waiting) => {
+                    // Remote access stays on until it's heard how this ends.
+                    let _waiting = factory.waiting();
+                    match wait_to_be_allowed(&mut socket, &factory, message.id, &waiting, peer).await? {
+                        Pairing::Allowed => match factory.authorize(&hello.token, peer, kind).await {
+                            Authorized::Connected(connected) => connected,
+                            _ => {
+                                let reason = "This device was allowed, then removed.";
+                                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+                            }
+                        },
+                        Pairing::Ended(reason) => return reject(socket, message.id, ErrorCode::Unauthorized, reason).await,
+                        // It went away while it waited.
+                        Pairing::Waiting => return Ok(()),
+                    }
+                }
+                Authorized::Refused => {
+                    let reason = "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
+                    return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+                }
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
             device = Some(connected);
@@ -129,7 +148,7 @@ pub(crate) async fn serve_stream<S: Stream>(
             // The loopback port: this machine's app's token (from its local
             // pairing code), or nothing once that app uses the tunnel.
             let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
-            let Some(connected) = factory.authorize(&hello.token, &local).await else {
+            let Authorized::Connected(connected) = factory.authorize(&hello.token, &local, kind).await else {
                 let reason = format!(
                     "This port wants a token: connect with the pairing code in {}.",
                     factory.home.root().join("remote/local-pairing").display()
@@ -303,10 +322,14 @@ async fn handle(
             factory.update_agent(&agent_id, change).await
         }
         Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
-        Some(Request::SendMessage(request)) => factory.send_message(&request.agent_id, &request.text, Some(connection.sent_from.clone())),
+        Some(Request::SendMessage(request)) => {
+            factory.send_message(&request.agent_id, &request.text, Some(connection.sent_from.clone()), &request.client_id)
+        }
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
-        Some(Request::UpdateProject(request)) => factory.update_project(&request.project_id, request.name.as_deref()).await,
+        Some(Request::UpdateProject(request)) => {
+            factory.update_project(&request.project_id, request.name.as_deref(), request.archived).await
+        }
         Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
         Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
@@ -356,6 +379,12 @@ async fn handle(
         Some(Request::FetchApp(request)) => {
             return match factory.fetch_app(&request.version, request.offset).await {
                 Ok(chunk) => Body::AppChunk(chunk),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::LoadEntries(request)) => {
+            return match factory.load_entries(&request).await {
+                Ok(page) => Body::EntryPage(page),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
@@ -419,6 +448,9 @@ async fn handle(
         }
         Some(Request::SetLayout(request)) => crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
+        Some(Request::ApproveDevice(request)) => factory.approve_device(&request.device_id).await,
+        Some(Request::DenyDevice(request)) => factory.deny_device(&request.device_id).await,
+        Some(Request::CancelPairing(request)) => factory.cancel_pairing(&request.device_id).await,
         // Remote access is on while devices are paired: only the relays are set here.
         Some(Request::SetRemoteAccess(request)) if request.set_relays => factory.set_relays(&request.relays).await,
         Some(Request::SetRemoteAccess(_)) => Ok(()),
@@ -469,6 +501,40 @@ async fn send<S: Stream>(socket: &mut Socket<S>, reply_to: u64, body: Body) -> R
     let message = ServerMessage { reply_to, body: Some(body) };
     socket.send(Message::Binary(message.encode_to_vec().into())).await?;
     Ok(())
+}
+
+/// A device that used a pairing code first waits here, its Hello answered
+/// with PairingPending, until the person allows it (`Allowed`), its code
+/// ends (`Ended`, with why), or it goes away (`Waiting`).
+async fn wait_to_be_allowed<S: Stream>(
+    socket: &mut Socket<S>,
+    factory: &Factory,
+    hello_id: u64,
+    waiting: &crate::remote::Device,
+    peer: &crate::remote::Peer,
+) -> Result<Pairing, ConnectionError> {
+    let pending = v1::PairingPending {
+        device_id: waiting.id.clone(),
+        name: waiting.name.clone(),
+        machine: crate::remote::machine_name().to_owned(),
+        expires_ms: waiting.code_expires.unwrap_or_default(),
+    };
+    send(socket, hello_id, Body::PairingPending(pending)).await?;
+    loop {
+        match factory.pairing(&waiting.id, &peer.endpoint_id) {
+            Pairing::Waiting => {}
+            settled => return Ok(settled),
+        }
+        tokio::select! {
+            () = factory.pairing_changed() => {}
+            frame = socket.next() => {
+                // Nothing it sends counts until it's allowed.
+                if let Frame::Closed = read(socket, frame).await? {
+                    return Ok(Pairing::Waiting);
+                }
+            }
+        }
+    }
 }
 
 /// Sends a final error and closes the connection.

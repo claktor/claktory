@@ -75,7 +75,11 @@ class _AgentViewState extends State<AgentView> {
             // Following a message to its sender can be undone with Back.
             open: (id) => AppScope.scope(context).history.follow(agent.id, id),
             child: ListenableBuilder(
-              listenable: Listenable.merge([transcript, backend.queued]),
+              listenable: Listenable.merge([
+                transcript,
+                backend.queued,
+                backend.outbox,
+              ]),
               builder: (context, _) {
                 if (transcript.agentId != agent.id) {
                   return const SizedBox.shrink();
@@ -83,6 +87,7 @@ class _AgentViewState extends State<AgentView> {
                 // Nothing said yet: what the agent is for, and how to start.
                 if (transcript.length == 0 &&
                     backend.queued.of(agent.id).isEmpty &&
+                    backend.outbox.of(agent.id).isEmpty &&
                     !_working) {
                   return EmptyConversation(agent: agent);
                 }
@@ -92,12 +97,15 @@ class _AgentViewState extends State<AgentView> {
                   working: _working,
                   follow: _follow,
                   queued: backend.queued,
+                  outbox: backend.outbox,
+                  loadEarlier: () => backend.loadEarlier(agent.id),
                   agentId: agent.id,
                 );
               },
             ),
           ),
         ),
+        ArchivedLine(agent: agent),
         const ReconnectingLine(),
         _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
       ],
@@ -685,14 +693,9 @@ class _ComposerState extends State<_Composer> {
     _text.clear();
     setState(() => _error = null);
     widget.onSent();
-    try {
-      await backend.sendMessage(agentId, text);
-    } on RequestFailure catch (failure) {
-      if (!mounted) return _giveBack(agentId, text);
-      // Give the message back so it isn't lost.
-      if (_text.text.isEmpty && widget.agent.id == agentId) _text.text = text;
-      setState(() => _error = "Couldn't send: ${failure.message}");
-    }
+    // It shows in the conversation at once; one that isn't sent stays
+    // there, with Retry.
+    backend.outbox.send(agentId, text);
   }
 
   @override
@@ -970,6 +973,49 @@ class _ReconnectingLineState extends State<ReconnectingLine> {
 
 /// What [ReconnectingLine] says.
 const reconnectingText = "Reconnecting… You can send once it's back.";
+
+/// For an agent in an archived project (opened from a link, say), a quiet
+/// line above the message box saying so, with Unarchive. Messages sent
+/// meanwhile wait for it.
+class ArchivedLine extends StatelessWidget {
+  const ArchivedLine({super.key, required this.agent});
+
+  final Agent agent;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final project = archivedProjectOf(backend.workspace.workspace, agent);
+        if (project == null) return const SizedBox.shrink();
+        final palette = Palette.of(context);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(Space.xl, Space.s, Space.xl, 0),
+          child: Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Space.s,
+            runSpacing: Space.xs,
+            children: [
+              Text(
+                '${project.name} is archived, so its agents don\'t work until '
+                'you unarchive it. Messages you send wait until then.',
+                textAlign: TextAlign.center,
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+              Button(
+                label: 'Unarchive',
+                onPressed: () => fireAndLog(unarchiveProject(backend, project)),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
 
 /// A conversation with nothing in it yet: the agent, what it's for (its
 /// role), and that you start by telling it what to do. Quiet, centered.

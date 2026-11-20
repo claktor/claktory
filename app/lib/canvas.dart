@@ -29,6 +29,13 @@ class CanvasController extends ChangeNotifier {
   /// fits up to its own size.
   void show(Rect rect) => _canvas?._show(rect);
 
+  /// Where [rect] (in the content's coordinates) is in the view now.
+  Rect toView(Rect rect) {
+    final canvas = _canvas;
+    if (canvas == null) return rect;
+    return MatrixUtils.transformRect(canvas._transform.value, rect);
+  }
+
   void _changed() => notifyListeners();
 }
 

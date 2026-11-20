@@ -59,6 +59,15 @@ fn parse(code: &str) -> Code {
     }
 }
 
+/// The four digits a device waiting to be allowed shows, worked out as the
+/// protocol says (PendingDevice.number), from its side.
+fn number(code: &Code, device: &str) -> String {
+    use sha2::Digest as _;
+    let token: String = sha2::Sha256::digest(code.token.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+    let digest = sha2::Sha256::digest(format!("claktory pairing\n{}\n{device}\n{token}", code.endpoint).as_bytes());
+    format!("{:04}", u32::from_be_bytes(digest[..4].try_into().expect("4 bytes")) % 10_000)
+}
+
 /// A device: a key of its own, no relays.
 async fn new_device() -> Endpoint {
     Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.expect("device endpoint")
@@ -250,14 +259,35 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert_eq!((shown.relays.as_slice(), shown.custom_relays), ([relay.to_owned()].as_slice(), true));
     assert!(shown.devices[0].code_expires_ms > now_ms() && !shown.devices[0].connected, "{shown:?}");
 
-    // The phone binds its key with the code's token, over the network.
+    // The phone uses the code's token, over the network, and waits for the
+    // person to allow it, showing the same number as the app.
     let phone = new_device().await;
     let connection = dial(&phone, &code, &code.addresses).await.expect("a code is waiting: let in");
     let mut socket = open(&connection).await;
     match hello(&mut socket, &code.token).await {
-        Body::Welcome(welcome) => assert_eq!(welcome.device_id, "phone"),
+        Body::PairingPending(pending) => {
+            assert_eq!((pending.device_id.as_str(), pending.name.as_str()), ("phone", "Phone"));
+            assert_eq!(pending.machine, remote(&view).machine);
+            assert!(pending.expires_ms > now_ms());
+        }
+        other => panic!("expected to wait, got {other:?}"),
+    }
+    view.follow(&mut client, |view| !remote(view).pending_devices.is_empty()).await;
+    let asking = remote(&view).pending_devices[0].clone();
+    assert_eq!((asking.device_id.as_str(), asking.name.as_str(), asking.kind()), ("phone", "Phone", v1::DeviceKind::Phone));
+    assert_eq!(asking.number, number(&code, &phone.id().to_string()), "worked out the same on both sides");
+    assert!(asking.requested_ms > 0 && asking.expires_ms > now_ms());
+    // While it waits, another key that copied the code is turned away.
+    let copier = new_device().await;
+    let refused = dial(&copier, &code, &code.addresses).await.expect_err("the code is taken");
+    assert!(refused.contains("isn't paired"), "{refused}");
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
+    match next(&mut socket).await {
+        Some(Body::Welcome(welcome)) => assert_eq!(welcome.device_id, "phone"),
         other => panic!("expected welcome, got {other:?}"),
     }
+    view.follow(&mut client, |view| remote(view).pending_devices.is_empty()).await;
     let saved = factoryd::remote::devices(&home(&dir)).expect("devices");
     let bound = saved.iter().find(|device| device.id == "phone").expect("phone");
     assert_eq!((bound.endpoint_id.clone(), bound.code_expires), (phone.id().to_string(), None));
@@ -268,7 +298,11 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert!(device.code_expires_ms == 0 && device.last_seen_ms > 0 && !device.last_address.is_empty(), "{device:?}");
     // What the person sends from it says it came from it.
     apply_request(&mut client, &mut view, crate::common::create_agent("", "Ops", "")).await;
-    let message = client_message::Body::SendMessage(v1::SendMessage { agent_id: "ops".into(), text: "From the train".into() });
+    let message = client_message::Body::SendMessage(v1::SendMessage {
+        agent_id: "ops".into(),
+        text: "From the train".into(),
+        client_id: String::new(),
+    });
     socket.send(Message::Binary(ClientMessage { id: 2, body: Some(message) }.encode_to_vec().into())).await.expect("send");
     let select = client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "ops".into() });
     apply_request(&mut client, &mut view, select).await;
@@ -286,17 +320,17 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     let stranger = new_device().await;
     let refused = dial(&stranger, &code, &code.addresses).await.expect_err("turned away");
     assert!(refused.contains("isn't paired"), "{refused}");
-    // Nor does a code that expired let one in.
+    // Nor does a code that expired let one in, and it's forgotten.
     factoryd::remote::pair(&home(&dir), "Old").expect("paired");
     let mut devices = factoryd::remote::devices(&home(&dir)).expect("devices");
     devices.iter_mut().find(|device| device.id == "old").expect("old").code_expires = Some(1);
     std::fs::write(dir.join("home/remote/devices.json"), serde_json::to_string(&devices).expect("json")).expect("write");
     let refused = dial(&stranger, &code, &code.addresses).await.expect_err("turned away");
     assert!(refused.contains("isn't paired"), "{refused}");
-    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == "old" && device.code_expires_ms == 1)).await;
+    view.follow(&mut client, |view| remote(view).devices.iter().all(|device| device.id != "old")).await;
 
     // Unpaired from the app: its session and its connection close at once.
-    for id in ["old", "phone"] {
+    for id in ["phone"] {
         let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: id.into() });
         assert!(matches!(apply_request(&mut client, &mut view, unpair).await, Body::Ack(_)));
     }
@@ -417,7 +451,10 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let phone = new_device().await;
     let phone_link = dial(&phone, &code, &code.addresses).await.expect("the phone reaches the remote endpoint");
     let mut phone_socket = open(&phone_link).await;
-    assert!(matches!(hello(&mut phone_socket, &code.token).await, Body::Welcome(_)));
+    assert!(matches!(hello(&mut phone_socket, &code.token).await, Body::PairingPending(_)));
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into() });
+    assert!(matches!(ask(&mut socket, 4, allow).await, Body::Ack(_)));
+    assert!(matches!(next(&mut phone_socket).await, Some(Body::Welcome(_))));
     assert!(matches!(ask(&mut socket, 4, list_home()).await, Body::FolderList(_)), "still connected");
 
     // Unpairing it turns remote access off; this machine's app stays.
@@ -442,4 +479,87 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
         other => panic!("expected a pairing code, got {other:?}"),
     };
     assert_eq!(second.addresses.first().map(SocketAddr::port), code.addresses.first().map(SocketAddr::port));
+}
+
+/// Makes a code from the app and has a new device use it: the code, the
+/// device's id, its endpoint (kept, or its connection closes), its
+/// connection and the socket it waits on.
+async fn waiting_device(client: &mut Client, view: &mut View, name: &str) -> (Code, String, Endpoint, Connection, Socket) {
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: name.into(), host: String::new() });
+    let made = match apply_request(client, view, pairing).await {
+        Body::PairingCode(code) => code,
+        other => panic!("expected a pairing code, got {other:?}"),
+    };
+    let code = parse(&made.code);
+    let device = new_device().await;
+    let connection = dial(&device, &code, &code.addresses).await.expect("a code is waiting: let in");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    (code, made.device_id, device, connection, socket)
+}
+
+/// The waiting device is turned away: why.
+async fn turned_away(socket: &mut Socket, case: &str) -> String {
+    match next(socket).await {
+        Some(Body::Error(error)) if error.code() == ErrorCode::Unauthorized => error.message,
+        other => panic!("{case}: expected to be turned away, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_they_stop_pairing() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await;
+
+    // Turned away: it hears so, and its device and code are forgotten.
+    let (code, id, stranger, _link, mut socket) = waiting_device(&mut client, &mut view, "Tablet").await;
+    let deny = client_message::Body::DenyDevice(v1::DenyDevice { device_id: id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, deny.clone()).await, Body::Ack(_)));
+    let why = turned_away(&mut socket, "denied").await;
+    assert!(why.contains("didn't allow this device"), "{why}");
+    view.follow(&mut client, |view| remote(view).devices.is_empty() && remote(view).pending_devices.is_empty()).await;
+    assert!(dial(&stranger, &code, &code.addresses).await.is_err(), "the code is gone");
+    assert!(matches!(apply_request(&mut client, &mut view, deny).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
+
+    // Add a device closed while a device waits: the code ends.
+    let (_, id, _device, _link, mut socket) = waiting_device(&mut client, &mut view, "Laptop").await;
+    let cancel = client_message::Body::CancelPairing(v1::CancelPairing { device_id: id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, cancel.clone()).await, Body::Ack(_)));
+    let why = turned_away(&mut socket, "cancelled").await;
+    assert!(why.contains("cancelled"), "{why}");
+    assert!(matches!(apply_request(&mut client, &mut view, cancel).await, Body::Ack(_)), "already gone: nothing to do");
+    // And one nobody used yet.
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Spare".into(), host: String::new() });
+    let Body::PairingCode(spare) = apply_request(&mut client, &mut view, pairing).await else { panic!("a code") };
+    let cancel = client_message::Body::CancelPairing(v1::CancelPairing { device_id: spare.device_id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, cancel).await, Body::Ack(_)));
+    view.follow(&mut client, |view| remote(view).devices.is_empty() && !remote(view).on).await;
+
+    // Its 10 minutes run out while it waits.
+    let (_, id, _device, _link, mut socket) = waiting_device(&mut client, &mut view, "Watch").await;
+    let mut devices = factoryd::remote::devices(&home(&dir)).expect("devices");
+    devices.iter_mut().find(|device| device.id == id).expect("waiting").code_expires = Some(now_ms() - 1);
+    std::fs::write(dir.join("home/remote/devices.json"), serde_json::to_string(&devices).expect("json")).expect("write");
+    let why = turned_away(&mut socket, "expired").await;
+    assert!(why.contains("expired"), "{why}");
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
+
+    // Allowed in a terminal (factoryd allow), it's let in all the same;
+    // cancelling it afterwards leaves it paired.
+    let (_, id, phone, _link, mut socket) = waiting_device(&mut client, &mut view, "Phone").await;
+    factoryd::remote::approve(&home(&dir), "Phone").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+    let cancel = client_message::Body::CancelPairing(v1::CancelPairing { device_id: id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, cancel).await, Body::Ack(_)));
+    let saved = factoryd::remote::devices(&home(&dir)).expect("devices");
+    let paired = saved.iter().find(|device| device.id == id).expect("still paired");
+    assert_eq!((paired.endpoint_id.clone(), paired.pending_endpoint_id.as_str()), (phone.id().to_string(), ""));
+    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == id && device.connected)).await;
 }

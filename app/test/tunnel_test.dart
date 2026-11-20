@@ -3,13 +3,14 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/connection.dart';
 import 'package:factory_app/connections.dart';
-import 'package:factory_app/devices.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -85,6 +86,14 @@ class FakeTunnels implements Tunnels {
     this.addresses.add(addresses);
     return tunnel;
   }
+
+  /// Endpoint ids of 64 "b"s for this device and 64 "a"s for the backend,
+  /// as in the pairing number's example.
+  @override
+  Future<({String device, String backend})> pairingIds({
+    required String deviceKey,
+    required String endpointId,
+  }) async => (device: 'b' * 64, backend: 'a' * 64);
 }
 
 Backend backendWith(Tunnels tunnels, {RemoteFactory? local}) => Backend(
@@ -385,6 +394,71 @@ void main() {
     await server.close(force: true);
   });
 
+  test('earlier entries are asked for and put before the ones held', () async {
+    Entry numbered(int seq) => Entry(
+      seq: Int64(seq),
+      user: UserText(text: 'message $seq'),
+    );
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final asked = <LoadEntries>[];
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          socket
+            ..add(
+              ServerMessage(
+                replyTo: message.id,
+                welcome: Welcome(serverVersion: 'test'),
+              ).writeToBuffer(),
+            )
+            ..add(
+              ServerMessage(
+                transcript: Transcript(
+                  agentId: 'a',
+                  entries: [numbered(10), numbered(11)],
+                  hasEarlier: true,
+                ),
+              ).writeToBuffer(),
+            );
+        } else if (message.hasLoadEntries()) {
+          asked.add(message.loadEntries);
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              entryPage: EntryPage(
+                agentId: 'a',
+                entries: [numbered(8), numbered(9)],
+                hasEarlier: false,
+              ),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    for (var i = 0; i < 250 && backend.transcript.length < 2; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(backend.transcript.hasEarlier, isTrue);
+
+    await backend.loadEarlier('a');
+    expect(asked.single.agentId, 'a');
+    expect(asked.single.beforeSeq.toInt(), 10, reason: 'the first one held');
+    expect(
+      [for (var i = 0; i < 4; i++) backend.transcript[i].seq],
+      [8, 9, 10, 11],
+    );
+    expect(backend.transcript.hasEarlier, isFalse);
+    expect(backend.transcript.earlier, 2);
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('turned away at the tunnel, it stops trying and says why', () async {
     // Nothing listens: the tunnel closes every socket at once.
     final unused = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -421,15 +495,15 @@ void main() {
     await harness.show(tester);
     await tester.tap(find.text("Can't connect to mac-mini"));
     await settle(tester);
-    expect(find.byType(TunnelProblem), findsOneWidget);
+    expect(find.byType(ConnectionDialog), findsOneWidget);
     expect(find.text('Nothing answered within 20 seconds.'), findsOneWidget);
     expect(
       find.textContaining('Make sure mac-mini is on, awake and online'),
       findsOneWidget,
     );
-    await tester.tap(find.text('Try again'));
+    await tester.tap(find.text('Reconnect'));
     await settle(tester);
-    expect(find.byType(TunnelProblem), findsNothing);
+    expect(find.byType(ConnectionDialog), findsNothing);
   });
 
   testWidgets('reconnecting after a resume or a drop, the footer says '
@@ -474,7 +548,10 @@ void main() {
     await harness.show(tester);
     await harness.apply(tester, snapshot);
     await pumpFrames(tester);
-    final line = find.text('Connected to mac-mini');
+    final line = find.descendant(
+      of: find.byType(SettingsView),
+      matching: find.text('Connected to mac-mini'),
+    );
     // Settings builds its sections as they scroll into view.
     await tester.scrollUntilVisible(
       line,

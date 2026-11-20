@@ -591,7 +591,7 @@ pub fn create_agent(project_id: &str, name: &str, prompt: &str) -> client_messag
 }
 
 pub fn send_message(agent_id: &str, text: &str) -> client_message::Body {
-    client_message::Body::SendMessage(v1::SendMessage { agent_id: agent_id.into(), text: text.into() })
+    client_message::Body::SendMessage(v1::SendMessage { agent_id: agent_id.into(), text: text.into(), client_id: String::new() })
 }
 
 /// A transcript's entries as short strings, for comparing whole conversations.
@@ -622,7 +622,10 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
 #[derive(Default)]
 pub struct View {
     pub workspace: v1::Workspace,
+    /// The latest entries, as the snapshot sent them and updates added to
+    /// them; the first may be a later one than seq 0 (Transcript.has_earlier).
     pub entries: Vec<v1::Entry>,
+    pub has_earlier: bool,
     pub deltas: usize,
     pub explorer: Option<v1::Explorer>,
     /// The open extension panel's content, as last sent.
@@ -656,21 +659,26 @@ impl View {
             Body::ExtensionView(view) => self.extension_view = Some(view.clone()),
             Body::QueuedMessages(queued) => self.queued = Some(queued.clone()),
             Body::Highlight(highlight) => self.highlights.push(highlight.clone()),
-            Body::Transcript(transcript) => self.entries = transcript.entries.clone(),
+            Body::Transcript(transcript) => {
+                self.entries = transcript.entries.clone();
+                self.has_earlier = transcript.has_earlier;
+            }
             Body::Entry(update) => {
                 let Some(entry) = update.entry.clone() else { return };
-                let seq = entry.seq as usize;
-                if seq < self.entries.len() {
-                    self.entries[seq] = entry;
+                // An entry older than the ones held is left for when they're loaded.
+                let Some(at) = (entry.seq as usize).checked_sub(self.first_seq()) else { return };
+                if at < self.entries.len() {
+                    self.entries[at] = entry;
                 } else {
-                    assert_eq!(seq, self.entries.len(), "entries arrive in order");
+                    assert_eq!(at, self.entries.len(), "entries arrive in order");
                     self.entries.push(entry);
                 }
             }
             Body::Delta(delta) => {
                 use v1::entry::Kind;
                 self.deltas += 1;
-                match self.entries[delta.seq as usize].kind.as_mut() {
+                let at = delta.seq as usize - self.first_seq();
+                match self.entries[at].kind.as_mut() {
                     Some(Kind::Assistant(v1::AssistantText { text })) | Some(Kind::Thinking(v1::Thinking { text })) => {
                         text.push_str(&delta.text)
                     }
@@ -679,6 +687,11 @@ impl View {
             }
             _ => {}
         }
+    }
+
+    /// The seq of the first entry held.
+    pub fn first_seq(&self) -> usize {
+        self.entries.first().map_or(0, |entry| entry.seq as usize)
     }
 
     pub fn agent(&self, id: &str) -> &v1::Agent {

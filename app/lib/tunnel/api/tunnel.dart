@@ -22,6 +22,14 @@ Future<TunnelHandle> openTunnel({
   addresses: addresses,
 );
 
+PairingIds pairingIds({
+  required String deviceKey,
+  required String endpointId,
+}) => RustLib.instance.api.crateApiTunnelPairingIds(
+  deviceKey: deviceKey,
+  endpointId: endpointId,
+);
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<TunnelHandle>>
 abstract class TunnelHandle implements RustOpaqueInterface {
   /// Stops it: the port closes, and so does the connection.
@@ -36,6 +44,27 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   Future<void> reconnect();
 
   TunnelStatus status();
+}
+
+/// The endpoint ids, as lowercase hex, that the number a device shows while
+/// it waits to be allowed is worked out from: [device]'s, from its key
+/// [device_key], and the [backend]'s, from its pairing code's `e=`.
+class PairingIds {
+  final String device;
+  final String backend;
+
+  const PairingIds({required this.device, required this.backend});
+
+  @override
+  int get hashCode => device.hashCode ^ backend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PairingIds &&
+          runtimeType == other.runtimeType &&
+          device == other.device &&
+          backend == other.backend;
 }
 
 enum TunnelFailure { none, unreachable, refused, offline, other }

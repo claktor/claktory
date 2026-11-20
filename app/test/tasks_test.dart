@@ -87,6 +87,24 @@ ExtensionView tasksView(List<BackgroundTask> tasks) => ExtensionView(
 Finder inPanel(Finder finder) =>
     find.descendant(of: find.byType(TasksView), matching: finder);
 
+/// A running task's clock, started [ago] as of [made]: the row reads the
+/// wall clock as it builds, which a loaded machine can delay by seconds, so
+/// it shows one of the texts any moment from then until now can give.
+Finder _running(Duration ago, DateTime made) {
+  final late = DateTime.now().difference(made) + const Duration(seconds: 1);
+  final possible = {
+    for (
+      var extra = Duration.zero;
+      extra <= late;
+      extra += const Duration(milliseconds: 250)
+    )
+      formatDuration(ago + extra, whole: true),
+  };
+  return inPanel(
+    find.byWidgetPredicate((w) => w is Text && possible.contains(w.data)),
+  );
+}
+
 void main() {
   group('tool call clock', () {
     test('bash running: elapsed and when it times out', () {
@@ -206,6 +224,7 @@ void main() {
     testWidgets('running first, then finished, each with how it went', (
       tester,
     ) async {
+      final made = DateTime.now();
       await show(tester, [
         _task(
           id: 'task-3',
@@ -235,7 +254,10 @@ void main() {
         tester.getTopLeft(inPanel(find.text('npm run dev'))).dy,
         lessThan(tester.getTopLeft(inPanel(find.text('Finished'))).dy),
       );
-      expect(inPanel(find.text('2m 5s')), findsOneWidget);
+      expect(
+        _running(const Duration(minutes: 2, seconds: 5), made),
+        findsOneWidget,
+      );
       expect(inPanel(find.text('42s')), findsOneWidget);
       expect(inPanel(find.text('exit 1')), findsOneWidget);
       expect(inPanel(find.text('3m 7s')), findsOneWidget);
@@ -258,8 +280,9 @@ void main() {
     });
 
     testWidgets('a running task ticks', (tester) async {
+      final made = DateTime.now();
       await show(tester, [_task(startedAgo: const Duration(seconds: 10))]);
-      expect(inPanel(find.text('10s')), findsOneWidget);
+      expect(_running(const Duration(seconds: 10), made), findsOneWidget);
       expect(find.byType(Ticking), findsWidgets);
     });
 

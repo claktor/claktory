@@ -162,7 +162,8 @@ async fn tick_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
             }
             let agent = match inner.config.agent(&monitor.agent) {
                 Some(config) => Agent {
-                    on: crate::extensions::enabled(config, super::ID),
+                    // Paused while its project is archived.
+                    on: crate::extensions::enabled(config, super::ID) && !inner.config.archived(config),
                     running: inner.agents.get(&config.id).is_some_and(|runtime| runtime.running),
                     folder: crate::runner::places(&factory.home, &inner.config, config).folder,
                 },

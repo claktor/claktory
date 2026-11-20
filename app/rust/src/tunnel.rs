@@ -40,6 +40,15 @@ pub fn parse_key(hex: &str) -> anyhow::Result<SecretKey> {
     Ok(SecretKey::from_bytes(&bytes))
 }
 
+/// The endpoint ids a pairing number is worked out from, as lowercase hex:
+/// this device's, from its [device_key], and the backend's [endpoint_id]
+/// (hex or base32, as in a pairing code's `e=`).
+pub fn pairing_ids(device_key: &str, endpoint_id: &str) -> anyhow::Result<(String, String)> {
+    let device = parse_key(device_key)?.public();
+    let backend: EndpointId = endpoint_id.trim().to_lowercase().parse().map_err(|error| anyhow::anyhow!("not an endpoint id: {error}"))?;
+    Ok((hex::encode(device.as_bytes()), hex::encode(backend.as_bytes())))
+}
+
 /// Where the backend is: its endpoint id, the relays its pairing code
 /// names (none: iroh finds it through its address lookup and n0's relays),
 /// and the direct UDP addresses it names (`a=`: this Mac's own code has
@@ -513,5 +522,19 @@ mod tests {
         assert!(backend_addr("nope", &[], &[]).is_err());
         assert!(backend_addr(&id, &[], &["nowhere".to_owned()]).is_err());
         assert!(parse_key("abcd").is_err());
+    }
+
+    #[test]
+    fn pairing_ids_are_both_endpoint_ids_in_hex() {
+        let device = generate_key();
+        let backend = parse_key(&generate_key()).unwrap().public();
+        let (device_id, backend_id) = pairing_ids(&device, &backend.to_string()).unwrap();
+        assert_eq!(device_id, hex::encode(parse_key(&device).unwrap().public().as_bytes()));
+        assert_eq!(backend_id, hex::encode(backend.as_bytes()));
+        assert_eq!(backend_id.len(), 64);
+        // The same id written in hex reads the same.
+        assert_eq!(pairing_ids(&device, &backend_id.to_uppercase()).unwrap().1, backend_id);
+        assert!(pairing_ids("abcd", &backend_id).is_err());
+        assert!(pairing_ids(&device, "nope").is_err());
     }
 }

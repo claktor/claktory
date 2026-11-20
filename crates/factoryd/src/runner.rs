@@ -543,12 +543,22 @@ impl Factory {
         let models = inner.models.clone();
         let places = agent.as_ref().map(|agent| places(&self.home, &inner.config, agent));
         let cache_ttl = agent.as_ref().and_then(|agent| inner.config.cache_ttl(&agent.model)).unwrap_or_default();
+        let archived = agent.as_ref().is_some_and(|agent| inner.config.archived(agent));
         let runtime = inner.agents.get_mut(id)?;
         let Some(agent) = agent else {
             runtime.running = false;
             runtime.idle = false;
             return None;
         };
+        // Its project is archived: what's queued waits for it to come back.
+        if archived {
+            runtime.running = false;
+            runtime.idle = false;
+            runtime.compact = None;
+            self.end_run(runtime, "stopped");
+            self.broadcast_workspace(&inner);
+            return None;
+        }
         // New work came before compacting while idle began: it goes first,
         // on the conversation as it is.
         if runtime.compact == Some(Reason::Idle) && !runtime.queue.is_empty() {
@@ -1285,7 +1295,7 @@ fn user_message(queued: Queued) -> UserMessage {
     let now = factory_agent::clock::now_ms();
     match queued.event {
         Some(event) => UserMessage::event(queued.text, event, now),
-        None => UserMessage { sent_from: queued.sent_from, ..UserMessage::text(queued.text, now) },
+        None => UserMessage { sent_from: queued.sent_from, client_id: queued.client_id, ..UserMessage::text(queued.text, now) },
     }
 }
 

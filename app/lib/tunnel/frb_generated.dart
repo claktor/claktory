@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1733062143;
+  int get rustContentHash => 1037294838;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -94,6 +94,11 @@ abstract class RustLibApi extends BaseApi {
     required String endpointId,
     required List<String> relays,
     required List<String> addresses,
+  });
+
+  PairingIds crateApiTunnelPairingIds({
+    required String deviceKey,
+    required String endpointId,
   });
 
   RustArcIncrementStrongCountFnType
@@ -271,6 +276,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     argNames: ["deviceKey", "endpointId", "relays", "addresses"],
   );
 
+  @override
+  PairingIds crateApiTunnelPairingIds({
+    required String deviceKey,
+    required String endpointId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(deviceKey, serializer);
+          sse_encode_String(endpointId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_pairing_ids,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiTunnelPairingIdsConstMeta,
+        argValues: [deviceKey, endpointId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTunnelPairingIdsConstMeta => const TaskConstMeta(
+    debugName: "pairing_ids",
+    argNames: ["deviceKey", "endpointId"],
+  );
+
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_TunnelHandle => wire
       .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle;
@@ -340,6 +374,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  PairingIds dco_decode_pairing_ids(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return PairingIds(
+      device: dco_decode_String(arr[0]),
+      backend: dco_decode_String(arr[1]),
+    );
   }
 
   @protected
@@ -478,6 +524,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  PairingIds sse_decode_pairing_ids(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_device = sse_decode_String(deserializer);
+    var var_backend = sse_decode_String(deserializer);
+    return PairingIds(device: var_device, backend: var_backend);
   }
 
   @protected
@@ -624,6 +678,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_pairing_ids(PairingIds self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.device, serializer);
+    sse_encode_String(self.backend, serializer);
   }
 
   @protected

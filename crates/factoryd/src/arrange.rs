@@ -210,7 +210,13 @@ mod tests {
     fn factory() -> Config {
         let mut config = Config { agents: Vec::new(), ..Config::default() };
         for id in ["web", "app"] {
-            config.projects.push(ProjectConfig { id: id.into(), name: id.into(), path: format!("/{id}").into(), folders: Vec::new() });
+            config.projects.push(ProjectConfig {
+                id: id.into(),
+                name: id.into(),
+                path: format!("/{id}").into(),
+                folders: Vec::new(),
+                archived: false,
+            });
         }
         config.agents = vec![
             agent("rivet", None, None),

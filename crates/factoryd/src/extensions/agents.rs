@@ -75,9 +75,13 @@ const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} 
 
 pub(crate) struct Agents;
 
-/// Whether `from` may see and message `to`.
-pub(crate) fn can_message(from: &AgentConfig, to: &AgentConfig) -> bool {
+/// Whether `from` may see and message `to`. No agent can message one in
+/// an archived project, and one there messages no one (it doesn't run).
+pub(crate) fn can_message(config: &Config, from: &AgentConfig, to: &AgentConfig) -> bool {
     if from.id == to.id || !enabled(from, ID) || !enabled(to, ID) || !switch(to, ID, "reachable") {
+        return false;
+    }
+    if config.archived(from) || config.archived(to) {
         return false;
     }
     switch(from, ID, "admin") || from.project == to.project || agent_list(from, ID, "also").contains(&to.id)
@@ -85,7 +89,7 @@ pub(crate) fn can_message(from: &AgentConfig, to: &AgentConfig) -> bool {
 
 /// The agents `from` can message, in the settings' order.
 fn reachable<'a>(config: &'a Config, from: &AgentConfig) -> Vec<&'a AgentConfig> {
-    config.agents.iter().filter(|to| can_message(from, to)).collect()
+    config.agents.iter().filter(|to| can_message(config, from, to)).collect()
 }
 
 /// Whom `from` can message, by id, as its prompt names them; empty with the
@@ -253,7 +257,7 @@ impl Extension for Agents {
         let config = &inner.config;
         let me = config.agent(agent)?;
         let reaches = reachable(config, me).into_iter().map(|to| to.id.clone()).collect();
-        let reached_by = config.agents.iter().filter(|from| can_message(from, me)).map(|from| from.id.clone()).collect();
+        let reached_by = config.agents.iter().filter(|from| can_message(config, from, me)).map(|from| from.id.clone()).collect();
         Some(v1::ExtensionView {
             extension_id: ID.to_owned(),
             agent_id: agent.to_owned(),
@@ -278,7 +282,7 @@ fn map_line(config: &Config, asker: &AgentConfig, agent: &AgentConfig) -> String
         }
     };
     let messages = list(reachable(config, agent));
-    let messaged_by = list(config.agents.iter().filter(|from| can_message(from, agent)).collect());
+    let messaged_by = list(config.agents.iter().filter(|from| can_message(config, from, agent)).collect());
     let mut line = agent.id.clone();
     let label = with_role(agent, place(config, asker, agent));
     if label != agent.id {

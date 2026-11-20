@@ -354,7 +354,8 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         now.others = sampled.others;
         check(&mut now, &lines, &config)
     };
-    let told: Vec<String> = config.agents.iter().filter(|agent| enabled(agent, ID)).map(|agent| agent.id.clone()).collect();
+    let told: Vec<String> =
+        config.agents.iter().filter(|agent| enabled(agent, ID) && !config.archived(agent)).map(|agent| agent.id.clone()).collect();
     for (_, text) in said {
         for agent in &told {
             let event = Event {

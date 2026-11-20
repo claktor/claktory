@@ -6,6 +6,19 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.5
+Released 2026-11-20 10:41 UTC.
+- Added: See at a glance whether you're connected. The bottom of the sidebar always says Connected, Reconnecting… or Can't connect, and each Claktory in the rail shows a pulsing or red dot when it isn't connected. Click the line to see how you're connected, or to reconnect.
+- Changed: Your messages show in the conversation the moment you send them, even over a slow connection. If one can't be sent, it stays there with Retry, so nothing you wrote is lost.
+- Changed: Long conversations open quickly, even over a slow connection: Claktory brings their latest messages first, and earlier ones as you scroll up.
+- Changed: Your Mac now keeps its connections to your Claktories in the Keychain, as your iPhone does, so other apps can't read them to pose as your Mac. They move there by themselves the first time you open Claktory.
+
+## v0.1.4
+Released 2026-11-20 09:25 UTC.
+- Changed: A new device connects only once you allow it. When it uses its code, Claktory asks you, and both screens show the same four digits, so no one else can use a copied code. Closing Add a device cancels its code.
+- Added: Archive a project you're done with, in its settings: it leaves the sidebar and its agents stop, with nothing deleted, and messages you send them wait. Find it under Archived at the bottom of the sidebar to unarchive it.
+- Added: On the Map, hover an agent, or tap it on iPhone, for everything it has: extensions, folder, whom it can message and its secrets.
+
 ## v0.1.3
 Released 2026-11-20 03:53 UTC.
 - Added: See how your Claktory is arranged on the Map: Rivet, each project with its folders and agents, who can message whom and who has which secret. Open it with Map at the bottom of the sidebar. Hover an agent to see what it reaches, and click it to open its conversation.

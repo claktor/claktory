@@ -76,9 +76,17 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
 
   @override
-  Future<void> sendMessage(String agentId, String text) => _record(
+  Future<void> sendMessage(
+    String agentId,
+    String text, {
+    String clientId = '',
+  }) => _record(
     ClientMessage(
-      sendMessage: SendMessage(agentId: agentId, text: text),
+      sendMessage: SendMessage(
+        agentId: agentId,
+        text: text,
+        clientId: clientId,
+      ),
     ),
   );
 
@@ -213,6 +221,18 @@ class RecordingBackend extends Backend {
   @override
   Future<void> unpairDevice(String deviceId) =>
       _record(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
+
+  @override
+  Future<void> approveDevice(String deviceId) =>
+      _record(ClientMessage(approveDevice: ApproveDevice(deviceId: deviceId)));
+
+  @override
+  Future<void> denyDevice(String deviceId) =>
+      _record(ClientMessage(denyDevice: DenyDevice(deviceId: deviceId)));
+
+  @override
+  Future<void> cancelPairing(String deviceId) =>
+      _record(ClientMessage(cancelPairing: CancelPairing(deviceId: deviceId)));
 
   @override
   Future<void> setRemoteAccess(bool on, {int port = 0, String? listen}) =>

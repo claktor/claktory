@@ -580,7 +580,7 @@ fn whose(config: &Config, asker: &str, agent: Option<&str>) -> Result<String, St
     let Some(wanted) = agent.filter(|wanted| *wanted != asker && !me.name.eq_ignore_ascii_case(wanted)) else {
         return Ok(asker.to_owned());
     };
-    let reachable: Vec<&AgentConfig> = config.agents.iter().filter(|to| super::agents::can_message(me, to)).collect();
+    let reachable: Vec<&AgentConfig> = config.agents.iter().filter(|to| super::agents::can_message(config, me, to)).collect();
     match super::agents::find(config, me, &reachable, wanted)? {
         Some(found) if super::enabled(found, ID) => Ok(found.id.clone()),
         Some(found) => Err(format!("{} has monitors turned off.", found.id)),

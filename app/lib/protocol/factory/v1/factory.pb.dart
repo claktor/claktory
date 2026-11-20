@@ -86,6 +86,10 @@ enum ClientMessage_Body {
   accountSignOut,
   setAccountService,
   showRecoveryKey,
+  approveDevice,
+  denyDevice,
+  cancelPairing,
+  loadEntries,
   notSet
 }
 
@@ -156,6 +160,10 @@ class ClientMessage extends $pb.GeneratedMessage {
     AccountSignOut? accountSignOut,
     SetAccountService? setAccountService,
     ShowRecoveryKey? showRecoveryKey,
+    ApproveDevice? approveDevice,
+    DenyDevice? denyDevice,
+    CancelPairing? cancelPairing,
+    LoadEntries? loadEntries,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -226,6 +234,10 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (accountSignOut != null) result.accountSignOut = accountSignOut;
     if (setAccountService != null) result.setAccountService = setAccountService;
     if (showRecoveryKey != null) result.showRecoveryKey = showRecoveryKey;
+    if (approveDevice != null) result.approveDevice = approveDevice;
+    if (denyDevice != null) result.denyDevice = denyDevice;
+    if (cancelPairing != null) result.cancelPairing = cancelPairing;
+    if (loadEntries != null) result.loadEntries = loadEntries;
     return result;
   }
 
@@ -304,6 +316,10 @@ class ClientMessage extends $pb.GeneratedMessage {
     63: ClientMessage_Body.accountSignOut,
     64: ClientMessage_Body.setAccountService,
     65: ClientMessage_Body.showRecoveryKey,
+    66: ClientMessage_Body.approveDevice,
+    67: ClientMessage_Body.denyDevice,
+    68: ClientMessage_Body.cancelPairing,
+    69: ClientMessage_Body.loadEntries,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -374,7 +390,11 @@ class ClientMessage extends $pb.GeneratedMessage {
       62,
       63,
       64,
-      65
+      65,
+      66,
+      67,
+      68,
+      69
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -506,6 +526,14 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: SetAccountService.$_createMessage)
     ..aOM<ShowRecoveryKey>(65, _omitFieldNames ? '' : 'showRecoveryKey',
         subBuilder: ShowRecoveryKey.$_createMessage)
+    ..aOM<ApproveDevice>(66, _omitFieldNames ? '' : 'approveDevice',
+        subBuilder: ApproveDevice.$_createMessage)
+    ..aOM<DenyDevice>(67, _omitFieldNames ? '' : 'denyDevice',
+        subBuilder: DenyDevice.$_createMessage)
+    ..aOM<CancelPairing>(68, _omitFieldNames ? '' : 'cancelPairing',
+        subBuilder: CancelPairing.$_createMessage)
+    ..aOM<LoadEntries>(69, _omitFieldNames ? '' : 'loadEntries',
+        subBuilder: LoadEntries.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -594,6 +622,10 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(63)
   @$pb.TagNumber(64)
   @$pb.TagNumber(65)
+  @$pb.TagNumber(66)
+  @$pb.TagNumber(67)
+  @$pb.TagNumber(68)
+  @$pb.TagNumber(69)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -659,6 +691,10 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(63)
   @$pb.TagNumber(64)
   @$pb.TagNumber(65)
+  @$pb.TagNumber(66)
+  @$pb.TagNumber(67)
+  @$pb.TagNumber(68)
+  @$pb.TagNumber(69)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1376,6 +1412,53 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearShowRecoveryKey() => $_clearField(65);
   @$pb.TagNumber(65)
   ShowRecoveryKey ensureShowRecoveryKey() => $_ensure(64);
+
+  /// Pairing a device: allowing or turning away the device that used a
+  /// code, and cancelling a code (see PendingDevice).
+  @$pb.TagNumber(66)
+  ApproveDevice get approveDevice => $_getN(65);
+  @$pb.TagNumber(66)
+  set approveDevice(ApproveDevice value) => $_setField(66, value);
+  @$pb.TagNumber(66)
+  $core.bool hasApproveDevice() => $_has(65);
+  @$pb.TagNumber(66)
+  void clearApproveDevice() => $_clearField(66);
+  @$pb.TagNumber(66)
+  ApproveDevice ensureApproveDevice() => $_ensure(65);
+
+  @$pb.TagNumber(67)
+  DenyDevice get denyDevice => $_getN(66);
+  @$pb.TagNumber(67)
+  set denyDevice(DenyDevice value) => $_setField(67, value);
+  @$pb.TagNumber(67)
+  $core.bool hasDenyDevice() => $_has(66);
+  @$pb.TagNumber(67)
+  void clearDenyDevice() => $_clearField(67);
+  @$pb.TagNumber(67)
+  DenyDevice ensureDenyDevice() => $_ensure(66);
+
+  @$pb.TagNumber(68)
+  CancelPairing get cancelPairing => $_getN(67);
+  @$pb.TagNumber(68)
+  set cancelPairing(CancelPairing value) => $_setField(68, value);
+  @$pb.TagNumber(68)
+  $core.bool hasCancelPairing() => $_has(67);
+  @$pb.TagNumber(68)
+  void clearCancelPairing() => $_clearField(68);
+  @$pb.TagNumber(68)
+  CancelPairing ensureCancelPairing() => $_ensure(67);
+
+  /// Earlier entries of a transcript (see Transcript.has_earlier).
+  @$pb.TagNumber(69)
+  LoadEntries get loadEntries => $_getN(68);
+  @$pb.TagNumber(69)
+  set loadEntries(LoadEntries value) => $_setField(69, value);
+  @$pb.TagNumber(69)
+  $core.bool hasLoadEntries() => $_has(68);
+  @$pb.TagNumber(69)
+  void clearLoadEntries() => $_clearField(69);
+  @$pb.TagNumber(69)
+  LoadEntries ensureLoadEntries() => $_ensure(68);
 }
 
 enum ServerMessage_Body {
@@ -1399,6 +1482,8 @@ enum ServerMessage_Body {
   envPreview,
   recoveryKey,
   secretUses,
+  pairingPending,
+  entryPage,
   notSet
 }
 
@@ -1425,6 +1510,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     EnvPreview? envPreview,
     RecoveryKey? recoveryKey,
     SecretUses? secretUses,
+    PairingPending? pairingPending,
+    EntryPage? entryPage,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -1448,6 +1535,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (envPreview != null) result.envPreview = envPreview;
     if (recoveryKey != null) result.recoveryKey = recoveryKey;
     if (secretUses != null) result.secretUses = secretUses;
+    if (pairingPending != null) result.pairingPending = pairingPending;
+    if (entryPage != null) result.entryPage = entryPage;
     return result;
   }
 
@@ -1482,6 +1571,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     22: ServerMessage_Body.envPreview,
     23: ServerMessage_Body.recoveryKey,
     24: ServerMessage_Body.secretUses,
+    25: ServerMessage_Body.pairingPending,
+    26: ServerMessage_Body.entryPage,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1508,7 +1599,9 @@ class ServerMessage extends $pb.GeneratedMessage {
       21,
       22,
       23,
-      24
+      24,
+      25,
+      26
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1551,6 +1644,10 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: RecoveryKey.$_createMessage)
     ..aOM<SecretUses>(24, _omitFieldNames ? '' : 'secretUses',
         subBuilder: SecretUses.$_createMessage)
+    ..aOM<PairingPending>(25, _omitFieldNames ? '' : 'pairingPending',
+        subBuilder: PairingPending.$_createMessage)
+    ..aOM<EntryPage>(26, _omitFieldNames ? '' : 'entryPage',
+        subBuilder: EntryPage.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1595,6 +1692,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(22)
   @$pb.TagNumber(23)
   @$pb.TagNumber(24)
+  @$pb.TagNumber(25)
+  @$pb.TagNumber(26)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1616,6 +1715,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(22)
   @$pb.TagNumber(23)
   @$pb.TagNumber(24)
+  @$pb.TagNumber(25)
+  @$pb.TagNumber(26)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1857,6 +1958,31 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearSecretUses() => $_clearField(24);
   @$pb.TagNumber(24)
   SecretUses ensureSecretUses() => $_ensure(20);
+
+  /// To a device's Hello, with its pairing code's token, while it waits for
+  /// the person to allow it (see PendingDevice).
+  @$pb.TagNumber(25)
+  PairingPending get pairingPending => $_getN(21);
+  @$pb.TagNumber(25)
+  set pairingPending(PairingPending value) => $_setField(25, value);
+  @$pb.TagNumber(25)
+  $core.bool hasPairingPending() => $_has(21);
+  @$pb.TagNumber(25)
+  void clearPairingPending() => $_clearField(25);
+  @$pb.TagNumber(25)
+  PairingPending ensurePairingPending() => $_ensure(21);
+
+  /// The answer to LoadEntries, to the asker only.
+  @$pb.TagNumber(26)
+  EntryPage get entryPage => $_getN(22);
+  @$pb.TagNumber(26)
+  set entryPage(EntryPage value) => $_setField(26, value);
+  @$pb.TagNumber(26)
+  $core.bool hasEntryPage() => $_has(22);
+  @$pb.TagNumber(26)
+  void clearEntryPage() => $_clearField(26);
+  @$pb.TagNumber(26)
+  EntryPage ensureEntryPage() => $_ensure(22);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -2246,6 +2372,7 @@ class PairingCode extends $pb.GeneratedMessage {
   /// each r= a relay it can be reached through (percent-encoded). Until it's
   /// first used it expires (PairedDevice.code_expires_ms); the first device
   /// to connect with it binds its key to it, and no other key can use it.
+  /// That device gets in once the person allows it (PendingDevice).
   @$pb.TagNumber(1)
   $core.String get code => $_getSZ(0);
   @$pb.TagNumber(1)
@@ -2323,6 +2450,292 @@ class UnpairDevice extends $pb.GeneratedMessage {
   $core.bool hasDeviceId() => $_has(0);
   @$pb.TagNumber(1)
   void clearDeviceId() => $_clearField(1);
+}
+
+/// Allows a device that's waiting (RemoteAccess.pending_devices): it's
+/// paired, and its waiting connection gets Welcome. Answered with Ack;
+/// ERROR_CODE_NOT_FOUND when no device with that id is waiting (its code
+/// expired or was cancelled meanwhile).
+class ApproveDevice extends $pb.GeneratedMessage {
+  factory ApproveDevice({
+    $core.String? deviceId,
+  }) {
+    final result = ApproveDevice._();
+    if (deviceId != null) result.deviceId = deviceId;
+    return result;
+  }
+
+  ApproveDevice._();
+
+  factory ApproveDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ApproveDevice()..mergeFromBuffer(data, registry);
+  factory ApproveDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ApproveDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ApproveDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ApproveDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ApproveDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ApproveDevice copyWith(void Function(ApproveDevice) updates) =>
+      super.copyWith((message) => updates(message as ApproveDevice))
+          as ApproveDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ApproveDevice() / ApproveDevice.new instead')
+  static ApproveDevice create() => ApproveDevice._();
+  static $pb.GeneratedMessage $_createMessage() => ApproveDevice._();
+  @$core.override
+  ApproveDevice createEmptyInstance() => ApproveDevice._();
+  @$core.pragma('dart2js:noInline')
+  static ApproveDevice getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ApproveDevice>(
+          ApproveDevice.$_createMessage);
+  static ApproveDevice? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+}
+
+/// Turns away a device that's waiting: its code stops working, the device is
+/// forgotten (make a new code to pair it), and its waiting connection gets
+/// ERROR_CODE_UNAUTHORIZED. Answered with Ack; ERROR_CODE_NOT_FOUND when no
+/// device with that id is waiting.
+class DenyDevice extends $pb.GeneratedMessage {
+  factory DenyDevice({
+    $core.String? deviceId,
+  }) {
+    final result = DenyDevice._();
+    if (deviceId != null) result.deviceId = deviceId;
+    return result;
+  }
+
+  DenyDevice._();
+
+  factory DenyDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DenyDevice()..mergeFromBuffer(data, registry);
+  factory DenyDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DenyDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DenyDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DenyDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DenyDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DenyDevice copyWith(void Function(DenyDevice) updates) =>
+      super.copyWith((message) => updates(message as DenyDevice)) as DenyDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DenyDevice() / DenyDevice.new instead')
+  static DenyDevice create() => DenyDevice._();
+  static $pb.GeneratedMessage $_createMessage() => DenyDevice._();
+  @$core.override
+  DenyDevice createEmptyInstance() => DenyDevice._();
+  @$core.pragma('dart2js:noInline')
+  static DenyDevice getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<DenyDevice>(DenyDevice.$_createMessage);
+  static DenyDevice? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+}
+
+/// Cancels a pairing code that hasn't let a device in yet, when the person
+/// closes Add a device: the code stops working and the device is forgotten
+/// (a device waiting with it is turned away). A code exists only while the
+/// person is pairing: this, or its 10 minutes running out, ends it. Answered
+/// with Ack, also when the device is already gone; a device already allowed
+/// stays paired.
+class CancelPairing extends $pb.GeneratedMessage {
+  factory CancelPairing({
+    $core.String? deviceId,
+  }) {
+    final result = CancelPairing._();
+    if (deviceId != null) result.deviceId = deviceId;
+    return result;
+  }
+
+  CancelPairing._();
+
+  factory CancelPairing.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CancelPairing()..mergeFromBuffer(data, registry);
+  factory CancelPairing.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CancelPairing()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CancelPairing',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: CancelPairing.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelPairing clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CancelPairing copyWith(void Function(CancelPairing) updates) =>
+      super.copyWith((message) => updates(message as CancelPairing))
+          as CancelPairing;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use CancelPairing() / CancelPairing.new instead')
+  static CancelPairing create() => CancelPairing._();
+  static $pb.GeneratedMessage $_createMessage() => CancelPairing._();
+  @$core.override
+  CancelPairing createEmptyInstance() => CancelPairing._();
+  @$core.pragma('dart2js:noInline')
+  static CancelPairing getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CancelPairing>(
+          CancelPairing.$_createMessage);
+  static CancelPairing? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+}
+
+/// The answer to a device's Hello while it waits to be allowed. The
+/// connection stays open: Welcome follows (replying to the Hello) once the
+/// person allows it, or Error ERROR_CODE_UNAUTHORIZED, with why, once it's
+/// turned away, cancelled or its code expires. Meanwhile the device shows
+/// PendingDevice.number, worked out on its own side.
+class PairingPending extends $pb.GeneratedMessage {
+  factory PairingPending({
+    $core.String? deviceId,
+    $core.String? name,
+    $core.String? machine,
+    $fixnum.Int64? expiresMs,
+  }) {
+    final result = PairingPending._();
+    if (deviceId != null) result.deviceId = deviceId;
+    if (name != null) result.name = name;
+    if (machine != null) result.machine = machine;
+    if (expiresMs != null) result.expiresMs = expiresMs;
+    return result;
+  }
+
+  PairingPending._();
+
+  factory PairingPending.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PairingPending()..mergeFromBuffer(data, registry);
+  factory PairingPending.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PairingPending()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PairingPending',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PairingPending.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'machine')
+    ..aInt64(4, _omitFieldNames ? '' : 'expiresMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PairingPending clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PairingPending copyWith(void Function(PairingPending) updates) =>
+      super.copyWith((message) => updates(message as PairingPending))
+          as PairingPending;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PairingPending() / PairingPending.new instead')
+  static PairingPending create() => PairingPending._();
+  static $pb.GeneratedMessage $_createMessage() => PairingPending._();
+  @$core.override
+  PairingPending createEmptyInstance() => PairingPending._();
+  @$core.pragma('dart2js:noInline')
+  static PairingPending getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PairingPending>(
+          PairingPending.$_createMessage);
+  static PairingPending? _defaultInstance;
+
+  /// Its id in RemoteAccess.devices.
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+
+  /// The name it was given when its code was made.
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  /// The name of the computer Claktory runs on, which asks the person
+  /// (RemoteAccess.machine).
+  @$pb.TagNumber(3)
+  $core.String get machine => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set machine($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMachine() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMachine() => $_clearField(3);
+
+  /// When its code stops working, in ms since 1970.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get expiresMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set expiresMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasExpiresMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearExpiresMs() => $_clearField(4);
 }
 
 /// Turns remote access (devices on other machines reaching this Factory
@@ -2450,6 +2863,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
     $core.bool? customRelays,
     $core.String? homeRelay,
     $core.bool? relayConnected,
+    $core.Iterable<PendingDevice>? pendingDevices,
   }) {
     final result = RemoteAccess._();
     if (on != null) result.on = on;
@@ -2465,6 +2879,7 @@ class RemoteAccess extends $pb.GeneratedMessage {
     if (customRelays != null) result.customRelays = customRelays;
     if (homeRelay != null) result.homeRelay = homeRelay;
     if (relayConnected != null) result.relayConnected = relayConnected;
+    if (pendingDevices != null) result.pendingDevices.addAll(pendingDevices);
     return result;
   }
 
@@ -2495,6 +2910,8 @@ class RemoteAccess extends $pb.GeneratedMessage {
     ..aOB(11, _omitFieldNames ? '' : 'customRelays')
     ..aOS(12, _omitFieldNames ? '' : 'homeRelay')
     ..aOB(13, _omitFieldNames ? '' : 'relayConnected')
+    ..pPM<PendingDevice>(14, _omitFieldNames ? '' : 'pendingDevices',
+        subBuilder: PendingDevice.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2632,6 +3049,148 @@ class RemoteAccess extends $pb.GeneratedMessage {
   $core.bool hasRelayConnected() => $_has(12);
   @$pb.TagNumber(13)
   void clearRelayConnected() => $_clearField(13);
+
+  /// Devices that used a pairing code and wait for the person to allow them,
+  /// oldest first. Each is also in `devices`, with its code_expires_ms.
+  @$pb.TagNumber(14)
+  $pb.PbList<PendingDevice> get pendingDevices => $_getList(13);
+}
+
+/// A device that connected with a pairing code and waits to be allowed: a
+/// code lets a device in only once the person allows it, on a device that's
+/// already in (ApproveDevice), or turns it away (DenyDevice). Only the first
+/// device to use a code asks; any other is turned away. The new device shows
+/// the same number (see `number`), so the person can tell it's theirs and
+/// not one that copied the code.
+class PendingDevice extends $pb.GeneratedMessage {
+  factory PendingDevice({
+    $core.String? deviceId,
+    $core.String? name,
+    DeviceKind? kind,
+    $core.String? number,
+    $fixnum.Int64? requestedMs,
+    $fixnum.Int64? expiresMs,
+  }) {
+    final result = PendingDevice._();
+    if (deviceId != null) result.deviceId = deviceId;
+    if (name != null) result.name = name;
+    if (kind != null) result.kind = kind;
+    if (number != null) result.number = number;
+    if (requestedMs != null) result.requestedMs = requestedMs;
+    if (expiresMs != null) result.expiresMs = expiresMs;
+    return result;
+  }
+
+  PendingDevice._();
+
+  factory PendingDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PendingDevice()..mergeFromBuffer(data, registry);
+  factory PendingDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PendingDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PendingDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PendingDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aE<DeviceKind>(3, _omitFieldNames ? '' : 'kind',
+        enumValues: DeviceKind.values)
+    ..aOS(4, _omitFieldNames ? '' : 'number')
+    ..aInt64(5, _omitFieldNames ? '' : 'requestedMs')
+    ..aInt64(6, _omitFieldNames ? '' : 'expiresMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PendingDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PendingDevice copyWith(void Function(PendingDevice) updates) =>
+      super.copyWith((message) => updates(message as PendingDevice))
+          as PendingDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PendingDevice() / PendingDevice.new instead')
+  static PendingDevice create() => PendingDevice._();
+  static $pb.GeneratedMessage $_createMessage() => PendingDevice._();
+  @$core.override
+  PendingDevice createEmptyInstance() => PendingDevice._();
+  @$core.pragma('dart2js:noInline')
+  static PendingDevice getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PendingDevice>(
+          PendingDevice.$_createMessage);
+  static PendingDevice? _defaultInstance;
+
+  /// Its id in RemoteAccess.devices (PairingCode.device_id).
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+
+  /// The name it was given when its code was made.
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  /// What it says it is, from its Hello.
+  @$pb.TagNumber(3)
+  DeviceKind get kind => $_getN(2);
+  @$pb.TagNumber(3)
+  set kind(DeviceKind value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasKind() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearKind() => $_clearField(3);
+
+  /// Four digits, e.g. "0427", that the new device shows too. Both sides
+  /// work it out: SHA-256 of the UTF-8 text "claktory pairing\n" + this
+  /// Claktory's endpoint id (the code's e=, lowercase hex) + "\n" + the
+  /// device's own endpoint id (lowercase hex) + "\n" + the SHA-256 of the
+  /// code's token (t=, the SHA-256 of its text) in lowercase hex; its first
+  /// four bytes as a big-endian unsigned number, modulo 10000, with leading
+  /// zeros. For example, with endpoint ids of 64 "a"s and 64 "b"s and the
+  /// token "0123456789abcdef": "0722".
+  @$pb.TagNumber(4)
+  $core.String get number => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set number($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasNumber() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearNumber() => $_clearField(4);
+
+  /// When it asked, in ms since 1970.
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get requestedMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set requestedMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasRequestedMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearRequestedMs() => $_clearField(5);
+
+  /// When its code stops working, and it's turned away, unless allowed.
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get expiresMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set expiresMs($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasExpiresMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearExpiresMs() => $_clearField(6);
 }
 
 class PairedDevice extends $pb.GeneratedMessage {
@@ -3406,10 +3965,12 @@ class SendMessage extends $pb.GeneratedMessage {
   factory SendMessage({
     $core.String? agentId,
     $core.String? text,
+    $core.String? clientId,
   }) {
     final result = SendMessage._();
     if (agentId != null) result.agentId = agentId;
     if (text != null) result.text = text;
+    if (clientId != null) result.clientId = clientId;
     return result;
   }
 
@@ -3428,6 +3989,7 @@ class SendMessage extends $pb.GeneratedMessage {
       createEmptyInstance: SendMessage.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'agentId')
     ..aOS(2, _omitFieldNames ? '' : 'text')
+    ..aOS(3, _omitFieldNames ? '' : 'clientId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3469,6 +4031,18 @@ class SendMessage extends $pb.GeneratedMessage {
   $core.bool hasText() => $_has(1);
   @$pb.TagNumber(2)
   void clearText() => $_clearField(2);
+
+  /// Made up by the app for this send, so it can show the message at once and
+  /// match it to the queued message and transcript entry it becomes, which
+  /// carry it (QueuedMessage.client_id, UserText.client_id). Optional.
+  @$pb.TagNumber(3)
+  $core.String get clientId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set clientId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasClientId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearClientId() => $_clearField(3);
 }
 
 /// Stops the agent's current run.
@@ -3899,10 +4473,12 @@ class UpdateProject extends $pb.GeneratedMessage {
   factory UpdateProject({
     $core.String? projectId,
     $core.String? name,
+    $core.bool? archived,
   }) {
     final result = UpdateProject._();
     if (projectId != null) result.projectId = projectId;
     if (name != null) result.name = name;
+    if (archived != null) result.archived = archived;
     return result;
   }
 
@@ -3921,6 +4497,7 @@ class UpdateProject extends $pb.GeneratedMessage {
       createEmptyInstance: UpdateProject.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'projectId')
     ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOB(3, _omitFieldNames ? '' : 'archived')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3962,6 +4539,17 @@ class UpdateProject extends $pb.GeneratedMessage {
   $core.bool hasName() => $_has(1);
   @$pb.TagNumber(2)
   void clearName() => $_clearField(2);
+
+  /// Archives the project (true) or brings it back (false); see
+  /// Project.archived.
+  @$pb.TagNumber(3)
+  $core.bool get archived => $_getBF(2);
+  @$pb.TagNumber(3)
+  set archived($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasArchived() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearArchived() => $_clearField(3);
 }
 
 /// Changes Factory-wide settings. Unset fields stay as they are. An empty
@@ -11705,12 +12293,14 @@ class Project extends $pb.GeneratedMessage {
     $core.String? name,
     $core.String? path,
     $core.Iterable<ProjectFolder>? folders,
+    $core.bool? archived,
   }) {
     final result = Project._();
     if (id != null) result.id = id;
     if (name != null) result.name = name;
     if (path != null) result.path = path;
     if (folders != null) result.folders.addAll(folders);
+    if (archived != null) result.archived = archived;
     return result;
   }
 
@@ -11732,6 +12322,7 @@ class Project extends $pb.GeneratedMessage {
     ..aOS(3, _omitFieldNames ? '' : 'path')
     ..pPM<ProjectFolder>(4, _omitFieldNames ? '' : 'folders',
         subBuilder: ProjectFolder.$_createMessage)
+    ..aOB(5, _omitFieldNames ? '' : 'archived')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -11786,6 +12377,21 @@ class Project extends $pb.GeneratedMessage {
   /// Agent.folder_id). In the person's order.
   @$pb.TagNumber(4)
   $pb.PbList<ProjectFolder> get folders => $_getList(3);
+
+  /// Archived: put away, with nothing deleted. Its agents stay in
+  /// Workspace.agents with their conversations, checklists, memory and
+  /// files, but don't run: one that was working is stopped, and messages and
+  /// events for them wait, queued, until the project is unarchived. Their
+  /// monitors pause, other agents can't message them, and the Map leaves the
+  /// project out. Unarchived, all of that resumes as it was.
+  @$pb.TagNumber(5)
+  $core.bool get archived => $_getBF(4);
+  @$pb.TagNumber(5)
+  set archived($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasArchived() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearArchived() => $_clearField(5);
 }
 
 /// A folder that some of a project's agents work in. It only scopes where they
@@ -12542,10 +13148,12 @@ class Transcript extends $pb.GeneratedMessage {
   factory Transcript({
     $core.String? agentId,
     $core.Iterable<Entry>? entries,
+    $core.bool? hasEarlier,
   }) {
     final result = Transcript._();
     if (agentId != null) result.agentId = agentId;
     if (entries != null) result.entries.addAll(entries);
+    if (hasEarlier != null) result.hasEarlier = hasEarlier;
     return result;
   }
 
@@ -12565,6 +13173,7 @@ class Transcript extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'agentId')
     ..pPM<Entry>(2, _omitFieldNames ? '' : 'entries',
         subBuilder: Entry.$_createMessage)
+    ..aOB(3, _omitFieldNames ? '' : 'hasEarlier')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -12596,8 +13205,202 @@ class Transcript extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearAgentId() => $_clearField(1);
 
+  /// The latest entries only: at most 200, and at most about 256 KB encoded
+  /// (at least one, however big), starting at a model response's first entry.
+  /// Older ones come with LoadEntries.
   @$pb.TagNumber(2)
   $pb.PbList<Entry> get entries => $_getList(1);
+
+  /// There are entries before the first of `entries`.
+  @$pb.TagNumber(3)
+  $core.bool get hasEarlier => $_getBF(2);
+  @$pb.TagNumber(3)
+  set hasEarlier($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasHasEarlier() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearHasEarlier() => $_clearField(3);
+}
+
+/// Earlier entries of an agent's transcript, answered with EntryPage to the
+/// asker only. NOT_FOUND for an unknown agent, INVALID_REQUEST when
+/// `before_seq` is beyond the end.
+class LoadEntries extends $pb.GeneratedMessage {
+  factory LoadEntries({
+    $core.String? agentId,
+    $fixnum.Int64? beforeSeq,
+    $core.int? limit,
+    $fixnum.Int64? fromSeq,
+  }) {
+    final result = LoadEntries._();
+    if (agentId != null) result.agentId = agentId;
+    if (beforeSeq != null) result.beforeSeq = beforeSeq;
+    if (limit != null) result.limit = limit;
+    if (fromSeq != null) result.fromSeq = fromSeq;
+    return result;
+  }
+
+  LoadEntries._();
+
+  factory LoadEntries.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LoadEntries()..mergeFromBuffer(data, registry);
+  factory LoadEntries.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LoadEntries()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'LoadEntries',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: LoadEntries.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'beforeSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aI(3, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'fromSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LoadEntries clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LoadEntries copyWith(void Function(LoadEntries) updates) =>
+      super.copyWith((message) => updates(message as LoadEntries))
+          as LoadEntries;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use LoadEntries() / LoadEntries.new instead')
+  static LoadEntries create() => LoadEntries._();
+  static $pb.GeneratedMessage $_createMessage() => LoadEntries._();
+  @$core.override
+  LoadEntries createEmptyInstance() => LoadEntries._();
+  @$core.pragma('dart2js:noInline')
+  static LoadEntries getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<LoadEntries>(
+          LoadEntries.$_createMessage);
+  static LoadEntries? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  /// Entries before this seq (exclusive): the seq of the first entry the app
+  /// holds.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get beforeSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set beforeSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasBeforeSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearBeforeSeq() => $_clearField(2);
+
+  /// Without `from_seq`: the latest entries before `before_seq`, cut as
+  /// Transcript's are, at most `limit` (0 for 200; 1000 at most).
+  @$pb.TagNumber(3)
+  $core.int get limit => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set limit($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLimit() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLimit() => $_clearField(3);
+
+  /// Every entry from this seq up to `before_seq`, uncut: to jump to an older
+  /// entry and keep what the app holds one run with no gaps.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get fromSeq => $_getI64(3);
+  @$pb.TagNumber(4)
+  set fromSeq($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFromSeq() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFromSeq() => $_clearField(4);
+}
+
+/// The answer to LoadEntries: entries oldest first.
+class EntryPage extends $pb.GeneratedMessage {
+  factory EntryPage({
+    $core.String? agentId,
+    $core.Iterable<Entry>? entries,
+    $core.bool? hasEarlier,
+  }) {
+    final result = EntryPage._();
+    if (agentId != null) result.agentId = agentId;
+    if (entries != null) result.entries.addAll(entries);
+    if (hasEarlier != null) result.hasEarlier = hasEarlier;
+    return result;
+  }
+
+  EntryPage._();
+
+  factory EntryPage.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      EntryPage()..mergeFromBuffer(data, registry);
+  factory EntryPage.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      EntryPage()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'EntryPage',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: EntryPage.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..pPM<Entry>(2, _omitFieldNames ? '' : 'entries',
+        subBuilder: Entry.$_createMessage)
+    ..aOB(3, _omitFieldNames ? '' : 'hasEarlier')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  EntryPage clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  EntryPage copyWith(void Function(EntryPage) updates) =>
+      super.copyWith((message) => updates(message as EntryPage)) as EntryPage;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use EntryPage() / EntryPage.new instead')
+  static EntryPage create() => EntryPage._();
+  static $pb.GeneratedMessage $_createMessage() => EntryPage._();
+  @$core.override
+  EntryPage createEmptyInstance() => EntryPage._();
+  @$core.pragma('dart2js:noInline')
+  static EntryPage getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<EntryPage>(EntryPage.$_createMessage);
+  static EntryPage? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<Entry> get entries => $_getList(1);
+
+  /// There are entries before the first of `entries`.
+  @$pb.TagNumber(3)
+  $core.bool get hasEarlier => $_getBF(2);
+  @$pb.TagNumber(3)
+  set hasEarlier($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasHasEarlier() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearHasEarlier() => $_clearField(3);
 }
 
 /// What waits for the selected agent, not yet taken by it. Sent on connect,
@@ -12679,6 +13482,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     $fixnum.Int64? created,
     $core.String? summary,
     SentFrom? sentFrom,
+    $core.String? clientId,
   }) {
     final result = QueuedMessage._();
     if (id != null) result.id = id;
@@ -12689,6 +13493,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     if (created != null) result.created = created;
     if (summary != null) result.summary = summary;
     if (sentFrom != null) result.sentFrom = sentFrom;
+    if (clientId != null) result.clientId = clientId;
     return result;
   }
 
@@ -12714,6 +13519,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     ..aOS(7, _omitFieldNames ? '' : 'summary')
     ..aOM<SentFrom>(8, _omitFieldNames ? '' : 'sentFrom',
         subBuilder: SentFrom.$_createMessage)
+    ..aOS(9, _omitFieldNames ? '' : 'clientId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -12821,6 +13627,16 @@ class QueuedMessage extends $pb.GeneratedMessage {
   void clearSentFrom() => $_clearField(8);
   @$pb.TagNumber(8)
   SentFrom ensureSentFrom() => $_ensure(7);
+
+  /// The person's: SendMessage.client_id, as sent; empty without one.
+  @$pb.TagNumber(9)
+  $core.String get clientId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set clientId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasClientId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearClientId() => $_clearField(9);
 }
 
 /// Adds an entry or replaces the one with the same `seq`.
@@ -13475,10 +14291,12 @@ class UserText extends $pb.GeneratedMessage {
   factory UserText({
     $core.String? text,
     SentFrom? sentFrom,
+    $core.String? clientId,
   }) {
     final result = UserText._();
     if (text != null) result.text = text;
     if (sentFrom != null) result.sentFrom = sentFrom;
+    if (clientId != null) result.clientId = clientId;
     return result;
   }
 
@@ -13498,6 +14316,7 @@ class UserText extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'text')
     ..aOM<SentFrom>(2, _omitFieldNames ? '' : 'sentFrom',
         subBuilder: SentFrom.$_createMessage)
+    ..aOS(3, _omitFieldNames ? '' : 'clientId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -13541,6 +14360,17 @@ class UserText extends $pb.GeneratedMessage {
   void clearSentFrom() => $_clearField(2);
   @$pb.TagNumber(2)
   SentFrom ensureSentFrom() => $_ensure(1);
+
+  /// SendMessage.client_id, as sent; empty without one, and for messages from
+  /// before it.
+  @$pb.TagNumber(3)
+  $core.String get clientId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set clientId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasClientId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearClientId() => $_clearField(3);
 }
 
 class AssistantText extends $pb.GeneratedMessage {

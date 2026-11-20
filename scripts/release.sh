@@ -10,8 +10,8 @@
 # is undone by the supervisor (crates/factoryd/src/update.rs).
 #
 # A release for the real Factory is signed with the Developer ID and notarized
-# when this Mac has the identity and the notarization key, and signed ad hoc
-# otherwise (scripts/sign-release.sh says which).
+# (scripts/sign-release.sh); without the identity and the notarization key
+# it's refused, unless --adhoc says to sign it ad hoc on purpose.
 #
 # A release for the real Factory needs its entries in docs/CHANGELOG.md,
 # stamped with its version by scripts/changelog.sh stamp (and committed); it
@@ -25,25 +25,39 @@
 #                              ~/.factory/releases: a rehearsal (of signing
 #                              and notarizing, say) that no running Claktory
 #                              sees, so it shows no Update banner.
+#   --adhoc                    with either of those: allows a real release
+#                              signed ad hoc. Without it, one that this Mac
+#                              can't sign with the Developer ID and notarize
+#                              is refused: an ad hoc app is another app to
+#                              macOS, which then hides what the person's app
+#                              kept in the Keychain (its connections, say).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
-usage() { echo "usage: scripts/release.sh [--dev | --out DIR]" >&2; exit 2; }
-case "${1:-}" in
-  "") RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=() ;;
-  --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true) ;;
-  --out)
-    [[ -n "${2:-}" ]] || usage
-    RELEASES="$(mkdir -p "$2" && cd "$2" && pwd)"
-    case "$RELEASES/" in
-      "$HOME/.factory/"* | "$HOME/.factory-dev/"*) echo "--out is for a folder outside ~/.factory and ~/.factory-dev" >&2; exit 2 ;;
-    esac
-    APP_NAME="Factory.app"; DEFINES=()
-    ;;
-  *) usage ;;
-esac
+usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc]]" >&2; exit 2; }
+RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false
+while (($#)); do
+  case "$1" in
+    --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true); shift ;;
+    --out)
+      [[ -n "${2:-}" ]] || usage
+      RELEASES="$(mkdir -p "$2" && cd "$2" && pwd)"
+      case "$RELEASES/" in
+        "$HOME/.factory/"* | "$HOME/.factory-dev/"*) echo "--out is for a folder outside ~/.factory and ~/.factory-dev" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --adhoc) ADHOC=true; shift ;;
+    *) usage ;;
+  esac
+done
+if [[ "$APP_NAME" == "Factory Dev.app" && ( "$RELEASES" != "$HOME/.factory-dev/releases" || $ADHOC ) ]]; then usage; fi
+if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && [[ "$(signing_mode)" == adhoc ]]; then
+  echo "a real release is signed with the Developer ID and notarized, and this Mac can't now: it needs the \"Developer ID Application\" identity and the App Store Connect key (scripts/sign-release.sh says where). An ad hoc app is another app to macOS, and can't read what the person's app keeps in the Keychain. Build it ad hoc anyway only on purpose, with --adhoc." >&2
+  exit 1
+fi
 if [[ "$APP_NAME" == "Factory.app" ]]; then
   # Built only from what's committed: a release is never someone's work in
   # progress. The real one only from main's commit (on main, or a checkout
@@ -57,6 +71,9 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
     echo "a release is built from main's commit only; this checkout is at $(git -C "$ROOT" rev-parse --short HEAD), main at $(git -C "$ROOT" rev-parse --short main)" >&2
     exit 1
   fi
+  # Publishing it pushes its source, which the secret check must pass: find
+  # out now, at the freeze, not once it's built and tried.
+  "$ROOT/scripts/check-secrets.sh" HEAD
 fi
 mkdir -p "$RELEASES"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
@@ -120,6 +137,9 @@ else
   # Developer ID and notarized when this Mac has what that takes; ad hoc
   # otherwise, as dev releases always are.
   "$ROOT/scripts/sign-release.sh" "$partial"
+  if ! $ADHOC; then
+    spctl --assess --type execute "$partial/$APP_NAME" || { echo "$partial/$APP_NAME isn't notarized after signing; not releasing it" >&2; exit 1; }
+  fi
 fi
 mv "$partial" "$RELEASES/$FACTORY_VERSION"
 # Named only once complete; the rename makes the change atomic.

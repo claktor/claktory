@@ -11,6 +11,8 @@ import 'connections.dart';
 import 'device_kind.dart' show thisDeviceKindForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
+import 'outbox.dart';
+import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
 
@@ -97,11 +99,19 @@ class Backend {
   final ExtensionViewStore extensionView;
   final QueuedStore queued;
 
+  /// The person's messages on their way, shown in the conversation at once.
+  late final outbox = Outbox(
+    (agentId, text, clientId) => sendMessage(agentId, text, clientId: clientId),
+  );
+
   /// What glows as state changes, and what's said beside it.
   final HighlightStore highlights;
 
   /// True from the backend's `welcome` until the connection drops.
   final connected = ValueNotifier<bool>(false);
+
+  /// When the backend last welcomed this connection; null while it's down.
+  final connectedSince = ValueNotifier<DateTime?>(null);
 
   /// True while it reconnects after the app came back from the background
   /// or a connection that was up dropped (a network change, say), for up to
@@ -313,8 +323,9 @@ class Backend {
         }
         socket.pingInterval = const Duration(seconds: 5);
         _socket = socket;
-        // Welcomed within [connectWithin], or it starts again.
-        final welcome = Timer(connectWithin, () {
+        // Welcomed within [connectWithin], or it starts again; a device
+        // waiting to be allowed waits as long as its code lasts.
+        final welcome = _welcomeTimer = Timer(connectWithin, () {
           if (identical(_socket, socket) && !connected.value) {
             _log('no welcome within ${connectWithin.inSeconds}s');
             unawaited(_tunnel?.reconnect());
@@ -322,13 +333,19 @@ class Backend {
           }
         });
         _watchTunnel();
+        _helloVia = via;
+        _helloKey = via == null || !via.tunnelled
+            ? null
+            : target == null
+            ? _localKey
+            : deviceKey(via);
         _send(
           ClientMessage(
             id: Int64(_nextId++),
             hello: Hello(
               protocolVersion: _protocolVersion,
               clientVersion: _clientVersion,
-              token: via?.token,
+              token: _helloVia?.token,
               deviceKind: await thisDeviceKindForHello(),
             ),
           ),
@@ -378,11 +395,51 @@ class Backend {
     }
   }
 
+  /// The connection's Welcome timeout, cancelled while it waits to be
+  /// allowed.
+  Timer? _welcomeTimer;
+
+  /// What the current connection's Hello was sent to, and with which
+  /// device key: the pairing number is worked out from them.
+  RemoteFactory? _helloVia;
+  String? _helloKey;
+
+  /// This device used a pairing code and waits for the person to allow it
+  /// on that Claktory (PairingPending), with the number to compare; null
+  /// otherwise. It stays set when the device is turned away ([refused]
+  /// says why), until it connects or another Claktory is picked.
+  final pairing = ValueNotifier<PairingWait?>(null);
+
+  Future<void> _pairingPending(PairingPending pending) async {
+    _welcomeTimer?.cancel();
+    final via = _helloVia;
+    final key = _helloKey;
+    var number = '';
+    if (via != null && key != null) {
+      try {
+        final ids = await _tunnels.pairingIds(
+          deviceKey: key,
+          endpointId: via.endpointId,
+        );
+        number = pairingNumber(
+          backendId: ids.backend,
+          deviceId: ids.device,
+          token: via.token,
+        );
+      } catch (error) {
+        _log("can't work out the pairing number: $error");
+      }
+    }
+    if (_closed || !identical(via, _helloVia)) return;
+    pairing.value = PairingWait(pending, number);
+  }
+
   /// Connects to [target] instead (null for this Mac's Factory). What the
   /// old one showed goes at once, so nothing of it shows as the new one's.
   void connectTo(RemoteFactory? target) {
     _target = target;
     refused.value = null;
+    pairing.value = null;
     _retryDelay = _minRetryDelay;
     workspace.apply(Workspace());
     highlights.forgetKnown();
@@ -465,6 +522,18 @@ class Backend {
     await open?.close();
   }
 
+  /// Reconnects at once, when the person asks: a live connection is made
+  /// afresh (the tunnel's too), and one that's down tries again now rather
+  /// than after its backoff.
+  void reconnectNow() {
+    if (_closed) return;
+    if (refused.value != null) return retry();
+    if (connected.value) return _restart();
+    unawaited(_tunnel?.reconnect());
+    _retryDelay = _minRetryDelay;
+    _wakeUp();
+  }
+
   /// After a refusal, tries the same Factory again.
   void retry() {
     refused.value = null;
@@ -509,11 +578,44 @@ class Backend {
   Future<void> selectAgent(String agentId) =>
       _request(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
 
-  Future<void> sendMessage(String agentId, String text) => _request(
+  /// Sends the person's message; [clientId] comes back on the queued
+  /// message and the entry it becomes (see [outbox]).
+  Future<void> sendMessage(
+    String agentId,
+    String text, {
+    String clientId = '',
+  }) => _request(
     ClientMessage(
-      sendMessage: SendMessage(agentId: agentId, text: text),
+      sendMessage: SendMessage(
+        agentId: agentId,
+        text: text,
+        clientId: clientId,
+      ),
     ),
   );
+
+  /// Loads the entries before the first one [transcript] holds, when it's
+  /// [agentId]'s: the backend sends only the latest at first. Throws
+  /// [RequestFailure] when it can't.
+  Future<void> loadEarlier(String agentId) async {
+    if (transcript.agentId != agentId || transcript.length == 0) return;
+    final loads = transcript.loads;
+    final first = transcript[0].entry.seq;
+    final reply = await _call(
+      ClientMessage(
+        loadEntries: LoadEntries(agentId: agentId, beforeSeq: first),
+      ),
+    );
+    // A new snapshot meanwhile starts somewhere else: this page may not
+    // join onto it.
+    if (transcript.loads != loads ||
+        transcript.length == 0 ||
+        transcript[0].entry.seq != first) {
+      return;
+    }
+    final page = reply.entryPage;
+    transcript.prepend(page.agentId, page.entries, hasEarlier: page.hasEarlier);
+  }
 
   Future<void> stopAgent(String agentId) =>
       _request(ClientMessage(stopAgent: StopAgent(agentId: agentId)));
@@ -949,6 +1051,21 @@ class Backend {
   Future<void> unpairDevice(String deviceId) =>
       _request(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
 
+  /// Lets in the device waiting with [deviceId]'s code
+  /// (RemoteAccess.pending_devices): it's paired from now on.
+  Future<void> approveDevice(String deviceId) =>
+      _request(ClientMessage(approveDevice: ApproveDevice(deviceId: deviceId)));
+
+  /// Turns away the device waiting with [deviceId]'s code: the code stops
+  /// working, and a new one is needed to try again.
+  Future<void> denyDevice(String deviceId) =>
+      _request(ClientMessage(denyDevice: DenyDevice(deviceId: deviceId)));
+
+  /// Ends [deviceId]'s code as Add a device closes, unless a device was
+  /// already let in with it.
+  Future<void> cancelPairing(String deviceId) =>
+      _request(ClientMessage(cancelPairing: CancelPairing(deviceId: deviceId)));
+
   /// Turns remote access on or off; [port] 0 keeps it, and [listen] (an
   /// address to listen on only, or empty for every one) is kept when null.
   Future<void> setRemoteAccess(bool on, {int port = 0, String? listen}) =>
@@ -993,10 +1110,14 @@ class Backend {
         _quiet?.cancel();
         reconnecting.value = false;
         deviceId = message.welcome.deviceId;
+        pairing.value = null;
+        connectedSince.value = DateTime.now();
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
       case ServerMessage_Body.ack:
         _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.pairingPending:
+        unawaited(_pairingPending(message.pairingPending));
       case ServerMessage_Body.error:
         if (message.error.code == ErrorCode.ERROR_CODE_UNAUTHORIZED) {
           // Not (or no longer) a paired device: retrying won't help.
@@ -1035,6 +1156,7 @@ class Backend {
       case ServerMessage_Body.envPreview:
       case ServerMessage_Body.recoveryKey:
       case ServerMessage_Body.secretUses:
+      case ServerMessage_Body.entryPage:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
@@ -1047,6 +1169,7 @@ class Backend {
     // A connection that was up and dropped is most likely a network change:
     // it comes back without a word, if it can.
     if (connected.value && !_closed) _reconnectQuietly();
+    connectedSince.value = null;
     connected.value = false;
     final pending = _pending.values.toList();
     _pending.clear();

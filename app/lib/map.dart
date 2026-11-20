@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import 'backend.dart' show fireAndLog;
 import 'canvas.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'map_card.dart';
 import 'map_layout.dart';
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -40,8 +42,11 @@ const mapLayerNames = {
 /// Rivet and the other admins along the top, then the workspace and each
 /// project as a board with its folders and agents, and the vault along the
 /// bottom; lines show who can message whom, who has which secret and who
-/// reads Claktory's records. Hover an agent to light up its lines; click it
-/// to open its conversation.
+/// reads Claktory's records. Hover an agent to light up its lines and,
+/// after a moment, see its card (every extension it has, where it works,
+/// whom it messages, its secrets); click it to open its conversation. On a
+/// phone, with no pointer, a tap lights it up and shows its card, with Open
+/// conversation.
 class MapView extends StatefulWidget {
   const MapView({super.key});
 
@@ -55,12 +60,17 @@ class _MapViewState extends State<MapView> {
   String? _hover;
   String? _pinned;
 
+  /// The agent whose card shows on hover, once the pointer has rested.
+  String? _card;
+  Timer? _cardWait;
+
   ClaktoryMap? _laidOut;
   Map<String, int>? _order;
   var _layout = MapLayout.empty;
 
   @override
   void dispose() {
+    _cardWait?.cancel();
     _canvas.dispose();
     super.dispose();
   }
@@ -86,17 +96,87 @@ class _MapViewState extends State<MapView> {
     return true;
   }
 
+  void _hovered(String? id) {
+    _cardWait?.cancel();
+    setState(() {
+      _hover = id;
+      if (id != _card) _card = null;
+    });
+    if (id == null || !id.startsWith('agent:')) return;
+    // Waits a moment, as hover cards do, so it doesn't flash by.
+    _cardWait = Timer(const Duration(milliseconds: 300), () {
+      if (mounted && _hover == id) setState(() => _card = id);
+    });
+  }
+
   void _open(MapNode node) {
-    if (node.kind != MapNodeKind.MAP_NODE_KIND_AGENT) {
-      // Anything else lights up its lines, and off again.
+    final agent = node.kind == MapNodeKind.MAP_NODE_KIND_AGENT;
+    if (!agent || isPhoneLayout(context)) {
+      // Anything else lights up its lines, and off again; on a phone an
+      // agent too, with its card.
       setState(() => _pinned = _pinned == node.id ? null : node.id);
       return;
     }
+    _openConversation(node);
+  }
+
+  void _openConversation(MapNode node) {
     final backend = AppScope.of(context);
     AppScope.closePage(context);
     fireAndLog(backend.selectAgent(node.refId));
     // On a phone, its conversation is pushed over the list.
     PhoneNavigation.of(context)?.value = true;
+  }
+
+  /// [chip]'s card: on a Mac beside it, following the canvas as it moves,
+  /// and never in the pointer's way; on a phone along the bottom, with
+  /// Close and Open conversation.
+  Widget _cardFor(Workspace workspace, MapChip chip, {required bool phone}) {
+    final details = mapAgentDetails(workspace, chip.node);
+    if (phone) {
+      return Positioned(
+        left: Space.s,
+        right: Space.s,
+        bottom: Space.s,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: MapAgentCard(
+              width: null,
+              details: details,
+              actions: [
+                Button(
+                  label: 'Close',
+                  onPressed: () => setState(() => _pinned = null),
+                ),
+                Button(
+                  label: 'Open conversation',
+                  primary: true,
+                  onPressed: () => _openConversation(chip.node),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: ListenableBuilder(
+          listenable: _canvas,
+          builder: (context, _) => CustomSingleChildLayout(
+            delegate: MapCardPlacement(_canvas.toView(chip.rect)),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: 1),
+              duration: Motion.fast,
+              curve: Curves.easeOut,
+              builder: (context, t, child) => Opacity(opacity: t, child: child),
+              child: MapAgentCard(details: details),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -162,6 +242,15 @@ class _MapViewState extends State<MapView> {
                     }
                     final layout = _layoutFor(workspace);
                     final focus = _hover ?? _pinned;
+                    // On a phone, the tapped agent's card; on a Mac, the
+                    // hovered one's.
+                    final cardId = phone ? _pinned : _card;
+                    final cardChip =
+                        cardId == null || !cardId.startsWith('agent:')
+                        ? null
+                        : layout.chips
+                              .where((chip) => chip.id == cardId)
+                              .firstOrNull;
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
@@ -175,18 +264,26 @@ class _MapViewState extends State<MapView> {
                           }),
                         ),
                         Expanded(
-                          child: ZoomCanvas(
-                            controller: _canvas,
-                            size: layout.size,
-                            background: (transform) =>
-                                _GridPainter(transform, palette.hairline),
-                            child: _Board(
-                              layout: layout,
-                              hidden: _hidden,
-                              focus: focus,
-                              onHover: (id) => setState(() => _hover = id),
-                              onTap: _open,
-                            ),
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: ZoomCanvas(
+                                  controller: _canvas,
+                                  size: layout.size,
+                                  background: (transform) =>
+                                      _GridPainter(transform, palette.hairline),
+                                  child: _Board(
+                                    layout: layout,
+                                    hidden: _hidden,
+                                    focus: focus,
+                                    onHover: _hovered,
+                                    onTap: _open,
+                                  ),
+                                ),
+                              ),
+                              if (cardChip != null)
+                                _cardFor(workspace, cardChip, phone: phone),
+                            ],
                           ),
                         ),
                       ],
@@ -609,7 +706,8 @@ class _GridPainter extends CustomPainter {
 }
 
 /// The key, along the top: a switch for each kind of line, with its color,
-/// then the zoom; under them, what the badges on agents mean.
+/// then the zoom; under them, what the badges on agents mean (only what
+/// gives an agent reach or power; its card lists all its extensions).
 class _Key extends StatelessWidget {
   const _Key({
     required this.layout,
@@ -676,6 +774,8 @@ class _Key extends StatelessWidget {
                 runSpacing: Space.xs,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
+                  if (badges.isNotEmpty)
+                    Text('Badges: extra reach or power', style: caption),
                   for (final badge in badges.values)
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -692,7 +792,8 @@ class _Key extends StatelessWidget {
                     ),
                   Text(
                     'Agents can read their whole project but change files '
-                    'only in their own folder. Hover an agent to see which.',
+                    'only in their own folder. Hover an agent to see '
+                    'everything it has.',
                     style: caption,
                   ),
                 ],

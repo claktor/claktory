@@ -13,6 +13,7 @@ import 'identity.dart';
 import 'layout.dart';
 import 'map.dart';
 import 'marketplace.dart';
+import 'pairing.dart';
 import 'panes.dart' show pageOfKind, paneGlyph, paneTitle;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show ClaktoriesBackRow;
@@ -75,6 +76,7 @@ class _PhoneShellState extends State<PhoneShell> {
           scope.page,
           scope.connections,
           _conversation,
+          backend.pairing,
         ]),
         builder: (context, _) {
           // Under the status bar, and above the home indicator or the
@@ -101,6 +103,15 @@ class _PhoneShellState extends State<PhoneShell> {
           );
           if (scope.connections.current == null && !backend.localBackend) {
             return screen(const PairScreen(), overKeyboard: true);
+          }
+          // A code used, waiting to be allowed: the number to compare.
+          final waiting = scope.connections.current;
+          if (backend.pairing.value != null && waiting != null) {
+            return screen(
+              PairingWaitView(
+                onCancel: () => scope.connections.forget(waiting),
+              ),
+            );
           }
           switch (scope.page.value) {
             case AppPage.settings:

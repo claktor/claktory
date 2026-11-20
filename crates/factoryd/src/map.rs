@@ -1,4 +1,5 @@
 //! The Map: how this Claktory is arranged, as a graph the app lays out.
+//! Archived projects and their agents are left out.
 //! Where agents are (workspace, projects, folders, nesting), whom they can
 //! message, which secrets they have, what data they read and write, and
 //! their extensions that grant reach or power. It's computed here from the
@@ -73,7 +74,8 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
         ..Default::default()
     }];
     let mut edges = Vec::new();
-    for project in &config.projects {
+    // Archived projects, and their agents, are out of the Map.
+    for project in config.projects.iter().filter(|project| !project.archived) {
         nodes.push(v1::MapNode {
             id: project_node(&project.id),
             kind: v1::MapNodeKind::Project.into(),
@@ -96,7 +98,7 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
         }
     }
     let mut records = false;
-    for agent in &config.agents {
+    for agent in config.agents.iter().filter(|agent| !config.archived(agent)) {
         let id = agent_node(&agent.id);
         let project = agent.project.as_deref().and_then(|project| config.project(project));
         let folder = config.agent_folder(agent);
@@ -148,10 +150,10 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
             edges.push(edge(&id, RECORDS, v1::MapEdgeKind::Reads));
         }
         for to in &config.agents {
-            if !can_message(agent, to) {
+            if !can_message(config, agent, to) {
                 continue;
             }
-            let back = can_message(to, agent);
+            let back = can_message(config, to, agent);
             // A pair that messages both ways is one edge, from the lower id.
             if back && to.id < agent.id {
                 continue;
@@ -178,7 +180,7 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState) -> v1:
             ref_id: secret.id.clone(),
             ..Default::default()
         });
-        let holders = secret.grants.iter().filter(|grant| config.agent(&grant.agent_id).is_some());
+        let holders = secret.grants.iter().filter(|grant| config.agent(&grant.agent_id).is_some_and(|agent| !config.archived(agent)));
         edges.extend(holders.map(|grant| edge(&id, &agent_node(&grant.agent_id), v1::MapEdgeKind::Secret)));
     }
     nodes.sort_by(|a, b| a.id.cmp(&b.id));

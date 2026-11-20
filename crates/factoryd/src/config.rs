@@ -318,6 +318,11 @@ pub struct ProjectConfig {
     /// Folders some of its agents work in, in the person's order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<FolderConfig>,
+    /// Put away, with nothing deleted: its agents don't run (what's sent to
+    /// them waits), their monitors pause, no agent can message them, and the
+    /// Map leaves it out, until it's unarchived.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 /// A folder inside a project, where some of its agents work. It only scopes
@@ -622,6 +627,12 @@ impl Config {
 
     pub fn agent_mut(&mut self, id: &str) -> Option<&mut AgentConfig> {
         self.agents.iter_mut().find(|agent| agent.id == id)
+    }
+
+    /// The agent's project is archived: it doesn't run, and no agent can
+    /// message it.
+    pub fn archived(&self, agent: &AgentConfig) -> bool {
+        agent.project.as_deref().and_then(|project| self.project(project)).is_some_and(|project| project.archived)
     }
 
     /// The project folder the agent works in, if it's in one its project has.

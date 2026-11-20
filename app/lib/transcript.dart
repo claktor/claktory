@@ -16,6 +16,7 @@ import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'markdown.dart';
+import 'outbox.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -46,10 +47,21 @@ class TranscriptView extends StatefulWidget {
     required this.working,
     required this.follow,
     this.queued,
+    this.outbox,
+    this.loadEarlier,
     this.agentId = '',
   });
 
+  /// Loads the entries before the first one held, when the transcript has
+  /// any ([TranscriptStore.hasEarlier]); called as the person scrolls near
+  /// the top. Throws [RequestFailure] when it can't.
+  final Future<void> Function()? loadEarlier;
+
   final TranscriptStore transcript;
+
+  /// The person's messages on their way, shown at once after what's
+  /// queued, until the backend's own take their place.
+  final Outbox? outbox;
 
   /// Messages waiting for the agent, shown faded after the last entry until
   /// it takes them; [agentId] is whose.
@@ -77,11 +89,25 @@ const _queuedOpacity = 0.5;
 /// before it fades out (as it does when /clear drops the queue).
 const _leaveGrace = Duration(milliseconds: 1500);
 
-/// A queued message on show.
-class _Waiting {
-  _Waiting(this.message, this.shown);
+/// How long a message the person sent still says "Sending…" once it's
+/// queued: an idle agent takes it at once, so "Queued" would only flash.
+const _sendingFor = Duration(seconds: 1);
 
-  final QueuedMessage message;
+/// A queued message on show, or one of the person's on its way.
+class _Waiting {
+  _Waiting(this.message, this.shown, {this.outgoing});
+
+  /// The backend's queued message; for one still on its way, a stand-in
+  /// with its text.
+  QueuedMessage message;
+
+  /// While it's the person's message on its way: the backend's queued
+  /// message or entry takes its place, in place, when it comes.
+  Outgoing? outgoing;
+
+  /// The person's message just sent, queued a moment ago: it still says
+  /// "Sending…".
+  var justSent = false;
 
   /// When it was first shown, to ease it in then.
   final DateTime shown;
@@ -137,11 +163,124 @@ class _TranscriptViewState extends State<TranscriptView>
     super.initState();
     _split = math.max(0, widget.transcript.length - 1);
     _known = widget.transcript.length;
+    _earlier = widget.transcript.earlier;
     _controller.addListener(_scrolled);
     widget.follow.addListener(_followAgain);
     widget.transcript.addListener(_entriesChanged);
     widget.queued?.addListener(_queueChanged);
+    widget.outbox?.addListener(_outboxChanged);
     _queueChanged(initial: true);
+    _outboxChanged(initial: true);
+  }
+
+  /// Says "Queued" once a message just sent has been queued a moment.
+  Timer? _relabel;
+
+  /// How many earlier entries the view has seen paged in.
+  late int _earlier;
+
+  /// Earlier entries are on their way.
+  var _loadingEarlier = false;
+
+  /// Why the earlier entries couldn't load; they load again on Retry.
+  String? _earlierFailed;
+
+  /// How near the top (in pixels) earlier entries start loading, so they're
+  /// usually there before the person reaches them.
+  static const _loadWithin = 1200.0;
+
+  /// Loads earlier entries if the view is near the top and there are some.
+  void _maybeLoadEarlier() {
+    final load = widget.loadEarlier;
+    if (load == null ||
+        !mounted ||
+        _loadingEarlier ||
+        _earlierFailed != null ||
+        !widget.transcript.hasEarlier ||
+        !_controller.hasClients) {
+      return;
+    }
+    final position = _controller.position;
+    if (!position.hasContentDimensions ||
+        position.pixels - position.minScrollExtent > _loadWithin) {
+      return;
+    }
+    unawaited(_loadEarlier(load));
+  }
+
+  Future<void> _loadEarlier(Future<void> Function() load) async {
+    setState(() {
+      _loadingEarlier = true;
+      _earlierFailed = null;
+    });
+    String? failed;
+    try {
+      await load();
+    } on RequestFailure catch (failure) {
+      failed = failure.message;
+    }
+    if (!mounted) return;
+    setState(() {
+      _loadingEarlier = false;
+      _earlierFailed = failed;
+    });
+    // Still near the top (a short page): the next one.
+    if (failed == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeLoadEarlier());
+    }
+  }
+
+  /// The person's message on its way that [clientId] says this is (the
+  /// backend carries it from the send), or for one sent without it, the
+  /// oldest with [text].
+  _Waiting? _outgoing(String clientId, String text) {
+    for (final waiting in _waiting) {
+      final outgoing = waiting.outgoing;
+      if (outgoing == null) continue;
+      if (clientId.isEmpty
+          ? waiting.message.text == text
+          : outgoing.clientId == clientId) {
+        return waiting;
+      }
+    }
+    return null;
+  }
+
+  /// [waiting], the person's message on its way, is now the backend's: it
+  /// leaves the outbox and stays where it is.
+  void _arrived(_Waiting waiting) {
+    final outgoing = waiting.outgoing;
+    if (outgoing == null) return;
+    waiting.outgoing = null;
+    widget.outbox?.remove(outgoing);
+  }
+
+  /// The outbox changed: show what was just sent, or failed; drop what
+  /// left it otherwise (taken back to edit, or the backend had it and its
+  /// own never showed here).
+  void _outboxChanged({bool initial = false}) {
+    final outbox = widget.outbox;
+    if (outbox == null) return;
+    final current = outbox.of(widget.agentId);
+    var added = false;
+    for (final outgoing in current) {
+      if (_waiting.any((waiting) => waiting.outgoing == outgoing)) continue;
+      _waiting.add(
+        _Waiting(
+          QueuedMessage(source: 'person', text: outgoing.text),
+          initial ? DateTime(0) : DateTime.now(),
+          outgoing: outgoing,
+        ),
+      );
+      added = true;
+    }
+    _waiting.removeWhere(
+      (waiting) =>
+          waiting.outgoing != null && !current.contains(waiting.outgoing),
+    );
+    if (initial) return;
+    setState(() {});
+    if (added && _controller.pinned) _startGlide();
   }
 
   /// The queue changed: show what's new, and note what left it.
@@ -154,9 +293,34 @@ class _TranscriptViewState extends State<TranscriptView>
     var added = false;
     for (final message in current) {
       if (_delivered.contains(message.id)) continue;
-      final shown = _waiting.where((w) => w.message.id == message.id);
-      if (shown.isEmpty) {
-        _waiting.add(_Waiting(message, initial ? DateTime(0) : now));
+      final shown = _waiting.where(
+        (w) => w.outgoing == null && w.message.id == message.id,
+      );
+      final sent = message.source == 'person' && shown.isEmpty
+          ? _outgoing(message.clientId, message.text)
+          : null;
+      if (sent != null) {
+        // The person's message just sent: it's queued, where it shows.
+        sent
+          ..message = message
+          ..justSent = true;
+        _arrived(sent);
+        _relabel?.cancel();
+        _relabel = Timer(_sendingFor, () {
+          if (!mounted) return;
+          setState(() {
+            for (final waiting in _waiting) {
+              waiting.justSent = false;
+            }
+          });
+        });
+      } else if (shown.isEmpty) {
+        // Before the person's messages still on their way.
+        final at = _waiting.indexWhere((w) => w.outgoing != null);
+        _waiting.insert(
+          at < 0 ? _waiting.length : at,
+          _Waiting(message, initial ? DateTime(0) : now),
+        );
         added = true;
       } else {
         // Back in the queue: it stays.
@@ -167,7 +331,9 @@ class _TranscriptViewState extends State<TranscriptView>
       }
     }
     for (final waiting in _waiting) {
-      if (!ids.contains(waiting.message.id)) _leave(waiting);
+      if (waiting.outgoing == null && !ids.contains(waiting.message.id)) {
+        _leave(waiting);
+      }
     }
     if (initial) return;
     setState(() {});
@@ -203,6 +369,10 @@ class _TranscriptViewState extends State<TranscriptView>
       old.queued?.removeListener(_queueChanged);
       widget.queued?.addListener(_queueChanged);
     }
+    if (old.outbox != widget.outbox) {
+      old.outbox?.removeListener(_outboxChanged);
+      widget.outbox?.addListener(_outboxChanged);
+    }
   }
 
   @override
@@ -210,6 +380,8 @@ class _TranscriptViewState extends State<TranscriptView>
     widget.follow.removeListener(_followAgain);
     widget.transcript.removeListener(_entriesChanged);
     widget.queued?.removeListener(_queueChanged);
+    widget.outbox?.removeListener(_outboxChanged);
+    _relabel?.cancel();
     for (final waiting in _waiting) {
       waiting.leaving?.cancel();
     }
@@ -224,6 +396,14 @@ class _TranscriptViewState extends State<TranscriptView>
   void _entriesChanged() {
     final transcript = widget.transcript;
     final length = transcript.length;
+    // Earlier entries paged in go above the center line, so what's on
+    // screen stays where it is.
+    final earlier = transcript.earlier - _earlier;
+    if (earlier > 0) {
+      _earlier = transcript.earlier;
+      _split += earlier;
+      _known += earlier;
+    }
     if (length <= _known) {
       _known = length;
       return;
@@ -242,21 +422,32 @@ class _TranscriptViewState extends State<TranscriptView>
     final entry = model.entry;
     final String text;
     final bool person;
+    var clientId = '';
     if (entry.hasUser()) {
       (text, person) = (entry.user.text, true);
+      clientId = entry.user.clientId;
     } else if (entry.hasEvent()) {
       (text, person) = (entry.event.text, false);
     } else {
       return;
     }
+    bool same(_Waiting waiting) {
+      final message = waiting.message;
+      if ((message.source == 'person') != person) return false;
+      if (clientId.isEmpty) return message.text == text;
+      return (waiting.outgoing?.clientId ?? message.clientId) == clientId;
+    }
+
     for (final waiting in _waiting) {
       final message = waiting.message;
-      if (!waiting.gone &&
-          (message.source == 'person') == person &&
-          message.text == text) {
+      if (!waiting.gone && same(waiting)) {
         waiting.leaving?.cancel();
         _waiting.remove(waiting);
-        _delivered.add(message.id);
+        if (waiting.outgoing != null) {
+          _arrived(waiting);
+        } else {
+          _delivered.add(message.id);
+        }
         _fromQueue.add(model.seq);
         setState(() {});
         return;
@@ -317,6 +508,7 @@ class _TranscriptViewState extends State<TranscriptView>
       _glide.stop();
     }
     _controller.pinned = position.pixels >= position.maxScrollExtent - 8;
+    _maybeLoadEarlier();
   }
 
   void _followAgain() {
@@ -403,15 +595,18 @@ class _TranscriptViewState extends State<TranscriptView>
         CrossAxisAlignment.center,
       ),
     };
+    final outgoing = waiting.outgoing;
+    final failure = outgoing?.failure;
+    final sending = outgoing != null || waiting.justSent;
     return Align(
-      key: ValueKey(('queued', message.id)),
+      key: ObjectKey(waiting),
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: contentMaxWidth),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(Space.xl, Space.l, Space.xl, 0),
           child: AnimatedOpacity(
-            opacity: waiting.gone ? 0 : _queuedOpacity,
+            opacity: waiting.gone ? 0 : 1,
             duration: Motion.fast,
             curve: Curves.easeOut,
             child: Arrival(
@@ -421,30 +616,45 @@ class _TranscriptViewState extends State<TranscriptView>
               child: Column(
                 crossAxisAlignment: side,
                 children: [
-                  bubble,
-                  Padding(
-                    padding: const EdgeInsets.only(
-                      top: 2,
-                      left: Space.m,
-                      right: Space.m,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
+                  Opacity(
+                    opacity: _queuedOpacity,
+                    child: Column(
+                      crossAxisAlignment: side,
                       children: [
-                        if (message.source == 'person' &&
-                            message.hasSentFrom()) ...[
-                          DeviceMark(message.sentFrom),
-                          const SizedBox(width: Space.xs),
-                        ],
-                        Text(
-                          'Queued',
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
+                        bubble,
+                        if (failure == null)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: 2,
+                              left: Space.m,
+                              right: Space.m,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (message.source == 'person' &&
+                                    message.hasSentFrom()) ...[
+                                  DeviceMark(message.sentFrom),
+                                  const SizedBox(width: Space.xs),
+                                ],
+                                Text(
+                                  sending ? 'Sending…' : 'Queued',
+                                  style: TextStyles.caption.copyWith(
+                                    color: palette.textFaint,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
                       ],
                     ),
                   ),
+                  if (outgoing != null && failure != null)
+                    _NotSent(
+                      why: failure,
+                      onRetry: () => widget.outbox?.retry(outgoing),
+                      onEdit: () => _edit(outgoing),
+                    ),
                 ],
               ),
             ),
@@ -454,6 +664,18 @@ class _TranscriptViewState extends State<TranscriptView>
     );
   }
 
+  /// Takes a message that wasn't sent back to the message box, to change
+  /// it; after anything already typed there.
+  void _edit(Outgoing outgoing) {
+    final drafts = AppScope.scope(context).drafts;
+    final draft = drafts.of(outgoing.agentId);
+    drafts.set(
+      outgoing.agentId,
+      draft.trim().isEmpty ? outgoing.text : '$draft\n\n${outgoing.text}',
+    );
+    widget.outbox?.remove(outgoing);
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -461,6 +683,14 @@ class _TranscriptViewState extends State<TranscriptView>
       builder: (context, _) {
         final length = widget.transcript.length;
         final split = math.min(_split, length);
+        final hasEarlier =
+            widget.transcript.hasEarlier && widget.loadEarlier != null;
+        if (hasEarlier) {
+          // Shorter than the view, or opened at the top: load at once.
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _maybeLoadEarlier(),
+          );
+        }
         return ToolViewScope(
           transcript: widget.transcript,
           agentId: widget.transcript.agentId,
@@ -475,8 +705,16 @@ class _TranscriptViewState extends State<TranscriptView>
                 slivers: [
                   SliverList(
                     delegate: SliverChildBuilderDelegate(
-                      (context, index) => _item(split - 1 - index),
-                      childCount: split,
+                      (context, index) => index == split
+                          ? _EarlierRow(
+                              failed: _earlierFailed,
+                              onRetry: () {
+                                setState(() => _earlierFailed = null);
+                                _maybeLoadEarlier();
+                              },
+                            )
+                          : _item(split - 1 - index),
+                      childCount: split + (hasEarlier ? 1 : 0),
                     ),
                   ),
                   SliverPadding(
@@ -495,6 +733,64 @@ class _TranscriptViewState extends State<TranscriptView>
           ),
         );
       },
+    );
+  }
+}
+
+/// At the top of a conversation with earlier entries still to load: a
+/// quiet line while they load, or why they couldn't, with Retry.
+class _EarlierRow extends StatelessWidget {
+  const _EarlierRow({required this.failed, required this.onRetry});
+
+  final String? failed;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final failed = this.failed;
+    return SizedBox(
+      height: 48,
+      child: Center(
+        child: failed == null
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  LiveDot(color: palette.textFaint),
+                  const SizedBox(width: Space.s),
+                  Text(
+                    'Loading earlier messages…',
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textFaint,
+                    ),
+                  ),
+                ],
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      "Couldn't load earlier messages. $failed",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyles.caption.copyWith(color: palette.danger),
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  Pressable(
+                    onTap: onRetry,
+                    builder: (context, hovered) => Text(
+                      'Retry',
+                      style: TextStyles.caption.copyWith(
+                        color: hovered ? palette.text : palette.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 }
@@ -776,6 +1072,57 @@ class _UserText extends StatelessWidget {
           child: DeviceMark(from),
         ),
       ],
+    );
+  }
+}
+
+/// Under a message the backend never got: "Not sent" in `danger` (why on
+/// hover, or when held), then Retry and Edit, which takes it back to the
+/// message box.
+class _NotSent extends StatelessWidget {
+  const _NotSent({
+    required this.why,
+    required this.onRetry,
+    required this.onEdit,
+  });
+
+  final String why;
+  final VoidCallback onRetry;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    Widget action(String label, VoidCallback onTap) => Pressable(
+      onTap: onTap,
+      builder: (context, hovered) => Text(
+        label,
+        style: TextStyles.caption.copyWith(
+          color: hovered ? palette.text : palette.textMuted,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, left: Space.m, right: Space.m),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HoverCard(
+            holdToShow: true,
+            end: true,
+            card: (context) => Text(why),
+            child: Text(
+              'Not sent',
+              style: TextStyles.caption.copyWith(color: palette.danger),
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          action('Retry', onRetry),
+          const SizedBox(width: Space.s),
+          action('Edit', onEdit),
+        ],
+      ),
     );
   }
 }

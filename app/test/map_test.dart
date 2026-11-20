@@ -1,4 +1,5 @@
 import 'package:factory_app/map.dart';
+import 'package:factory_app/map_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 
@@ -32,6 +33,157 @@ void main() {
         find.ancestor(of: chip(name), matching: find.byType(AnimatedOpacity)),
       )
       .opacity;
+
+  MapNode node(Workspace workspace, String id) =>
+      workspace.map.nodes.firstWhere((node) => node.id == id);
+
+  test("an agent's card lists every extension it has, the badges' first, "
+      'where it works, whom it messages and its secrets', () {
+    final workspace = claktoryWorkspace();
+    final mike = mapAgentDetails(
+      workspace,
+      node(workspace, 'agent:coordinator'),
+    );
+    expect(
+      [for (final e in mike.extensions) (e.label, e.important)],
+      [
+        ('Web', true),
+        ('Claktory manual', true),
+        ('Messaging', false),
+        ('Checklist', false),
+        ('Tasks', false),
+      ],
+    );
+    expect(mike.folder?.label, 'App');
+    expect(mike.reads.map((n) => n.label), ['Claktory', 'Research']);
+    expect(mike.everyone, isFalse);
+    // In the sidebar's order.
+    final messages = mike.messages.map((n) => n.label).toList();
+    expect(messages, [
+      'Nora',
+      'Iris',
+      'Theo',
+      'Hana',
+      'Sam',
+      'Lena',
+      'Omar',
+      'Priya',
+      'Kenji',
+      'Zoe',
+      'Arjun',
+      'Felix',
+      'June',
+    ]);
+    expect(messages, isNot(contains('Disk Scout')));
+    expect(messages, isNot(contains('Mike')));
+    expect(mike.secrets.map((n) => n.label), ['App Store Connect']);
+
+    // Rivet's badges stand for its extensions: Messaging is "Messages every
+    // agent", Tasks "Stops any agent's tasks"; it messages every agent.
+    final rivet = mapAgentDetails(workspace, node(workspace, 'agent:rivet'));
+    expect(rivet.extensions.map((e) => e.label), [
+      'Messages every agent',
+      'Gives secrets to agents',
+      "Stops any agent's tasks",
+      'Web',
+      'Own checkout',
+      "Claktory's records",
+    ]);
+    expect(rivet.extensions.every((e) => e.important), isTrue);
+    expect(rivet.everyone, isTrue);
+    expect(rivet.folder?.label, 'Workspace');
+
+    // Arjun messages Disk Scout, though it can't message him back.
+    final arjun = mapAgentDetails(workspace, node(workspace, 'agent:devops'));
+    expect(arjun.messages.map((n) => n.label), contains('Disk Scout'));
+    final scout = mapAgentDetails(
+      workspace,
+      node(workspace, 'agent:disk-scout'),
+    );
+    expect(scout.messages, isEmpty);
+    expect(scout.secrets, isEmpty);
+  });
+
+  testWidgets('resting the pointer on an agent shows its card beside it', (
+    tester,
+  ) async {
+    await showMap(tester, workspace: claktoryWorkspace());
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(tester.getCenter(chip('Mike')));
+    await tester.pump();
+    expect(find.byType(MapAgentCard), findsNothing, reason: 'not at once');
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 200));
+    final card = find.byType(MapAgentCard);
+    expect(card, findsOneWidget);
+    Finder inCard(String text) =>
+        find.descendant(of: card, matching: find.text(text));
+    for (final text in [
+      'Project Manager',
+      'Web',
+      'Claktory manual',
+      'Messaging',
+      'Checklist',
+      'Tasks',
+      'App Store Connect',
+    ]) {
+      expect(inCard(text), findsOneWidget, reason: text);
+    }
+    expect(inCard('Memory'), findsNothing);
+    expect(
+      find.descendant(
+        of: card,
+        matching: find.textContaining('App  /Users/me/factory/app'),
+      ),
+      findsOneWidget,
+    );
+    // Beside Mike's chip, not over it.
+    final chipRect = tester.getRect(
+      find
+          .ancestor(of: chip('Mike').first, matching: find.byType(MouseRegion))
+          .first,
+    );
+    final cardRect = tester.getRect(card);
+    expect(
+      cardRect.left >= chipRect.right || cardRect.right <= chipRect.left,
+      isTrue,
+    );
+
+    await mouse.moveTo(const Offset(1430, 890));
+    await tester.pump();
+    expect(find.byType(MapAgentCard), findsNothing);
+  });
+
+  testWidgets('the key says what badges are', (tester) async {
+    await showMap(tester);
+    expect(find.text('Badges: extra reach or power'), findsOneWidget);
+  });
+
+  testWidgets('on a phone a tap shows the card, with Open conversation', (
+    tester,
+  ) async {
+    final harness = await showMap(
+      tester,
+      workspace: claktoryWorkspace(),
+      size: const Size(393, 852),
+    );
+    await tester.tap(chip('Mike'));
+    await settle(tester);
+    expect(harness.page.value, AppPage.map);
+    expect(find.byType(MapAgentCard), findsOneWidget);
+    expect(find.text('Claktory manual'), findsOneWidget);
+    await tester.tap(find.text('Close'));
+    await settle(tester);
+    expect(find.byType(MapAgentCard), findsNothing);
+
+    await tester.tap(chip('Mike'));
+    await settle(tester);
+    await tester.tap(find.text('Open conversation'));
+    await settle(tester);
+    expect(harness.last.selectAgent.agentId, 'coordinator');
+  });
 
   testWidgets('every agent, project, folder and secret is on it', (
     tester,

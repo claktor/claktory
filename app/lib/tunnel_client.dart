@@ -22,6 +22,14 @@ abstract interface class Tunnels {
     required List<String> relays,
     List<String> addresses = const [],
   });
+
+  /// The endpoint ids, as lowercase hex, a pairing number is worked out
+  /// from: this device's, from its [deviceKey], and the backend's
+  /// [endpointId] (a pairing code's `e=`, hex or base32).
+  Future<({String device, String backend})> pairingIds({
+    required String deviceKey,
+    required String endpointId,
+  });
 }
 
 abstract interface class Tunnel {
@@ -61,6 +69,16 @@ class RustTunnels implements Tunnels {
     );
     return _RustTunnel(handle);
   }
+
+  @override
+  Future<({String device, String backend})> pairingIds({
+    required String deviceKey,
+    required String endpointId,
+  }) async {
+    await _load();
+    final ids = rust.pairingIds(deviceKey: deviceKey, endpointId: endpointId);
+    return (device: ids.device, backend: ids.backend);
+  }
 }
 
 class _RustTunnel implements Tunnel {
@@ -98,7 +116,7 @@ String tunnelAdvice(
   TunnelFailure.offline =>
     'This $device is offline. Check your internet connection.',
   TunnelFailure.refused =>
-    '$machine no longer allows this device. Add it again on $machine in '
+    "$machine doesn't allow this device. Add it on $machine in "
         'Settings → Devices.',
   TunnelFailure.other => 'Trying again…',
   TunnelFailure.none => '',

@@ -13,6 +13,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+pub(crate) use crate::encoding::{hex, unhex};
+
 /// A 256-bit key, wiped from memory when dropped.
 pub(crate) type Key = Zeroizing<[u8; 32]>;
 
@@ -150,18 +152,6 @@ pub(crate) fn parse_recovery(text: &str) -> Option<Zeroizing<[u8; 20]>> {
         }
     }
     (count == 32).then_some(out)
-}
-
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
 }
 
 #[cfg(test)]

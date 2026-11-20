@@ -245,9 +245,89 @@ void main() {
     await tester.tap(find.text('Copy code'));
     await tester.pump();
     expect(copied, [harness.backend.pairingCode.code]);
-    await tester.tap(find.text('Done').last);
+    // Closing ends the code: it lasts only while it's shown.
+    await tester.tap(find.text('Cancel').last);
     await pumpFrames(tester);
     expect(find.text('Scan with your iPhone'), findsNothing);
+    expect(harness.last.cancelPairing.deviceId, 'd9');
+  });
+
+  Future<Harness> showCode(WidgetTester tester) async {
+    final harness = await showSettings(tester, workspace());
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await pumpFrames(tester);
+    return harness;
+  }
+
+  Future<void> deviceUsesCode(WidgetTester tester, Harness harness) =>
+      harness.apply(
+        tester,
+        harness.backend.workspace.workspace.deepCopy()
+          ..remote.pendingDevices.add(
+            PendingDevice(
+              deviceId: 'd9',
+              name: 'iPhone',
+              kind: DeviceKind.DEVICE_KIND_PHONE,
+              number: '0427',
+            ),
+          ),
+      );
+
+  testWidgets('a device that used the code waits to be allowed, with the '
+      'number its screen shows', (tester) async {
+    final harness = await showCode(tester);
+    await deviceUsesCode(tester, harness);
+    await pumpFrames(tester);
+    expect(find.text('Allow iPhone to connect?'), findsOneWidget);
+    expect(find.text('Check that its screen shows 0427.'), findsOneWidget);
+    await tester.tap(find.text('Allow'));
+    await pumpFrames(tester);
+    expect(harness.last.approveDevice.deviceId, 'd9');
+    expect(find.text('Allow iPhone to connect?'), findsNothing);
+    // Let in: nothing to cancel.
+    expect(harness.backend.sent.where((m) => m.hasCancelPairing()), isEmpty);
+  });
+
+  testWidgets("Don't allow turns it away", (tester) async {
+    final harness = await showCode(tester);
+    await deviceUsesCode(tester, harness);
+    await pumpFrames(tester);
+    await tester.tap(find.text("Don't allow"));
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent
+          .where((m) => m.hasDenyDevice())
+          .single
+          .denyDevice
+          .deviceId,
+      'd9',
+    );
+    expect(find.text('Allow iPhone to connect?'), findsNothing);
+  });
+
+  testWidgets('a device that stopped waiting says so', (tester) async {
+    final harness = await showCode(tester);
+    await deviceUsesCode(tester, harness);
+    await pumpFrames(tester);
+    harness.backend.onSend = (message) {
+      if (message.hasApproveDevice()) {
+        throw const RequestFailure(
+          'No device is waiting.',
+          code: ErrorCode.ERROR_CODE_NOT_FOUND,
+        );
+      }
+    };
+    await tester.tap(find.text('Allow'));
+    await pumpFrames(tester);
+    expect(
+      find.text('iPhone stopped waiting. To add it, make a new code.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets("the first device's code comes even though turning access on "
@@ -357,15 +437,16 @@ void main() {
     expect(harness.backend.target, target);
     // The old Factory's state is gone until the new one's arrives.
     expect(harness.backend.workspace.workspace.agents, isEmpty);
-    expect(find.textContaining('on mac mini'), findsOneWidget);
+    // The footer names it.
+    expect(find.textContaining('to mac mini'), findsOneWidget);
 
     // Refused: it says so, and stops trying.
     harness.backend.refused.value = 'unknown device';
     await pumpFrames(tester);
-    expect(find.text('mac mini no longer allows this device'), findsOneWidget);
+    expect(find.text("mac mini doesn't allow this device"), findsOneWidget);
 
     // Back to this Mac's.
-    await tester.tap(find.text('mac mini no longer allows this device'));
+    await tester.tap(find.text("mac mini doesn't allow this device"));
     await pumpFrames(tester);
     await tester.tap(find.text('This Mac'));
     await pumpFrames(tester);

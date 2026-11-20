@@ -34,8 +34,9 @@
 #                 FACTORY_UPDATE_URL=https://github.com/claktor/claktory/releases/latest/download/latest.json scripts/release.sh
 #               It refuses a release built from another commit or for
 #               another channel.
-#   --adhoc     allows publishing a Mac app to GitHub that isn't notarized
-#               (signed ad hoc); without it, that's refused.
+#   --adhoc     allows a Mac app that isn't notarized (signed ad hoc): building
+#               one (scripts/release.sh --adhoc) and publishing it to GitHub;
+#               without it, both are refused.
 #
 # Agents: leave publishing to GitHub to Coordinator and the person.
 set -euo pipefail
@@ -141,7 +142,9 @@ else
       exit 1
     }
   fi
-  FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/release.sh" ${DEV[@]+"${DEV[@]}"}
+  RELEASE_ARGS=(${DEV[@]+"${DEV[@]}"})
+  if $ADHOC && [[ ${#DEV[@]} -eq 0 ]]; then RELEASE_ARGS+=(--adhoc); fi
+  FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/release.sh" ${RELEASE_ARGS[@]+"${RELEASE_ARGS[@]}"}
   VERSION="$(cat "$HOME_DIR/releases/latest")"
   RELEASE="$HOME_DIR/releases/$VERSION"
   require_notarized "$RELEASE/$APP_NAME"

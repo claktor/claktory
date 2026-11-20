@@ -237,7 +237,7 @@ void main() {
     app.backends['']!.refused.value = 'unknown device';
     await pumpFrames(tester);
     expect(
-      _labeled("This device isn't paired with this Claktory any more"),
+      _labeled("this Claktory doesn't allow this device"),
       findsOneWidget,
     );
   });
@@ -389,11 +389,8 @@ void main() {
       ) as dynamic).back();
       await pumpFrames(tester);
       expect(find.byType(ClaktoryList), findsOneWidget);
-      expect(find.text("Can't connect to mac-mini"), findsOneWidget);
-      expect(
-        find.textContaining("This device isn't paired with"),
-        findsOneWidget,
-      );
+      expect(find.text("Can't connect"), findsOneWidget);
+      expect(find.text('Not allowed'), findsOneWidget);
       expect(find.text('Working'), findsOneWidget);
       // The last rows are reachable however short the screen.
       await tester.scrollUntilVisible(
