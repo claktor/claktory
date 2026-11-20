@@ -13,25 +13,41 @@ use factory_agent::{Tool, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::proposals::is_admin;
 
 pub(crate) const ID: &str = "secrets";
 
-static MANIFEST: Manifest = Manifest {
+static MANIFEST: Manifest = Manifest { options: &[], ..CONNECTING };
+
+/// With the option to suggest connecting services, once Claktory connects
+/// any (`crate::connectors::offered`).
+static CONNECTING: Manifest = Manifest {
     id: ID,
     name: "Secrets",
     icon: "key-round",
     description: "Lets it ask you for a key or password it needs. An admin agent also gives your secrets to agents when you ask, without seeing them.",
     default_enabled: true,
-    options: &[],
+    options: &[OptionSpec {
+        id: crate::connectors::proposals::OPTION,
+        label: "Can suggest connecting services",
+        description: "It can suggest that you connect a service such as Cloudflare or AWS. Connecting gives it nothing: you or Rivet then give it a secret made from the connection.",
+        kind: OptionKind::Switch,
+        default_on: false,
+        includes_project: false,
+    }],
 };
 
 const ASK: &str = "## Asking for secrets
 
 You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe what you need (a short name, which service and what access, and the environment variables you expect, never values) and say why. The person gives you one of theirs that fits, adds a new one, or dismisses the request, and you're told what you got.
+";
+
+const CONNECT: &str = "## Connecting services
+
+When your work needs a service the person hasn't connected yet, such as Cloudflare or AWS, propose connecting it with `secrets_propose_connection`: say what it's for, the access the work needs (which permissions, on which zones, accounts or roles), and why. Ask for the least that does the job. The person approves it on the service's own site; connecting gives you nothing by itself: an admin agent then gives you a secret made from the connection, and you're told.
 ";
 
 const PROMPT: &str = "## Secrets
@@ -50,11 +66,14 @@ pub(crate) struct Secrets;
 
 impl Extension for Secrets {
     fn manifest(&self) -> &'static Manifest {
-        &MANIFEST
+        if crate::connectors::offered() { &CONNECTING } else { &MANIFEST }
     }
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let mut sections = vec![PromptSection { kind: PromptKind::Static, text: ASK.to_owned() }];
+        if crate::connectors::offered() && super::switch(agent, ID, crate::connectors::proposals::OPTION) {
+            sections.push(PromptSection { kind: PromptKind::Static, text: CONNECT.to_owned() });
+        }
         if is_admin(agent) {
             sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
         }
@@ -81,8 +100,17 @@ impl Extension for Secrets {
             },
         });
         let ask = super::tool(crate::vault::asks::TOOL, "Ask for a secret", REQUEST, request, super::typed_handler(factory, agent, ask));
-        if !factory.lock().config.agent(agent).is_some_and(is_admin) {
-            return vec![ask];
+        let (admin, connect) = {
+            let inner = factory.lock();
+            let config = inner.config.agent(agent);
+            (config.is_some_and(is_admin), config.is_some_and(|config| super::switch(config, ID, crate::connectors::proposals::OPTION)))
+        };
+        let mut tools = vec![ask];
+        if connect && crate::connectors::offered() {
+            tools.push(crate::connectors::proposals::tool(factory, agent));
+        }
+        if !admin {
+            return tools;
         }
         let agents = json!({
             "type": "object",
@@ -95,8 +123,7 @@ impl Extension for Secrets {
         });
         let mut revoke = agents.clone();
         revoke["properties"]["stop_tasks"] = json!({"type": "boolean"});
-        vec![
-            ask,
+        tools.extend([
             super::tool(
                 "secrets_list",
                 "List secrets",
@@ -106,7 +133,8 @@ impl Extension for Secrets {
             ),
             super::tool("secrets_grant", "Give a secret", GRANT, agents, super::typed_handler(factory, agent, grant)),
             super::tool("secrets_revoke", "Take a secret back", REVOKE, revoke, super::typed_handler(factory, agent, revoke_tool)),
-        ]
+        ]);
+        tools
     }
 }
 

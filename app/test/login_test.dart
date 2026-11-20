@@ -4,6 +4,8 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'loopback_forward_test.dart' show Forwarder;
+
 Workspace flowing({
   String provider = 'anthropic',
   String url = '',
@@ -84,5 +86,71 @@ void main() {
     store.apply(flowing(url: 'https://a.test/3'));
 
     expect(opened, isEmpty);
+  });
+
+  group('forwarding the page\'s way back', () {
+    const claude =
+        'https://claude.ai/oauth/authorize?'
+        'redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback';
+    late Forwarder forwarder;
+
+    setUp(() {
+      forwarder = Forwarder();
+      launcher = LoginLauncher(
+        workspace: store,
+        send: (_) async {},
+        forwards: forwarder.forwards,
+        open: (url) async {
+          opened.add('$url');
+          return true;
+        },
+      );
+    });
+
+    Future<void> openFlow() async {
+      await launcher.start('anthropic', 'oauth');
+      store.apply(flowing(url: claude));
+      await pumpEventQueue();
+    }
+
+    test('forwards its port while the flow lasts', () async {
+      await openFlow();
+      expect(opened, [claude]);
+      expect(forwarder.made.single.port, 53692);
+      expect(launcher.forwardingFor(claude), isNotNull);
+      expect(launcher.forwardingFor('https://other.test/'), isNull);
+
+      // Signed in: the flow's gone.
+      store.apply(Workspace());
+      await pumpEventQueue();
+      expect(forwarder.made.single.stopped, isTrue);
+      expect(launcher.forwardingFor(claude), isNull);
+    });
+
+    test('stops when the flow fails, is cancelled or moves on', () async {
+      await openFlow();
+      store.apply(flowing(url: claude, error: 'denied'));
+      await pumpEventQueue();
+      expect(forwarder.made.last.stopped, isTrue);
+
+      await openFlow();
+      launcher.forget();
+      await pumpEventQueue();
+      expect(forwarder.made.last.stopped, isTrue);
+
+      await openFlow();
+      store.apply(flowing(url: 'https://claude.ai/oauth/other'));
+      await pumpEventQueue();
+      expect(forwarder.made.last.stopped, isTrue);
+      expect(forwarder.forwards.active, isEmpty);
+    });
+
+    test('forwards nothing for a Claktory on this machine', () async {
+      forwarder.remote = false;
+      await openFlow();
+      expect(opened, [claude]);
+      expect(forwarder.made, isEmpty);
+      expect(launcher.forwardingFor(claude), isNull);
+    });
   });
 }

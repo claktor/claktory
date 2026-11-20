@@ -54,6 +54,7 @@ fn create(path: &str, kind: &str, version: &str, selectors: Vec<v1::Selector>, b
         selectors,
         body: body.into(),
         send_now: false,
+        suggestion: None,
     })
 }
 
@@ -281,4 +282,128 @@ async fn agents_comment_on_files_for_the_person_and_send_now_goes_at_once() {
     view.follow(&mut client, |view| view.entries.len() >= before + 2 && idle(view, "writer")).await;
     let prompt = requests.lock().expect("lock").last().expect("a request").prompt.clone();
     assert!(prompt.contains("commented on notes.txt") && prompt.contains("Reply: Why?"), "{prompt}");
+}
+
+fn decide(thread: &str, accept: bool) -> client_message::Body {
+    client_message::Body::DecideSuggestion(v1::DecideSuggestion { thread_id: thread.into(), accept })
+}
+
+/// The latest prompt `agent` was given once it's done with what came.
+async fn last_prompt(
+    client: &mut Client,
+    view: &mut View,
+    requests: &std::sync::Arc<std::sync::Mutex<Vec<crate::common::Request>>>,
+    before: usize,
+) -> String {
+    view.follow(client, |view| view.entries.len() >= before + 2 && idle(view, "writer")).await;
+    requests.lock().expect("lock").last().expect("a request").prompt.clone()
+}
+
+#[tokio::test]
+async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    std::fs::write(dir.join("site/notes.txt"), "one\ntwo\nthree\n").expect("write");
+    let path = std::fs::canonicalize(dir.join("site/notes.txt")).expect("path").display().to_string();
+
+    // The agent suggests; the person accepts, and Claktory makes the change.
+    let said = call(
+        &mut client,
+        &mut view,
+        "writer",
+        r#"call comments_suggest {"path":"notes.txt","quote":{"exact":"two"},"replacement":"2","body":"Shorter."}"#,
+    )
+    .await;
+    assert!(said.contains("Suggested the change") && said.contains("(t-1)"), "{said}");
+    let suggested = threads(&mut client, &path).await;
+    let suggestion = find(&suggested, "t-1").suggestion.clone().expect("a suggestion");
+    assert_eq!(
+        (suggestion.replacement.as_str(), suggestion.author_agent_id.as_str(), suggestion.decision()),
+        ("2", "writer", v1::SuggestionDecision::Unspecified)
+    );
+    let before = view.entries.len();
+    assert!(matches!(apply_request(&mut client, &mut view, decide("t-1", true)).await, Body::Ack(_)));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "one\n2\nthree\n");
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("accepted your suggested change t-1 on notes.txt") && prompt.contains("“two” → “2”"), "{prompt}");
+    let accepted = threads(&mut client, &path).await;
+    let t1 = find(&accepted, "t-1");
+    assert_eq!(
+        (t1.status(), t1.suggestion.as_ref().map(v1::Suggestion::decision)),
+        (ThreadStatus::Resolved, Some(v1::SuggestionDecision::Accepted))
+    );
+    assert_eq!(t1.source.as_ref().map(|source| source.exact.as_str()), Some("2"), "on the new text");
+    match client.request(decide("t-1", false)).await.body {
+        Body::Error(error) => assert_eq!(error.code(), ErrorCode::InvalidRequest),
+        other => panic!("decided once: {other:?}"),
+    }
+
+    // Text changed since: accepting is refused; rejecting leaves the file be.
+    call(&mut client, &mut view, "writer", r#"call comments_suggest {"path":"notes.txt","quote":{"exact":"three"},"replacement":"3"}"#)
+        .await;
+    std::fs::write(&path, "one\n2\nfour\n").expect("write");
+    match client.request(decide("t-2", true)).await.body {
+        Body::Error(error) => assert_eq!(error.message, "The text changed after this was suggested."),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    let before = view.entries.len();
+    assert!(matches!(apply_request(&mut client, &mut view, decide("t-2", false)).await, Body::Ack(_)));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "one\n2\nfour\n");
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("rejected your suggested change t-2"), "{prompt}");
+
+    // The person's own suggestion: sent, then made by them.
+    let mine = v1::CreateThread {
+        agent_id: "writer".into(),
+        path: path.clone(),
+        kind: "text".into(),
+        version_sha256: String::new(),
+        selectors: vec![quote("one", "", "\n2")],
+        body: String::new(),
+        send_now: true,
+        suggestion: Some("uno".into()),
+    };
+    let before = view.entries.len();
+    let Body::Thread(made) = apply_request(&mut client, &mut view, client_message::Body::CreateThread(mine)).await else {
+        panic!("expected the thread")
+    };
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("suggesting “uno” instead") && !prompt.contains("Reply:"), "a suggestion needs no words: {prompt}");
+    let before = view.entries.len();
+    assert!(matches!(apply_request(&mut client, &mut view, decide(&made.id, true)).await, Body::Ack(_)));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "uno\n2\nfour\n");
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("made the change they suggested") && prompt.contains("themselves"), "{prompt}");
+
+    // Their own, never sent: decided, its comment is no draft to send.
+    let unsent = v1::CreateThread {
+        agent_id: "writer".into(),
+        path: path.clone(),
+        kind: "text".into(),
+        version_sha256: String::new(),
+        selectors: vec![quote("four", "2\n", "\n")],
+        body: String::new(),
+        send_now: false,
+        suggestion: Some("4".into()),
+    };
+    let Body::Thread(unsent) = apply_request(&mut client, &mut view, client_message::Body::CreateThread(unsent)).await else {
+        panic!("expected the thread")
+    };
+    assert!(unsent.comments[0].draft, "a draft until decided");
+    assert!(matches!(apply_request(&mut client, &mut view, decide(&unsent.id, true)).await, Body::Ack(_)));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "uno\n2\n4\n");
+    let decided = threads(&mut client, &path).await;
+    assert!(!find(&decided, &unsent.id).comments[0].draft, "kept with the thread, not sent");
+    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone() };
+    match client.request(client_message::Body::SendComments(send)).await.body {
+        Body::Error(error) => assert_eq!(error.message, "There are no comments to send."),
+        other => panic!("expected an error, got {other:?}"),
+    }
 }

@@ -1,0 +1,659 @@
+import 'dart:async';
+
+import 'package:factory_app/connectors.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scope.dart';
+import 'package:factory_app/secrets.dart';
+import 'package:factory_app/update.dart';
+import 'package:factory_app/web_auth.dart';
+import 'package:fixnum/fixnum.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'harness.dart';
+
+final _cloudflare = Connector(
+  id: 'cloudflare',
+  name: 'Cloudflare',
+  description: 'Deploy sites and manage DNS in your Cloudflare accounts.',
+  flow: ConnectorFlowKind.CONNECTOR_FLOW_KIND_BROWSER,
+  accesses: [
+    ConnectorAccess(
+      id: 'read',
+      label: 'Read only',
+      why: 'See your accounts, zones and DNS records.',
+    ),
+    ConnectorAccess(
+      id: 'deploy',
+      label: 'Deploy websites',
+      why: 'Publish sites and change DNS in the accounts you choose.',
+      preselected: true,
+    ),
+  ],
+  redirectUris: [
+    'http://127.0.0.1:{port}/oauth/cloudflare',
+    'com.claktory.app:/oauth/cloudflare',
+    'com.claktory.app.dev:/oauth/cloudflare',
+  ],
+  variables: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
+);
+
+final _aws = Connector(
+  id: 'aws',
+  name: 'AWS',
+  description: 'Use your AWS accounts through IAM Identity Center.',
+  flow: ConnectorFlowKind.CONNECTOR_FLOW_KIND_DEVICE,
+  accesses: [
+    ConnectorAccess(
+      id: 'roles',
+      label: 'Use roles',
+      why: 'Get short-lived keys for the roles you can use.',
+      preselected: true,
+    ),
+  ],
+  fields: [
+    ConnectorField(
+      id: 'start_url',
+      label: 'Access portal URL',
+      placeholder: 'https://d-1234.awsapps.com/start',
+    ),
+    ConnectorField(id: 'region', label: 'Region', placeholder: 'us-east-1'),
+  ],
+  setupNote: 'Your AWS needs IAM Identity Center with permission sets.',
+);
+
+final _connection = SecretInfo(
+  id: 'c1',
+  name: 'Cloudflare (matt@example.com)',
+  connection: SecretConnection(
+    connectorId: 'cloudflare',
+    account: 'matt@example.com',
+    access: ['Publish sites and change DNS.'],
+    resources: ['Cloudflare account Acme'],
+    status: ConnectionStatus.CONNECTION_STATUS_READY,
+  ),
+);
+
+ConnectProposal _proposal({
+  ConnectProposalState state =
+      ConnectProposalState.CONNECT_PROPOSAL_STATE_PENDING,
+}) => ConnectProposal(
+  id: 'p1',
+  agentId: 'june',
+  connectorId: 'cloudflare',
+  accessId: 'deploy',
+  purpose: 'Deploy the website to Cloudflare Pages.',
+  access: 'Pages and DNS for example.com',
+  reason: 'The site is ready and needs a home.',
+  state: state,
+  createdMs: Int64(1000),
+);
+
+Workspace _workspace({
+  List<SecretInfo> secrets = const [],
+  List<ConnectProposal> proposals = const [],
+  List<ConnectFlow> flows = const [],
+}) => Workspace(
+  agents: [
+    Agent(id: 'june', name: 'June', color: 'pink', modelAvailable: true),
+    Agent(id: 'rivet', name: 'Rivet', color: 'blue', modelAvailable: true),
+  ],
+  selectedAgentId: 'june',
+  settings: Settings(userName: 'Matt'),
+  vault: VaultState(
+    exists: true,
+    unlocked: true,
+    secrets: secrets,
+    connectors: [_cloudflare, _aws],
+    proposals: proposals,
+    flows: flows,
+  ),
+);
+
+/// The backend tells every device how the flow stands, with [secrets].
+void _flow(
+  Harness harness,
+  ConnectFlowState state, {
+  String error = '',
+  List<SecretInfo> secrets = const [],
+  List<ConnectProposal> proposals = const [],
+}) => harness.backend.workspace.apply(
+  _workspace(
+    secrets: secrets,
+    proposals: proposals,
+    flows: [
+      ConnectFlow(
+        id: 'flow-1',
+        connectorId: 'cloudflare',
+        state: state,
+        error: error,
+        secretId: state == ConnectFlowState.CONNECT_FLOW_STATE_CONNECTED
+            ? 'c1'
+            : '',
+      ),
+    ],
+  ),
+);
+
+/// [child] in the window, as the app's views get it.
+Future<void> _show(WidgetTester tester, Harness harness, Widget child) async {
+  tester.view.physicalSize = const Size(1000, 1400);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    WidgetsApp(
+      color: const Color(0xFF000000),
+      builder: (context, _) => AppScope(
+        backend: harness.backend,
+        login: harness.login,
+        page: harness.page,
+        appBuild: AppBuild(
+          version: 'dev',
+          bundlePath: '/Applications/Factory.app',
+          quit: () {},
+          updater: harness.updater,
+        ),
+        drafts: harness.drafts,
+        history: harness.history,
+        connections: harness.connections,
+        child: Overlay(
+          initialEntries: [
+            OverlayEntry(
+              builder: (context) => SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: child,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+}
+
+List<T> _sent<T>(Harness harness, T? Function(ClientMessage) of) => [
+  for (final message in harness.backend.sent)
+    if (of(message) case final T found) found,
+];
+
+/// The Mac's address for the service's answer, without a real socket.
+class _Receiver implements ConnectReceiver {
+  _Receiver(String path) : address = Uri.parse('http://127.0.0.1:5555$path');
+
+  @override
+  final Uri address;
+  final _back = Completer<Uri?>();
+  var closed = false;
+
+  @override
+  Future<Uri?> get back => _back.future;
+
+  void arrive(String query) => _back.complete(address.replace(query: query));
+
+  @override
+  Future<void> close() async {
+    closed = true;
+    if (!_back.isCompleted) _back.complete(null);
+  }
+}
+
+void main() {
+  late List<Uri> opened;
+  late List<_Receiver> receivers;
+  late List<(Uri, String)> sheets;
+  Completer<Uri?>? sheet;
+
+  setUp(() {
+    opened = [];
+    receivers = [];
+    sheets = [];
+    sheet = null;
+    openConnectPage = (url) async {
+      opened.add(url);
+      return true;
+    };
+    connectInSheet = false;
+    startConnectReceiver = (path) async {
+      final receiver = _Receiver(path);
+      receivers.add(receiver);
+      return receiver;
+    };
+    connectSheet = (url, scheme) {
+      sheets.add((url, scheme));
+      return (sheet = Completer<Uri?>()).future;
+    };
+    closeConnectSheet = () async {
+      if (sheet?.isCompleted == false) sheet!.complete(null);
+    };
+  });
+
+  testWidgets('Connect a service, on the Mac: the page opens in the browser, '
+      'its answer comes back to this computer and goes to the backend; '
+      'nobody has the connection', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    expect(find.text('Connect a service'), findsOneWidget);
+    expect(find.text('AWS'), findsOneWidget);
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Connect Cloudflare'), findsOneWidget);
+    // The preselected access, and why.
+    expect(find.text('Deploy websites'), findsOneWidget);
+    expect(
+      find.text('Publish sites and change DNS in the accounts you choose.'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('Connecting gives no agent access'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+
+    final start = _sent(
+      harness,
+      (m) => m.hasStartConnect() ? m.startConnect : null,
+    ).single;
+    expect(start.connectorId, 'cloudflare');
+    expect(start.accessId, 'deploy');
+    expect(start.redirectUri, 'http://127.0.0.1:5555/oauth/cloudflare');
+    expect(start.proposalId, isEmpty);
+    expect(opened.single.toString(), harness.backend.connectStarted.url);
+    expect(
+      find.textContaining('Sign in to Cloudflare in your browser'),
+      findsOneWidget,
+    );
+
+    // The browser comes back: the whole address goes to the backend.
+    receivers.single.arrive('code=abc&state=s');
+    await tester.pump();
+    final finish = _sent(
+      harness,
+      (m) => m.hasFinishConnect() ? m.finishConnect : null,
+    ).single;
+    expect(finish.flowId, 'flow-1');
+    expect(
+      finish.callbackUrl,
+      'http://127.0.0.1:5555/oauth/cloudflare?code=abc&state=s',
+    );
+
+    _flow(harness, ConnectFlowState.CONNECT_FLOW_STATE_CHECKING);
+    await tester.pump();
+    expect(find.text('Checking what Cloudflare allowed…'), findsOneWidget);
+
+    _flow(
+      harness,
+      ConnectFlowState.CONNECT_FLOW_STATE_CONNECTED,
+      secrets: [_connection],
+    );
+    await tester.pump();
+    expect(
+      find.text('Connected Cloudflare as Cloudflare (matt@example.com).'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('No agent has it yet.'), findsOneWidget);
+    expect(_sent(harness, (m) => m.hasGrantSecret() ? m : null), isEmpty);
+
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+    expect(find.text('Connect Cloudflare'), findsNothing);
+    expect(
+      _sent(
+        harness,
+        (m) => m.hasCancelConnect() ? m.cancelConnect : null,
+      ).single.flowId,
+      'flow-1',
+      reason: 'the ended flow leaves the list',
+    );
+  });
+
+  testWidgets('cancelling stops listening and ends the flow', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(receivers.single.closed, isTrue);
+    expect(
+      _sent(harness, (m) => m.hasCancelConnect() ? m : null),
+      hasLength(1),
+    );
+    expect(_sent(harness, (m) => m.hasFinishConnect() ? m : null), isEmpty);
+  });
+
+  testWidgets("a failure says the backend's words and offers Try again", (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    _flow(
+      harness,
+      ConnectFlowState.CONNECT_FLOW_STATE_FAILED,
+      error: "Cloudflare didn't allow it: you clicked Deny.",
+    );
+    await tester.pump();
+    expect(
+      find.text("Cloudflare didn't allow it: you clicked Deny."),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    await tester.pump();
+    expect(_sent(harness, (m) => m.hasStartConnect() ? m : null), hasLength(2));
+    expect(receivers, hasLength(2));
+  });
+
+  testWidgets('a refusal before there is a flow shows too', (tester) async {
+    final harness = Harness(_workspace())
+      ..backend.refuse = "This Claktory can't connect services yet.";
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.text("This Claktory can't connect services yet."),
+      findsOneWidget,
+    );
+    expect(receivers.single.closed, isTrue, reason: 'nothing can come back');
+  });
+
+  testWidgets('on iPhone the sign-in sheet catches the answer on the app '
+      'scheme; closing it cancels', (tester) async {
+    connectInSheet = true;
+    final harness = Harness(_workspace());
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    final start = _sent(
+      harness,
+      (m) => m.hasStartConnect() ? m.startConnect : null,
+    ).single;
+    expect(start.redirectUri, 'com.claktory.app:/oauth/cloudflare');
+    expect(receivers, isEmpty);
+    expect(sheets.single.$2, 'com.claktory.app');
+    sheet!.complete(
+      Uri.parse('com.claktory.app:/oauth/cloudflare?code=abc&state=s'),
+    );
+    await tester.pump();
+    expect(
+      _sent(
+        harness,
+        (m) => m.hasFinishConnect() ? m.finishConnect : null,
+      ).single.callbackUrl,
+      'com.claktory.app:/oauth/cloudflare?code=abc&state=s',
+    );
+
+    // Closed without finishing: the flow ends.
+    _flow(harness, ConnectFlowState.CONNECT_FLOW_STATE_FAILED, error: 'No.');
+    await tester.pump();
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    await tester.pump();
+    sheet!.complete(null);
+    await tester.pump();
+    await tester.pump();
+    expect(_sent(harness, (m) => m.hasCancelConnect() ? m : null), isNotEmpty);
+  });
+
+  testWidgets("AWS asks for its portal first, then shows the page's code", (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    harness.backend.connectStarted = ConnectStarted(
+      flowId: 'flow-1',
+      url: 'https://device.sso.us-east-1.amazonaws.com/?user_code=WXYZ-1234',
+      userCode: 'WXYZ-1234',
+    );
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('AWS'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Your AWS needs IAM Identity Center with permission sets.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    expect(find.text('Enter the access portal URL.'), findsOneWidget);
+    expect(_sent(harness, (m) => m.hasStartConnect() ? m : null), isEmpty);
+
+    final fields = find.byType(EditableText);
+    await tester.enterText(fields.at(0), 'https://d-1234.awsapps.com/start');
+    await tester.enterText(fields.at(1), 'eu-west-1');
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    final start = _sent(
+      harness,
+      (m) => m.hasStartConnect() ? m.startConnect : null,
+    ).single;
+    expect(start.redirectUri, isEmpty, reason: 'the backend polls');
+    expect(start.fields, {
+      'start_url': 'https://d-1234.awsapps.com/start',
+      'region': 'eu-west-1',
+    });
+    expect(receivers, isEmpty);
+    expect(opened.single.queryParameters['user_code'], 'WXYZ-1234');
+    expect(find.text('Check that the page shows WXYZ-1234.'), findsOneWidget);
+  });
+
+  testWidgets("an agent's proposal: what for, the access, why; Connect "
+      'answers it, Dismiss tells it why', (tester) async {
+    final harness = Harness(_workspace(proposals: [_proposal()]));
+    await _show(tester, harness, const SecretsSettings());
+    expect(find.text('June suggests connecting Cloudflare'), findsOneWidget);
+    expect(
+      find.text('Deploy the website to Cloudflare Pages.'),
+      findsOneWidget,
+    );
+    expect(find.text('Pages and DNS for example.com'), findsOneWidget);
+    expect(
+      find.textContaining('Connecting gives June nothing yet'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Connect Cloudflare'));
+    await tester.pump();
+    await tester.pump();
+    final start = _sent(
+      harness,
+      (m) => m.hasStartConnect() ? m.startConnect : null,
+    ).single;
+    expect(start.proposalId, 'p1');
+    expect(start.accessId, 'deploy');
+    expect(opened, hasLength(1));
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.enterText(find.byType(EditableText).last, 'Not yet');
+    await tester.tap(find.text('Dismiss'));
+    await tester.pump();
+    final dismiss = _sent(
+      harness,
+      (m) => m.hasDismissConnectProposal() ? m.dismissConnectProposal : null,
+    ).single;
+    expect(dismiss.proposalId, 'p1');
+    expect(dismiss.comment, 'Not yet');
+  });
+
+  testWidgets('a decided proposal says what was connected', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      ConnectProposalCard(
+        _proposal(state: ConnectProposalState.CONNECT_PROPOSAL_STATE_CONNECTED)
+          ..secretName = 'Cloudflare (matt@example.com)'
+          ..decidedMs = Int64(2000),
+      ),
+    );
+    expect(
+      find.textContaining(
+        'Connected Cloudflare as Cloudflare (matt@example.com)',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Connect Cloudflare'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+  });
+
+  testWidgets('a connection in the list: its service, account and access, '
+      'no values, never given; a secret made from it with chosen access', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace(secrets: [_connection]));
+    harness.backend.connectChoices = ConnectChoices(
+      secretId: 'c1',
+      rules: 'Choose one account and at least one permission.',
+      choices: [
+        ConnectChoice(kind: 'account', id: 'acc1', label: 'Acme'),
+        ConnectChoice(
+          kind: 'zone',
+          id: 'z1',
+          label: 'example.com',
+          parent: 'acc1',
+        ),
+        ConnectChoice(
+          kind: 'permission',
+          id: 'pages:write',
+          label: 'Pages: edit',
+          why: 'Publish and change Pages projects.',
+        ),
+        ConnectChoice(
+          kind: 'permission',
+          id: 'dns:write',
+          label: 'DNS: edit',
+          why: 'Change DNS records.',
+        ),
+      ],
+    );
+    await _show(tester, harness, const SecretsSettings());
+    expect(
+      find.text('Cloudflare connection · matt@example.com'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('No agent has access'), findsOneWidget);
+
+    await tester.tap(find.text('Cloudflare (matt@example.com)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Publish sites and change DNS.'), findsOneWidget);
+    expect(find.text('Cloudflare account Acme'), findsOneWidget);
+    expect(find.text('Show'), findsNothing);
+    expect(find.text('Give to…'), findsNothing);
+
+    await tester.tap(find.text('Make a secret from it…'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Choose one account and at least one permission.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Make secret'));
+    await tester.pump();
+    expect(find.text('Choose what it may do.'), findsOneWidget);
+    await tester.tap(find.text('Pages: edit'));
+    await tester.tap(find.text('example.com'));
+    await tester.pump();
+    await tester.tap(find.text('Make secret'));
+    await tester.pumpAndSettle();
+    final derive = _sent(
+      harness,
+      (m) => m.hasDeriveSecret() ? m.deriveSecret : null,
+    ).single;
+    expect(derive.secretId, 'c1');
+    expect(derive.permissions, ['pages:write']);
+    expect(derive.resources, ['acc1', 'z1']);
+    expect(_sent(harness, (m) => m.hasGrantSecret() ? m : null), isEmpty);
+
+    await tester.tap(find.text('Disconnect…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Disconnect'));
+    await tester.pumpAndSettle();
+    final disconnect = _sent(
+      harness,
+      (m) => m.hasDisconnectService() ? m.disconnectService : null,
+    ).single;
+    expect(disconnect.secretId, 'c1');
+    expect(disconnect.revoke, isTrue);
+  });
+
+  testWidgets('a secret made from a connection says so', (tester) async {
+    final harness = Harness(
+      _workspace(
+        secrets: [
+          _connection,
+          SecretInfo(
+            id: 'e1',
+            name: 'Cloudflare Pages',
+            variables: [SecretVariable(name: 'CLOUDFLARE_API_TOKEN')],
+            grants: [SecretGrant(agentId: 'june')],
+            export: SecretExport(
+              connectionId: 'c1',
+              access: ['Publish Pages projects.'],
+              expiresMs: Int64(4000000000000),
+            ),
+          ),
+        ],
+      ),
+    );
+    await _show(tester, harness, const SecretsSettings());
+    expect(
+      find.text(
+        'Made from Cloudflare (matt@example.com) · Renewed before it expires',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('June uses secrets made from it'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('nothing of it shows while the backend offers no services', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace()..vault.connectors.clear());
+    await _show(tester, harness, const SecretsSettings());
+    expect(find.text('Add a secret…'), findsOneWidget);
+    expect(find.text('Connect a service…'), findsNothing);
+  });
+
+  test('a connect run is kept by what it is for, per backend', () {
+    final a = RecordingBackend();
+    final b = RecordingBackend();
+    expect(ConnectRun.of(a, 'new'), same(ConnectRun.of(a, 'new')));
+    expect(ConnectRun.of(a, 'new'), isNot(same(ConnectRun.of(b, 'new'))));
+    expect(
+      ConnectRun.of(a, 'proposal:p1'),
+      isNot(same(ConnectRun.of(a, 'new'))),
+    );
+  });
+}

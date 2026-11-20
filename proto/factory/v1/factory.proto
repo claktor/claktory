@@ -117,6 +117,7 @@ message ClientMessage {
     ReaddressThread readdress_thread = 80;
     ReattachThread reattach_thread = 81;
     SendComments send_comments = 82;
+    DecideSuggestion decide_suggestion = 83;
     // The project whose files this connection shows on their own (the
     // iPhone's Files page).
     WatchFiles watch_files = 84;
@@ -1006,6 +1007,27 @@ message Thread {
   int64 created_ms = 13;
   // When a comment, its status or its address last changed.
   int64 updated_ms = 14;
+  // A change to its text, proposed by the person or an agent; unset for none.
+  Suggestion suggestion = 15;
+}
+
+// A proposed replacement for a thread's text (a text file's), which the
+// person accepts (Claktory makes the change) or rejects with
+// DecideSuggestion; an agent may also make the person's change itself.
+message Suggestion {
+  // What replaces the text, as the file has it (Markdown in a Markdown file);
+  // empty to delete it.
+  string replacement = 1;
+  // The agent who suggested it; empty for the person.
+  string author_agent_id = 2;
+  SuggestionDecision decision = 3;
+}
+
+enum SuggestionDecision {
+  // Not decided yet.
+  SUGGESTION_DECISION_UNSPECIFIED = 0;
+  SUGGESTION_DECISION_ACCEPTED = 1;
+  SUGGESTION_DECISION_REJECTED = 2;
 }
 
 message Selector {
@@ -1106,10 +1128,14 @@ message CreateThread {
   // "markdown": TextQuoteSelector (and TextPositionSelector, if known) in the
   // formatted view's plain text. "image": a FragmentSelector.
   repeated Selector selectors = 5;
-  // The first comment, Markdown; not empty.
+  // The first comment, Markdown; not empty, unless it suggests a change
+  // (then a comment with an empty body carries it until it's sent).
   string body = 6;
   // Send it to the agent now, alone, rather than as a draft.
   bool send_now = 7;
+  // A replacement the person suggests for the text (text and Markdown only;
+  // see Suggestion).
+  optional string suggestion = 8;
 }
 
 // The person replies on a thread, answered with Ack: a draft until sent,
@@ -1162,6 +1188,16 @@ message SendComments {
   string agent_id = 1;
   // Absolute; empty for every file.
   string path = 2;
+}
+
+// Accepts a thread's suggestion (Claktory replaces the text with it in the
+// file, and resolves the thread) or rejects it (resolves it unchanged),
+// answered with Ack. Accepting is refused, with an Error whose message can be
+// shown as it is, when the text changed since the suggestion was made
+// (Thread.anchor isn't ANCHORED). The agent who suggested it is told.
+message DecideSuggestion {
+  string thread_id = 1;
+  bool accept = 2;
 }
 
 // ---- Sign-in ----

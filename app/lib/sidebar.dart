@@ -13,6 +13,7 @@ import 'controls.dart';
 import 'forms.dart';
 import 'highlights.dart';
 import 'identity.dart';
+import 'loopback_forward.dart' show ForwardingsLine;
 import 'markdown.dart';
 import 'phone.dart' show PhoneProjects;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -1494,6 +1495,14 @@ class _Footer extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Links opened from conversations whose pages come back to
+          // localhost on the Claktory's machine (a sign-in's own show in
+          // Settings); nothing while there are none.
+          ForwardingsLine(
+            forwards: scope.backend.forwards,
+            except: workspace.hasLogin() ? workspace.login.url : '',
+            padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.s),
+          ),
           for (final line in status)
             Padding(
               padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.s),

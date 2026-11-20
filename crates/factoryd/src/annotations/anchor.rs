@@ -160,6 +160,19 @@ fn score(text: &[u16], quote: &Quote, range: &Range<usize>, alike: f32, hint: Op
     (total / weight, context)
 }
 
+/// How alike the text around `range` is to the quote's context: None
+/// without any context on either side.
+fn context(text: &[u16], quote: &Quote, range: &Range<usize>) -> Option<f32> {
+    let mut alike = Vec::new();
+    if !quote.prefix.is_empty() {
+        alike.push(similarity(&quote.prefix, &text[range.start.saturating_sub(quote.prefix.len())..range.start]));
+    }
+    if !quote.suffix.is_empty() {
+        alike.push(similarity(&quote.suffix, &text[range.end..(range.end + quote.suffix.len()).min(text.len())]));
+    }
+    (!alike.is_empty()).then(|| alike.iter().sum::<f32>() / alike.len() as f32)
+}
+
 /// Finds `quote` in `text`: the copy that fits its context and `hint` (where
 /// it's expected to start) best, or failing that, the best text like it.
 pub(crate) fn find(text: &[u16], quote: &Quote, hint: Option<usize>) -> Option<Found> {
@@ -388,23 +401,74 @@ impl Mapping {
     }
 }
 
-/// The segments of a changed stretch, diffed unit by unit (or as one
-/// replacement when that takes too long or it's very big).
+fn is_word(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(char::is_alphanumeric)
+        || unit == u16::from(b'_')
+        || is_low_surrogate(unit)
+        || (0xD800..0xDC00).contains(&unit)
+}
+
+/// Where each token of `text` starts: a word, or any other single unit.
+fn tokens(text: &[u16]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for at in 0..text.len() {
+        if at == 0 || !(is_word(text[at]) && is_word(text[at - 1])) {
+            starts.push(at);
+        }
+    }
+    starts.push(text.len());
+    starts
+}
+
+/// The segments of a changed stretch, diffed word by word, so offsets in
+/// changed text move to the edges of words (or as one replacement when
+/// that takes too long or it's very big).
 fn refine(old: &[u16], new: &[u16], old_at: usize, new_at: usize, segments: &mut Vec<Segment>) {
     let whole = Segment { old: old_at..old_at + old.len(), new: new_at..new_at + new.len(), equal: false };
     if old.is_empty() || new.is_empty() || old.len().saturating_mul(new.len()) > 1 << 32 {
         segments.push(whole);
         return;
     }
-    let ops = capture_diff_slices_deadline(Algorithm::Myers, old, new, Some(Instant::now() + DIFF_TIME));
+    let (old_starts, new_starts) = (tokens(old), tokens(new));
+    let words =
+        |text: &[u16], starts: &[usize]| -> Vec<Vec<u16>> { starts.windows(2).map(|pair| text[pair[0]..pair[1]].to_vec()).collect() };
+    let (old_words, new_words) = (words(old, &old_starts), words(new, &new_starts));
+    let ops = capture_diff_slices_deadline(Algorithm::Myers, &old_words, &new_words, Some(Instant::now() + DIFF_TIME));
     for op in ops {
         let (tag, was, is) = op.as_tag_tuple();
         segments.push(Segment {
-            old: old_at + was.start..old_at + was.end,
-            new: new_at + is.start..new_at + is.end,
+            old: old_at + old_starts[was.start]..old_at + old_starts[was.end],
+            new: new_at + new_starts[is.start]..new_at + new_starts[is.end],
             equal: tag == DiffTag::Equal,
         });
     }
+}
+
+/// `range` of `text` without the spaces and separating punctuation at its
+/// ends that the quote doesn't have there.
+fn tidy(text: &[u16], range: Range<usize>, quote: &Quote) -> Range<usize> {
+    let loose = |unit: u16| matches!(char::from_u32(u32::from(unit)), Some(c) if c.is_whitespace() || matches!(c, ',' | ';' | ':'));
+    let Range { mut start, mut end } = range;
+    let (first, last) = (quote.exact.first().copied(), quote.exact.last().copied());
+    while start < end && loose(text[start]) && first != Some(text[start]) {
+        start += 1;
+    }
+    while end > start && loose(text[end - 1]) && last != Some(text[end - 1]) {
+        end -= 1;
+    }
+    start..end
+}
+
+/// `range` of `text` widened to whole words at both ends.
+fn whole_words(text: &[u16], range: Range<usize>) -> Range<usize> {
+    let Range { mut start, mut end } = range;
+    while start > 0 && start < text.len() && is_word(text[start]) && is_word(text[start - 1]) {
+        start -= 1;
+    }
+    while end > 0 && end < text.len() && is_word(text[end - 1]) && is_word(text[end]) {
+        end += 1;
+    }
+    start..end
 }
 
 /// The plain text a Markdown file's formatted view shows, with runs of
@@ -610,15 +674,20 @@ impl Doc {
         if let Some(range) = range {
             let mapped = mapping.start(range.start)..mapping.end(range.end);
             if let Some(there) = self.in_space(space, &mapped) {
-                let alike = similarity(&self.text(space)[there.clone()], &quote.exact);
-                if alike >= 0.9 {
+                let text = self.text(space);
+                let there = tidy(text, whole_words(text, there), quote);
+                let alike = similarity(&text[there.clone()], &quote.exact);
+                // Like its quote, or rewritten between text that's still
+                // as it was around it.
+                if alike >= 0.9 || context(text, quote, &there).is_some_and(|context| context >= 0.75) {
                     return Some((self.to_source(space, &there)?, alike));
                 }
                 hint = Some(there.start);
             }
         }
-        let found = find(self.text(space), quote, hint)?;
-        Some((self.to_source(space, &found.range)?, found.similarity))
+        let text = self.text(space);
+        let found = find(text, quote, hint)?;
+        Some((self.to_source(space, &whole_words(text, found.range))?, found.similarity))
     }
 }
 
@@ -694,6 +763,17 @@ mod tests {
         let (range, alike) = reworded.follow(&mapping, Space::Source, Some(&at), &quote).expect("found again");
         assert_eq!(string(&reworded.source[range]), "The point is right here.");
         assert!(alike < 1.0);
+        let rivers = Doc::new("Rivers are very important for many reasons and things. They have shaped history.\n", false);
+        let quoted = 11..53;
+        assert_eq!(string(&rivers.source[quoted.clone()]), "very important for many reasons and things");
+        let quote = Quote::of(&rivers.source, &quoted);
+        let rewritten = Doc::new("Rivers are vital: they provide water, food, and transport, and have shaped human settlement.\n", false);
+        let mapping = Mapping::new(&rivers.source, &rewritten.source);
+        let (range, _) = rewritten.follow(&mapping, Space::Source, Some(&quoted), &quote).expect("followed");
+        let now = string(&rewritten.source[range]);
+        assert!(now.starts_with("vital"), "the rewrite, from a word's start: {now:?}");
+        assert!(now.ends_with(|end: char| end.is_alphanumeric()) && !now.contains("shaped"), "to a word's end: {now:?}");
+        let old = Doc::new("Intro.\n\nThe point is here.\n\nEnd.\n", false);
         let gone = Doc::new("Something else entirely.\n", false);
         let mapping = Mapping::new(&old.source, &gone.source);
         assert_eq!(gone.follow(&mapping, Space::Source, Some(&at), &quote), None);

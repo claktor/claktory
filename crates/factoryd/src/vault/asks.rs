@@ -150,7 +150,7 @@ impl Vault {
         }
         let name = check_name(&wanted.name).map_err(|_| {
             VaultError::Invalid(
-                "Give what you need a short name, such as \"Cloudflare token\": letters, digits, spaces, '-', '_' or '.', up to 64."
+                "Give what you need a short name, such as \"Cloudflare token\": letters, digits, spaces and - _ . @ ( ), up to 64."
                     .to_owned(),
             )
         })?;

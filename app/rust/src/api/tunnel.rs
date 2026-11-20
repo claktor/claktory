@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 
 use flutter_rust_bridge::frb;
 
+use crate::forward;
 use crate::tunnel::{self, Failure, Path, Phase};
 
 /// The tunnel's own runtime: iroh's tasks outlive any one call from Dart.
@@ -21,7 +22,12 @@ pub struct TunnelHandle {
 /// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
 /// direct addresses [addresses], from its pairing code), as the device
 /// [device_key]. It listens at once and dials when the app first connects.
-pub async fn open_tunnel(device_key: String, endpoint_id: String, relays: Vec<String>, addresses: Vec<String>) -> anyhow::Result<TunnelHandle> {
+pub async fn open_tunnel(
+    device_key: String,
+    endpoint_id: String,
+    relays: Vec<String>,
+    addresses: Vec<String>,
+) -> anyhow::Result<TunnelHandle> {
     RUNTIME
         .spawn(async move {
             let key = tunnel::parse_key(&device_key)?;
@@ -93,6 +99,81 @@ impl TunnelHandle {
     pub async fn close(&self) {
         let tunnel = self.tunnel.clone();
         let _ = RUNTIME.spawn(async move { tunnel.close().await }).await;
+    }
+
+    /// Forwards this device's localhost [port] (127.0.0.1 and ::1) to the
+    /// same port on the backend's machine, so a sign-in whose browser comes
+    /// back to http://127.0.0.1:<port> reaches the program waiting for it
+    /// there. Until [ForwardHandle::stop]. The forwarding connection is
+    /// dialled first, so a backend from before it fails here (Unsupported).
+    pub async fn forward_port(&self, port: u16) -> Result<ForwardHandle, ForwardError> {
+        let tunnel = self.tunnel.clone();
+        match RUNTIME.spawn(async move { forward::forward(&tunnel, port).await }).await {
+            Ok(Ok(forward)) => Ok(ForwardHandle { forward: Arc::new(forward) }),
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(ForwardError { kind: ForwardErrorKind::Failed, message: error.to_string() }),
+        }
+    }
+}
+
+/// A localhost port forwarded to the backend's machine.
+#[frb(opaque)]
+pub struct ForwardHandle {
+    forward: Arc<forward::Forward>,
+}
+
+impl ForwardHandle {
+    #[frb(sync)]
+    pub fn port(&self) -> u16 {
+        self.forward.port()
+    }
+
+    #[frb(sync)]
+    pub fn status(&self) -> ForwardStatus {
+        let status = self.forward.status();
+        ForwardStatus { connections: status.connections, last_error: status.last_error }
+    }
+
+    /// Stops listening; connections being carried finish on their own.
+    pub async fn stop(&self) {
+        let forward = self.forward.clone();
+        let _ = RUNTIME.spawn(async move { forward.stop() }).await;
+    }
+}
+
+pub struct ForwardStatus {
+    /// Connections carried so far: above 0 once the browser came back.
+    pub connections: u32,
+    /// Why the last one couldn't be carried (the backend's sentence, or the
+    /// tunnel's); empty while all's well.
+    pub last_error: String,
+}
+
+/// Why a port can't be forwarded.
+#[derive(Debug)]
+pub struct ForwardError {
+    pub kind: ForwardErrorKind,
+    /// Failed: what went wrong, as it is; empty otherwise.
+    pub message: String,
+}
+
+#[derive(Debug)]
+pub enum ForwardErrorKind {
+    /// Something on this device already listens on the port (on 127.0.0.1
+    /// or ::1): the browser would reach it instead.
+    PortTaken,
+    /// The backend is from before forwarding.
+    Unsupported,
+    Failed,
+}
+
+impl From<forward::ForwardingFailure> for ForwardError {
+    fn from(error: forward::ForwardingFailure) -> ForwardError {
+        match error {
+            forward::ForwardingFailure::PortTaken => ForwardError { kind: ForwardErrorKind::PortTaken, message: String::new() },
+            forward::ForwardingFailure::Unsupported => ForwardError { kind: ForwardErrorKind::Unsupported, message: String::new() },
+            forward::ForwardingFailure::Failed(message) => ForwardError { kind: ForwardErrorKind::Failed, message },
+        }
     }
 }
 

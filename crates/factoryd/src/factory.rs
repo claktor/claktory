@@ -137,6 +137,13 @@ pub enum RequestError {
     /// A file that can't be uploaded or attached, and why (`crate::uploads`).
     #[error("{0}")]
     Upload(String),
+    /// A service that can't be connected, or a connection that can't do
+    /// what was asked, and why (`crate::connectors`).
+    #[error("{0}")]
+    Connect(String),
+    /// A service that couldn't be reached, or answered with an error.
+    #[error("{0}")]
+    Unreachable(String),
 }
 
 impl RequestError {
@@ -174,7 +181,9 @@ impl RequestError {
             | RequestError::Layout(_)
             | RequestError::NoEntries(_)
             | RequestError::Upload(_)
+            | RequestError::Connect(_)
             | RequestError::Comments(_) => v1::ErrorCode::InvalidRequest,
+            RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
                 v1::ErrorCode::Internal
@@ -266,6 +275,8 @@ pub struct Factory {
     pub(crate) idle: crate::idle::State,
     /// Files the person is uploading for agents (`crate::uploads`).
     pub(crate) uploads: crate::uploads::Uploads,
+    /// Connecting services (`crate::connectors`).
+    pub(crate) broker: crate::connectors::Broker,
     /// Agents' layouts (`extensions::viewer`).
     pub(crate) viewer: crate::extensions::viewer::State,
     /// Comments on files: the files in panes as last checked (`crate::annotations`).
@@ -524,6 +535,7 @@ impl Factory {
             build_caches: crate::extensions::tree::caches::State::default(),
             idle: crate::idle::State::default(),
             uploads: crate::uploads::Uploads::default(),
+            broker: crate::connectors::Broker::default(),
             viewer,
             annotations: crate::annotations::State::default(),
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
@@ -1111,6 +1123,16 @@ impl Factory {
             }
             Err(error) => tracing::error!(agent = %id, %error, "could not read secret requests; decided ones show as pending"),
         }
+        match self.vault.proposals_of(id) {
+            Ok(proposals) => {
+                for proposal in proposals.into_iter().filter(|proposal| proposal.state() != v1::ConnectProposalState::Pending) {
+                    transcript.set_connect_proposal(proposal);
+                }
+            }
+            Err(error) => {
+                tracing::error!(agent = %id, %error, "could not read proposals to connect services; decided ones show as pending")
+            }
+        }
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
         if runtime.transcript.is_none() {
@@ -1650,7 +1672,11 @@ impl Factory {
             });
         }
         let config = &inner.config;
-        let vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
+        let mut vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
+        if vault.exists {
+            vault.connectors = self.broker.catalog();
+            vault.flows = self.broker.flows();
+        }
         v1::Workspace {
             map: Some(crate::map::build(config, &self.home, &vault)),
             projects,
@@ -1895,7 +1921,9 @@ impl Factory {
     }
 
     pub(crate) fn vault_changed(&self) {
-        self.redaction.set(factory_agent::Redactor::new(&self.vault.every_variable()));
+        let mut hidden = self.vault.every_variable();
+        hidden.extend(self.broker.hidden(&self.vault));
+        self.redaction.set(factory_agent::Redactor::new(&hidden));
         self.broadcast_workspace(&self.lock());
     }
 

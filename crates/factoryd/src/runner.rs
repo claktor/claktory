@@ -1204,6 +1204,8 @@ impl Factory {
                 };
                 // Locked after a restart: the account service may open it now.
                 crate::account::unlock_now(&factory).await;
+                // Secrets made from a connection are renewed first when due.
+                factory.renew_for(&agent, &names).await?;
                 factory.vault.resolve(&agent, &names)
             })
         });

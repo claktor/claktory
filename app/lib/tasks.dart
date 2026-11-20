@@ -276,7 +276,7 @@ class _TaskRowState extends State<TaskRow> {
                         ),
                       )
                     else
-                      CodeBlock(task.logTail),
+                      CodeBlock(task.logTail, links: true),
                     if (task.logPath.isNotEmpty) ...[
                       const SizedBox(height: Space.xs),
                       Text(

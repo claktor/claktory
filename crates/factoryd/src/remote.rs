@@ -58,6 +58,8 @@ use crate::transcript::now_ms;
 pub const ALPN: &[u8] = b"claktory/1";
 /// The same, compressed (`compressed`): what apps that have it offer first.
 pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
+/// A paired device reaching this machine's localhost (`crate::forward`).
+pub const ALPN_FORWARD: &[u8] = b"claktory-forward/1";
 /// How hard `claktory/2` compresses: zstd's default, fast enough that a
 /// transcript of megabytes costs milliseconds.
 const COMPRESSION: async_compression::Level = async_compression::Level::Default;
@@ -690,6 +692,19 @@ pub(crate) struct State {
     /// Connections of devices waiting to be allowed, or being told they
     /// weren't: remote access stays on for them until they've heard.
     waiting: AtomicU64,
+    /// The port Claktory's own listener has (7420), which devices may not
+    /// forward to; 0 until it listens.
+    listener_port: AtomicU64,
+}
+
+impl State {
+    pub(crate) fn set_listener_port(&self, port: u16) {
+        self.listener_port.store(u64::from(port), Ordering::Relaxed);
+    }
+
+    pub(crate) fn listener_port(&self) -> Option<u16> {
+        u16::try_from(self.listener_port.load(Ordering::Relaxed)).ok().filter(|port| *port != 0)
+    }
 }
 
 /// A device's connection waiting to be allowed, while it lives.
@@ -1158,6 +1173,7 @@ impl Factory {
             Err(error) => return Err(RequestError::Remote(error.to_string())),
         };
         self.close_device(&removed.id, &removed.endpoint_id);
+        self.cancel_device_flows(&removed.id);
         self.refresh_remote();
         Ok(())
     }
@@ -1384,7 +1400,7 @@ async fn bind(home: &Home, key: SecretKey, wanted: &Wanted, port: u16) -> Result
         let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
         let mut builder = builder
             .secret_key(key.clone())
-            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec()])
+            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec(), ALPN_FORWARD.to_vec()])
             .hooks(Gate { home: home.clone() })
             .relay_mode(relay_mode)
             .clear_ip_transports()
@@ -1438,6 +1454,11 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
         lock(&strong.remote.links).entry(endpoint_id.clone()).or_default().push((number, connection.clone()));
         number
     };
+    if connection.alpn() == ALPN_FORWARD {
+        crate::forward::serve(connection, factory.clone(), endpoint_id.clone()).await;
+        forget_link(&factory, &endpoint_id, number);
+        return;
+    }
     let compress = connection.alpn() == ALPN_COMPRESSED;
     tracing::info!(endpoint = %endpoint_id, compressed = compress, "tunnel connection opened");
     while let Ok((send, receive)) = connection.accept_bi().await {
@@ -1455,15 +1476,27 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
             }
         });
     }
+    forget_link(&factory, &endpoint_id, number);
+}
+
+/// A tunnel connection that ended no longer needs closing on unpair.
+fn forget_link(factory: &Weak<Factory>, endpoint_id: &str, number: u64) {
     if let Some(strong) = factory.upgrade() {
         let mut links = lock(&strong.remote.links);
-        if let Some(open) = links.get_mut(&endpoint_id) {
+        if let Some(open) = links.get_mut(endpoint_id) {
             open.retain(|(known, _)| *known != number);
             if open.is_empty() {
-                links.remove(&endpoint_id);
+                links.remove(endpoint_id);
             }
         }
     }
+}
+
+/// The id of the paired device whose key `endpoint_id` is, once it was
+/// allowed; None for any other key, a device still waiting included.
+pub(crate) fn paired_device(home: &Home, endpoint_id: &str) -> Option<String> {
+    let devices = devices(home).ok()?;
+    devices.into_iter().find(|device| !device.endpoint_id.is_empty() && device.endpoint_id == endpoint_id).map(|device| device.id)
 }
 
 /// A stream on `claktory/2`: the bytes `claktory/1` carries, each way one

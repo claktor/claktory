@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'account.dart' show signInPutOff;
 import 'backend.dart';
 import 'characters/character.dart';
+import 'connectors.dart';
 import 'controls.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
@@ -60,6 +61,16 @@ class SecretsSettings extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: Space.l),
                 child: SecretRequestCard(request, key: ValueKey(request.id)),
               ),
+            // Agents' proposals to connect a service, the same way.
+            for (final proposal in vault.proposals)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.l),
+                child: ConnectProposalCard(
+                  proposal,
+                  key: ValueKey(proposal.id),
+                ),
+              ),
+            const OtherConnectFlows(),
             if (vault.secrets.isEmpty)
               Text(
                 'No secrets yet.',
@@ -73,6 +84,14 @@ class SecretsSettings extends StatelessWidget {
               spacing: Space.s,
               runSpacing: Space.s,
               children: [
+                if (vault.connectors.isNotEmpty)
+                  Button(
+                    label: 'Connect a service…',
+                    onPressed: () => showModal(
+                      context,
+                      (context, close) => ConnectServiceForm(close: close),
+                    ),
+                  ),
                 Button(
                   label: 'Add a secret…',
                   onPressed: () => showModal(
@@ -414,7 +433,12 @@ class _SecretRowState extends State<_SecretRow> {
     ];
     final now = DateTime.now();
     final summary = [
-      given.isEmpty ? 'Not given to any agent' : 'Given to ${given.join(', ')}',
+      if (secret.hasConnection())
+        connectionSummary(backend, secret)
+      else
+        given.isEmpty
+            ? 'Not given to any agent'
+            : 'Given to ${given.join(', ')}',
       if (secret.lastUsedMs > 0)
         'Last used ${formatAge(secret.lastUsedMs.toInt(), now)}'
             '${secret.lastUsedBy.isEmpty ? '' : ' by ${_agentName(backend, secret.lastUsedBy)}'}',
@@ -482,16 +506,21 @@ class _SecretRowState extends State<_SecretRow> {
                                   color: palette.textMuted,
                                 ),
                               ),
-                            Text(
-                              [
-                                for (final variable in secret.variables)
-                                  variable.name,
-                              ].join(', '),
-                              style: TextStyles.caption.copyWith(
-                                fontFamily: TextStyles.mono,
-                                color: palette.textFaint,
+                            if (secret.hasConnection())
+                              ConnectionHeadline(secret: secret)
+                            else if (secret.hasExport())
+                              ExportHeadline(secret: secret),
+                            if (secret.variables.isNotEmpty)
+                              Text(
+                                [
+                                  for (final variable in secret.variables)
+                                    variable.name,
+                                ].join(', '),
+                                style: TextStyles.caption.copyWith(
+                                  fontFamily: TextStyles.mono,
+                                  color: palette.textFaint,
+                                ),
                               ),
-                            ),
                             Text(
                               summary,
                               style: TextStyles.caption.copyWith(
@@ -514,7 +543,18 @@ class _SecretRowState extends State<_SecretRow> {
               ),
             ),
           ),
-          if (_open) _details(context, palette, backend),
+          if (_open)
+            secret.hasConnection()
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      Space.s + Space.m + 2,
+                      0,
+                      Space.s,
+                      Space.m,
+                    ),
+                    child: ConnectionDetails(secret: secret),
+                  )
+                : _details(context, palette, backend),
         ],
       ),
     );
@@ -534,6 +574,14 @@ class _SecretRowState extends State<_SecretRow> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (secret.hasExport()) ...[
+            AccessLines(
+              access: secret.export.access,
+              resources: secret.export.resources,
+              expiresMs: secret.export.expiresMs.toInt(),
+            ),
+            const SizedBox(height: Space.m),
+          ],
           for (final variable in secret.variables)
             Padding(
               padding: const EdgeInsets.only(bottom: Space.xs),
@@ -1013,6 +1061,12 @@ class _SecretFormState extends State<SecretForm> {
     super.dispose();
   }
 
+  /// A connection or a secret made from one: its values are Claktory's to
+  /// keep, so only its name and description change here.
+  bool get _named =>
+      widget.secret?.hasConnection() == true ||
+      widget.secret?.hasExport() == true;
+
   Future<void> _submit() async {
     final editing = widget.secret;
     final name = _name.text.trim();
@@ -1021,7 +1075,7 @@ class _SecretFormState extends State<SecretForm> {
       return;
     }
     final typed = _variables.where((v) => v.value.text.isNotEmpty).length;
-    final replace = editing == null || typed > 0;
+    final replace = !_named && (editing == null || typed > 0);
     if (replace) {
       if (_variables.isEmpty ||
           _variables.any((v) => v.name.text.trim().isEmpty)) {
@@ -1100,36 +1154,7 @@ class _SecretFormState extends State<SecretForm> {
             minLines: 1,
           ),
         ),
-        Text(
-          'Values',
-          style: TextStyles.caption.copyWith(
-            color: palette.textMuted,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        if (editing != null)
-          Text(
-            'Leave the values empty to keep them. To change one, enter them '
-            'all.',
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
-          ),
-        const SizedBox(height: Space.xs + 2),
-        for (final (index, variable) in _variables.indexed)
-          _VariableFields(
-            key: ObjectKey(variable),
-            variable: variable,
-            onChanged: () => setState(() {}),
-            onRemove: _variables.length > 1
-                ? () => setState(() => _variables.removeAt(index).dispose())
-                : null,
-          ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Button(
-            label: 'Add another value',
-            onPressed: () => setState(() => _variables.add(_VariableEdit())),
-          ),
-        ),
+        if (!_named) ..._values(palette, editing),
         const SizedBox(height: Space.l),
       ],
       error: _error,
@@ -1138,6 +1163,39 @@ class _SecretFormState extends State<SecretForm> {
       onCancel: widget.close,
     );
   }
+
+  List<Widget> _values(Palette palette, SecretInfo? editing) => [
+    Text(
+      'Values',
+      style: TextStyles.caption.copyWith(
+        color: palette.textMuted,
+        fontWeight: FontWeight.w500,
+      ),
+    ),
+    if (editing != null)
+      Text(
+        'Leave the values empty to keep them. To change one, enter them '
+        'all.',
+        style: TextStyles.caption.copyWith(color: palette.textFaint),
+      ),
+    const SizedBox(height: Space.xs + 2),
+    for (final (index, variable) in _variables.indexed)
+      _VariableFields(
+        key: ObjectKey(variable),
+        variable: variable,
+        onChanged: () => setState(() {}),
+        onRemove: _variables.length > 1
+            ? () => setState(() => _variables.removeAt(index).dispose())
+            : null,
+      ),
+    Align(
+      alignment: Alignment.centerLeft,
+      child: Button(
+        label: 'Add another value',
+        onPressed: () => setState(() => _variables.add(_VariableEdit())),
+      ),
+    ),
+  ];
 }
 
 class _VariableFields extends StatelessWidget {

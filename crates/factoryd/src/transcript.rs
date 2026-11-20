@@ -350,6 +350,18 @@ impl Transcript {
         Some(entry.clone())
     }
 
+    /// Shows an agent's proposal to connect a service as it is now; the
+    /// changed entry, or None if the conversation doesn't show it.
+    pub fn set_connect_proposal(&mut self, proposal: v1::ConnectProposal) -> Option<Entry> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(&entry.kind, Some(Kind::ConnectProposal(shown)) if shown.id == proposal.id))?;
+        entry.kind = Some(Kind::ConnectProposal(proposal));
+        Some(entry.clone())
+    }
+
     /// Adds a harness notice. Notices are for display only and aren't saved.
     pub fn notice(&mut self, text: impl Into<String>, level: NoticeLevel) -> Entry {
         self.push(now_ms(), notice(text.into(), level))
@@ -497,6 +509,10 @@ impl Transcript {
                 // So does a request for a secret.
                 if let Some(request) = crate::vault::asks::requested(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::SecretRequest(request)));
+                }
+                // And a proposal to connect a service.
+                if let Some(proposal) = crate::connectors::proposals::proposed(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::ConnectProposal(proposal)));
                 }
                 changed
             }

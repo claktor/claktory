@@ -12,6 +12,7 @@ import 'agent_name.dart';
 import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
+import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
 import 'explorer.dart' show openFile;
 import 'extensions.dart' show logTime;
@@ -1036,8 +1037,13 @@ class _EntryViewState extends State<EntryView> {
         ),
         Space.l,
       ),
-      // Shown once the app has its card.
-      Entry_Kind.connectProposal ||
+      Entry_Kind.connectProposal => (
+        ConnectProposalCard(
+          key: ValueKey(entry.connectProposal.id),
+          entry.connectProposal,
+        ),
+        Space.l,
+      ),
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
     return Padding(
@@ -2302,7 +2308,12 @@ class _ToolCallBody extends StatelessWidget {
     } else if (call.name == 'edit_file' && !failed) {
       output = DiffView(call.output);
     } else {
-      output = CodeBlock(call.output, color: failed ? palette.danger : null);
+      output = CodeBlock(
+        call.output,
+        color: failed ? palette.danger : null,
+        // A CLI's sign-in page, say, opened through the tunnel's forwarding.
+        links: call.name == 'bash',
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

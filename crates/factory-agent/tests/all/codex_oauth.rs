@@ -181,7 +181,12 @@ async fn browser_login_takes_the_callback_and_exchanges_the_code() {
             let ok =
                 reqwest::get(format!("http://127.0.0.1:{port}/auth/callback?code=browser-code&state={state}")).await.expect("callback");
             assert_eq!(ok.status().as_u16(), 200);
-            assert!(ok.text().await.expect("html").contains("OpenAI authentication completed. You can close this window."));
+            assert!(
+                ok.text()
+                    .await
+                    .expect("html")
+                    .contains("Claktory is finishing your ChatGPT sign-in. You can close this tab and go back to Claktory to see how it went.")
+            );
             return (challenge, port);
         }
     });

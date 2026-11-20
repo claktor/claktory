@@ -123,6 +123,32 @@ class ViewAxis extends $pb.ProtobufEnum {
   const ViewAxis._(super.value, super.name);
 }
 
+class SuggestionDecision extends $pb.ProtobufEnum {
+  /// Not decided yet.
+  static const SuggestionDecision SUGGESTION_DECISION_UNSPECIFIED =
+      SuggestionDecision._(
+          0, _omitEnumNames ? '' : 'SUGGESTION_DECISION_UNSPECIFIED');
+  static const SuggestionDecision SUGGESTION_DECISION_ACCEPTED =
+      SuggestionDecision._(
+          1, _omitEnumNames ? '' : 'SUGGESTION_DECISION_ACCEPTED');
+  static const SuggestionDecision SUGGESTION_DECISION_REJECTED =
+      SuggestionDecision._(
+          2, _omitEnumNames ? '' : 'SUGGESTION_DECISION_REJECTED');
+
+  static const $core.List<SuggestionDecision> values = <SuggestionDecision>[
+    SUGGESTION_DECISION_UNSPECIFIED,
+    SUGGESTION_DECISION_ACCEPTED,
+    SUGGESTION_DECISION_REJECTED,
+  ];
+
+  static final $core.List<SuggestionDecision?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static SuggestionDecision? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SuggestionDecision._(super.value, super.name);
+}
+
 class ThreadStatus extends $pb.ProtobufEnum {
   static const ThreadStatus THREAD_STATUS_UNSPECIFIED =
       ThreadStatus._(0, _omitEnumNames ? '' : 'THREAD_STATUS_UNSPECIFIED');

@@ -109,11 +109,18 @@ fn render_page(title: &str, heading: &str, message: &str, details: Option<&str>)
 }
 
 pub fn success_html(message: &str) -> String {
-    render_page("Authentication successful", "Authentication successful", message, None)
+    render_page("Signed in", "Signed in", message, None)
+}
+
+/// The page a callback shows before Claktory has exchanged the code, which
+/// may still fail: it says the sign-in is being finished, not that it worked.
+pub fn finishing_html(provider: &str) -> String {
+    let message = format!("Claktory is finishing your {provider} sign-in. You can close this tab and go back to Claktory to see how it went.");
+    render_page("Finishing sign-in", "Finishing sign-in", &message, None)
 }
 
 pub fn error_html(message: &str, details: Option<&str>) -> String {
-    render_page("Authentication failed", "Authentication failed", message, details)
+    render_page("Couldn't sign in", "Couldn't sign in", message, details)
 }
 
 pub fn base64url(bytes: &[u8]) -> String {

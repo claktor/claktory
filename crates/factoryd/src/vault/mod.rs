@@ -14,6 +14,7 @@
 
 mod account;
 pub(crate) mod asks;
+pub(crate) mod connections;
 mod crypto;
 pub(crate) mod env;
 pub mod handoff;
@@ -134,6 +135,40 @@ CREATE TABLE kept (
 -- The secret given for a request, which the person picks: its id and name.
 ALTER TABLE requests ADD COLUMN given TEXT NOT NULL DEFAULT '';
 ALTER TABLE requests ADD COLUMN given_name TEXT NOT NULL DEFAULT '';
+",
+    "
+-- Connected services (docs/CONNECTORS.md): a secret's kind ('' the
+-- person's, 'connection', 'export'), its connector, an export's connection,
+-- and what it reaches as JSON (never a token).
+ALTER TABLE secrets ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE secrets ADD COLUMN connector TEXT NOT NULL DEFAULT '';
+ALTER TABLE secrets ADD COLUMN parent TEXT NOT NULL DEFAULT '';
+ALTER TABLE secrets ADD COLUMN meta TEXT NOT NULL DEFAULT '';
+-- A connection's tokens, the connector's JSON, sealed with its secret's key
+-- and bound to the vault, secret, connector and generation; never a
+-- variable, so never given to a command.
+CREATE TABLE controls (
+    secret TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    sealed BLOB NOT NULL
+);
+-- Agents' proposals to connect a service (secrets_propose_connection).
+CREATE TABLE connect_proposals (
+    id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    access_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    access TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    -- pending, connected, dismissed
+    state TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    decided INTEGER NOT NULL DEFAULT 0,
+    comment TEXT NOT NULL DEFAULT '',
+    secret TEXT NOT NULL DEFAULT '',
+    secret_name TEXT NOT NULL DEFAULT ''
+);
 ",
 ];
 
@@ -261,9 +296,9 @@ fn check_name(name: &str) -> Result<String, VaultError> {
     if name.is_empty() {
         return Err(VaultError::Invalid("A secret needs a name.".to_owned()));
     }
-    if name.chars().count() > 64 || !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')) {
+    if name.chars().count() > 64 || !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '@' | '(' | ')')) {
         return Err(VaultError::Invalid(format!(
-            "\"{name}\" can't be a secret's name: use letters, digits, spaces, '-', '_' or '.', up to 64."
+            "\"{name}\" can't be a secret's name. Use letters, digits, spaces and - _ . @ ( ), up to 64 characters."
         )));
     }
     Ok(name.to_owned())
@@ -719,6 +754,11 @@ impl Vault {
         let transaction = db.transaction()?;
         let (id, before) = Self::secret_id(&transaction, id)?;
         Self::name_taken(&transaction, &name, &id)?;
+        if values.is_some() && !Self::kind_of(&transaction, &id)?.is_empty() {
+            return Err(VaultError::Invalid(format!(
+                "{before} is made from a connected service, so its values can't be edited. Rename it, or connect the service again."
+            )));
+        }
         let now = now_ms();
         transaction.execute(
             "UPDATE secrets SET name = ?2, description = ?3, updated = ?4 WHERE id = ?1",
@@ -741,6 +781,9 @@ impl Vault {
         let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
         let transaction = db.transaction()?;
         let (id, name) = Self::secret_id(&transaction, id)?;
+        if Self::kind_of(&transaction, &id)? == connections::KIND_CONNECTION {
+            return Err(VaultError::Invalid(format!("To remove {name}, disconnect it.")));
+        }
         let agents = transaction
             .prepare("SELECT agent FROM grants WHERE secret = ?1 ORDER BY granted")?
             .query_map([&id], |row| row.get(0))?
@@ -767,6 +810,11 @@ impl Vault {
         let key = Self::grant_key(&inner)?;
         let db = Self::db(&inner)?;
         let (id, name) = Self::secret_id(db, id)?;
+        if Self::kind_of(db, &id)? == connections::KIND_CONNECTION {
+            return Err(VaultError::Invalid(format!(
+                "Agents can't be given {name} itself. Make a secret from it with only the access the work needs, and give that."
+            )));
+        }
         let now = now_ms();
         let mac = crypto::mac(&key, &grant_message(&inner.vault_id, &id, agent, now));
         db.execute("INSERT OR REPLACE INTO grants (secret, agent, granted, mac) VALUES (?1, ?2, ?3, ?4)", params![id, agent, now, mac])?;
@@ -799,6 +847,7 @@ impl Vault {
             .collect::<Result<Vec<String>, _>>()?;
         db.execute("DELETE FROM grants WHERE agent = ?1", [agent])?;
         db.execute("DELETE FROM requests WHERE agent = ?1", [agent])?;
+        db.execute("DELETE FROM connect_proposals WHERE agent = ?1", [agent])?;
         inner.state = None;
         Ok(names)
     }
@@ -961,6 +1010,7 @@ impl Vault {
                 }
                 secret.grants.push(v1::SecretGrant { agent_id: agent, granted_ms: granted, running_tasks: 0 });
             }
+            Self::connection_view(db, &mut secret)?;
             secrets.push(secret);
         }
         let state = v1::VaultState {
@@ -969,6 +1019,7 @@ impl Vault {
             locked_mode: inner.locked_mode,
             secrets,
             requests: asks::pending(db)?,
+            proposals: connections::pending_proposals(db)?,
             ..v1::VaultState::default()
         };
         Ok((state, recent))

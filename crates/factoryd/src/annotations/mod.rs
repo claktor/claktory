@@ -85,6 +85,16 @@ CREATE INDEX thread_comments_by_thread ON thread_comments (thread, id);
 CREATE TABLE thread_files (path TEXT PRIMARY KEY, sha TEXT NOT NULL, text TEXT NOT NULL);
 ";
 
+/// Suggestions: a change to a thread's text, proposed (slice 2).
+pub(crate) const SUGGESTIONS: &str = "
+-- A change to a thread's text, proposed: the replacement (null for none),
+-- the agent who suggested it ('' for the person), and what became of it
+-- ('' until decided, accepted or rejected).
+ALTER TABLE threads ADD COLUMN suggestion TEXT;
+ALTER TABLE threads ADD COLUMN suggested_by TEXT;
+ALTER TABLE threads ADD COLUMN decision TEXT;
+";
+
 /// Text files are commented on up to this size, as viewers read them.
 const TEXT_LIMIT: u64 = 2_000_000;
 /// Images up to this size.
@@ -255,10 +265,19 @@ struct Thread {
     original: String,
     created: i64,
     updated: i64,
+    suggestion: Option<Suggestion>,
 }
 
-const THREAD_COLUMNS: &str =
-    "id, agent, path, kind, version, range_start, range_end, quote, selectors, status, anchor, original, created, updated";
+/// A replacement proposed for a thread's text.
+#[derive(Clone, Debug)]
+struct Suggestion {
+    replacement: String,
+    /// An agent's id; empty for the person.
+    by: String,
+    decision: v1::SuggestionDecision,
+}
+
+const THREAD_COLUMNS: &str = "id, agent, path, kind, version, range_start, range_end, quote, selectors, status, anchor, original, created, updated, suggestion, suggested_by, decision";
 
 fn anchor_name(anchor: v1::AnchorState) -> &'static str {
     match anchor {
@@ -300,6 +319,15 @@ impl Thread {
             original: row.get(11)?,
             created: row.get(12)?,
             updated: row.get(13)?,
+            suggestion: row.get::<_, Option<String>>(14)?.map(|replacement| Suggestion {
+                replacement,
+                by: row.get::<_, Option<String>>(15).ok().flatten().unwrap_or_default(),
+                decision: match row.get::<_, Option<String>>(16).ok().flatten().as_deref() {
+                    Some("accepted") => v1::SuggestionDecision::Accepted,
+                    Some("rejected") => v1::SuggestionDecision::Rejected,
+                    _ => v1::SuggestionDecision::Unspecified,
+                },
+            }),
         })
     }
 
@@ -502,6 +530,11 @@ fn to_proto(db: &Connection, thread: &Thread, doc: Option<&Doc>) -> rusqlite::Re
         comments,
         created_ms: thread.created,
         updated_ms: thread.updated,
+        suggestion: thread.suggestion.as_ref().map(|suggestion| v1::Suggestion {
+            replacement: suggestion.replacement.clone(),
+            author_agent_id: suggestion.by.clone(),
+            decision: suggestion.decision.into(),
+        }),
         ..v1::Thread::default()
     };
     if !thread.is_text() {
@@ -581,10 +614,14 @@ impl Factory {
     pub(crate) fn create_thread(self: &Arc<Self>, request: &v1::CreateThread) -> Result<v1::Thread, RequestError> {
         self.known_agent(&request.agent_id)?;
         let body = request.body.trim();
-        if body.is_empty() {
+        // A suggested change needs no words: its comment may be empty.
+        if body.is_empty() && request.suggestion.is_none() {
             return Err(RequestError::Empty("body"));
         }
         let kind = Kind::parse(&request.kind)?;
+        if request.suggestion.is_some() && kind == Kind::Image {
+            return Err(RequestError::Comments("Changes can be suggested only for text.".to_owned()));
+        }
         let path = absolute(&request.path)?;
         let (thread, comment) = {
             let _work = self.comments_lock();
@@ -610,6 +647,12 @@ impl Factory {
                 ],
             )?;
             let thread = db.last_insert_rowid();
+            if let Some(suggestion) = &request.suggestion {
+                db.execute(
+                    "UPDATE threads SET suggestion = ?2, suggested_by = '', decision = '' WHERE id = ?1",
+                    params![thread, suggestion],
+                )?;
+            }
             db.execute(
                 "INSERT INTO thread_comments (thread, author, body, created, draft) VALUES (?1, '', ?2, ?3, ?4)",
                 params![thread, body, now, !request.send_now],
@@ -741,6 +784,111 @@ impl Factory {
         Ok(())
     }
 
+    /// DecideSuggestion: the person accepts a suggested change (Claktory
+    /// makes it in the file) or rejects it; either resolves the thread.
+    pub(crate) fn decide_suggestion(self: &Arc<Self>, request: &v1::DecideSuggestion) -> Result<(), RequestError> {
+        let person = self.lock().config.person_capitalized().to_owned();
+        let tell = {
+            let _work = self.comments_lock();
+            let db = self.store.db();
+            let found = find_thread(&db, &request.thread_id)?;
+            let Some(suggestion) = found.suggestion.clone() else {
+                return Err(RequestError::Comments("This comment doesn't suggest a change.".to_owned()));
+            };
+            if suggestion.decision != v1::SuggestionDecision::Unspecified {
+                return Err(RequestError::Comments("This change was already accepted or rejected.".to_owned()));
+            }
+            let (content, _) = refresh(&db, &found.path)?;
+            let thread = thread(&db, found.id)?.unwrap_or(found);
+            let before = thread.quote.exact.clone();
+            if request.accept {
+                self.make_change(&db, &thread, content, &suggestion.replacement)?;
+            }
+            let sent = comments_of(&db, thread.id)?.iter().any(|comment| !comment.draft);
+            let decision = if request.accept { "accepted" } else { "rejected" };
+            db.execute("UPDATE threads SET decision = ?2, status = 'resolved' WHERE id = ?1", params![thread.id, decision])?;
+            // Its unsent comments are kept with it, never sent: the change
+            // is decided, so they'd only tell the agent of it as if new.
+            db.execute("UPDATE thread_comments SET draft = 0 WHERE thread = ?1 AND draft = 1", [thread.id])?;
+            touch(&db, thread.id)?;
+            self.broadcast_threads(&db, &thread.path)?;
+            let change = format!("“{}” → “{}”", shown(&before), shown(&suggestion.replacement));
+            let file = file_name(&thread.path);
+            match (suggestion.by.is_empty(), request.accept) {
+                // The agent's suggestion: it hears what became of it.
+                (false, true) => Some((
+                    suggestion.by.clone(),
+                    format!("{person} accepted your suggested change {} on {file}.", thread.name()),
+                    format!("{change}\nThe file has it now: {}", thread.path),
+                )),
+                (false, false) => Some((
+                    suggestion.by.clone(),
+                    format!("{person} rejected your suggested change {} on {file}.", thread.name()),
+                    format!("{change}\nThe file is as it was: {}", thread.path),
+                )),
+                // Their own, already sent: the agent mustn't make it again.
+                (true, true) if sent => Some((
+                    thread.agent.clone(),
+                    format!("{person} made the change they suggested in {} on {file} themselves.", thread.name()),
+                    format!("{change}\nThe file has it now: {}", thread.path),
+                )),
+                _ => None,
+            }
+        };
+        if let Some((agent, summary, details)) = tell
+            && self.lock().config.agent(&agent).is_some()
+        {
+            let text = format!("{summary}\n{details}");
+            let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+            self.deliver_event(&agent, text, event);
+        }
+        Ok(())
+    }
+
+    /// Replaces a thread's text in its file with `replacement`, if the text
+    /// is still the one it was made on; the thread then holds the new text.
+    fn make_change(&self, db: &Connection, thread: &Thread, content: Content, replacement: &str) -> Result<(), RequestError> {
+        let changed = || RequestError::Comments("The text changed after this was suggested.".to_owned());
+        let Content::Text { text, .. } = content else { return Err(changed()) };
+        let source = anchor::units(&text);
+        let range = match (&thread.range, thread.anchor) {
+            (Some(range), v1::AnchorState::Anchored) if range.end <= source.len() => range.clone(),
+            _ => return Err(changed()),
+        };
+        let added = anchor::units(replacement);
+        let mut new = source[..range.start].to_vec();
+        new.extend_from_slice(&added);
+        new.extend_from_slice(&source[range.end..]);
+        let new = anchor::string(&new);
+        write_atomic(Path::new(&thread.path), &new)?;
+        // The other threads follow the change; this one is on the new text.
+        refresh(db, &thread.path)?;
+        let mut placed = self::thread(db, thread.id)?.unwrap_or_else(|| thread.clone());
+        let doc = Doc::new(&new, is_markdown(&thread.path));
+        let range = range.start..range.start + added.len();
+        match doc.quote(placed.kind.space(), &range) {
+            Some(quote) => {
+                placed.original = anchor::string(&quote.exact);
+                placed.quote = QuoteJson::of(&quote);
+                placed.range = Some(range);
+                placed.anchor = v1::AnchorState::Anchored;
+            }
+            // Deleted: nothing left to show it on.
+            None => {
+                placed.range = None;
+                placed.anchor = v1::AnchorState::Detached;
+            }
+        }
+        save_place(db, &placed)?;
+        let sha = sha256(new.as_bytes());
+        guard(&self.annotations.seen).entry(thread.path.clone()).and_modify(|seen| {
+            seen.stamp = stamp(Path::new(&thread.path));
+            seen.sha.clone_from(&sha);
+        });
+        self.send(Body::FileChanged(v1::FileChanged { path: thread.path.clone(), sha256: sha, by_agent_id: String::new() }));
+        Ok(())
+    }
+
     /// SendComments: the person's drafts on a file (or every file) to the
     /// agent they're addressed to.
     pub(crate) fn send_comments(self: &Arc<Self>, request: &v1::SendComments) -> Result<(), RequestError> {
@@ -826,6 +974,19 @@ impl Factory {
     }
 }
 
+/// Writes a file whole or not at all, keeping its permissions.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let name = path.file_name().map_or_else(|| "file".to_owned(), |name| name.to_string_lossy().into_owned());
+    let temporary = path.with_file_name(format!(".{name}.claktory-{}", std::process::id()));
+    std::fs::write(&temporary, text)?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&temporary, metadata.permissions());
+    }
+    std::fs::rename(&temporary, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })
+}
+
 fn file_name(path: &str) -> String {
     Path::new(path).file_name().map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
@@ -864,8 +1025,11 @@ fn event_section(thread: &Thread, doc: Option<&Doc>, comments: &[Comment], first
     } else {
         let _ = write!(section, " (a region of the image: {})", thread.selectors);
     }
+    if let Some(suggestion) = thread.suggestion.as_ref().filter(|suggestion| suggestion.by.is_empty()) {
+        let _ = write!(section, ", suggesting “{}” instead", shown(&suggestion.replacement));
+    }
     section.push('\n');
-    for comment in comments {
+    for comment in comments.iter().filter(|comment| !comment.body.trim().is_empty()) {
         if Some(comment.id) != first {
             section.push_str("Reply: ");
         }
@@ -1077,7 +1241,7 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
             }
             let comments: Vec<Comment> =
                 comments_of(&db, thread.id).map_err(|error| error.to_string())?.into_iter().filter(|comment| !comment.draft).collect();
-            if comments.is_empty() {
+            if comments.is_empty() && !suggested_by(&thread, agent) {
                 continue;
             }
             count += 1;
@@ -1093,7 +1257,16 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
                 let _ = write!(out, ": “{}”", shown(&thread.quote.exact));
             }
             out.push('\n');
-            for comment in comments {
+            if let Some(suggestion) = &thread.suggestion {
+                let who = if suggestion.by.is_empty() { person.as_str() } else { "You" };
+                let state = match suggestion.decision {
+                    v1::SuggestionDecision::Accepted => "accepted",
+                    v1::SuggestionDecision::Rejected => "rejected",
+                    v1::SuggestionDecision::Unspecified => "not decided yet",
+                };
+                let _ = writeln!(out, "  {who} suggested “{}” instead ({state})", shown(&suggestion.replacement));
+            }
+            for comment in comments.iter().filter(|comment| !comment.body.trim().is_empty()) {
                 let who = if comment.author.is_empty() {
                     person.clone()
                 } else if comment.author == agent {
@@ -1115,6 +1288,11 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
     Ok(out.trim_end().to_owned())
 }
 
+/// The agent suggested the change the thread holds.
+fn suggested_by(thread: &Thread, agent: &str) -> bool {
+    thread.suggestion.as_ref().is_some_and(|suggestion| suggestion.by == agent)
+}
+
 /// A thread addressed to `agent` that it can see.
 fn agents_thread(db: &Connection, agent: &str, id: &str) -> Result<Thread, String> {
     let found = find_thread(db, id).map_err(|_| format!("There's no thread {id}."))?;
@@ -1122,7 +1300,7 @@ fn agents_thread(db: &Connection, agent: &str, id: &str) -> Result<Thread, Strin
         return Err(format!("{} isn't addressed to you.", found.name()));
     }
     let sent = comments_of(db, found.id).map_err(|error| error.to_string())?.iter().any(|comment| !comment.draft);
-    if !sent {
+    if !sent && !suggested_by(&found, agent) {
         return Err(format!("There's no thread {id}."));
     }
     Ok(found)
@@ -1157,9 +1335,17 @@ pub(crate) fn agent_reply(factory: &Factory, agent: &str, id: &str, body: &str, 
 
 /// The agent leaves a comment on `path` (relative to `folder`), on the text
 /// `quote` quotes, for the person.
-pub(crate) fn agent_add(factory: &Factory, agent: &str, folder: &Path, path: &str, quote: &Quote, body: &str) -> Result<String, String> {
+pub(crate) fn agent_add(
+    factory: &Factory,
+    agent: &str,
+    folder: &Path,
+    path: &str,
+    quote: &Quote,
+    body: &str,
+    suggestion: Option<&str>,
+) -> Result<String, String> {
     let body = body.trim();
-    if body.is_empty() {
+    if body.is_empty() && suggestion.is_none() {
         return Err("body is empty: say what the comment is.".to_owned());
     }
     if quote.exact.is_empty() {
@@ -1201,13 +1387,25 @@ pub(crate) fn agent_add(factory: &Factory, agent: &str, folder: &Path, path: &st
     )
     .map_err(fail)?;
     let thread = db.last_insert_rowid();
-    db.execute(
-        "INSERT INTO thread_comments (thread, author, body, created, draft) VALUES (?1, ?2, ?3, ?4, 0)",
-        params![thread, agent, body, now],
-    )
-    .map_err(fail)?;
+    if let Some(suggestion) = suggestion {
+        db.execute(
+            "UPDATE threads SET suggestion = ?2, suggested_by = ?3, decision = '' WHERE id = ?1",
+            params![thread, suggestion, agent],
+        )
+        .map_err(fail)?;
+    }
+    if !body.is_empty() {
+        db.execute(
+            "INSERT INTO thread_comments (thread, author, body, created, draft) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![thread, agent, body, now],
+        )
+        .map_err(fail)?;
+    }
     factory.broadcast_threads(&db, &path).map_err(fail)?;
     let (first, last) = doc.lines(&range);
     let lines = if first == last { format!("line {first}") } else { format!("lines {first}–{last}") };
-    Ok(format!("Commented on {path}, {lines} (t-{thread}); {person} sees it with the file."))
+    Ok(match suggestion {
+        Some(_) => format!("Suggested the change on {path}, {lines} (t-{thread}); {person} accepts or rejects it, and you'll hear which."),
+        None => format!("Commented on {path}, {lines} (t-{thread}); {person} sees it with the file."),
+    })
 }

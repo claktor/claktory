@@ -6,9 +6,11 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:protobuf/protobuf.dart';
 
+import 'annotations.dart' show ThreadStore;
 import 'app_update.dart';
 import 'attachments.dart';
 import 'connections.dart';
+import 'loopback_forward.dart';
 import 'device_kind.dart' show thisDeviceKindForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
@@ -109,6 +111,13 @@ class Backend {
 
   /// What glows as state changes, and what's said beside it.
   final HighlightStore highlights;
+
+  /// Comments on files, by path, as the backend last sent them
+  /// (annotations.dart).
+  final threads = ThreadStore();
+
+  /// The last file in any agent's panes the backend said changed.
+  final fileChanged = ValueNotifier<FileChanged?>(null);
 
   /// True from the backend's `welcome` until the connection drops.
   final connected = ValueNotifier<bool>(false);
@@ -294,6 +303,27 @@ class Backend {
 
   Tunnel? _tunnel;
   RemoteFactory? _tunnelTarget;
+
+  /// The ports this device forwards to the backend's machine, for browser
+  /// flows that come back to localhost there (loopback_forward.dart).
+  late final forwards = LoopbackForwards(
+    remote: () => target != null,
+    forward: forwardPort,
+  );
+
+  /// Listens on [port] of this device's loopback and carries each
+  /// connection through the tunnel to the same port on the backend's
+  /// machine (throws [ForwardFailure]).
+  Future<PortForward> forwardPort(int port) async {
+    final open = _tunnel;
+    if (open == null) {
+      throw const ForwardFailure(
+        ForwardProblem.failed,
+        'Not connected to it right now.',
+      );
+    }
+    return open.forwardPort(port);
+  }
   Timer? _tunnelWatch;
 
   Future<void> run() async {
@@ -531,6 +561,8 @@ class Backend {
     _tunnel = null;
     _tunnelTarget = null;
     tunnel.value = null;
+    // Its forwards go with it.
+    if (open != null) await forwards.stopAll();
     await open?.close();
   }
 
@@ -564,6 +596,7 @@ class Backend {
     _sleepWatch?.cancel();
     _wakeUp();
     await _socket?.close();
+    await forwards.stopAll();
     await _closeTunnel();
   }
 
@@ -916,6 +949,67 @@ class Backend {
     return reply.secretUses.uses;
   }
 
+  /// Starts connecting a service (docs/CONNECTORS.md): the flow, and the
+  /// page to open on this device. Only this device gets it.
+  Future<ConnectStarted> startConnect(StartConnect start) async {
+    final reply = await _call(ClientMessage(startConnect: start));
+    if (!reply.hasConnectStarted()) {
+      throw const RequestFailure('Claktory sent no page to open.');
+    }
+    return reply.connectStarted;
+  }
+
+  /// The whole address the browser came back to, as it is.
+  Future<void> finishConnect(String flowId, String callbackUrl) => _request(
+    ClientMessage(
+      finishConnect: FinishConnect(flowId: flowId, callbackUrl: callbackUrl),
+    ),
+  );
+
+  /// Stops a flow, or takes an ended one off the list.
+  Future<void> cancelConnect(String flowId) =>
+      _request(ClientMessage(cancelConnect: CancelConnect(flowId: flowId)));
+
+  Future<void> dismissConnectProposal(
+    String proposalId, {
+    String comment = '',
+  }) => _request(
+    ClientMessage(
+      dismissConnectProposal: DismissConnectProposal(
+        proposalId: proposalId,
+        comment: comment,
+      ),
+    ),
+  );
+
+  /// What a secret can be made of from the connection [secretId]: its
+  /// accounts, zones, roles and permissions, and how to pick.
+  Future<ConnectChoices> listConnectChoices(String secretId) async {
+    final reply = await _call(
+      ClientMessage(listConnectChoices: ListConnectChoices(secretId: secretId)),
+    );
+    if (!reply.hasConnectChoices()) {
+      throw const RequestFailure('Claktory sent no choices.');
+    }
+    return reply.connectChoices;
+  }
+
+  /// Makes a secret from a connection, with only the access asked for.
+  Future<void> deriveSecret(DeriveSecret derive) =>
+      _request(ClientMessage(deriveSecret: derive));
+
+  /// Removes a connection and the secrets made from it; with [revoke], at
+  /// the service too.
+  Future<void> disconnectService(String secretId, {bool revoke = false}) =>
+      _request(
+        ClientMessage(
+          disconnectService: DisconnectService(
+            secretId: secretId,
+            revoke: revoke,
+          ),
+        ),
+      );
+
   /// Emails a code to sign this Claktory in to [email].
   Future<void> accountSignIn(String email) =>
       _request(ClientMessage(accountSignIn: AccountSignIn(email: email)));
@@ -1121,6 +1215,82 @@ class Backend {
     return reply.fileContent;
   }
 
+  /// Asks for the comments on [path]; they arrive in [threads].
+  Future<void> listThreads(String path) =>
+      _call(ClientMessage(listThreads: ListThreads(path: path)));
+
+  /// Comments on a passage of [path] (see annotations.dart); answers the
+  /// new thread, also put in [threads].
+  Future<Thread> createThread(CreateThread thread) async {
+    final reply = await _call(ClientMessage(createThread: thread));
+    if (!reply.hasThread()) {
+      throw const RequestFailure('Claktory sent no comment.');
+    }
+    return reply.thread;
+  }
+
+  Future<void> replyThread(
+    String threadId,
+    String body, {
+    bool sendNow = false,
+  }) => _request(
+    ClientMessage(
+      replyThread: ReplyThread(
+        threadId: threadId,
+        body: body,
+        sendNow: sendNow,
+      ),
+    ),
+  );
+
+  Future<void> editComment(String commentId, String body) => _request(
+    ClientMessage(
+      editComment: EditComment(commentId: commentId, body: body),
+    ),
+  );
+
+  Future<void> deleteComment(String commentId) => _request(
+    ClientMessage(deleteComment: DeleteComment(commentId: commentId)),
+  );
+
+  Future<void> setThreadStatus(String threadId, {required bool resolved}) =>
+      _request(
+        ClientMessage(
+          setThreadStatus: SetThreadStatus(
+            threadId: threadId,
+            resolved: resolved,
+          ),
+        ),
+      );
+
+  Future<void> readdressThread(String threadId, String agentId) => _request(
+    ClientMessage(
+      readdressThread: ReaddressThread(threadId: threadId, agentId: agentId),
+    ),
+  );
+
+  Future<void> reattachThread(ReattachThread reattach) =>
+      _request(ClientMessage(reattachThread: reattach));
+
+  /// Sends [agentId] every draft comment on [path] as one message.
+  Future<void> sendComments(String agentId, String path) => _request(
+    ClientMessage(
+      sendComments: SendComments(agentId: agentId, path: path),
+    ),
+  );
+
+  /// Accepts a suggested change (Claktory makes it in the file) or rejects
+  /// it; either resolves its thread.
+  Future<void> decideSuggestion(String threadId, {required bool accept}) =>
+      _request(
+        ClientMessage(
+          decideSuggestion: DecideSuggestion(
+            threadId: threadId,
+            accept: accept,
+          ),
+        ),
+      );
+
   /// Lays out [agentId]'s panes; null (or a lone chat leaf) clears it.
   Future<void> setLayout(String agentId, ViewNode? root) => _request(
     ClientMessage(
@@ -1259,12 +1429,15 @@ class Backend {
       case ServerMessage_Body.uploadedFile:
       case ServerMessage_Body.connectStarted:
       case ServerMessage_Body.connectChoices:
-      // Comments on files (Zoe's side to come): answers complete requests,
-      // broadcasts (reply_to 0) are let be until then.
-      case ServerMessage_Body.threadList:
-      case ServerMessage_Body.thread:
-      case ServerMessage_Body.fileChanged:
         _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.threadList:
+        threads.apply(message.threadList);
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.thread:
+        threads.put(message.thread);
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.fileChanged:
+        fileChanged.value = message.fileChanged;
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
         break;

@@ -353,7 +353,8 @@ impl Models for Scripted {
             } else {
                 format!("echo: {prompt}")
             };
-            let (first, second) = reply.split_at(reply.len() / 2);
+            let half = (0..=reply.len() / 2).rev().find(|at| reply.is_char_boundary(*at)).unwrap_or(0);
+            let (first, second) = reply.split_at(half);
             let mut partial = AssistantMessage {
                 content: Vec::new(),
                 api: model.api.clone(),

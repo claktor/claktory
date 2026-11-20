@@ -23,8 +23,7 @@ static MANIFEST: Manifest = Manifest {
     name: "Comments",
     icon: "message-square-text",
     description: "Lets you comment on files it shows you, and lets it answer your comments and leave its own.",
-    // Off until the app shows comments.
-    default_enabled: false,
+    default_enabled: true,
     options: &[],
 };
 
@@ -32,6 +31,7 @@ const LIST: &str = "List the comment threads on files addressed to you: each thr
 const REPLY: &str =
     "Answer on a comment thread: the person sees your reply beside the text in the file. thread: its id, such as t-41. body: Markdown.";
 const RESOLVE: &str = "Resolve a comment thread once it's dealt with, with an optional note saying what you did (\"Split it into two sentences\"). thread: its id, such as t-41.";
+const SUGGEST: &str = "Suggest a change to a file for the person to accept or reject, rather than making it yourself: they see the text and your replacement side by side, and accepting makes the change. path: absolute, or relative to your working folder. quote.exact: the text to replace, exactly as the file has it; prefix and suffix pick between copies of it. replacement: what replaces it, as the file should have it (empty to delete it). body: an optional comment saying why. You hear whether it was accepted.";
 const ADD: &str = "Leave the person a comment on a file, on the text you quote, to point them at something (\"I cut this paragraph; check the transition\"). path: absolute, or relative to your working folder. quote.exact: the text, exactly as the file has it; prefix and suffix (a few words before and after) pick between copies of it. body: Markdown.";
 
 #[derive(Deserialize)]
@@ -62,6 +62,15 @@ struct QuoteArgs {
     prefix: String,
     #[serde(default)]
     suffix: String,
+}
+
+#[derive(Deserialize)]
+struct SuggestArgs {
+    path: String,
+    quote: QuoteArgs,
+    replacement: String,
+    #[serde(default)]
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -112,7 +121,14 @@ fn resolve(factory: &Arc<Factory>, agent: &str, args: ResolveArgs) -> Result<Too
 fn add(factory: &Arc<Factory>, agent: &str, args: AddArgs) -> Result<ToolResult, String> {
     let folder = folder(factory, agent)?;
     let quote = Quote::new(&args.quote.exact, &args.quote.prefix, &args.quote.suffix);
-    let text = crate::annotations::agent_add(factory, agent, &folder, &args.path, &quote, &args.body)?;
+    let text = crate::annotations::agent_add(factory, agent, &folder, &args.path, &quote, &args.body, None)?;
+    Ok(ToolResult::text(text, json!({"path": args.path})))
+}
+
+fn suggest(factory: &Arc<Factory>, agent: &str, args: SuggestArgs) -> Result<ToolResult, String> {
+    let folder = folder(factory, agent)?;
+    let quote = Quote::new(&args.quote.exact, &args.quote.prefix, &args.quote.suffix);
+    let text = crate::annotations::agent_add(factory, agent, &folder, &args.path, &quote, &args.body, Some(&args.replacement))?;
     Ok(ToolResult::text(text, json!({"path": args.path})))
 }
 
@@ -162,11 +178,28 @@ impl Extension for Comments {
             },
             "additionalProperties": false,
         });
+        let suggest_parameters = json!({
+            "type": "object",
+            "required": ["path", "quote", "replacement"],
+            "properties": {
+                "path": {"type": "string"},
+                "quote": {
+                    "type": "object",
+                    "required": ["exact"],
+                    "properties": {"exact": {"type": "string"}, "prefix": {"type": "string"}, "suffix": {"type": "string"}},
+                    "additionalProperties": false,
+                },
+                "replacement": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "additionalProperties": false,
+        });
         vec![
             tool("comments_list", "List comments", LIST, list_parameters, typed_handler(factory, agent, list)),
             tool("comments_reply", "Reply to a comment", REPLY, reply_parameters, typed_handler(factory, agent, reply)),
             tool("comments_resolve", "Resolve a comment", RESOLVE, resolve_parameters, typed_handler(factory, agent, resolve)),
             tool("comments_add", "Comment on a file", ADD, add_parameters, typed_handler(factory, agent, add)),
+            tool("comments_suggest", "Suggest a change", SUGGEST, suggest_parameters, typed_handler(factory, agent, suggest)),
         ]
     }
 }

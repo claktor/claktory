@@ -4,6 +4,7 @@ import 'package:factory_app/connections.dart';
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/history.dart';
 import 'package:factory_app/login.dart';
+import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
@@ -235,6 +236,95 @@ class RecordingBackend extends Backend {
   @override
   Future<void> cancelPairing(String deviceId) =>
       _record(ClientMessage(cancelPairing: CancelPairing(deviceId: deviceId)));
+
+  @override
+  Future<void> listThreads(String path) =>
+      _record(ClientMessage(listThreads: ListThreads(path: path)));
+
+  /// The thread [createThread] answers: as asked, with ids t1, t2…
+  var _threads = 0;
+
+  @override
+  Future<Thread> createThread(CreateThread thread) async {
+    await _record(ClientMessage(createThread: thread));
+    return Thread(
+      id: 't${++_threads}',
+      agentId: thread.agentId,
+      path: thread.path,
+      kind: thread.kind,
+      versionSha256: thread.versionSha256,
+      selectors: thread.selectors,
+      status: ThreadStatus.THREAD_STATUS_OPEN,
+      comments: [ThreadComment(body: thread.body, draft: !thread.sendNow)],
+    );
+  }
+
+  @override
+  Future<void> replyThread(
+    String threadId,
+    String body, {
+    bool sendNow = false,
+  }) => _record(
+    ClientMessage(
+      replyThread: ReplyThread(
+        threadId: threadId,
+        body: body,
+        sendNow: sendNow,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> editComment(String commentId, String body) => _record(
+    ClientMessage(
+      editComment: EditComment(commentId: commentId, body: body),
+    ),
+  );
+
+  @override
+  Future<void> deleteComment(String commentId) => _record(
+    ClientMessage(deleteComment: DeleteComment(commentId: commentId)),
+  );
+
+  @override
+  Future<void> setThreadStatus(String threadId, {required bool resolved}) =>
+      _record(
+        ClientMessage(
+          setThreadStatus: SetThreadStatus(
+            threadId: threadId,
+            resolved: resolved,
+          ),
+        ),
+      );
+
+  @override
+  Future<void> readdressThread(String threadId, String agentId) => _record(
+    ClientMessage(
+      readdressThread: ReaddressThread(threadId: threadId, agentId: agentId),
+    ),
+  );
+
+  @override
+  Future<void> reattachThread(ReattachThread reattach) =>
+      _record(ClientMessage(reattachThread: reattach));
+
+  @override
+  Future<void> sendComments(String agentId, String path) => _record(
+    ClientMessage(
+      sendComments: SendComments(agentId: agentId, path: path),
+    ),
+  );
+
+  @override
+  Future<void> decideSuggestion(String threadId, {required bool accept}) =>
+      _record(
+        ClientMessage(
+          decideSuggestion: DecideSuggestion(
+            threadId: threadId,
+            accept: accept,
+          ),
+        ),
+      );
 
   @override
   Future<void> setRemoteAccess(bool on, {int port = 0, String? listen}) =>
@@ -563,6 +653,80 @@ class RecordingBackend extends Backend {
     await _record(ClientMessage(showRecoveryKey: ShowRecoveryKey()));
     return recoveryKey;
   }
+
+  /// What [startConnect] answers (Priya's connectors_test).
+  var connectStarted = ConnectStarted(
+    flowId: 'flow-1',
+    url: 'https://dash.cloudflare.com/oauth2/auth?state=s',
+  );
+
+  @override
+  Future<ConnectStarted> startConnect(StartConnect start) async {
+    await _record(ClientMessage(startConnect: start));
+    return connectStarted;
+  }
+
+  @override
+  Future<void> finishConnect(String flowId, String callbackUrl) => _record(
+    ClientMessage(
+      finishConnect: FinishConnect(flowId: flowId, callbackUrl: callbackUrl),
+    ),
+  );
+
+  @override
+  Future<void> cancelConnect(String flowId) =>
+      _record(ClientMessage(cancelConnect: CancelConnect(flowId: flowId)));
+
+  @override
+  Future<void> dismissConnectProposal(
+    String proposalId, {
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      dismissConnectProposal: DismissConnectProposal(
+        proposalId: proposalId,
+        comment: comment,
+      ),
+    ),
+  );
+
+  /// What [listConnectChoices] answers.
+  var connectChoices = ConnectChoices();
+
+  @override
+  Future<ConnectChoices> listConnectChoices(String secretId) async {
+    await _record(
+      ClientMessage(listConnectChoices: ListConnectChoices(secretId: secretId)),
+    );
+    return connectChoices;
+  }
+
+  @override
+  Future<void> deriveSecret(DeriveSecret derive) =>
+      _record(ClientMessage(deriveSecret: derive));
+
+  @override
+  Future<void> disconnectService(String secretId, {bool revoke = false}) =>
+      _record(
+        ClientMessage(
+          disconnectService: DisconnectService(
+            secretId: secretId,
+            revoke: revoke,
+          ),
+        ),
+      );
+
+  /// The ports [forwardPort] was asked for; it answers what [forwarded]
+  /// makes, by default that the Claktory can't forward.
+  final forwardedPorts = <int>[];
+  Future<PortForward> Function(int port) forwarded = (_) async =>
+      throw const ForwardFailure(ForwardProblem.unsupported);
+
+  @override
+  Future<PortForward> forwardPort(int port) {
+    forwardedPorts.add(port);
+    return forwarded(port);
+  }
 }
 
 /// Updates this app from another machine without touching the disk: it
@@ -647,6 +811,7 @@ class Harness {
     login = LoginLauncher(
       workspace: backend.workspace,
       send: backend.startLogin,
+      forwards: backend.forwards,
       open: (url) async {
         opened.add(url.toString());
         return true;

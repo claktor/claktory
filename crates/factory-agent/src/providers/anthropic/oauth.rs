@@ -11,8 +11,8 @@ use crate::clock::now_ms;
 use crate::credentials::Credential;
 use crate::errors::Error;
 use crate::oauth::{
-    Callback, FixedCallback, bound_port, browser_authorization, callback_host, error_html, fixed_callback, generate_pkce, request_auth,
-    success_html,
+    Callback, FixedCallback, bound_port, browser_authorization, callback_host, error_html, finishing_html, fixed_callback, generate_pkce,
+    request_auth,
 };
 use crate::providers::{client, response_text, send_with_timeout};
 
@@ -124,7 +124,7 @@ async fn start_callback(port: u16, expected_state: String) -> (u16, Callback) {
         expected_state,
         FixedCallback {
             path: CALLBACK_PATH,
-            success: success_html("Anthropic authentication completed. You can close this window."),
+            success: finishing_html("Anthropic"),
             internal: "Internal error".into(),
             missing: error_html("Missing code or state parameter.", None),
             oauth_error: Some("Anthropic authentication did not complete."),

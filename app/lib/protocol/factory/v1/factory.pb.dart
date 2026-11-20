@@ -103,6 +103,7 @@ enum ClientMessage_Body {
   readdressThread,
   reattachThread,
   sendComments,
+  decideSuggestion,
   watchFiles,
   startConnect,
   finishConnect,
@@ -198,6 +199,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     ReaddressThread? readdressThread,
     ReattachThread? reattachThread,
     SendComments? sendComments,
+    DecideSuggestion? decideSuggestion,
     WatchFiles? watchFiles,
     StartConnect? startConnect,
     FinishConnect? finishConnect,
@@ -293,6 +295,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (readdressThread != null) result.readdressThread = readdressThread;
     if (reattachThread != null) result.reattachThread = reattachThread;
     if (sendComments != null) result.sendComments = sendComments;
+    if (decideSuggestion != null) result.decideSuggestion = decideSuggestion;
     if (watchFiles != null) result.watchFiles = watchFiles;
     if (startConnect != null) result.startConnect = startConnect;
     if (finishConnect != null) result.finishConnect = finishConnect;
@@ -398,6 +401,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     80: ClientMessage_Body.readdressThread,
     81: ClientMessage_Body.reattachThread,
     82: ClientMessage_Body.sendComments,
+    83: ClientMessage_Body.decideSuggestion,
     84: ClientMessage_Body.watchFiles,
     90: ClientMessage_Body.startConnect,
     91: ClientMessage_Body.finishConnect,
@@ -494,6 +498,7 @@ class ClientMessage extends $pb.GeneratedMessage {
       80,
       81,
       82,
+      83,
       84,
       90,
       91,
@@ -667,6 +672,8 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: ReattachThread.$_createMessage)
     ..aOM<SendComments>(82, _omitFieldNames ? '' : 'sendComments',
         subBuilder: SendComments.$_createMessage)
+    ..aOM<DecideSuggestion>(83, _omitFieldNames ? '' : 'decideSuggestion',
+        subBuilder: DecideSuggestion.$_createMessage)
     ..aOM<WatchFiles>(84, _omitFieldNames ? '' : 'watchFiles',
         subBuilder: WatchFiles.$_createMessage)
     ..aOM<StartConnect>(90, _omitFieldNames ? '' : 'startConnect',
@@ -789,6 +796,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(80)
   @$pb.TagNumber(81)
   @$pb.TagNumber(82)
+  @$pb.TagNumber(83)
   @$pb.TagNumber(84)
   @$pb.TagNumber(90)
   @$pb.TagNumber(91)
@@ -879,6 +887,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(80)
   @$pb.TagNumber(81)
   @$pb.TagNumber(82)
+  @$pb.TagNumber(83)
   @$pb.TagNumber(84)
   @$pb.TagNumber(90)
   @$pb.TagNumber(91)
@@ -1797,97 +1806,108 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(82)
   SendComments ensureSendComments() => $_ensure(81);
 
+  @$pb.TagNumber(83)
+  DecideSuggestion get decideSuggestion => $_getN(82);
+  @$pb.TagNumber(83)
+  set decideSuggestion(DecideSuggestion value) => $_setField(83, value);
+  @$pb.TagNumber(83)
+  $core.bool hasDecideSuggestion() => $_has(82);
+  @$pb.TagNumber(83)
+  void clearDecideSuggestion() => $_clearField(83);
+  @$pb.TagNumber(83)
+  DecideSuggestion ensureDecideSuggestion() => $_ensure(82);
+
   /// The project whose files this connection shows on their own (the
   /// iPhone's Files page).
   @$pb.TagNumber(84)
-  WatchFiles get watchFiles => $_getN(82);
+  WatchFiles get watchFiles => $_getN(83);
   @$pb.TagNumber(84)
   set watchFiles(WatchFiles value) => $_setField(84, value);
   @$pb.TagNumber(84)
-  $core.bool hasWatchFiles() => $_has(82);
+  $core.bool hasWatchFiles() => $_has(83);
   @$pb.TagNumber(84)
   void clearWatchFiles() => $_clearField(84);
   @$pb.TagNumber(84)
-  WatchFiles ensureWatchFiles() => $_ensure(82);
+  WatchFiles ensureWatchFiles() => $_ensure(83);
 
   /// Connecting a service (Cloudflare, AWS) to the vault: see Connector.
   @$pb.TagNumber(90)
-  StartConnect get startConnect => $_getN(83);
+  StartConnect get startConnect => $_getN(84);
   @$pb.TagNumber(90)
   set startConnect(StartConnect value) => $_setField(90, value);
   @$pb.TagNumber(90)
-  $core.bool hasStartConnect() => $_has(83);
+  $core.bool hasStartConnect() => $_has(84);
   @$pb.TagNumber(90)
   void clearStartConnect() => $_clearField(90);
   @$pb.TagNumber(90)
-  StartConnect ensureStartConnect() => $_ensure(83);
+  StartConnect ensureStartConnect() => $_ensure(84);
 
   @$pb.TagNumber(91)
-  FinishConnect get finishConnect => $_getN(84);
+  FinishConnect get finishConnect => $_getN(85);
   @$pb.TagNumber(91)
   set finishConnect(FinishConnect value) => $_setField(91, value);
   @$pb.TagNumber(91)
-  $core.bool hasFinishConnect() => $_has(84);
+  $core.bool hasFinishConnect() => $_has(85);
   @$pb.TagNumber(91)
   void clearFinishConnect() => $_clearField(91);
   @$pb.TagNumber(91)
-  FinishConnect ensureFinishConnect() => $_ensure(84);
+  FinishConnect ensureFinishConnect() => $_ensure(85);
 
   @$pb.TagNumber(92)
-  CancelConnect get cancelConnect => $_getN(85);
+  CancelConnect get cancelConnect => $_getN(86);
   @$pb.TagNumber(92)
   set cancelConnect(CancelConnect value) => $_setField(92, value);
   @$pb.TagNumber(92)
-  $core.bool hasCancelConnect() => $_has(85);
+  $core.bool hasCancelConnect() => $_has(86);
   @$pb.TagNumber(92)
   void clearCancelConnect() => $_clearField(92);
   @$pb.TagNumber(92)
-  CancelConnect ensureCancelConnect() => $_ensure(85);
+  CancelConnect ensureCancelConnect() => $_ensure(86);
 
   @$pb.TagNumber(93)
-  DismissConnectProposal get dismissConnectProposal => $_getN(86);
+  DismissConnectProposal get dismissConnectProposal => $_getN(87);
   @$pb.TagNumber(93)
   set dismissConnectProposal(DismissConnectProposal value) =>
       $_setField(93, value);
   @$pb.TagNumber(93)
-  $core.bool hasDismissConnectProposal() => $_has(86);
+  $core.bool hasDismissConnectProposal() => $_has(87);
   @$pb.TagNumber(93)
   void clearDismissConnectProposal() => $_clearField(93);
   @$pb.TagNumber(93)
-  DismissConnectProposal ensureDismissConnectProposal() => $_ensure(86);
+  DismissConnectProposal ensureDismissConnectProposal() => $_ensure(87);
 
   @$pb.TagNumber(94)
-  ListConnectChoices get listConnectChoices => $_getN(87);
+  ListConnectChoices get listConnectChoices => $_getN(88);
   @$pb.TagNumber(94)
   set listConnectChoices(ListConnectChoices value) => $_setField(94, value);
   @$pb.TagNumber(94)
-  $core.bool hasListConnectChoices() => $_has(87);
+  $core.bool hasListConnectChoices() => $_has(88);
   @$pb.TagNumber(94)
   void clearListConnectChoices() => $_clearField(94);
   @$pb.TagNumber(94)
-  ListConnectChoices ensureListConnectChoices() => $_ensure(87);
+  ListConnectChoices ensureListConnectChoices() => $_ensure(88);
 
   @$pb.TagNumber(95)
-  DeriveSecret get deriveSecret => $_getN(88);
+  DeriveSecret get deriveSecret => $_getN(89);
   @$pb.TagNumber(95)
   set deriveSecret(DeriveSecret value) => $_setField(95, value);
   @$pb.TagNumber(95)
-  $core.bool hasDeriveSecret() => $_has(88);
+  $core.bool hasDeriveSecret() => $_has(89);
   @$pb.TagNumber(95)
   void clearDeriveSecret() => $_clearField(95);
   @$pb.TagNumber(95)
-  DeriveSecret ensureDeriveSecret() => $_ensure(88);
+  DeriveSecret ensureDeriveSecret() => $_ensure(89);
 
   @$pb.TagNumber(96)
-  DisconnectService get disconnectService => $_getN(89);
+  DisconnectService get disconnectService => $_getN(90);
   @$pb.TagNumber(96)
   set disconnectService(DisconnectService value) => $_setField(96, value);
   @$pb.TagNumber(96)
-  $core.bool hasDisconnectService() => $_has(89);
+  $core.bool hasDisconnectService() => $_has(90);
   @$pb.TagNumber(96)
   void clearDisconnectService() => $_clearField(96);
   @$pb.TagNumber(96)
-  DisconnectService ensureDisconnectService() => $_ensure(89);
+  DisconnectService ensureDisconnectService() => $_ensure(90);
 }
 
 enum ServerMessage_Body {
@@ -8147,6 +8167,7 @@ class Thread extends $pb.GeneratedMessage {
     $core.Iterable<ThreadComment>? comments,
     $fixnum.Int64? createdMs,
     $fixnum.Int64? updatedMs,
+    Suggestion? suggestion,
   }) {
     final result = Thread._();
     if (id != null) result.id = id;
@@ -8163,6 +8184,7 @@ class Thread extends $pb.GeneratedMessage {
     if (comments != null) result.comments.addAll(comments);
     if (createdMs != null) result.createdMs = createdMs;
     if (updatedMs != null) result.updatedMs = updatedMs;
+    if (suggestion != null) result.suggestion = suggestion;
     return result;
   }
 
@@ -8199,6 +8221,8 @@ class Thread extends $pb.GeneratedMessage {
         subBuilder: ThreadComment.$_createMessage)
     ..aInt64(13, _omitFieldNames ? '' : 'createdMs')
     ..aInt64(14, _omitFieldNames ? '' : 'updatedMs')
+    ..aOM<Suggestion>(15, _omitFieldNames ? '' : 'suggestion',
+        subBuilder: Suggestion.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -8360,6 +8384,104 @@ class Thread extends $pb.GeneratedMessage {
   $core.bool hasUpdatedMs() => $_has(13);
   @$pb.TagNumber(14)
   void clearUpdatedMs() => $_clearField(14);
+
+  /// A change to its text, proposed by the person or an agent; unset for none.
+  @$pb.TagNumber(15)
+  Suggestion get suggestion => $_getN(14);
+  @$pb.TagNumber(15)
+  set suggestion(Suggestion value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasSuggestion() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearSuggestion() => $_clearField(15);
+  @$pb.TagNumber(15)
+  Suggestion ensureSuggestion() => $_ensure(14);
+}
+
+/// A proposed replacement for a thread's text (a text file's), which the
+/// person accepts (Claktory makes the change) or rejects with
+/// DecideSuggestion; an agent may also make the person's change itself.
+class Suggestion extends $pb.GeneratedMessage {
+  factory Suggestion({
+    $core.String? replacement,
+    $core.String? authorAgentId,
+    SuggestionDecision? decision,
+  }) {
+    final result = Suggestion._();
+    if (replacement != null) result.replacement = replacement;
+    if (authorAgentId != null) result.authorAgentId = authorAgentId;
+    if (decision != null) result.decision = decision;
+    return result;
+  }
+
+  Suggestion._();
+
+  factory Suggestion.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Suggestion()..mergeFromBuffer(data, registry);
+  factory Suggestion.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      Suggestion()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'Suggestion',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: Suggestion.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'replacement')
+    ..aOS(2, _omitFieldNames ? '' : 'authorAgentId')
+    ..aE<SuggestionDecision>(3, _omitFieldNames ? '' : 'decision',
+        enumValues: SuggestionDecision.values)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Suggestion clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Suggestion copyWith(void Function(Suggestion) updates) =>
+      super.copyWith((message) => updates(message as Suggestion)) as Suggestion;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use Suggestion() / Suggestion.new instead')
+  static Suggestion create() => Suggestion._();
+  static $pb.GeneratedMessage $_createMessage() => Suggestion._();
+  @$core.override
+  Suggestion createEmptyInstance() => Suggestion._();
+  @$core.pragma('dart2js:noInline')
+  static Suggestion getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<Suggestion>(Suggestion.$_createMessage);
+  static Suggestion? _defaultInstance;
+
+  /// What replaces the text, as the file has it (Markdown in a Markdown file);
+  /// empty to delete it.
+  @$pb.TagNumber(1)
+  $core.String get replacement => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set replacement($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasReplacement() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearReplacement() => $_clearField(1);
+
+  /// The agent who suggested it; empty for the person.
+  @$pb.TagNumber(2)
+  $core.String get authorAgentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set authorAgentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAuthorAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAuthorAgentId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  SuggestionDecision get decision => $_getN(2);
+  @$pb.TagNumber(3)
+  set decision(SuggestionDecision value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDecision() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDecision() => $_clearField(3);
 }
 
 class Selector extends $pb.GeneratedMessage {
@@ -8908,6 +9030,7 @@ class CreateThread extends $pb.GeneratedMessage {
     $core.Iterable<Selector>? selectors,
     $core.String? body,
     $core.bool? sendNow,
+    $core.String? suggestion,
   }) {
     final result = CreateThread._();
     if (agentId != null) result.agentId = agentId;
@@ -8917,6 +9040,7 @@ class CreateThread extends $pb.GeneratedMessage {
     if (selectors != null) result.selectors.addAll(selectors);
     if (body != null) result.body = body;
     if (sendNow != null) result.sendNow = sendNow;
+    if (suggestion != null) result.suggestion = suggestion;
     return result;
   }
 
@@ -8941,6 +9065,7 @@ class CreateThread extends $pb.GeneratedMessage {
         subBuilder: Selector.$_createMessage)
     ..aOS(6, _omitFieldNames ? '' : 'body')
     ..aOB(7, _omitFieldNames ? '' : 'sendNow')
+    ..aOS(8, _omitFieldNames ? '' : 'suggestion')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -9012,7 +9137,8 @@ class CreateThread extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   $pb.PbList<Selector> get selectors => $_getList(4);
 
-  /// The first comment, Markdown; not empty.
+  /// The first comment, Markdown; not empty, unless it suggests a change
+  /// (then a comment with an empty body carries it until it's sent).
   @$pb.TagNumber(6)
   $core.String get body => $_getSZ(5);
   @$pb.TagNumber(6)
@@ -9031,6 +9157,17 @@ class CreateThread extends $pb.GeneratedMessage {
   $core.bool hasSendNow() => $_has(6);
   @$pb.TagNumber(7)
   void clearSendNow() => $_clearField(7);
+
+  /// A replacement the person suggests for the text (text and Markdown only;
+  /// see Suggestion).
+  @$pb.TagNumber(8)
+  $core.String get suggestion => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set suggestion($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasSuggestion() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSuggestion() => $_clearField(8);
 }
 
 /// The person replies on a thread, answered with Ack: a draft until sent,
@@ -9548,6 +9685,80 @@ class SendComments extends $pb.GeneratedMessage {
   $core.bool hasPath() => $_has(1);
   @$pb.TagNumber(2)
   void clearPath() => $_clearField(2);
+}
+
+/// Accepts a thread's suggestion (Claktory replaces the text with it in the
+/// file, and resolves the thread) or rejects it (resolves it unchanged),
+/// answered with Ack. Accepting is refused, with an Error whose message can be
+/// shown as it is, when the text changed since the suggestion was made
+/// (Thread.anchor isn't ANCHORED). The agent who suggested it is told.
+class DecideSuggestion extends $pb.GeneratedMessage {
+  factory DecideSuggestion({
+    $core.String? threadId,
+    $core.bool? accept,
+  }) {
+    final result = DecideSuggestion._();
+    if (threadId != null) result.threadId = threadId;
+    if (accept != null) result.accept = accept;
+    return result;
+  }
+
+  DecideSuggestion._();
+
+  factory DecideSuggestion.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideSuggestion()..mergeFromBuffer(data, registry);
+  factory DecideSuggestion.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideSuggestion()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DecideSuggestion',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DecideSuggestion.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'threadId')
+    ..aOB(2, _omitFieldNames ? '' : 'accept')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideSuggestion clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideSuggestion copyWith(void Function(DecideSuggestion) updates) =>
+      super.copyWith((message) => updates(message as DecideSuggestion))
+          as DecideSuggestion;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DecideSuggestion() / DecideSuggestion.new instead')
+  static DecideSuggestion create() => DecideSuggestion._();
+  static $pb.GeneratedMessage $_createMessage() => DecideSuggestion._();
+  @$core.override
+  DecideSuggestion createEmptyInstance() => DecideSuggestion._();
+  @$core.pragma('dart2js:noInline')
+  static DecideSuggestion getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DecideSuggestion>(
+          DecideSuggestion.$_createMessage);
+  static DecideSuggestion? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get threadId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set threadId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasThreadId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearThreadId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get accept => $_getBF(1);
+  @$pb.TagNumber(2)
+  set accept($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAccept() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAccept() => $_clearField(2);
 }
 
 /// Starts signing in to a provider with one of its `Provider.methods`.

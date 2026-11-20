@@ -7,6 +7,8 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `fmt`, `fmt`, `from`
+
 /// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
 /// direct addresses [addresses], from its pairing code), as the device
 /// [device_key]. It listens at once and dials when the app first connects.
@@ -30,10 +32,27 @@ PairingIds pairingIds({
   endpointId: endpointId,
 );
 
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ForwardHandle>>
+abstract class ForwardHandle implements RustOpaqueInterface {
+  int port();
+
+  ForwardStatus status();
+
+  /// Stops listening; connections being carried finish on their own.
+  Future<void> stop();
+}
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<TunnelHandle>>
 abstract class TunnelHandle implements RustOpaqueInterface {
   /// Stops it: the port closes, and so does the connection.
   Future<void> close();
+
+  /// Forwards this device's localhost [port] (127.0.0.1 and ::1) to the
+  /// same port on the backend's machine, so a sign-in whose browser comes
+  /// back to http://127.0.0.1:<port> reaches the program waiting for it
+  /// there. Until [ForwardHandle::stop]. The forwarding connection is
+  /// dialled first, so a backend from before it fails here (Unsupported).
+  Future<ForwardHandle> forwardPort({required int port});
 
   /// Where the app connects: ws://127.0.0.1:<port>.
   int port();
@@ -44,6 +63,59 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   Future<void> reconnect();
 
   TunnelStatus status();
+}
+
+/// Why a port can't be forwarded.
+class ForwardError implements FrbException {
+  final ForwardErrorKind kind;
+
+  /// Failed: what went wrong, as it is; empty otherwise.
+  final String message;
+
+  const ForwardError({required this.kind, required this.message});
+
+  @override
+  int get hashCode => kind.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ForwardError &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          message == other.message;
+}
+
+enum ForwardErrorKind {
+  /// Something on this device already listens on the port (on 127.0.0.1
+  /// or ::1): the browser would reach it instead.
+  portTaken,
+
+  /// The backend is from before forwarding.
+  unsupported,
+  failed,
+}
+
+class ForwardStatus {
+  /// Connections carried so far: above 0 once the browser came back.
+  final int connections;
+
+  /// Why the last one couldn't be carried (the backend's sentence, or the
+  /// tunnel's); empty while all's well.
+  final String lastError;
+
+  const ForwardStatus({required this.connections, required this.lastError});
+
+  @override
+  int get hashCode => connections.hashCode ^ lastError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ForwardStatus &&
+          runtimeType == other.runtimeType &&
+          connections == other.connections &&
+          lastError == other.lastError;
 }
 
 /// The endpoint ids, as lowercase hex, that the number a device shows while

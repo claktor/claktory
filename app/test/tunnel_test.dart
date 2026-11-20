@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connection.dart';
 import 'package:factory_app/connections.dart';
@@ -52,6 +53,17 @@ class FakeTunnel implements Tunnel {
 
   @override
   Future<void> reconnect() async => reconnects++;
+
+  /// The ports asked for; [forwardPort] answers what [forwarded] makes.
+  final forwards = <int>[];
+  Future<PortForward> Function(int port) forwarded = (_) async =>
+      throw const ForwardFailure(ForwardProblem.unsupported);
+
+  @override
+  Future<PortForward> forwardPort(int port) {
+    forwards.add(port);
+    return forwarded(port);
+  }
 
   @override
   Future<void> close() async => closed = true;

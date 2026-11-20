@@ -1,7 +1,9 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import 'identity.dart';
+import 'loopback_forward.dart' show openLink;
 
 /// Builds one block of rendered text: [span] is all it shows (with its
 /// style), [index] its place among the blocks in reading order (from 0,
@@ -15,10 +17,10 @@ typedef MarkdownTextBlock = Widget Function(
 );
 
 /// Renders agent markdown: paragraphs, headings, lists, quotes, tables,
-/// emphasis, inline code and fenced code. Parsing happens in [build], so a
-/// streaming entry re-parses at most once per frame however many deltas
-/// arrive.
-class Markdown extends StatelessWidget {
+/// emphasis, inline code, fenced code and links (a click opens them, with
+/// [openLink]). Parsing happens in [build], so a streaming entry re-parses
+/// at most once per frame however many deltas arrive.
+class Markdown extends StatefulWidget {
   const Markdown(this.text, {super.key, this.color, this.textBlock});
 
   final String text;
@@ -31,17 +33,51 @@ class Markdown extends StatelessWidget {
   final MarkdownTextBlock? textBlock;
 
   @override
+  State<Markdown> createState() => _MarkdownState();
+}
+
+class _MarkdownState extends State<Markdown> {
+  /// The links' recognizers from the last build; made only for text that
+  /// has links.
+  final _recognizers = <TapGestureRecognizer>[];
+
+  void _dropRecognizers() {
+    for (final recognizer in _recognizers) {
+      recognizer.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  @override
+  void dispose() {
+    _dropRecognizers();
+    super.dispose();
+  }
+
+  GestureRecognizer? _link(String href) {
+    final url = Uri.tryParse(href);
+    if (url == null || !url.hasScheme) return null;
+    if (url.scheme != 'http' && url.scheme != 'https') return null;
+    final recognizer = TapGestureRecognizer()
+      ..onTap = () => openLink(context, url);
+    _recognizers.add(recognizer);
+    return recognizer;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    _dropRecognizers();
     final nodes = md.Document(
       extensionSet: md.ExtensionSet.gitHubFlavored,
       encodeHtml: false,
-    ).parse(text);
+    ).parse(widget.text);
     final palette = Palette.of(context);
-    final textBlock = this.textBlock;
+    final textBlock = widget.textBlock;
     final renderer = _Renderer(
       palette,
-      color ?? palette.text,
+      widget.color ?? palette.text,
       textBlock == null ? null : _Blocks(textBlock),
+      _link,
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -53,10 +89,20 @@ class Markdown extends StatelessWidget {
 /// A fenced code block: Geist Mono on a panel, scrolling sideways rather
 /// than wrapping.
 class CodeBlock extends StatelessWidget {
-  const CodeBlock(this.code, {super.key, this.color, this.text});
+  const CodeBlock(
+    this.code, {
+    super.key,
+    this.color,
+    this.text,
+    this.links = false,
+  });
 
   final String code;
   final Color? color;
+
+  /// Whether web addresses in [code] open when clicked, with [openLink]
+  /// (a command's output, where a CLI prints the page to sign in on).
+  final bool links;
 
   /// Shown instead of the plain [Text] of [code] (see
   /// [Markdown.textBlock]).
@@ -79,12 +125,111 @@ class CodeBlock extends StatelessWidget {
         ),
         child:
             text ??
-            Text(
-              code,
-              softWrap: false,
-              style: TextStyles.code.copyWith(color: color ?? palette.text),
-            ),
+            (links && webAddresses.hasMatch(code)
+                ? _LinkedCode(
+                    code,
+                    style: TextStyles.code.copyWith(
+                      color: color ?? palette.text,
+                    ),
+                  )
+                : Text(
+                    code,
+                    softWrap: false,
+                    style: TextStyles.code.copyWith(
+                      color: color ?? palette.text,
+                    ),
+                  )),
       ),
+    );
+  }
+}
+
+/// http and https addresses in plain text, up to the first space, quote or
+/// angle bracket; [_trimAddress] drops the punctuation after one.
+@visibleForTesting
+final webAddresses = RegExp(r'''https?://[^\s<>"'`]+''');
+
+/// [match] without the punctuation that ends a sentence or closes a
+/// bracket it didn't open: "(see https://a.com/x)." is https://a.com/x.
+String _trimAddress(String match) {
+  var end = match.length;
+  while (end > 0) {
+    final last = match[end - 1];
+    if ('.,;:!?'.contains(last)) {
+      end--;
+    } else if (last == ')' || last == ']' || last == '}') {
+      final open = {')': '(', ']': '[', '}': '{'}[last]!;
+      final text = match.substring(0, end);
+      if (open.allMatches(text).length >= last.allMatches(text).length) break;
+      end--;
+    } else {
+      break;
+    }
+  }
+  return match.substring(0, end);
+}
+
+/// [code] with its web addresses underlined and opening when clicked;
+/// recognizers only for the addresses.
+class _LinkedCode extends StatefulWidget {
+  const _LinkedCode(this.code, {required this.style});
+
+  final String code;
+  final TextStyle style;
+
+  @override
+  State<_LinkedCode> createState() => _LinkedCodeState();
+}
+
+class _LinkedCodeState extends State<_LinkedCode> {
+  final _recognizers = <TapGestureRecognizer>[];
+
+  void _dropRecognizers() {
+    for (final recognizer in _recognizers) {
+      recognizer.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  @override
+  void dispose() {
+    _dropRecognizers();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _dropRecognizers();
+    final code = widget.code;
+    final spans = <InlineSpan>[];
+    var at = 0;
+    for (final match in webAddresses.allMatches(code)) {
+      final address = _trimAddress(match[0]!);
+      final url = Uri.tryParse(address);
+      if (url == null || url.host.isEmpty) continue;
+      if (match.start > at) {
+        spans.add(TextSpan(text: code.substring(at, match.start)));
+      }
+      final recognizer = TapGestureRecognizer()
+        ..onTap = () => openLink(context, url);
+      _recognizers.add(recognizer);
+      spans.add(
+        TextSpan(
+          text: address,
+          recognizer: recognizer,
+          mouseCursor: SystemMouseCursors.click,
+          style: TextStyle(
+            decoration: TextDecoration.underline,
+            decorationColor: Palette.of(context).textFaint,
+          ),
+        ),
+      );
+      at = match.start + address.length;
+    }
+    if (at < code.length) spans.add(TextSpan(text: code.substring(at)));
+    return Text.rich(
+      TextSpan(style: widget.style, children: spans),
+      softWrap: false,
     );
   }
 }
@@ -103,11 +248,29 @@ class _Blocks {
 
 Widget _plainRich(TextSpan span) => Text.rich(span);
 
+/// [span] and the spans in it opening [recognizer]'s link when clicked.
+InlineSpan _linked(InlineSpan span, GestureRecognizer recognizer) {
+  if (span is! TextSpan) return span;
+  return TextSpan(
+    text: span.text,
+    style: span.style,
+    children: span.children == null
+        ? null
+        : [for (final child in span.children!) _linked(child, recognizer)],
+    recognizer: span.recognizer ?? recognizer,
+    mouseCursor: SystemMouseCursors.click,
+    semanticsLabel: span.semanticsLabel,
+  );
+}
+
 class _Renderer {
-  _Renderer(this.palette, this.color, [this.textBlocks]);
+  _Renderer(this.palette, this.color, [this.textBlocks, this.link]);
 
   final Palette palette;
   final Color color;
+
+  /// What a click on a link to `href` does; null where links don't open.
+  final GestureRecognizer? Function(String href)? link;
 
   /// Null when the text is plain [Text]s (the transcript).
   final _Blocks? textBlocks;
@@ -183,6 +346,7 @@ class _Renderer {
               palette,
               palette.textMuted,
               textBlocks,
+              link,
             ).blocks(node.children ?? const []),
           ),
         );
@@ -349,6 +513,24 @@ class _Renderer {
         case 'input':
           final checked = node.attributes['checked'] != null;
           out.add(TextSpan(text: checked ? '☑ ' : '☐ '));
+        case 'a':
+          final nested = <InlineSpan>[];
+          _inline(children, style, nested);
+          final recognizer = link?.call(node.attributes['href'] ?? '');
+          out.add(
+            TextSpan(
+              style: inner,
+              // A click lands on the text's own span, so each piece of the
+              // link's text carries the recognizer.
+              children: recognizer == null
+                  ? nested
+                  : [for (final span in nested) _linked(span, recognizer)],
+              recognizer: recognizer,
+              mouseCursor: recognizer == null
+                  ? MouseCursor.defer
+                  : SystemMouseCursors.click,
+            ),
+          );
         default:
           final nested = <InlineSpan>[];
           _inline(children, style, nested);

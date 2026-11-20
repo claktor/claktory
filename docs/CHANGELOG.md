@@ -6,6 +6,12 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.7
+Released 2026-11-20 11:41 UTC.
+- Added: Comment on a file as you would on a document: select text in a file beside a conversation, comment on it, and send your comments to the agent in one go. It revises the file, replies and resolves them, and each comment stays with its text as the file changes. You can also suggest new text yourself, and accept or reject an agent's suggestions.
+- Added: Sign in from any device with nothing to paste. When your Claktory runs on another computer, adding a Claude or ChatGPT subscription, or opening a sign-in link a command prints in a conversation, now finishes in the browser on the device you're using. Links in conversations also open when you click them.
+- Fixed: After you approve a Claude or ChatGPT sign-in, the browser no longer says it worked before Claktory has finished it. Claktory shows how it went.
+
 ## v0.1.6
 Released 2026-11-20 11:14 UTC.
 - Added: Send files and pictures to an agent with your message: drag them into the window, paste them, or click the paperclip in the message box (on iPhone, from Photos or Files). The agent gets them in its folder, and sees pictures too when its model can.

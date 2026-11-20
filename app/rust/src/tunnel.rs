@@ -149,6 +149,9 @@ struct Shared {
     /// finds none open.
     connection: AsyncMutex<Option<Connection>>,
     status: Mutex<Status>,
+    /// The connection localhost forwards travel on (`crate::forward`),
+    /// dialled by the first one.
+    forwards: AsyncMutex<Option<Connection>>,
 }
 
 impl Tunnel {
@@ -157,7 +160,13 @@ impl Tunnel {
     pub async fn open(endpoint: Endpoint, backend: EndpointAddr) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = listener.local_addr()?.port();
-        let shared = Arc::new(Shared { endpoint, backend, connection: AsyncMutex::new(None), status: Mutex::new(Status::default()) });
+        let shared = Arc::new(Shared {
+            endpoint,
+            backend,
+            connection: AsyncMutex::new(None),
+            status: Mutex::new(Status::default()),
+            forwards: AsyncMutex::new(None),
+        });
         let accept = tokio::spawn({
             let shared = shared.clone();
             async move {
@@ -218,8 +227,53 @@ impl Tunnel {
         if let Some(connection) = self.shared.connection.lock().await.take() {
             connection.close(0u32.into(), b"closed");
         }
+        if let Some(connection) = self.shared.forwards.lock().await.take() {
+            connection.close(0u32.into(), b"closed");
+        }
         self.shared.endpoint.close().await;
     }
+}
+
+impl Tunnel {
+    /// What localhost forwards dial with.
+    pub(crate) fn dialer(&self) -> Dialer {
+        Dialer(self.shared.clone())
+    }
+}
+
+/// A tunnel's side for localhost forwards (`crate::forward`).
+#[derive(Clone)]
+pub(crate) struct Dialer(Arc<Shared>);
+
+impl Dialer {
+    /// The open forwarding connection, or a new one.
+    pub(crate) async fn forward_connection(&self) -> Result<Connection, crate::forward::ForwardingFailure> {
+        use crate::forward::{ALPN_FORWARD, ForwardingFailure};
+        let mut slot = self.0.forwards.lock().await;
+        if let Some(open) = slot.as_ref()
+            && open.close_reason().is_none()
+        {
+            return Ok(open.clone());
+        }
+        let dial = self.0.endpoint.connect(self.0.backend.clone(), ALPN_FORWARD);
+        let connection = match tokio::time::timeout(DIAL_TIMEOUT, dial).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) if refused_alpn(&error) => return Err(ForwardingFailure::Unsupported),
+            Ok(Err(error)) => return Err(ForwardingFailure::Failed(explain_connect(&error).0)),
+            Err(_) => return Err(ForwardingFailure::Failed("Nothing answered within 20 seconds.".to_owned())),
+        };
+        *slot = Some(connection.clone());
+        Ok(connection)
+    }
+}
+
+/// The backend doesn't speak the ALPN asked for (TLS's
+/// no_application_protocol alert): it's from before it.
+fn refused_alpn(error: &ConnectError) -> bool {
+    let said = format!("{error:#}").to_lowercase();
+    ["no_application_protocol", "no application protocol", "error 120", "doesn't support any known protocol"]
+        .iter()
+        .any(|sign| said.contains(sign))
 }
 
 impl Drop for Tunnel {
@@ -592,7 +646,8 @@ mod tests {
         let key = generate_key();
         assert_eq!(key.len(), 64);
         let id = parse_key(&key).unwrap().public().to_string();
-        let addr = backend_addr(&id, &["https://relay.example.com".to_owned()], &["127.0.0.1:4919".to_owned(), "[::1]:4919".to_owned()]).unwrap();
+        let addr =
+            backend_addr(&id, &["https://relay.example.com".to_owned()], &["127.0.0.1:4919".to_owned(), "[::1]:4919".to_owned()]).unwrap();
         assert_eq!(addr.relay_urls().count(), 1);
         let ips: Vec<String> = addr.ip_addrs().map(|ip| ip.to_string()).collect();
         assert_eq!(ips.len(), 2);

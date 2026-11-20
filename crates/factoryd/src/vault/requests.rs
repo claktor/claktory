@@ -232,6 +232,16 @@ pub(crate) async fn delete_secret(
     request: &v1::DeleteSecret,
 ) -> Result<v1::VaultSession, RequestError> {
     open(factory, request.proof.as_ref()).await?;
+    // A connection goes with the secrets made from it, and a secret made
+    // from one with its token at the service.
+    if factory.vault.connection(&request.id).is_ok() {
+        factory.disconnect_service(&request.id, false).await?;
+        return Ok(session.answer());
+    }
+    if let Some(export) = factory.vault.export(&request.id)? {
+        factory.remove_export(&export).await?;
+        return Ok(session.answer());
+    }
     factory.vault.delete_secret(&request.id)?;
     factory.vault_changed();
     Ok(session.answer())

@@ -303,7 +303,8 @@ FinishConnect(flow_id, url)      →  same device D? state matches? not
 - **Nothing is granted** when a flow ends: not to the proposer, not to
   anyone.
 - **Names.** The backend names a connection after the service and account,
-  "Cloudflare (matt@example.com)" (" 2" if taken); UpdateSecret renames it
+  "Cloudflare (matt@example.com)" (" 2" if taken; secret names may hold
+  `@ ( )` now); UpdateSecret renames it
   and changes its description (entries are refused for a connection).
 - **Picking an export's makings.** ConnectChoices.rules says it in words,
   and DeriveSecret's refusal says what's wrong. Cloudflare: exactly one
@@ -330,16 +331,20 @@ secrets).
   exports).
 - `connect_proposals`: the proposals, like `requests`.
 - Exports are ordinary secrets with variables plus `parent` and `meta`.
-  When an export is due (the recipe says when: Cloudflare 7 days before its
-  expiry, default 30 days; AWS 2 minutes before its credentials expire, so
-  in effect per use) the broker renews it **before** the command gets it.
+  When an export is due (`renew_at_ms`, which the recipe sets: Cloudflare 7
+  days before its expiry, default 30 days; AWS 2 minutes before its
+  credentials expire) the broker renews it **before** the command gets it;
+  `per_use` only tells the app it's short-lived and renewed for the person.
+  A renewal that fails keeps the old values while they still work.
   The recipe returns new values (a new version) or the same values with a
   new expiry (Cloudflare extends the same token, so a running command keeps
   working; no new version): in the async wrapper around `vault.resolve`, with one renewal at a
   time per connection, the new values saved (a new version) before use.
   Refresh-token rotation is saved before the new access token is used; a
-  refresh that fails because the grant is gone marks the connection
-  NEEDS_RECONNECT, and commands asking for its exports are told why.
+  Problem::Reconnect from any recipe call (refresh, choices, derive, renew)
+  marks the connection NEEDS_RECONNECT, and commands asking for its exports
+  are told why. When a renewal brings new values and the recipe's meta
+  changed (a new minted token), the old one is removed at the service.
 - Redaction keeps hiding every value it knows (every_variable), now also
   exports' renewed values. A connection's own tokens are hidden too.
 
@@ -433,3 +438,19 @@ it). `secrets_grant` refuses a connection. `secrets_list` shows kinds.
 
 Resend, GitHub, Hetzner's guided import, Apps, MCP, the claimed HTTPS
 callback (auth.claktory.com), a flow surviving a backend restart.
+
+## The manual, with the first service
+
+Until a recipe is built in, nothing about connecting shows (the option, the
+tool, its prompt section), so the manual says nothing of it. With the first
+service, add back, under `## Secrets` in the core:
+
+```
+- {{user}} can also **connect a service** (Cloudflare, AWS) by approving Claktory on its own site; the vault keeps the connection, which no agent ever gets. An agent is given a secret made from it with only the access its work needs, and uses it as any other.
+```
+
+and as the last part of the `ext-secrets` note's item:
+
+```
+  - **Connecting services.** With the option **Can suggest connecting services** (`connect`, off unless turned on), an agent also gets `secrets_propose_connection`: `service` (a connector's id or name, such as `cloudflare` or `aws`), `purpose`, `access` (which permissions, on which zones, accounts or roles), `reason`, and optionally `access_id`. One suggestion per agent and service waits at a time; it shows in its conversation and at the top of Settings → Secrets, where {{user}} connects it or dismisses it. Connecting opens the service's page on {{user}}'s device (any paired device works, over the tunnel too); the device hands where the browser came back to to the backend, which signs in itself and keeps the tokens in the vault, never as variables: a connection is given to no one, and `secrets_grant` refuses it. When one is made for a suggestion, the agent is told it has nothing yet, and every admin agent with Secrets is told what was asked and what the connection reaches, to make a secret from it with only the access the work needs and give that. Secrets made from a connection (a Cloudflare token for some zones, an AWS account and role) are renewed before a command gets them when they're due; one the service no longer accepts shows **Needs reconnecting**. Disconnecting removes the connection and every secret made from it (their tokens at the service too, where it can), and can also revoke it at the service.
+```

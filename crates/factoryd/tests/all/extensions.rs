@@ -115,7 +115,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
     assert!(view.agent("rivet").extensions[5].enabled && !builder[5].enabled, "a new Factory's Rivet points at things");
-    assert!(!builder[2].enabled, "comments off until the app shows them");
+    assert!(builder[2].enabled, "comments on unless turned off");
     assert!(
         !builder[3].enabled
             && !view.agent("rivet").extensions[3].enabled

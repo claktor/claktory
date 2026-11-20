@@ -7,7 +7,9 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'backend.dart';
 import 'controls.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'identity.dart';
+import 'loopback_forward.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
@@ -20,18 +22,31 @@ import 'usage.dart';
 /// user clicked "Sign in" opens the browser, once, when the provider publishes
 /// the address. That may be after StartLogin's ack, since the provider's flow
 /// runs on its own.
+///
+/// The provider sends the browser back to `http://localhost:<port>/…` on
+/// the backend's machine. When that's another machine, this device
+/// forwards the port there while the flow lasts ([forwards]).
 class LoginLauncher {
   LoginLauncher({
     required this.workspace,
     required this._send,
-    Future<bool> Function(Uri url)? open,
-  }) : _open = open ?? launchUrl {
+    this.forwards,
+    this._open,
+  }) {
     workspace.addListener(_check);
   }
 
   final WorkspaceStore workspace;
   final Future<void> Function(StartLogin start) _send;
-  final Future<bool> Function(Uri url) _open;
+
+  /// Null where nothing is forwarded (tests of one view).
+  final LoopbackForwards? forwards;
+
+  /// Opens pages; null: the browser (or on iPhone the sign-in sheet).
+  final Future<bool> Function(Uri url)? _open;
+
+  /// The forwarding for the flow at its address, while it lasts.
+  Forwarding? _forwarding;
 
   /// The flow this window started and hasn't opened yet.
   StartLogin? _waiting;
@@ -77,7 +92,18 @@ class LoginLauncher {
   }
 
   /// The flow was cancelled or dismissed here; don't open anything for it.
-  void forget() => _waiting = null;
+  void forget() {
+    _waiting = null;
+    _stopForwarding();
+  }
+
+  /// The forwarding for the flow at [url], if this window opened it and
+  /// it lasts.
+  Forwarding? forwardingFor(String url) {
+    final forwarding = _forwarding;
+    if (forwarding == null || '${forwarding.url}' != url) return null;
+    return (forwards?.active.contains(forwarding) ?? false) ? forwarding : null;
+  }
 
   /// Whether this window opened [url] already.
   bool opened(String url) => _opened.contains(url);
@@ -87,14 +113,53 @@ class LoginLauncher {
     final uri = Uri.tryParse(url);
     if (uri == null) return;
     _opened.add(url);
-    try {
-      if (!await _open(uri)) _log('the browser did not open $url');
-    } on PlatformException catch (error) {
-      _log('could not open $url: ${error.message}');
+    final forwards = this.forwards;
+    if (forwards == null) {
+      try {
+        if (!await (_open ?? launchUrl)(uri)) {
+          _log('the browser did not open $url');
+        }
+      } on PlatformException catch (error) {
+        _log('could not open $url: ${error.message}');
+      }
+      return;
     }
+    final forwarding = await openInBrowser(
+      uri,
+      forwards: forwards,
+      launch: _open,
+    );
+    if (forwarding == null) return;
+    final login = workspace.workspace;
+    // The flow moved on while its ports opened.
+    if (!login.hasLogin() || login.login.url != url) {
+      unawaited(forwards.stop(forwarding));
+      return;
+    }
+    if (_forwarding != forwarding) _stopForwarding();
+    _forwarding = forwarding;
+  }
+
+  void _stopForwarding() {
+    final forwarding = _forwarding;
+    _forwarding = null;
+    if (forwarding == null) return;
+    unawaited(forwards?.stop(forwarding));
+    unawaited(closeSheet());
   }
 
   void _check() {
+    // The flow forwarded for ended (signed in, failed, cancelled) or
+    // moved on.
+    final forwarding = _forwarding;
+    if (forwarding != null) {
+      final shown = this.workspace.workspace;
+      if (!shown.hasLogin() ||
+          shown.login.url != '${forwarding.url}' ||
+          shown.login.error.isNotEmpty) {
+        _stopForwarding();
+      }
+    }
     final waiting = _waiting;
     final workspace = this.workspace.workspace;
     if (waiting == null || !workspace.hasLogin()) return;
@@ -112,7 +177,10 @@ class LoginLauncher {
     unawaited(open(login.url));
   }
 
-  void dispose() => workspace.removeListener(_check);
+  void dispose() {
+    workspace.removeListener(_check);
+    _stopForwarding();
+  }
 }
 
 void _log(String message) => developer.log(message, name: 'factory.login');
@@ -263,6 +331,21 @@ class _LoginPanelState extends State<LoginPanel> {
           ),
         );
       }
+      if (flow.url.isNotEmpty) {
+        final forwarding = scope.login.forwardingFor(flow.url);
+        if (forwarding != null) {
+          add(
+            ListenableBuilder(
+              listenable: scope.backend.forwards,
+              builder: (context, _) => ForwardingLine(
+                forwards: scope.backend.forwards,
+                forwarding: forwarding,
+                machine: _machine(),
+              ),
+            ),
+          );
+        }
+      }
       if (flow.url.isEmpty && flow.userCode.isEmpty && !flow.hasPrompt()) {
         add(
           Text(
@@ -305,6 +388,9 @@ class _LoginPanelState extends State<LoginPanel> {
       children: children,
     );
   }
+
+  /// The Claktory's name, for saying where the browser's way back goes.
+  String _machine() => claktoryName(AppScope.of(context));
 
   Widget _deviceCode(Palette palette, AppScope scope, LoginFlow flow) {
     final host = flow.verificationUrl.isEmpty

@@ -9,6 +9,7 @@ publish.workspace = true
 # The tunnel's compressed streams (`claktory/2`, remote.rs): zstd, as the app's.
 async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+base64 = "0.23"
 bytes = "1.12.2"
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 # The account service's API and its cryptography (`account.rs`), without the server.

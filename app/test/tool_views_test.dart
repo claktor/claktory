@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:factory_app/characters/character.dart';
+import 'package:factory_app/loopback_forward.dart' show linkLauncher;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tool_views.dart';
 import 'package:factory_app/transcript.dart' show TranscriptView;
@@ -744,11 +745,11 @@ void main() {
   group('web', () {
     testWidgets('web_search lists result titles that open', (tester) async {
       final opened = <Uri>[];
-      openWebLink = (url) async {
+      linkLauncher = (url) async {
         opened.add(url);
         return true;
       };
-      addTearDown(() => openWebLink = (url) async => false);
+      addTearDown(() => linkLauncher = null);
       await showing(tester, [
         call(
           'web_search',

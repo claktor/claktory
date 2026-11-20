@@ -611,3 +611,92 @@ async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connec
     assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
     assert!(matches!(ask(&mut socket, 2, list_home()).await, Body::FolderList(_)));
 }
+
+/// Opens a forward to `port` on `connection` (claktory-forward/1): the
+/// answer line and the stream.
+async fn forward_to(connection: &Connection, port: u16) -> (String, SendStream, RecvStream) {
+    use tokio::io::AsyncReadExt;
+    let (mut send, mut receive) = connection.open_bi().await.expect("stream");
+    send.write_all(format!("port {port}\n").as_bytes()).await.expect("header");
+    let mut line = Vec::new();
+    loop {
+        match tokio::time::timeout(WAIT, receive.read_u8()).await.expect("an answer in time") {
+            Ok(b'\n') | Err(_) => break,
+            Ok(byte) => line.push(byte),
+        }
+    }
+    (String::from_utf8(line).expect("utf-8"), send, receive)
+}
+
+/// A paired device reaches what listens on this machine's localhost, as a
+/// browser on the device coming back from a sign-in does; nobody else does,
+/// nor Claktory's own port, and unpairing ends it.
+#[tokio::test]
+async fn a_paired_device_forwards_to_this_machines_localhost() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await;
+
+    // Something waiting for a sign-in's callback: it answers what it got.
+    let waiting = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = waiting.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = waiting.accept().await {
+            tokio::spawn(async move {
+                let mut asked = Vec::new();
+                socket.read_to_end(&mut asked).await.expect("read");
+                socket.write_all(b"got: ").await.expect("write");
+                socket.write_all(&asked).await.expect("write");
+            });
+        }
+    });
+
+    // A device waiting to be allowed can't yet.
+    let (code, id, device, _link, mut socket) = waiting_device(&mut client, &mut view, "Laptop").await;
+    let early = dial_offering(&device, &code, &code.addresses, &[factoryd::remote::ALPN_FORWARD]).await.expect("the gate lets it in");
+    let (answer, ..) = forward_to(&early, port).await;
+    assert!(answer.starts_with("no ") && answer.contains("isn't paired"), "{answer}");
+
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone() });
+    assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+
+    // Allowed, it forwards: the bytes both ways, its half-close passed on.
+    let forwards = dial_offering(&device, &code, &code.addresses, &[factoryd::remote::ALPN_FORWARD]).await.expect("let in");
+    assert_eq!(forwards.alpn(), factoryd::remote::ALPN_FORWARD);
+    for _ in 0..2 {
+        let (answer, mut send, mut receive) = forward_to(&forwards, port).await;
+        assert_eq!(answer, "ok");
+        send.write_all(b"GET /callback?code=abc HTTP/1.1\r\n\r\n").await.expect("write");
+        send.finish().expect("finish");
+        let mut got = Vec::new();
+        tokio::time::timeout(WAIT, AsyncReadExt::read_to_end(&mut receive, &mut got)).await.expect("in time").expect("read");
+        assert_eq!(got, b"got: GET /callback?code=abc HTTP/1.1\r\n\r\n");
+    }
+    // Nothing listening, Claktory's own port, or no port at all.
+    let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind").local_addr().expect("addr").port();
+    let (answer, ..) = forward_to(&forwards, free).await;
+    assert!(answer.starts_with("no ") && answer.contains(&format!("port {free}")), "{answer}");
+    let (answer, ..) = forward_to(&forwards, addr.port()).await;
+    assert!(answer.starts_with("no ") && answer.contains("Claktory's own"), "{answer}");
+    let (answer, ..) = forward_to(&forwards, 0).await;
+    assert!(answer.starts_with("no "), "{answer}");
+
+    // A key that isn't a paired device's, even from this machine.
+    let stranger = new_device().await;
+    let local = parse(&local_pairing(&dir).await);
+    let theirs = dial_offering(&stranger, &local, &local.addresses, &[factoryd::remote::ALPN_FORWARD]).await.expect("this machine");
+    let (answer, ..) = forward_to(&theirs, port).await;
+    assert!(answer.contains("isn't paired"), "{answer}");
+
+    // Unpaired, its forwarding connection closes.
+    let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: id });
+    assert!(matches!(apply_request(&mut client, &mut view, unpair).await, Body::Ack(_)));
+    let closed = tokio::time::timeout(WAIT, forwards.closed()).await.expect("closed in time");
+    assert!(matches!(closed, ConnectionError::ApplicationClosed(_)), "{closed:?}");
+}

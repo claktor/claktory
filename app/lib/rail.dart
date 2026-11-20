@@ -51,6 +51,8 @@ class Claktory {
   late final login = LoginLauncher(
     workspace: backend.workspace,
     send: backend.startLogin,
+    // On another machine, its sign-ins come back there through this one.
+    forwards: backend.forwards,
   );
   late final history = AgentHistory(
     workspace: backend.workspace,

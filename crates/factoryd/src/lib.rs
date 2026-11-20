@@ -10,10 +10,13 @@ mod characters;
 mod commands;
 pub mod config;
 mod connection;
+#[doc(hidden)]
+pub mod connectors;
 mod encoding;
 mod explorer;
 mod extensions;
 pub mod factory;
+mod forward;
 pub mod home;
 mod idle;
 pub mod launch_agent;

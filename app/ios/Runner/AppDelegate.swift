@@ -1,3 +1,4 @@
+import AuthenticationServices
 import CoreImage
 import Flutter
 import PhotosUI
@@ -44,6 +45,11 @@ import UniformTypeIdentifiers
         result(nil)
       case "pickAttachments":
         Attach.shared.pick(result)
+      case "webAuth":
+        WebAuth.shared.start(call.arguments, result)
+      case "cancelWebAuth":
+        WebAuth.shared.cancel()
+        result(nil)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -235,5 +241,66 @@ final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDe
       ?? scene?.windows.first?.rootViewController
     while let presented = top?.presentedViewController { top = presented }
     return top
+  }
+}
+
+/// The browser step of connecting a service (app/lib/web_auth.dart): the
+/// service's page in the system's sign-in sheet, which shares Safari's
+/// cookies so a service already signed in to needs no password again. It
+/// answers the address the service sent back to (`scheme`), nil when the
+/// person closed the sheet, or an error.
+final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let shared = WebAuth()
+
+  private var session: ASWebAuthenticationSession?
+  private var result: FlutterResult?
+
+  func start(_ arguments: Any?, _ result: @escaping FlutterResult) {
+    guard let arguments = arguments as? [String: Any],
+      let url = (arguments["url"] as? String).flatMap(URL.init(string:)),
+      let scheme = arguments["scheme"] as? String
+    else {
+      return result(FlutterError(code: "arguments", message: "No address to open.", details: nil))
+    }
+    cancel()
+    let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) {
+      [weak self] callback, error in
+      DispatchQueue.main.async { self?.finished(callback, error) }
+    }
+    session.presentationContextProvider = self
+    self.session = session
+    self.result = result
+    if !session.start() {
+      finished(nil, NSError(domain: "WebAuth", code: 0, userInfo: [
+        NSLocalizedDescriptionKey: "Couldn't open the sign-in page.",
+      ]))
+    }
+  }
+
+  /// Closes the sheet; the waiting call answers nil.
+  func cancel() {
+    session?.cancel()
+    finished(nil, nil)
+  }
+
+  private func finished(_ callback: URL?, _ error: Error?) {
+    guard let result else { return }
+    self.result = nil
+    session = nil
+    if let callback {
+      result(callback.absoluteString)
+    } else if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+      result(nil)
+    } else if let error {
+      result(FlutterError(code: "failed", message: error.localizedDescription, details: nil))
+    } else {
+      result(nil)
+    }
+  }
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    return scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first ?? ASPresentationAnchor()
   }
 }

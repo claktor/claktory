@@ -26,9 +26,15 @@ void main() {
 
   tearDown(() => folder.deleteSync(recursive: true));
 
-  /// Lets the outbox get on with it.
-  Future<void> settle() =>
-      Future<void>.delayed(const Duration(milliseconds: 50));
+  /// Lets the outbox get on with it until [done]: it reads real files, which
+  /// takes longer on a busy machine, so no fixed wait is enough.
+  Future<void> until(bool Function() done) async {
+    for (var i = 0; i < 500 && !done(); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    // Anything it does right after.
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 
   test('files upload a chunk at a time, then go with the message', () async {
     final backend = FakeOutboxBackend();
@@ -41,7 +47,7 @@ void main() {
       }
     });
     expect(outbox.of('a').single.uploading, isTrue);
-    await settle();
+    await until(() => backend.sent.isNotEmpty);
     expect(backend.chunks, 4, reason: 'three for the big one, one small');
     expect(progress.last, greaterThan(0.5));
     for (final file in [big, small]) {
@@ -50,7 +56,7 @@ void main() {
     }
     expect(backend.sent.single, hasLength(2));
     backend.answers.single.complete();
-    await settle();
+    await until(() => outbox.of('a').isEmpty);
     expect(outbox.of('a'), isEmpty);
   });
 
@@ -59,7 +65,7 @@ void main() {
       ..refuseChunks = const RequestFailure('Not connected.');
     final outbox = Outbox(backend);
     final message = outbox.send('a', '', files: [big]);
-    await settle();
+    await until(() => message.failure != null);
     expect(message.failure, 'Not connected.');
     expect(backend.answers, isEmpty, reason: 'not sent without its file');
 
@@ -71,7 +77,7 @@ void main() {
       )
       ..refuseChunks = null;
     outbox.retry(message);
-    await settle();
+    await until(() => backend.answers.isNotEmpty);
     expect(backend.chunks, 2, reason: 'only what was missing');
     expect(backend.uploads[id], File(big.path).readAsBytesSync());
     expect(backend.answers, hasLength(1));
@@ -82,12 +88,12 @@ void main() {
       ..refuseChunks = const RequestFailure('Not connected.');
     final outbox = Outbox(backend);
     final message = outbox.send('a', 'here', files: [big]);
-    await settle();
+    await until(() => message.failure != null);
     final id = message.files.single.uploadId;
     backend.uploads[id] = [1, 2, 3];
     message.files.single.sent = 3;
     outbox.takeBack(message);
-    await settle();
+    await until(() => !backend.uploads.containsKey(id));
     expect(outbox.of('a'), isEmpty);
     expect(backend.uploads, isNot(contains(id)));
   });
@@ -97,7 +103,7 @@ void main() {
     final outbox = Outbox(backend);
     File(small.path).deleteSync();
     final message = outbox.send('a', 'here', files: [small]);
-    await settle();
+    await until(() => message.failure != null);
     expect(message.failure, contains('notes.txt'));
     expect(backend.answers, isEmpty);
   });

@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'loopback_forward.dart';
 import 'tunnel/api/tunnel.dart' as rust;
 import 'tunnel/api/tunnel.dart'
     show TunnelFailure, TunnelPath, TunnelPhase, TunnelStatus;
@@ -41,6 +42,11 @@ abstract interface class Tunnel {
   /// After the app comes back from the background, or the network changed:
   /// the next socket dials a new connection, and nothing counts as failed.
   Future<void> reconnect();
+
+  /// Listens on this device's 127.0.0.1 and ::1 at [port] and forwards
+  /// each connection to that port on the backend's machine (ALPN
+  /// claktory-forward/1). Throws [ForwardFailure].
+  Future<PortForward> forwardPort(int port);
 
   Future<void> close();
 }
@@ -96,8 +102,44 @@ class _RustTunnel implements Tunnel {
   Future<void> reconnect() => _handle.reconnect();
 
   @override
+  Future<PortForward> forwardPort(int port) async {
+    try {
+      return _RustForward(await _handle.forwardPort(port: port));
+    } on rust.ForwardError catch (error) {
+      throw ForwardFailure(switch (error.kind) {
+        rust.ForwardErrorKind.portTaken => ForwardProblem.taken,
+        rust.ForwardErrorKind.unsupported => ForwardProblem.unsupported,
+        rust.ForwardErrorKind.failed => ForwardProblem.failed,
+      }, error.message);
+    }
+  }
+
+  @override
   Future<void> close() async {
     await _handle.close();
+    _handle.dispose();
+  }
+}
+
+/// A port of this device's loopback carried to the same port on the
+/// backend's machine.
+class _RustForward implements PortForward {
+  _RustForward(this._handle) : port = _handle.port();
+
+  final rust.ForwardHandle _handle;
+
+  @override
+  final int port;
+
+  @override
+  int get connections => _handle.status().connections;
+
+  @override
+  String get lastError => _handle.status().lastError;
+
+  @override
+  Future<void> stop() async {
+    await _handle.stop();
     _handle.dispose();
   }
 }

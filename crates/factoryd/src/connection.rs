@@ -42,6 +42,9 @@ pub enum ConnectionError {
 
 /// Accepts clients forever, serving each connection on its own task.
 pub async fn serve(listener: TcpListener, factory: Arc<Factory>) {
+    if let Ok(addr) = listener.local_addr() {
+        factory.remote.set_listener_port(addr.port());
+    }
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -186,7 +189,11 @@ pub(crate) async fn serve_stream<S: Stream>(
     };
     let sent_from = crate::transcript::device(&from, kind);
     let files = crate::explorer::Watches::watch(&factory);
-    let connection = Connection { remote, device: name, sent_from, workspace_patches, files };
+    let binding = match &device {
+        Some(connected) => connected.device.id.clone(),
+        None => format!("connection-{}", crate::connectors::random_id()),
+    };
+    let connection = Connection { remote, device: name, sent_from, binding, workspace_patches, files };
     session(&mut socket, &factory, connection, device.as_ref().map(|connected| connected.closed.clone())).await?;
     tracing::info!("client disconnected");
     Ok(())
@@ -200,6 +207,10 @@ struct Connection {
     device: String,
     /// Where the person's messages come from.
     sent_from: factory_agent::SentFrom,
+    /// What a flow connecting a service is bound to: the paired device's id,
+    /// or this one connection's when it has no device (the loopback port
+    /// before this computer's app paired).
+    binding: String,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
     /// The project whose files it shows on their own (WatchFiles).
@@ -451,6 +462,7 @@ async fn handle(
         Some(Request::ReaddressThread(request)) => factory.readdress_thread(&request),
         Some(Request::ReattachThread(request)) => factory.reattach_thread(&request),
         Some(Request::SendComments(request)) => factory.send_comments(&request),
+        Some(Request::DecideSuggestion(request)) => factory.decide_suggestion(&request),
         Some(Request::WatchFiles(request)) => factory.watch_files(&connection.files, &request.project_id).await,
         Some(Request::LoadEntries(request)) => {
             return match factory.load_entries(&request).await {
@@ -525,16 +537,26 @@ async fn handle(
         Some(Request::SetRemoteAccess(request)) if request.set_relays => factory.set_relays(&request.relays).await,
         Some(Request::SetRemoteAccess(_)) => Ok(()),
         // Empty, or from a newer client that this server doesn't know.
-        // Connecting services: in the protocol before the backend does it.
-        Some(
-            Request::StartConnect(_)
-            | Request::FinishConnect(_)
-            | Request::CancelConnect(_)
-            | Request::DismissConnectProposal(_)
-            | Request::ListConnectChoices(_)
-            | Request::DeriveSecret(_)
-            | Request::DisconnectService(_),
-        ) => return error(ErrorCode::InvalidRequest, "This Claktory can't connect services yet."),
+        Some(Request::StartConnect(request)) => {
+            return match factory.start_connect(&request, &connection.binding, &connection.sent_from.device).await {
+                Ok(started) => Body::ConnectStarted(started),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::FinishConnect(request)) => factory.finish_connect(&request, &connection.binding),
+        Some(Request::CancelConnect(request)) => {
+            factory.cancel_connect(&request.flow_id);
+            Ok(())
+        }
+        Some(Request::DismissConnectProposal(request)) => crate::connectors::proposals::dismiss(factory, &request),
+        Some(Request::ListConnectChoices(request)) => {
+            return match factory.connect_choices(&request.secret_id).await {
+                Ok(choices) => Body::ConnectChoices(choices),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::DeriveSecret(request)) => factory.derive_secret(&request, "").await.map(|_| ()),
+        Some(Request::DisconnectService(request)) => factory.disconnect_service(&request.secret_id, request.revoke).await,
         None => return error(ErrorCode::UnknownMessage, "unknown message"),
     };
     match result {

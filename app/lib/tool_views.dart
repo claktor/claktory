@@ -4,7 +4,6 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
-import 'package:url_launcher/url_launcher.dart';
 
 import 'agent_name.dart';
 import 'backend.dart' show fireAndLog;
@@ -15,6 +14,7 @@ import 'extensions.dart' show StatusMark, statusLabel;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'layout.dart';
+import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -246,10 +246,6 @@ class ToolViewScope extends InheritedWidget {
   bool updateShouldNotify(ToolViewScope old) =>
       old.transcript != transcript || old.agentId != agentId;
 }
-
-/// Opens web links; tests replace it.
-@visibleForTesting
-Future<bool> Function(Uri url) openWebLink = launchUrl;
 
 // ---------------------------------------------------------------------------
 // Pieces the views are built from.
@@ -1571,7 +1567,7 @@ Widget? _webSearchBody(BuildContext context, ToolCallInfo call) {
             color: palette.text,
             onTap: () {
               final url = Uri.tryParse(_string(hit['url']));
-              if (url != null) openWebLink(url);
+              if (url != null) openLink(context, url);
             },
           ),
         ),
@@ -1607,7 +1603,7 @@ class _FetchLine extends StatelessWidget {
             text: title.ifEmpty(url),
             onTap: link == null || !link.hasScheme
                 ? null
-                : () => openWebLink(link),
+                : () => openLink(context, link),
           ),
         ),
         if (title.isNotEmpty) ...[

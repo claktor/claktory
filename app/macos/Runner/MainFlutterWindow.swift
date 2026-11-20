@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Cocoa
 import CoreImage
 import FlutterMacOS
@@ -67,6 +68,11 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "qrCode":
         result(Self.qrCode(call.arguments as? String ?? ""))
+      case "webAuth":
+        WebAuth.shared.start(call.arguments, result)
+      case "cancelWebAuth":
+        WebAuth.shared.cancel()
+        result(nil)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -366,5 +372,64 @@ class MainFlutterWindow: NSWindow {
     let height = min(940, max(500, (visible.height * 0.85).rounded()))
     return NSRect(
       x: visible.midX - width / 2, y: visible.midY - height / 2, width: width, height: height)
+  }
+}
+
+/// The browser step of connecting a service (app/lib/web_auth.dart) when
+/// the service sends back to this app's own address (`scheme`) rather than
+/// to one the app listens on: the system's sign-in window, which shares the
+/// default browser's sign-ins. It answers the address the service sent back
+/// to, nil when the person closed it, or an error.
+final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let shared = WebAuth()
+
+  private var session: ASWebAuthenticationSession?
+  private var result: FlutterResult?
+
+  func start(_ arguments: Any?, _ result: @escaping FlutterResult) {
+    guard let arguments = arguments as? [String: Any],
+      let url = (arguments["url"] as? String).flatMap(URL.init(string:)),
+      let scheme = arguments["scheme"] as? String
+    else {
+      return result(FlutterError(code: "arguments", message: "No address to open.", details: nil))
+    }
+    cancel()
+    let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) {
+      [weak self] callback, error in
+      DispatchQueue.main.async { self?.finished(callback, error) }
+    }
+    session.presentationContextProvider = self
+    self.session = session
+    self.result = result
+    if !session.start() {
+      finished(nil, NSError(domain: "WebAuth", code: 0, userInfo: [
+        NSLocalizedDescriptionKey: "Couldn't open the sign-in page.",
+      ]))
+    }
+  }
+
+  /// Closes the window; the waiting call answers nil.
+  func cancel() {
+    session?.cancel()
+    finished(nil, nil)
+  }
+
+  private func finished(_ callback: URL?, _ error: Error?) {
+    guard let result else { return }
+    self.result = nil
+    session = nil
+    if let callback {
+      result(callback.absoluteString)
+    } else if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+      result(nil)
+    } else if let error {
+      result(FlutterError(code: "failed", message: error.localizedDescription, details: nil))
+    } else {
+      result(nil)
+    }
+  }
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
   }
 }

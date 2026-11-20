@@ -11,8 +11,8 @@ use crate::clock::now_ms;
 use crate::credentials::Credential;
 use crate::errors::Error;
 use crate::oauth::{
-    CANCEL_MESSAGE, Callback, FixedCallback, bound_port, browser_authorization, callback_host, check_cancel, error_html, fixed_callback,
-    generate_pkce, random_hex, send_cancellable, success_html,
+    CANCEL_MESSAGE, Callback, FixedCallback, bound_port, browser_authorization, callback_host, check_cancel, error_html, finishing_html,
+    fixed_callback, generate_pkce, random_hex, send_cancellable,
 };
 use crate::providers::{client, response_text};
 
@@ -330,7 +330,7 @@ async fn start_callback_server(port: u16, state: String) -> (u16, Callback) {
         state,
         FixedCallback {
             path: "/auth/callback",
-            success: success_html("OpenAI authentication completed. You can close this window."),
+            success: finishing_html("ChatGPT"),
             internal: error_html("Internal error while processing OAuth callback.", None),
             missing: error_html("Missing authorization code.", None),
             oauth_error: None,

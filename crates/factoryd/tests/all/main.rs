@@ -18,6 +18,7 @@ mod characters;
 mod claktory_account;
 mod commands;
 mod comments;
+mod connectors;
 mod database;
 mod events;
 mod explorer;
