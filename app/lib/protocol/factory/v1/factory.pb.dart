@@ -7523,10 +7523,12 @@ class ReadFile extends $pb.GeneratedMessage {
   factory ReadFile({
     $core.String? path,
     $fixnum.Int64? maxBytes,
+    $fixnum.Int64? offset,
   }) {
     final result = ReadFile._();
     if (path != null) result.path = path;
     if (maxBytes != null) result.maxBytes = maxBytes;
+    if (offset != null) result.offset = offset;
     return result;
   }
 
@@ -7546,6 +7548,8 @@ class ReadFile extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'path')
     ..a<$fixnum.Int64>(
         2, _omitFieldNames ? '' : 'maxBytes', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'offset', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
@@ -7580,7 +7584,8 @@ class ReadFile extends $pb.GeneratedMessage {
   void clearPath() => $_clearField(1);
 
   /// At most this many bytes; 0 for the default. Text is read up to 2 MB and
-  /// images up to 20 MB, whatever is asked.
+  /// images up to 20 MB, whatever is asked; videos (and any read from an
+  /// offset) 8 MB at a time.
   @$pb.TagNumber(2)
   $fixnum.Int64 get maxBytes => $_getI64(1);
   @$pb.TagNumber(2)
@@ -7589,6 +7594,19 @@ class ReadFile extends $pb.GeneratedMessage {
   $core.bool hasMaxBytes() => $_has(1);
   @$pb.TagNumber(2)
   void clearMaxBytes() => $_clearField(2);
+
+  /// Read from this byte: a video is played a range at a time (offset 0, 8 MB,
+  /// 16 MB…, until offset + data's length is the size). Videos up to 2 GB,
+  /// and other files read from an offset too; larger ones come back with
+  /// `error`.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get offset => $_getI64(2);
+  @$pb.TagNumber(3)
+  set offset($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasOffset() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearOffset() => $_clearField(3);
 }
 
 class FileContent extends $pb.GeneratedMessage {
@@ -7601,6 +7619,7 @@ class FileContent extends $pb.GeneratedMessage {
     $fixnum.Int64? modifiedMs,
     $core.String? error,
     $core.String? sha256,
+    $fixnum.Int64? offset,
   }) {
     final result = FileContent._();
     if (path != null) result.path = path;
@@ -7611,6 +7630,7 @@ class FileContent extends $pb.GeneratedMessage {
     if (modifiedMs != null) result.modifiedMs = modifiedMs;
     if (error != null) result.error = error;
     if (sha256 != null) result.sha256 = sha256;
+    if (offset != null) result.offset = offset;
     return result;
   }
 
@@ -7637,6 +7657,8 @@ class FileContent extends $pb.GeneratedMessage {
     ..aInt64(6, _omitFieldNames ? '' : 'modifiedMs')
     ..aOS(7, _omitFieldNames ? '' : 'error')
     ..aOS(8, _omitFieldNames ? '' : 'sha256')
+    ..a<$fixnum.Int64>(9, _omitFieldNames ? '' : 'offset', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -7673,7 +7695,8 @@ class FileContent extends $pb.GeneratedMessage {
 
   /// Sniffed from its content and extension: "text/plain", "text/markdown",
   /// "application/json", "image/png", "image/jpeg", "image/gif",
-  /// "image/webp", "application/pdf", "application/octet-stream"…
+  /// "image/webp", "video/mp4", "video/quicktime", "video/webm",
+  /// "application/pdf", "application/octet-stream"…
   @$pb.TagNumber(2)
   $core.String get mime => $_getSZ(1);
   @$pb.TagNumber(2)
@@ -7693,7 +7716,7 @@ class FileContent extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   void clearSize() => $_clearField(3);
 
-  /// Its first bytes, up to the limit.
+  /// Its bytes from `offset`, up to the limit.
   @$pb.TagNumber(4)
   $core.List<$core.int> get data => $_getN(3);
   @$pb.TagNumber(4)
@@ -7703,7 +7726,7 @@ class FileContent extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearData() => $_clearField(4);
 
-  /// `data` is only the start of it.
+  /// `data` isn't the whole file: only its start, or a range of it.
   @$pb.TagNumber(5)
   $core.bool get truncated => $_getBF(4);
   @$pb.TagNumber(5)
@@ -7734,8 +7757,11 @@ class FileContent extends $pb.GeneratedMessage {
   @$pb.TagNumber(7)
   void clearError() => $_clearField(7);
 
-  /// The whole file's SHA-256, in lowercase hex; empty when `truncated`. A
-  /// thread made on this content says it in CreateThread.version_sha256.
+  /// The whole file's SHA-256, in lowercase hex. Text and images read from
+  /// the start leave it empty when `truncated`; videos and reads from an
+  /// offset always have it, the same for every range of one version of the
+  /// file. A thread made on this content says it in
+  /// CreateThread.version_sha256.
   @$pb.TagNumber(8)
   $core.String get sha256 => $_getSZ(7);
   @$pb.TagNumber(8)
@@ -7744,6 +7770,16 @@ class FileContent extends $pb.GeneratedMessage {
   $core.bool hasSha256() => $_has(7);
   @$pb.TagNumber(8)
   void clearSha256() => $_clearField(8);
+
+  /// Where `data` starts in the file: ReadFile.offset.
+  @$pb.TagNumber(9)
+  $fixnum.Int64 get offset => $_getI64(8);
+  @$pb.TagNumber(9)
+  set offset($fixnum.Int64 value) => $_setInt64(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasOffset() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearOffset() => $_clearField(9);
 }
 
 /// Sets an agent's layout (`Agent.layout`) for every device, answered with

@@ -15,6 +15,8 @@
 //! Agents get exports, made by an admin agent such as Rivet or the person
 //! with only the access the work needs (`derive`).
 
+pub mod aws;
+pub mod cloudflare;
 pub(crate) mod proposals;
 
 use std::collections::{BTreeMap, HashMap};
@@ -271,6 +273,10 @@ pub struct ExportMeta {
     /// token's id, the policy as given). Not secret.
     #[serde(default)]
     pub recipe: serde_json::Value,
+    /// Its variables that aren't secret (a region): given to commands like
+    /// the rest, but not hidden in what agents read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public: Vec<String>,
 }
 
 /// Why something a recipe did didn't work, in words for the person.
@@ -423,7 +429,10 @@ pub trait Recipe: Send + Sync {
 
 /// The recipes built in.
 fn built_in() -> Vec<Arc<dyn Recipe>> {
-    Vec::new()
+    let mut recipes: Vec<Arc<dyn Recipe>> = Vec::new();
+    recipes.extend(aws::Aws::built_in().map(|recipe| Arc::new(recipe) as Arc<dyn Recipe>));
+    recipes.extend(cloudflare::Cloudflare::built_in().map(|recipe| Arc::new(recipe) as Arc<dyn Recipe>));
+    recipes
 }
 
 /// Whether this Claktory connects any service: until one is built in (or a
@@ -564,7 +573,13 @@ impl Broker {
         recipe
             .hidden(control)
             .into_iter()
-            .map(|value| factory_agent::SecretVariable { secret: name.to_owned(), variable: "token".to_owned(), value, file: false })
+            .map(|value| factory_agent::SecretVariable {
+                secret: name.to_owned(),
+                variable: "token".to_owned(),
+                value,
+                file: false,
+                public: false,
+            })
             .collect()
     }
 
@@ -1118,11 +1133,13 @@ impl Factory {
                     self.broker.retire(
                         before
                             .into_iter()
+                            .filter(|value| !current.meta.public.contains(&value.variable))
                             .map(|value| factory_agent::SecretVariable {
                                 secret: current.name.clone(),
                                 variable: value.variable,
                                 value: value.value,
                                 file: value.file,
+                                public: false,
                             })
                             .collect(),
                     );

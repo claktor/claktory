@@ -21,6 +21,8 @@ import UniformTypeIdentifiers
     // The camera's picture that scans pairing codes (Scanner.swift).
     let scanner = engineBridge.pluginRegistry.registrar(forPlugin: "Scanner")!
     scanner.register(ScannerFactory(messenger: scanner.messenger()), withId: "claktory/scanner")
+    // The video viewer's player (app/macos/Runner/VideoPlayers.swift).
+    VideoPlayers.register(with: engineBridge.pluginRegistry.registrar(forPlugin: "VideoPlayers")!)
     deviceChannel = FlutterMethodChannel(name: "factory/device", binaryMessenger: messenger)
     deviceChannel?.setMethodCallHandler { call, result in
       switch call.method {

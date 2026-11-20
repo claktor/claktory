@@ -95,7 +95,10 @@ impl Demo {
         let n = self.minted.fetch_add(1, Ordering::SeqCst);
         let renew_at_ms = if self.due.load(Ordering::SeqCst) { 1 } else { i64::MAX };
         Derived {
-            values: Some(vec![Variable { name: "DEMO_TOKEN".into(), value: Zeroizing::new(format!("minted-{n}-0123456789")) }]),
+            values: Some(vec![
+                Variable { name: "DEMO_TOKEN".into(), value: Zeroizing::new(format!("minted-{n}-0123456789")) },
+                Variable { name: "DEMO_REGION".into(), value: Zeroizing::new("eu-central-1".into()) },
+            ]),
             meta: ExportMeta {
                 access: vec!["Edit DNS of acme.com".into()],
                 permissions,
@@ -103,6 +106,7 @@ impl Demo {
                 expires_ms: i64::MAX,
                 renew_at_ms,
                 recipe: json!({"token_id": format!("t{n}")}),
+                public: vec!["DEMO_REGION".into()],
                 ..ExportMeta::default()
             },
         }
@@ -296,7 +300,8 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     factory.add_connector(demo.clone(), &[]);
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    assert_eq!(vault(&view).connectors.iter().map(|connector| connector.id.as_str()).collect::<Vec<_>>(), ["demo"]);
+    // Besides whatever is built in.
+    assert!(vault(&view).connectors.iter().any(|connector| connector.id == "demo"));
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
     apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
     apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
@@ -311,7 +316,7 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     let said = call(&mut client, &mut view, "builder", "secrets_propose_connection", args).await;
     assert!(said.starts_with("Proposed connecting Demo;"), "{said}");
     let unknown = call(&mut client, &mut view, "builder", "secrets_propose_connection", &args.replace("Demo\"", "Stripe\"")).await;
-    assert!(unknown.contains("Claktory can't connect \"Stripe\". It can connect: demo."), "{unknown}");
+    assert!(unknown.starts_with("Claktory can't connect \"Stripe\". It can connect: ") && unknown.contains("demo"), "{unknown}");
     let proposal = vault(&view).proposals[0].clone();
     assert_eq!(
         (proposal.agent_id.as_str(), proposal.connector_id.as_str(), proposal.purpose.as_str()),
@@ -413,9 +418,10 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     // It's due: renewed before the command gets it, the old value still hidden.
     demo.stale.store(true, Ordering::SeqCst);
     let first = "minted-1-0123456789";
-    let command = format!(r#"{{"command":"echo \"$DEMO_TOKEN {first}\"","secrets":["Demo DNS"]}}"#);
+    let command = format!(r#"{{"command":"echo \"$DEMO_TOKEN {first} $DEMO_REGION\"","secrets":["Demo DNS"]}}"#);
     let output = call(&mut client, &mut view, "builder", "bash", &command).await;
-    assert_eq!(output.lines().next(), Some("[secret Demo DNS/DEMO_TOKEN] [secret Demo DNS/DEMO_TOKEN]"), "{output}");
+    // What the recipe says isn't secret (a region) stays readable.
+    assert_eq!(output.lines().next(), Some("[secret Demo DNS/DEMO_TOKEN] [secret Demo DNS/DEMO_TOKEN] eu-central-1"), "{output}");
     let renewed = vault(&view).secrets.into_iter().find(|secret| secret.id == made.id).expect("still there");
     assert_eq!(renewed.version, 2);
 

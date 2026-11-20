@@ -93,7 +93,7 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
         "# Essay\n\nThe industrial revolution was **not** a single event but a long series of changes.\n\nIt was, arguably, slow.\n";
     std::fs::write(dir.join("site/essay.md"), essay).expect("write");
     let path = std::fs::canonicalize(dir.join("site/essay.md")).expect("path").display().to_string();
-    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0 })).await;
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
     let Body::FileContent(content) = read.body else { panic!("expected the file") };
     assert_eq!(content.sha256.len(), 64, "the version comments are made on");
 
@@ -406,4 +406,135 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         Body::Error(error) => assert_eq!(error.message, "There are no comments to send."),
         other => panic!("expected an error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_region_of_an_image_is_told_in_words_and_pixels() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend_from_slice(&1280u32.to_be_bytes());
+    png.extend_from_slice(&1080u32.to_be_bytes());
+    png.extend_from_slice(b"pixels");
+    std::fs::write(dir.join("site/hero.png"), &png).expect("write");
+    let path = std::fs::canonicalize(dir.join("site/hero.png")).expect("path").display().to_string();
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
+    let Body::FileContent(content) = read.body else { panic!("expected the file") };
+    let region = serde_json::json!({"type": "FragmentSelector", "conformsTo": "http://www.w3.org/TR/media-frags/", "value": "xywh=percent:12.5,8,30,20"});
+    let client_message::Body::CreateThread(mut made) =
+        create(&path, "image", &content.sha256, vec![v1::Selector { json: region.to_string() }], "Brighter here.")
+    else {
+        unreachable!()
+    };
+    made.send_now = true;
+    let before = view.entries.len();
+    apply_request(&mut client, &mut view, client_message::Body::CreateThread(made)).await;
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    let words = "a region of the image, 30% wide and 20% tall, its top left 12.5% across and 8% down (that's 384 × 216 px at 160, 86 of 1280 × 1080)";
+    assert!(prompt.contains(&format!("hero.png: {words}\nBrighter here.")), "{prompt}");
+    let listed = call(&mut client, &mut view, "writer", r#"call comments_list {}"#).await;
+    assert!(listed.contains(&format!("(open): {words}")), "{listed}");
+
+    // The image changed: still the region, on an earlier version, without pixels.
+    png.extend_from_slice(b"more");
+    std::fs::write(dir.join("site/hero.png"), &png).expect("write");
+    let listed = call(&mut client, &mut view, "writer", r#"call comments_list {}"#).await;
+    assert!(
+        listed.contains(
+            "(open, the image changed since): a region of the image, 30% wide and 20% tall, its top left 12.5% across and 8% down\n"
+        ),
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn a_moment_of_a_video_is_told_in_words() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    // Bigger than text can be: only its hash is read.
+    let mut video = b"\0\0\0\x18ftypmp42\0\0\0\0".to_vec();
+    video.resize(3_000_000, 7);
+    std::fs::write(dir.join("site/clip.mp4"), &video).expect("write");
+    let path = std::fs::canonicalize(dir.join("site/clip.mp4")).expect("path").display().to_string();
+    let read =
+        client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, ..Default::default() })).await;
+    let Body::FileContent(content) = read.body else { panic!("expected the file") };
+    let moment = |value: &str| v1::Selector {
+        json: serde_json::json!({"type": "FragmentSelector", "conformsTo": "http://www.w3.org/TR/media-frags/", "value": value})
+            .to_string(),
+    };
+    let send = |version: &str, value: &str, body: &str| {
+        let client_message::Body::CreateThread(mut made) = create(&path, "video", version, vec![moment(value)], body) else {
+            unreachable!()
+        };
+        made.send_now = true;
+        client_message::Body::CreateThread(made)
+    };
+    let before = view.entries.len();
+    apply_request(&mut client, &mut view, send(&content.sha256, "t=31.2,45&xywh=percent:10,20,30,25", "Cut this.")).await;
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    let words = "at 0:31–0:45, in a region of the frame, 30% wide and 25% tall, its top left 10% across and 20% down";
+    assert!(prompt.contains(&format!("clip.mp4: {words}\nCut this.")), "{prompt}");
+    match client.request(create(&path, "video", &content.sha256, Vec::new(), "Where?")).await.body {
+        Body::Error(error) => assert_eq!(error.message, "A video's comment needs a time."),
+        other => panic!("expected an error, got {other:?}"),
+    }
+
+    // Made on an earlier version, or the video changed since: it says so.
+    let before = view.entries.len();
+    apply_request(&mut client, &mut view, send("an-older-version", "t=75", "And this.")).await;
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("clip.mp4: at 1:15 (on an earlier version of the video)\nAnd this."), "{prompt}");
+    // Shown in a pane, it's checked: a new version makes its comments outdated.
+    let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
+        id: id.into(),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new() })),
+    };
+    let split = v1::ViewSplit {
+        axis: v1::ViewAxis::Row.into(),
+        children: vec![leaf("chat", "chat", ""), leaf("pane-1", "video", &path)],
+        weights: Vec::new(),
+    };
+    let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
+    apply_request(&mut client, &mut view, client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root) }))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    video.extend_from_slice(b"more");
+    std::fs::write(dir.join("site/clip.mp4"), &video).expect("write");
+    let changed = until(&mut client, &mut view, |body| match body {
+        Body::FileChanged(changed) if changed.path == path => Some(changed.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(changed.sha256 != content.sha256 && changed.by_agent_id.is_empty(), "{changed:?}");
+    let outdated = threads(&mut client, &path).await;
+    assert!(outdated.threads.iter().all(|thread| thread.anchor() == AnchorState::Outdated), "{outdated:?}");
+    let listed = call(&mut client, &mut view, "writer", r#"call comments_list {}"#).await;
+    assert!(listed.contains(&format!("(open, the video changed since): {words}\n")), "{listed}");
+
+    // Made again just as it was (or caught mid-write): back on its version.
+    video.truncate(3_000_000);
+    std::fs::write(dir.join("site/clip.mp4"), &video).expect("write");
+    until(&mut client, &mut view, |body| match body {
+        Body::FileChanged(changed) if changed.path == path && changed.sha256 == content.sha256 => Some(()),
+        _ => None,
+    })
+    .await;
+    let back = threads(&mut client, &path).await;
+    let anchors: Vec<AnchorState> = back.threads.iter().map(v1::Thread::anchor).collect();
+    assert_eq!(anchors, [AnchorState::Anchored, AnchorState::Outdated], "the one made on an earlier version stays so");
 }

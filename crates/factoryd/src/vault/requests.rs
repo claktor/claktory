@@ -323,7 +323,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         } else if !asked.secret_id.is_empty() {
             asked.secret_id.clone()
         } else {
-            return Err(VaultError::Invalid("Pick a secret to give, or add a new one with its values.".to_owned()).into());
+            return Err(VaultError::Invalid("Choose a secret to give, or add a new one with its values.".to_owned()).into());
         };
         let name = give(factory, &secret, agent, "")?;
         Some((secret, name))

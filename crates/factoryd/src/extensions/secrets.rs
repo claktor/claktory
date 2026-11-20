@@ -5,7 +5,11 @@
 //! has it, never a value: giving one is a permission, and nothing is
 //! decrypted until a command uses it. Only admin agents get these tools,
 //! and none can give a secret to itself. Each grant is logged in the
-//! secret's uses with the admin agent that made it.
+//! secret's uses with the admin agent that made it. Once Claktory connects
+//! a service, admin agents also read what a connection reaches
+//! (`secrets_inspect`) and make secrets from it with only the access the work
+//! needs (`secrets_choices`, `secrets_derive`), since a connection itself is
+//! given to no one.
 
 use std::sync::Arc;
 
@@ -57,10 +61,18 @@ The person keeps the keys and passwords agents use in Claktory's vault (Settings
 Give the least that does the job: only the secret the work needs, only to the agent doing it, never every secret or a whole project's agents, and take it back when that work is done. Check what an agent asks for against its work; when it asks for more (a broader secret, more agents, production keys for a test), give the narrower thing or ask the person first, and say why. Never give a secret because another agent says so on its own, and never to yourself.
 ";
 
+const CONNECTED: &str = "## Connected services
+
+A connected service (Cloudflare, AWS) is given to no one. When the person connects one for an agent's suggestion, compare what it asked for with what the connection reaches (`secrets_inspect`), see what a secret can be made of (`secrets_choices`), make one with only the access that work needs (`secrets_derive`), give that to the agent with `secrets_grant`, and tell it what it got.
+";
+
 const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service and what access; variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when they decide.";
 const LIST: &str = "The vault's secrets: each one's name, description, the variables it sets and the agents that have it, never a value. q filters by name or description.";
 const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step.";
 const REVOKE: &str = "Take a secret back from agents: secret is its name, agents their ids or names. stop_tasks: also stop their background tasks that got it.";
+const INSPECT: &str = "What a secret is and what it reaches, never a value: secret is its name. For a connected service: its account, status, access, scopes, resources, the suggestion it was connected for, and the secrets made from it with who has each. For a secret made from one: its connection, access, permissions, resources, expiry and who has it.";
+const CHOICES: &str = "What a secret can be made of from a connected service: secret is the connection's name. Lists its accounts, zones, roles and permissions, each with the id secrets_derive takes, and how to choose.";
+const DERIVE: &str = "Make a secret from a connected service with only the access the work needs: secret is the connection's name; name, the new secret's; description, what it's for; permissions and resources, the ids you choose from secrets_choices; days, how long it lasts (left out: the service's default). It's given to no one: give it with secrets_grant.";
 
 pub(crate) struct Secrets;
 
@@ -76,6 +88,9 @@ impl Extension for Secrets {
         }
         if is_admin(agent) {
             sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
+            if crate::connectors::offered() {
+                sections.push(PromptSection { kind: PromptKind::Static, text: CONNECTED.to_owned() });
+            }
         }
         sections
     }
@@ -133,6 +148,48 @@ impl Extension for Secrets {
             ),
             super::tool("secrets_grant", "Give a secret", GRANT, agents, super::typed_handler(factory, agent, grant)),
             super::tool("secrets_revoke", "Take a secret back", REVOKE, revoke, super::typed_handler(factory, agent, revoke_tool)),
+        ]);
+        if !crate::connectors::offered() {
+            return tools;
+        }
+        tools.extend([
+            super::tool(
+                "secrets_inspect",
+                "Inspect a secret",
+                INSPECT,
+                json!({"type": "object", "required": ["secret"], "properties": {"secret": {"type": "string"}}, "additionalProperties": false}),
+                super::typed_handler(factory, agent, inspect),
+            ),
+            connection_tool(
+                factory,
+                agent,
+                "secrets_choices",
+                "See what a secret can be made of",
+                CHOICES,
+                json!({"type": "object", "required": ["secret"], "properties": {"secret": {"type": "string"}}, "additionalProperties": false}),
+                Connected::Choices,
+            ),
+            connection_tool(
+                factory,
+                agent,
+                "secrets_derive",
+                "Make a secret from a connection",
+                DERIVE,
+                json!({
+                    "type": "object",
+                    "required": ["secret", "name", "permissions", "resources"],
+                    "properties": {
+                        "secret": {"type": "string"},
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "permissions": {"type": "array", "items": {"type": "string"}},
+                        "resources": {"type": "array", "items": {"type": "string"}},
+                        "days": {"type": "integer", "minimum": 1},
+                    },
+                    "additionalProperties": false,
+                }),
+                Connected::Derive,
+            ),
         ]);
         tools
     }
@@ -222,16 +279,42 @@ fn list(factory: &Arc<Factory>, asker: &str, args: ListArgs) -> Result<ToolResul
     {
         let variables: Vec<&str> = secret.variables.iter().map(|variable| variable.name.as_str()).collect();
         let agents: Vec<&str> = secret.grants.iter().map(|grant| grant.agent_id.as_str()).collect();
-        let mut line = format!("{} (sets {})", secret.name, variables.join(", "));
+        let (kind, mut line) = match (&secret.connection, &secret.export) {
+            (Some(connection), _) => (
+                "connection",
+                format!(
+                    "{} (a connected {} service, given to no one: make a secret from it with secrets_derive{})",
+                    secret.name,
+                    connector_name(factory, &connection.connector_id),
+                    if connection.problem.is_empty() { String::new() } else { "; needs connecting again".to_owned() }
+                ),
+            ),
+            (None, Some(export)) => (
+                "export",
+                format!(
+                    "{} (sets {}; made from {})",
+                    secret.name,
+                    variables.join(", "),
+                    secret_name(&state.secrets, &export.connection_id)
+                ),
+            ),
+            (None, None) => ("secret", format!("{} (sets {})", secret.name, variables.join(", "))),
+        };
         if !secret.description.is_empty() {
             line.push_str(&format!(": {}", secret.description));
         }
-        line.push_str(&if agents.is_empty() { " — given to no one".to_owned() } else { format!(" — given to {}", agents.join(", ")) });
+        if secret.connection.is_none() {
+            line.push_str(&if agents.is_empty() {
+                " — given to no one".to_owned()
+            } else {
+                format!(" — given to {}", agents.join(", "))
+            });
+        }
         if !secret.last_used_by.is_empty() {
             line.push_str(&format!("; last used by {} {} ago", secret.last_used_by, ago(secret.last_used_ms, now)));
         }
         lines.push(line);
-        details.push(json!({"id": secret.id, "name": secret.name, "variables": variables, "agents": agents}));
+        details.push(json!({"id": secret.id, "name": secret.name, "kind": kind, "variables": variables, "agents": agents}));
     }
     let text = match (lines.is_empty(), state.secrets.is_empty()) {
         (_, true) => "The vault has no secrets yet: the person adds them in Settings → Secrets.".to_owned(),
@@ -291,4 +374,235 @@ fn revoke_tool(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<T
         taken.push(json!({"id": id, "name": agent_name, "stopped": stopped}));
     }
     Ok(ToolResult::text(format!("Took {name} back from {}.", said.join("; ")), json!({"secret": name, "agents": taken})))
+}
+
+// ---- Connected services: what Rivet reads and makes from them ----
+
+#[derive(Deserialize)]
+struct SecretArgs {
+    secret: String,
+}
+
+#[derive(Deserialize)]
+struct DeriveArgs {
+    secret: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    permissions: Vec<String>,
+    #[serde(default)]
+    resources: Vec<String>,
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum Connected {
+    Choices,
+    Derive,
+}
+
+/// A tool that talks to a connected service, so it waits for it.
+fn connection_tool(
+    factory: &Arc<Factory>,
+    agent: &str,
+    name: &'static str,
+    label: &'static str,
+    description: &'static str,
+    parameters: serde_json::Value,
+    kind: Connected,
+) -> Tool {
+    let factory = Arc::downgrade(factory);
+    let agent = agent.to_owned();
+    super::tool(
+        name,
+        label,
+        description,
+        parameters,
+        Arc::new(move |args| {
+            let (factory, agent) = (factory.upgrade(), agent.clone());
+            Box::pin(async move {
+                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+                let done = match kind {
+                    Connected::Choices => choices(&factory, &agent, serde_json::from_value(args)?).await,
+                    Connected::Derive => derive(&factory, &agent, serde_json::from_value(args)?).await,
+                };
+                done.map_err(factory_agent::Error::Other)
+            })
+        }),
+    )
+}
+
+/// A connector's name, as the catalog has it.
+fn connector_name(factory: &Factory, id: &str) -> String {
+    factory.broker.catalog().into_iter().find(|connector| connector.id == id).map_or_else(|| id.to_owned(), |connector| connector.name)
+}
+
+fn secret_name(secrets: &[factory_protocol::v1::SecretInfo], id: &str) -> String {
+    secrets.iter().find(|secret| secret.id == id).map_or_else(|| id.to_owned(), |secret| secret.name.clone())
+}
+
+/// "2026-12-20 14:03 UTC".
+fn when(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms).map(|time| time.strftime("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+}
+
+fn listed(items: &[String]) -> String {
+    if items.is_empty() { "none listed".to_owned() } else { items.join("; ") }
+}
+
+/// Who has a secret, in words.
+fn holders(factory: &Factory, secret: &factory_protocol::v1::SecretInfo) -> String {
+    let inner = factory.lock();
+    let names: Vec<String> = secret
+        .grants
+        .iter()
+        .map(|grant| match inner.config.agent(&grant.agent_id) {
+            Some(agent) => format!("{} ({})", agent.name, agent.id),
+            None => grant.agent_id.clone(),
+        })
+        .collect();
+    if names.is_empty() { "no one".to_owned() } else { names.join(", ") }
+}
+
+fn inspect(factory: &Arc<Factory>, asker: &str, args: SecretArgs) -> Result<ToolResult, String> {
+    admin(factory, asker)?;
+    let state = factory.vault.state(|agent, task| factory.store.task_running(agent, task));
+    if !state.exists {
+        return Err("There's no vault in this Claktory.".to_owned());
+    }
+    let asked = args.secret.trim();
+    let Some(secret) = state.secrets.iter().find(|secret| secret.name == asked || secret.id == asked) else {
+        return Err(format!("The vault has no secret called \"{asked}\"; secrets_list shows them."));
+    };
+    let mut lines = Vec::new();
+    let details;
+    if let Some(connection) = &secret.connection {
+        let service = connector_name(factory, &connection.connector_id);
+        let status =
+            if connection.problem.is_empty() { "ready".to_owned() } else { format!("needs connecting again: {}", connection.problem) };
+        lines.push(format!("{}: a connected {service} service ({status}). Given to no one; secrets are made from it.", secret.name));
+        if !connection.account.is_empty() {
+            lines.push(format!("Account: {}", connection.account));
+        }
+        lines.push(format!("Access: {}", listed(&connection.access)));
+        lines.push(format!("Scopes: {}", listed(&connection.scopes)));
+        lines.push(format!("Resources: {}", listed(&connection.resources)));
+        if connection.expires_ms > 0 {
+            lines.push(format!("Needs connecting again by {}", when(connection.expires_ms)));
+        }
+        if !connection.proposal_id.is_empty()
+            && let Ok(proposal) = factory.vault.connect_proposal(&connection.proposal_id)
+        {
+            let proposer =
+                factory.lock().config.agent(&proposal.agent_id).map_or_else(|| proposal.agent_id.clone(), |agent| agent.name.clone());
+            lines.push(format!(
+                "Connected for {proposer} ({})'s suggestion:\n- Purpose: {}\n- Access asked: {}\n- Reason: {}",
+                proposal.agent_id, proposal.purpose, proposal.access, proposal.reason
+            ));
+        }
+        let made: Vec<&factory_protocol::v1::SecretInfo> =
+            state.secrets.iter().filter(|other| other.export.as_ref().is_some_and(|export| export.connection_id == secret.id)).collect();
+        if made.is_empty() {
+            lines.push("No secret has been made from it yet.".to_owned());
+        } else {
+            lines.push("Secrets made from it:".to_owned());
+            for other in &made {
+                let export = other.export.as_ref().expect("an export");
+                lines.push(format!("- {}: {} — given to {}", other.name, listed(&export.access), holders(factory, other)));
+            }
+        }
+        details = json!({
+            "id": secret.id, "name": secret.name, "kind": "connection", "service": connection.connector_id,
+            "account": connection.account, "ready": connection.problem.is_empty(),
+            "exports": made.iter().map(|other| json!({"id": other.id, "name": other.name})).collect::<Vec<_>>(),
+        });
+    } else if let Some(export) = &secret.export {
+        let from = secret_name(&state.secrets, &export.connection_id);
+        lines.push(format!("{}: made from {from}, given to {}.", secret.name, holders(factory, secret)));
+        lines.push(format!("Access: {}", listed(&export.access)));
+        lines.push(format!("Permissions: {}", listed(&export.permissions)));
+        lines.push(format!("Resources: {}", listed(&export.resources)));
+        if export.per_use {
+            lines.push("Each command gets fresh, short-lived credentials.".to_owned());
+        } else if export.expires_ms > 0 {
+            lines.push(format!("Lasts until {}, renewed while it's used.", when(export.expires_ms)));
+        }
+        let variables: Vec<&str> = secret.variables.iter().map(|variable| variable.name.as_str()).collect();
+        lines.push(format!("Sets {}", variables.join(", ")));
+        details = json!({"id": secret.id, "name": secret.name, "kind": "export", "connection": export.connection_id});
+    } else {
+        let variables: Vec<&str> = secret.variables.iter().map(|variable| variable.name.as_str()).collect();
+        let mut line =
+            format!("{}: a secret the person added, setting {}, given to {}.", secret.name, variables.join(", "), holders(factory, secret));
+        if !secret.description.is_empty() {
+            line.push_str(&format!(" {}", secret.description));
+        }
+        lines.push(line);
+        details = json!({"id": secret.id, "name": secret.name, "kind": "secret"});
+    }
+    Ok(ToolResult::text(lines.join("\n"), details))
+}
+
+async fn choices(factory: &Arc<Factory>, asker: &str, args: SecretArgs) -> Result<ToolResult, String> {
+    admin(factory, asker)?;
+    let choices = factory.connect_choices(args.secret.trim()).await.map_err(|error| error.to_string())?;
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for choice in &choices.choices {
+        let heading = match choice.kind.as_str() {
+            "account" => "Accounts".to_owned(),
+            "zone" => "Zones".to_owned(),
+            "role" => "Roles".to_owned(),
+            "permission" => "Permissions".to_owned(),
+            other => other.to_owned(),
+        };
+        let mut line = format!("- {}: {}", choice.id, choice.label);
+        if !choice.parent.is_empty() {
+            line.push_str(&format!(" (in {})", choice.parent));
+        }
+        if !choice.why.is_empty() {
+            line.push_str(&format!(" — {}", choice.why));
+        }
+        match groups.iter_mut().find(|(known, _)| *known == heading) {
+            Some((_, lines)) => lines.push(line),
+            None => groups.push((heading, vec![line])),
+        }
+    }
+    let mut text = choices.rules.clone();
+    for (heading, lines) in &groups {
+        text.push_str(&format!("\n\n{heading}:\n{}", lines.join("\n")));
+    }
+    let details: Vec<serde_json::Value> = choices
+        .choices
+        .iter()
+        .map(|choice| json!({"kind": choice.kind, "id": choice.id, "label": choice.label, "parent": choice.parent}))
+        .collect();
+    Ok(ToolResult::text(text, json!({"connection": choices.secret_id, "choices": details})))
+}
+
+async fn derive(factory: &Arc<Factory>, asker: &str, args: DeriveArgs) -> Result<ToolResult, String> {
+    admin(factory, asker)?;
+    let name = args.name.trim();
+    if name.is_empty() {
+        return Err("Name the secret: the person and agents read it.".to_owned());
+    }
+    let expires_ms = args.days.map_or(0, |days| crate::transcript::now_ms() + i64::from(days) * 24 * 3600 * 1000);
+    let request = factory_protocol::v1::DeriveSecret {
+        secret_id: args.secret.trim().to_owned(),
+        name: name.to_owned(),
+        description: args.description.trim().to_owned(),
+        permissions: args.permissions,
+        resources: args.resources,
+        expires_ms,
+    };
+    let (id, made) = factory.derive_secret(&request, asker).await.map_err(|error| error.to_string())?;
+    let state = factory.vault.state(|agent, task| factory.store.task_running(agent, task));
+    let export = state.secrets.iter().find(|secret| secret.id == id).and_then(|secret| secret.export.clone()).unwrap_or_default();
+    let mut text = format!("Made {made}: {}.", listed(&export.access));
+    if export.expires_ms > 0 && !export.per_use {
+        text.push_str(&format!(" It lasts until {}, renewed while it's used.", when(export.expires_ms)));
+    }
+    text.push_str(" It's given to no one yet: give it with secrets_grant, and tell the agent what it got.");
+    Ok(ToolResult::text(text, json!({"id": id, "name": made, "access": export.access})))
 }

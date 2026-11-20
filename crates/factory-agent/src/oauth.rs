@@ -115,7 +115,8 @@ pub fn success_html(message: &str) -> String {
 /// The page a callback shows before Claktory has exchanged the code, which
 /// may still fail: it says the sign-in is being finished, not that it worked.
 pub fn finishing_html(provider: &str) -> String {
-    let message = format!("Claktory is finishing your {provider} sign-in. You can close this tab and go back to Claktory to see how it went.");
+    let message =
+        format!("Claktory is finishing your {provider} sign-in. You can close this tab and go back to Claktory to see how it went.");
     render_page("Finishing sign-in", "Finishing sign-in", &message, None)
 }
 

@@ -134,7 +134,23 @@ pub(crate) fn clean_name(text: &str) -> String {
     if name.is_empty() { "Connection".to_owned() } else { name }
 }
 
+/// The variables of a secret (its kind and meta) that aren't secret: what
+/// the recipe of a secret made from a connection says (a region).
+pub(super) fn public_of(kind: &str, meta: &str) -> Vec<String> {
+    match kind {
+        KIND_EXPORT => serde_json::from_str::<ExportMeta>(meta).unwrap_or_default().public,
+        _ => Vec::new(),
+    }
+}
+
 impl Vault {
+    /// The variables of secret `id` that aren't secret.
+    pub(super) fn public_variables(db: &Connection, id: &str) -> Result<Vec<String>, VaultError> {
+        let (kind, meta): (String, String) =
+            db.query_row("SELECT kind, meta FROM secrets WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(public_of(&kind, &meta))
+    }
+
     /// Keeps a newly connected service; returns its id and name, made from
     /// `name` (" 2" if it's taken).
     pub(crate) fn add_connection(

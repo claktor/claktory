@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'panes_test.dart' show beside, showPanes;
+import 'viewers_test.dart' show png;
 
 const _essay = '''# On rivers
 
@@ -181,6 +182,20 @@ void main() {
       expect(markSpan(span, const []), same(span));
     });
 
+    test('a region is a media fragment, and reads back', () {
+      const region = Region(Rect.fromLTWH(0.125, 0.08, 0.3, 0.2));
+      final json = jsonDecode(region.selectors.single.json) as Map;
+      expect(json['type'], 'FragmentSelector');
+      expect(json['value'], 'xywh=percent:12.5,8,30,20');
+      final back = regionOf(Thread(selectors: region.selectors))!;
+      expect(back.left, closeTo(0.125, 1e-9));
+      expect(back.top, closeTo(0.08, 1e-9));
+      expect(back.width, closeTo(0.3, 1e-9));
+      expect(back.height, closeTo(0.2, 1e-9));
+      expect(const Region(Rect.fromLTWH(0.5, 0.5, 0.001, 0.2)).isEmpty, isTrue);
+      expect(regionOf(Thread(selectors: [Selector(json: 'not json')])), isNull);
+    });
+
     test('a marked link stays a link in every piece', () {
       final tap = TapGestureRecognizer();
       addTearDown(tap.dispose);
@@ -296,7 +311,10 @@ void main() {
       }
 
       await drag('The second paragraph', 1, 120);
-      expect(_controller(tester).selection.value?.exact, isNotEmpty);
+      expect(
+        (_controller(tester).selection.value as Passage?)?.exact,
+        isNotEmpty,
+      );
       // A comment lands on the paragraph under the selection: it's drawn
       // again, highlighted, while the selection is in it.
       harness.backend.threads.apply(
@@ -312,7 +330,7 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(
         'The third one ends it.',
-        startsWith(_controller(tester).selection.value!.exact),
+        startsWith((_controller(tester).selection.value! as Passage).exact),
       );
     });
 
@@ -605,6 +623,159 @@ void main() {
       expect(made.createThread.suggestion, 'part');
       expect(made.createThread.body, '');
       expect(made.createThread.sendNow, isFalse);
+    });
+  });
+
+  _imageTests();
+}
+
+void _imageTests() {
+  group('image regions', () {
+    const path = '/w/chart.png';
+    const area = Rect.fromLTWH(0.25, 0.25, 0.5, 0.5);
+
+    Thread regionThread({
+      AnchorState anchor = AnchorState.ANCHOR_STATE_ANCHORED,
+    }) => Thread(
+      id: 'r1',
+      agentId: 'a1',
+      path: path,
+      kind: 'image',
+      versionSha256: 'v1',
+      status: ThreadStatus.THREAD_STATUS_OPEN,
+      anchor: anchor,
+      selectors: const Region(area).selectors,
+      comments: [ThreadComment(id: 'c1', body: 'Label this axis.')],
+    );
+
+    Future<Harness> showChart(
+      WidgetTester tester, {
+      List<Thread> threads = const [],
+    }) async {
+      final data = await png(tester, 400, 200);
+      final harness = await showPanes(
+        tester,
+        beside('image', path),
+        files: {
+          path: FileContent(
+            path: path,
+            mime: 'image/png',
+            size: Int64(data.length),
+            data: data,
+            sha256: 'v1',
+          ),
+        },
+      );
+      tester.view.physicalSize = const Size(1600, 900);
+      harness.backend.threads.apply(
+        ThreadList(path: path, versionSha256: 'v1', threads: threads),
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 300)),
+      );
+      await settle(tester);
+      await tester.pump();
+      return harness;
+    }
+
+    /// The image's box on screen.
+    Rect picture(WidgetTester tester) => tester.getRect(find.byType(RawImage));
+
+    testWidgets("a comment's region shows, with its card beside it", (
+      tester,
+    ) async {
+      final harness = await showChart(tester, threads: [regionThread()]);
+      expect(
+        harness.backend.sent.any((m) => m.listThreads.path == path),
+        isTrue,
+      );
+      expect(find.text('Label this axis.'), findsOneWidget);
+      expect(find.byType(RegionThumbnail), findsOneWidget);
+      // Level with the region's top.
+      final box = picture(tester);
+      final card = tester.getRect(
+        find.ancestor(
+          of: find.text('Label this axis.'),
+          matching: find.byType(AnimatedContainer),
+        ).first,
+      );
+      expect(card.top, closeTo(box.top + box.height * 0.25, 2));
+      expect(
+        find.text('Made on an earlier version of this image.'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a click on a region picks its comment', (tester) async {
+      await showChart(tester, threads: [regionThread()]);
+      expect(find.text('Reply'), findsNothing);
+      await tester.tapAt(picture(tester).center);
+      await tester.pump(const Duration(milliseconds: 400));
+      await settle(tester);
+      expect(find.text('Reply'), findsOneWidget);
+    });
+
+    testWidgets('Comment, then a drag, makes a comment on that region', (
+      tester,
+    ) async {
+      final harness = await showChart(tester);
+      await tester.tap(find.text('Comment'));
+      await settle(tester);
+      final box = picture(tester);
+      await tester.dragFrom(
+        box.topLeft + Offset(box.width * 0.1, box.height * 0.2),
+        Offset(box.width * 0.4, box.height * 0.5),
+      );
+      await settle(tester);
+      // The margin offers Comment (and no Suggest: an image can't be).
+      expect(find.text('Suggest'), findsNothing);
+      await tester.tap(find.text('Comment').last);
+      await settle(tester);
+      expect(find.byType(RegionThumbnail), findsOneWidget);
+      await tester.enterText(_field, 'Brighter here.');
+      await tester.pump();
+      await tester.tap(find.text('Comment').last);
+      await settle(tester);
+      final made = harness.backend.sent.lastWhere((m) => m.hasCreateThread());
+      expect(made.createThread.kind, 'image');
+      expect(made.createThread.versionSha256, 'v1');
+      final region = regionOf(Thread(selectors: made.createThread.selectors))!;
+      expect(region.left, closeTo(0.1, 0.02));
+      expect(region.top, closeTo(0.2, 0.02));
+      expect(region.width, closeTo(0.4, 0.02));
+      expect(region.height, closeTo(0.5, 0.02));
+    });
+
+    testWidgets('a comment made on an earlier version says so', (tester) async {
+      await showChart(
+        tester,
+        threads: [regionThread(anchor: AnchorState.ANCHOR_STATE_OUTDATED)],
+      );
+      expect(
+        find.text('Made on an earlier version of this image.'),
+        findsOneWidget,
+      );
+      // Still on its region: never put aside.
+      expect(find.byType(RegionThumbnail), findsOneWidget);
+    });
+
+    testWidgets('a new version reads the image again, and says who', (
+      tester,
+    ) async {
+      final harness = await showChart(tester);
+      final before = harness.backend.sent.where((m) => m.hasReadFile()).length;
+      harness.backend.fileChanged.value = FileChanged(
+        path: path,
+        sha256: 'v2',
+        byAgentId: 'a1',
+      );
+      await settle(tester);
+      expect(
+        harness.backend.sent.where((m) => m.hasReadFile()).length,
+        before + 1,
+      );
+      expect(find.text('Builder just updated this file'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 7));
     });
   });
 }

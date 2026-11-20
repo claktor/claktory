@@ -6,6 +6,11 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.8
+Released 2026-11-20 12:28 UTC.
+- Added: Watch an agent's videos beside its conversation and comment on a moment or a stretch: click Comment above the video, then click or drag along the timeline. Drag across the frame too to point at part of it.
+- Added: Comment on part of an image: click Comment above it and drag across the part you mean. Your comment stays on that part when the agent makes a new version.
+
 ## v0.1.7
 Released 2026-11-20 11:41 UTC.
 - Added: Comment on a file as you would on a document: select text in a file beside a conversation, comment on it, and send your comments to the agent in one go. It revises the file, replies and resolves them, and each comment stays with its text as the file changes. You can also suggest new text yourself, and accept or reject an agent's suggestions.

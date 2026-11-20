@@ -335,6 +335,8 @@ secrets).
   days before its expiry, default 30 days; AWS 2 minutes before its
   credentials expire) the broker renews it **before** the command gets it;
   `per_use` only tells the app it's short-lived and renewed for the person.
+  `ExportMeta.public` names variables that aren't secret (AWS_REGION): they're
+  set like the rest but never hidden in what agents read.
   A renewal that fails keeps the old values while they still work.
   The recipe returns new values (a new version) or the same values with a
   new expiry (Cloudflare extends the same token, so a running command keeps
@@ -441,16 +443,59 @@ callback (auth.claktory.com), a flow surviving a backend restart.
 
 ## The manual, with the first service
 
-Until a recipe is built in, nothing about connecting shows (the option, the
-tool, its prompt section), so the manual says nothing of it. With the first
-service, add back, under `## Secrets` in the core:
+Until a service is offered (Cloudflare waits for its client id, AWS for a
+try against a real account: `SHIPPED` in aws.rs), nothing about connecting
+shows (the option, the tool, its prompt section, Rivet's tools, the app's
+Connect a service…), so the manual says nothing of it. The dev Claktory
+has AWS with `FACTORY_AWS_ENABLED=1` (AWS itself) or `FACTORY_AWS_BASE`
+(a stand-in), and Cloudflare with `FACTORY_CLOUDFLARE_CLIENT_ID` and
+`FACTORY_CLOUDFLARE_BASE`. When one ships, add
+back, under `## Secrets` in the core (naming only the services offered):
 
 ```
 - {{user}} can also **connect a service** (Cloudflare, AWS) by approving Claktory on its own site; the vault keeps the connection, which no agent ever gets. An agent is given a secret made from it with only the access its work needs, and uses it as any other.
 ```
 
-and as the last part of the `ext-secrets` note's item:
+as the last part of the `ext-secrets` note's item (the AWS sentence only
+with AWS, and the examples only of the services offered):
 
 ```
-  - **Connecting services.** With the option **Can suggest connecting services** (`connect`, off unless turned on), an agent also gets `secrets_propose_connection`: `service` (a connector's id or name, such as `cloudflare` or `aws`), `purpose`, `access` (which permissions, on which zones, accounts or roles), `reason`, and optionally `access_id`. One suggestion per agent and service waits at a time; it shows in its conversation and at the top of Settings → Secrets, where {{user}} connects it or dismisses it. Connecting opens the service's page on {{user}}'s device (any paired device works, over the tunnel too); the device hands where the browser came back to to the backend, which signs in itself and keeps the tokens in the vault, never as variables: a connection is given to no one, and `secrets_grant` refuses it. When one is made for a suggestion, the agent is told it has nothing yet, and every admin agent with Secrets is told what was asked and what the connection reaches, to make a secret from it with only the access the work needs and give that. Secrets made from a connection (a Cloudflare token for some zones, an AWS account and role) are renewed before a command gets them when they're due; one the service no longer accepts shows **Needs reconnecting**. Disconnecting removes the connection and every secret made from it (their tokens at the service too, where it can), and can also revoke it at the service.
+  - **Connecting services.** With the option **Can suggest connecting services** (`connect`, off unless turned on), an agent also gets `secrets_propose_connection`: `service` (a connector's id or name, such as `cloudflare` or `aws`), `purpose`, `access` (which permissions, on which zones, accounts or roles), `reason`, and optionally `access_id`. One suggestion per agent and service waits at a time; it shows in its conversation and at the top of Settings → Secrets, where {{user}} connects it or dismisses it. Connecting opens the service's page on {{user}}'s device (any paired device works, over the tunnel too); the device hands where the browser came back to to the backend, which signs in itself and keeps the tokens in the vault, never as variables: a connection is given to no one, and `secrets_grant` refuses it. When one is made for a suggestion, the agent is told it has nothing yet, and every admin agent with Secrets is told what was asked and what the connection reaches, to make a secret from it with only the access the work needs and give that. Secrets made from a connection (a Cloudflare token for some zones, an AWS account and role) are renewed before a command gets them when they're due; one the service no longer accepts shows **Needs reconnecting**. **AWS** connects through IAM Identity Center: {{user}} gives the access portal URL and its region, and approves the code on AWS's page. A secret made from it is one role in one account (its permission set is all its access), as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` and `AWS_DEFAULT_REGION`: short-lived credentials, fetched again 2 minutes before they expire (the region isn't hidden in output). Disconnecting removes the connection and every secret made from it (their tokens at the service too, where it can), and can also revoke it at the service.
+```
+
+in the `app-secrets` note: its summary gains ", connecting services" after
+".env files"; its item on agents' requests gains, at its end,
+
+```
+Agents' suggestions to connect a service show there too, as in their conversations: what it's for, what it needs and why, then **Connect <service>** (with the access to allow and anything the service needs first) or **Dismiss**, with an optional reason. Connecting gives the agent nothing: Rivet, or {{user}}, gives it a secret made from the connection.
+```
+
+then, right after that item, **Connect a service…**, and after the item on what each secret shows, what a connection shows:
+
+```
+- **Connect a service…**: choose a service (such as AWS or Cloudflare), the access to allow and what it needs first (AWS: the access portal URL and region), then **Connect**. Its page opens on the device {{user}} is at, the backend's machine or another one: in the browser on a Mac, which comes back to the app by itself; in a sign-in sheet on iPhone; for AWS, a page with a code to check. The app shows how it's going, or why it failed, with **Try again**. Claktory keeps what it gets in the vault as a connection; nobody has it.
+```
+
+```
+- A connection shows its service and account, what it can do and reach, and has no values: it's never given to an agent. **Make a secret from it…** makes a narrower secret to give like any other (on Cloudflare an account, any of its zones and what it may do; on AWS a role), which Claktory renews before it expires (on AWS, a new key 2 minutes before the last one expires); it says which connection it was made from. **Connect again** signs in again in its place, keeping the secrets made from it and who has them; **Edit…** renames it; **Disconnect…** removes it and the secrets made from it, and cancels it at the service too unless turned off.
+```
+
+With AWS, `docs/CHANGELOG.md` gains under `## Unreleased` (Hana's words):
+
+```
+- Added: Connect AWS in Settings → Secrets, then give an agent one role in one account and nothing more. You sign in through IAM Identity Center with your access portal URL and region. The agent's short-lived keys renew by themselves, and your sign-in never goes to any agent.
+```
+
+and, in the `ext-secrets` note, after `secrets_revoke`'s sentence (Sam's tools, shown to
+admin agents only once a service is offered):
+
+```
+Once Claktory connects a service, admin agents also get `secrets_inspect` (`secret`: what a secret is and reaches, never a value; for a connection its account, status, access, scopes, resources, the suggestion it was connected for and the secrets made from it with who has each; for a secret made from one its connection, access, permissions, resources, expiry and who has it), `secrets_choices` (`secret`, a connection: its accounts, zones, roles and permissions with the ids to pick, and how to pick) and `secrets_derive` (`secret`, `name`, `description`, `permissions` and `resources` from the choices, `days`, or the service's default: Cloudflare's tokens last 30 days and are extended while they're used): a secret with only that access, given to no one until `secrets_grant` gives it. `secrets_list` says which secrets are connections and what each export was made from.
+```
+
+Rivet's default prompt (crates/factoryd/src/rivet-prompt.md) then gains, after
+its secrets item, with the new SHA-256 in `SHIPPED_RIVET_PROMPTS`:
+
+```
+- A connected service (such as Cloudflare or AWS) is never given to an agent. When {{user}} connects one for an agent's suggestion, compare what the agent asked for with what the connection reaches (secrets_inspect), make a secret from it with only the access that work needs (secrets_choices, then secrets_derive), give that to the agent with secrets_grant, and tell it what it got.
 ```

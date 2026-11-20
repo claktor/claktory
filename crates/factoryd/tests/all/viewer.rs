@@ -11,7 +11,14 @@ fn idle(view: &View, agent: &str) -> bool {
 }
 
 fn read(path: &std::path::Path, max_bytes: u64) -> client_message::Body {
-    client_message::Body::ReadFile(v1::ReadFile { path: path.display().to_string(), max_bytes })
+    client_message::Body::ReadFile(v1::ReadFile { path: path.display().to_string(), max_bytes, offset: 0 })
+}
+
+fn content(body: Body) -> v1::FileContent {
+    match body {
+        Body::FileContent(content) => content,
+        other => panic!("expected file content, got {other:?}"),
+    }
 }
 
 fn leaf(id: &str, kind: &str, path: &str) -> v1::ViewNode {
@@ -50,10 +57,6 @@ async fn the_app_reads_files_through_the_protocol() {
     std::fs::write(dir.join("notes.md"), "# Plan\nShip it.\n").expect("write");
     std::fs::write(dir.join("dot.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpixels").expect("write");
 
-    let content = |body: Body| match body {
-        Body::FileContent(content) => content,
-        other => panic!("expected file content, got {other:?}"),
-    };
     let text = content(client.request(read(&dir.join("notes.md"), 0)).await.body);
     assert_eq!(
         (text.mime.as_str(), text.data.as_slice(), text.size, text.truncated),
@@ -154,8 +157,48 @@ async fn an_agent_shows_the_person_a_file_once() {
     apply_request(&mut client, &mut view, show(r#"{"path":"blob.bin"}"#)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     let refused = said(&view).expect("said");
-    assert!(refused.contains("is neither text nor an image"), "{refused}");
+    assert!(refused.contains("isn't text, an image or a video the app can show"), "{refused}");
     apply_request(&mut client, &mut view, show(r#"{"path":"missing.md"}"#)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     assert!(said(&view).expect("said").starts_with("No such file: "));
+}
+
+#[tokio::test]
+async fn a_video_is_shown_and_played_a_range_at_a_time() {
+    const CHUNK: u64 = 8 * 1024 * 1024;
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let site = dir.join("site");
+    apply_request(&mut client, &mut view, create_project("Site", &site)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let mut bytes = b"\0\0\0\x18ftypisom\0\0\0\0isommp41\0\0\0\x08mdat".to_vec();
+    bytes.extend((0..CHUNK + 4096).map(|at| (at % 253) as u8));
+    std::fs::write(site.join("clip.mp4"), &bytes).expect("write");
+    let clip = std::fs::canonicalize(site.join("clip.mp4")).expect("path");
+
+    // Inferred from what it is.
+    apply_request(&mut client, &mut view, send_message("builder", r#"call show {"path":"clip.mp4"}"#)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &format!("video {}", clip.display())]);
+
+    // Played as the app does: 8 MB at a time, each range with the whole file's hash.
+    let ranged = |offset: u64| client_message::Body::ReadFile(v1::ReadFile { path: clip.display().to_string(), max_bytes: CHUNK, offset });
+    let first = content(client.request(ranged(0)).await.body);
+    assert_eq!((first.mime.as_str(), first.offset, first.data.len() as u64, first.truncated), ("video/mp4", 0, CHUNK, true));
+    let last = content(client.request(ranged(CHUNK)).await.body);
+    assert_eq!((last.offset, last.offset + last.data.len() as u64), (CHUNK, last.size));
+    assert_eq!(first.sha256.len(), 64);
+    assert_eq!(first.sha256, last.sha256, "one version, one hash");
+    assert_eq!([first.data, last.data].concat(), bytes);
+
+    // A new version, a new hash.
+    let mut changed = bytes.clone();
+    changed[64] ^= 0xff;
+    std::fs::write(&clip, &changed).expect("rewrite");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&clip).and_then(|file| file.set_modified(later)).expect("touch");
+    let again = content(client.request(ranged(CHUNK)).await.body);
+    assert_ne!(again.sha256, last.sha256);
 }

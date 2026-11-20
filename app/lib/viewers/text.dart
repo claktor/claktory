@@ -13,7 +13,6 @@ import '../markdown.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
-import '../scope.dart';
 import '../selection.dart';
 import 'registry.dart';
 
@@ -38,52 +37,11 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   String _text = '';
   bool _binary = false;
 
-  Backend? _backend;
-  CommentsController? _comments;
-
-  /// Who changed the file last, while it says so in the header.
-  String? _updatedBy;
-  Timer? _updatedFor;
-
   bool get _markdown {
     final mime = file?.mime ?? '';
     return mime == 'text/markdown' ||
         path.toLowerCase().endsWith('.md') ||
         path.toLowerCase().endsWith('.markdown');
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final backend = AppScope.of(context);
-    if (backend != _backend) {
-      _backend?.fileChanged.removeListener(_fileChanged);
-      _comments?.dispose();
-      _backend = backend..fileChanged.addListener(_fileChanged);
-      _comments = CommentsController(backend: backend, path: path);
-    }
-  }
-
-  @override
-  void dispose() {
-    _backend?.fileChanged.removeListener(_fileChanged);
-    _comments?.dispose();
-    _updatedFor?.cancel();
-    super.dispose();
-  }
-
-  /// The file changed on the machine: read it again, and say who did it.
-  void _fileChanged() {
-    final changed = _backend?.fileChanged.value;
-    if (changed == null || changed.path != path) return;
-    if (changed.sha256.isNotEmpty && changed.sha256 == file?.sha256) return;
-    unawaited(reload());
-    if (changed.byAgentId.isEmpty) return;
-    setState(() => _updatedBy = changed.byAgentId);
-    _updatedFor?.cancel();
-    _updatedFor = Timer(const Duration(seconds: 6), () {
-      if (mounted) setState(() => _updatedBy = null);
-    });
   }
 
   @override
@@ -117,25 +75,15 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
         file.sha256.isNotEmpty;
   }
 
-  String? _agentName(String agentId) {
-    for (final agent in _backend?.workspace.workspace.agents ?? <Agent>[]) {
-      if (agent.id == agentId) return agent.name;
-    }
-    return null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final file = this.file;
     final problem = waiting();
-    final comments = _comments;
-    final updatedBy = _updatedBy == null ? null : _agentName(_updatedBy!);
-    final details = updatedBy != null
-        ? '$updatedBy just updated this file'
-        : file == null || file.error.isNotEmpty
-        ? ''
-        : formatBytes(file.size);
+    final comments = this.comments;
+    final details = this.details(
+      file == null || file.error.isNotEmpty ? '' : formatBytes(file.size),
+    );
     final commentable = _commentable && comments != null;
     final controls = <Widget>[
       if (commentable) CommentsButton(controller: comments),

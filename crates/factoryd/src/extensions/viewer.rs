@@ -31,12 +31,12 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Viewer",
     icon: "panels-top-left",
-    description: "Lets it show you files, such as text and images, beside its conversation.",
+    description: "Lets it show you files, such as text, images and videos, beside its conversation.",
     default_enabled: true,
     options: &[],
 };
 
-const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…) or an image. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\" or \"image\", inferred when left out. A file already open isn't opened twice. Returns at once.";
+const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image or a video (MP4 or QuickTime). Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\" or \"video\", inferred when left out. A file already open isn't opened twice. Returns at once.";
 
 pub(crate) const SCHEMA: &str = "
 -- How each agent's main area is laid out (the Viewer extension): its
@@ -48,13 +48,19 @@ CREATE TABLE layouts (agent TEXT PRIMARY KEY, layout BLOB NOT NULL);
 const TEXT_LIMIT: u64 = 2_000_000;
 /// …and images up to this much.
 const IMAGE_LIMIT: u64 = 20_000_000;
+/// Videos, and any file read from an offset, are read this much at a time…
+const RANGE_LIMIT: u64 = 8 * 1024 * 1024;
+/// …from files up to this size, which are hashed whole for every range.
+const VIDEO_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+/// Files whose hash is kept (`whole_sha256`).
+const HASHES_KEPT: usize = 64;
 /// Panes in one layout, the conversation included.
 const MAX_LEAVES: usize = 12;
 /// Splits within splits.
 const MAX_DEPTH: usize = 8;
 
 const CHAT: &str = "chat";
-const KINDS: [&str; 2] = ["text", "image"];
+const KINDS: [&str; 3] = ["text", "image", "video"];
 
 /// Agents' layouts, as kept in factory.db.
 #[derive(Default)]
@@ -142,6 +148,9 @@ fn sniff(start: &[u8], path: &Path) -> &'static str {
     if start.len() >= 12 && &start[..4] == b"RIFF" && &start[8..12] == b"WEBP" {
         return "image/webp";
     }
+    if let Some(mime) = sniff_movie(start, path) {
+        return mime;
+    }
     for (prefix, mime) in magic {
         if !mime.is_empty() && start.starts_with(prefix) {
             return mime;
@@ -166,6 +175,36 @@ fn sniff(start: &[u8], path: &Path) -> &'static str {
     }
 }
 
+/// An MP4 or QuickTime movie, from its first box (an "ftyp" box's brand,
+/// or the extension for older movies that start without one), or a WebM.
+fn sniff_movie(start: &[u8], path: &Path) -> Option<&'static str> {
+    if start.starts_with(b"\x1a\x45\xdf\xa3") {
+        return Some("video/webm");
+    }
+    let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let by_extension = match extension.as_str() {
+        "mov" | "qt" => Some("video/quicktime"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        _ => None,
+    };
+    let first = start.get(4..8)?;
+    if first != b"ftyp" {
+        return matches!(first, b"moov" | b"mdat" | b"wide" | b"free" | b"skip" | b"pnot").then_some(by_extension).flatten();
+    }
+    match start.get(8..12)? {
+        b"qt  " => Some("video/quicktime"),
+        // Still images (HEIF, AVIF) and sound (M4A, audiobooks) in the same boxes.
+        b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"hevm" | b"hevs" | b"mif1" | b"msf1" | b"avif" | b"avis" => None,
+        b"M4A " | b"M4B " | b"M4P " | b"F4A " | b"F4B " => None,
+        _ => Some(by_extension.unwrap_or("video/mp4")),
+    }
+}
+
+/// Videos the app plays (Apple's players don't play WebM).
+fn is_video(mime: &str) -> bool {
+    matches!(mime, "video/mp4" | "video/quicktime")
+}
+
 /// UTF-8 without NULs; a character cut at the end of what was read counts.
 fn is_text(bytes: &[u8]) -> bool {
     if bytes.contains(&0) {
@@ -182,8 +221,16 @@ fn is_image(mime: &str) -> bool {
     matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp")
 }
 
-/// Reads up to `max_bytes` of a file (0: the default), for a viewer.
-pub(crate) fn read_file(path: &str, max_bytes: u64) -> v1::FileContent {
+/// Reads up to `max_bytes` of a file (0: the default) from `offset`, for a
+/// viewer: text and images from the start as they are (up to their limits,
+/// hashed when whole), videos and other files read from an offset a range
+/// at a time, with the whole file's hash (`whole_sha256`).
+pub(crate) fn read_file(path: &str, offset: u64, max_bytes: u64) -> v1::FileContent {
+    read(path, offset, max_bytes, true)
+}
+
+/// `read_file`, hashing ranges of big files only when `hash`.
+fn read(path: &str, offset: u64, max_bytes: u64, hash: bool) -> v1::FileContent {
     let path = expand(path.trim());
     let mut content = v1::FileContent { path: path.display().to_string(), ..v1::FileContent::default() };
     let failed = |mut content: v1::FileContent, error: String| {
@@ -210,19 +257,40 @@ pub(crate) fn read_file(path: &str, max_bytes: u64) -> v1::FileContent {
         return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
     }
     let mime = sniff(&start, &path);
-    let limit = if is_image(mime) { IMAGE_LIMIT } else { TEXT_LIMIT };
+    let ranged = offset > 0 || is_video(mime);
+    if ranged && metadata.len() > VIDEO_LIMIT {
+        return failed(content, format!("{} is too big to play. Claktory plays videos up to 2 GB.", path.display()));
+    }
+    let limit = if ranged {
+        RANGE_LIMIT
+    } else if is_image(mime) {
+        IMAGE_LIMIT
+    } else {
+        TEXT_LIMIT
+    };
     let limit = if max_bytes == 0 { limit } else { max_bytes.min(limit) };
-    let mut data = start;
+    let mut data = if offset == 0 { start } else { Vec::new() };
     data.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    if offset > 0
+        && let Err(error) = std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))
+    {
+        return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
+    }
     let rest = limit.saturating_sub(data.len() as u64);
     if let Err(error) = file.take(rest).read_to_end(&mut data) {
         return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
     }
     content.mime = mime.to_owned();
     content.size = metadata.len();
-    content.truncated = (data.len() as u64) < metadata.len();
+    content.offset = offset;
+    content.truncated = offset > 0 || (data.len() as u64) < metadata.len();
     if !content.truncated {
         content.sha256 = crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&data));
+    } else if ranged && hash {
+        match whole_sha256(&path) {
+            Ok(sha) => content.sha256 = sha,
+            Err(error) => return failed(content, format!("Can't read {}: {}", path.display(), plain(&error))),
+        }
     }
     content.data = data;
     content.modified_ms = metadata
@@ -231,6 +299,58 @@ pub(crate) fn read_file(path: &str, max_bytes: u64) -> v1::FileContent {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
     content
+}
+
+/// A file as last hashed: its size and when it was changed.
+type Stamp = (u64, Option<std::time::SystemTime>);
+
+/// Whole files' hashes (`whole_sha256`), by path, with the stamp they were
+/// made at.
+static HASHES: std::sync::LazyLock<Mutex<HashMap<PathBuf, (Stamp, String)>>> = std::sync::LazyLock::new(Mutex::default);
+
+fn stamp_of(metadata: &std::fs::Metadata) -> Stamp {
+    (metadata.len(), metadata.modified().ok())
+}
+
+/// The whole file's SHA-256, in lowercase hex, as FileContent.sha256 has it:
+/// kept by path, size and modification time, so a video read a range at a
+/// time (or checked every second while it's shown) is hashed once per
+/// version. Files over 2 GB aren't hashed: that's InvalidInput.
+pub(crate) fn whole_sha256(path: &Path) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > VIDEO_LIMIT {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "over 2 GB"));
+    }
+    let stamp = stamp_of(&metadata);
+    let lock = || HASHES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((kept, sha)) = lock().get(path)
+        && *kept == stamp
+    {
+        return Ok(sha.clone());
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buffer[..read]);
+    }
+    let sha = crate::encoding::hex(&sha2::Digest::finalize(hasher));
+    // Kept only if it didn't change while it was read.
+    if std::fs::metadata(path).is_ok_and(|after| stamp_of(&after) == stamp) {
+        let mut hashes = lock();
+        if hashes.len() >= HASHES_KEPT
+            && !hashes.contains_key(path)
+            && let Some(gone) = hashes.keys().next().cloned()
+        {
+            hashes.remove(&gone);
+        }
+        hashes.insert(path.to_owned(), (stamp, sha.clone()));
+    }
+    Ok(sha)
 }
 
 fn leaf_of(node: &v1::ViewNode) -> Option<&v1::ViewLeaf> {
@@ -455,21 +575,19 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     let path = expand(asked);
     let path = if path.is_absolute() { path } else { folder.join(path) };
     let path = std::fs::canonicalize(&path).unwrap_or(path);
-    let content = read_file(&path.display().to_string(), 4096);
+    let content = read(&path.display().to_string(), 0, 4096, false);
     if !content.error.is_empty() {
-        return Err(format!("{}.", content.error));
+        let stop = if content.error.ends_with('.') { "" } else { "." };
+        return Err(format!("{}{stop}", content.error));
     }
     let kind = match args.kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty()) {
         Some(kind) if KINDS.contains(&kind) => kind,
-        Some(kind) => return Err(format!("kind is \"text\" or \"image\", or left out; got \"{kind}\".")),
+        Some(kind) => return Err(format!("kind is \"text\", \"image\" or \"video\", or left out; got \"{kind}\".")),
         None if is_image(&content.mime) => "image",
+        None if is_video(&content.mime) => "video",
         None if is_text(&content.data) => "text",
         None => {
-            return Err(format!(
-                "{} is neither text nor an image the app shows ({}), so it can't be shown yet.",
-                path.display(),
-                content.mime
-            ));
+            return Err(format!("{} isn't text, an image or a video the app can show ({}).", path.display(), content.mime));
         }
     };
     let path_text = path.display().to_string();
@@ -602,19 +720,103 @@ mod tests {
         std::fs::write(dir.join("notes.md"), "# Notes\nčaj\n").expect("write");
         std::fs::write(dir.join("pixel.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").expect("write");
         std::fs::write(dir.join("blob.bin"), [0u8, 1, 2, 3]).expect("write");
-        let text = read_file(&dir.join("notes.md").display().to_string(), 0);
+        let text = read_file(&dir.join("notes.md").display().to_string(), 0, 0);
         assert_eq!(
             (text.mime.as_str(), text.data.as_slice(), text.truncated, text.error.as_str()),
             ("text/markdown", "# Notes\nčaj\n".as_bytes(), false, "")
         );
         assert!(text.modified_ms > 0 && text.size == 13);
-        let cut = read_file(&dir.join("notes.md").display().to_string(), 4);
+        let cut = read_file(&dir.join("notes.md").display().to_string(), 0, 4);
         assert_eq!((cut.data.as_slice(), cut.truncated, cut.size), (&b"# No"[..], true, 13));
-        assert_eq!(read_file(&dir.join("pixel.png").display().to_string(), 0).mime, "image/png");
-        assert_eq!(read_file(&dir.join("blob.bin").display().to_string(), 0).mime, "application/octet-stream");
-        assert!(read_file(&dir.join("gone.txt").display().to_string(), 0).error.starts_with("No such file: "));
-        assert!(read_file(&dir.display().to_string(), 0).error.ends_with("is a folder"));
-        assert!(read_file("relative.txt", 0).error.contains("isn't a full path"));
+        assert_eq!(read_file(&dir.join("pixel.png").display().to_string(), 0, 0).mime, "image/png");
+        assert_eq!(read_file(&dir.join("blob.bin").display().to_string(), 0, 0).mime, "application/octet-stream");
+        assert!(read_file(&dir.join("gone.txt").display().to_string(), 0, 0).error.starts_with("No such file: "));
+        assert!(read_file(&dir.display().to_string(), 0, 0).error.ends_with("is a folder"));
+        assert!(read_file("relative.txt", 0, 0).error.contains("isn't a full path"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn movie(brand: &[u8; 4]) -> Vec<u8> {
+        let mut bytes = b"\0\0\0\x18ftyp".to_vec();
+        bytes.extend_from_slice(brand);
+        bytes.extend_from_slice(b"\0\0\0\0isommp41\0\0\0\x08mdat");
+        bytes
+    }
+
+    #[test]
+    fn movies_are_sniffed_by_their_first_box_then_their_extension() {
+        let at = |name: &str| PathBuf::from(format!("/clips/{name}"));
+        assert_eq!(sniff(&movie(b"isom"), &at("a.mp4")), "video/mp4");
+        assert_eq!(sniff(&movie(b"mp42"), &at("no-extension")), "video/mp4");
+        assert_eq!(sniff(&movie(b"M4V "), &at("a.m4v")), "video/mp4");
+        assert_eq!(sniff(&movie(b"qt  "), &at("a.mp4")), "video/quicktime", "the brand before the extension");
+        assert_eq!(sniff(&movie(b"isom"), &at("a.mov")), "video/quicktime", "an unknown brand goes by the extension");
+        assert_eq!(sniff(b"\0\0\0\x08wide\0\0\0\x10mdat", &at("old.MOV")), "video/quicktime");
+        assert_eq!(sniff(b"\0\0\0\x08wide\0\0\0\x10mdat", &at("old.bin")), "application/octet-stream");
+        assert_eq!(sniff(&movie(b"heic"), &at("photo.heic")), "application/octet-stream", "HEIF images aren't videos");
+        assert_eq!(sniff(&movie(b"M4A "), &at("song.m4a")), "application/octet-stream");
+        assert_eq!(sniff(b"\x1a\x45\xdf\xa3\x01\0\0\0", &at("a.webm")), "video/webm");
+        assert!(is_video("video/mp4") && is_video("video/quicktime") && !is_video("video/webm"));
+    }
+
+    #[test]
+    fn videos_are_read_a_range_at_a_time_with_the_whole_file_hash() {
+        let dir = std::env::temp_dir().join(format!("factory-viewer-video-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("clip.mp4");
+        let mut bytes = movie(b"isom");
+        bytes.extend((0..RANGE_LIMIT + 1000).map(|at| (at % 251) as u8));
+        std::fs::write(&path, &bytes).expect("write");
+        let whole = crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        let name = path.display().to_string();
+
+        let mut read = Vec::new();
+        let mut offset = 0;
+        while offset < bytes.len() as u64 {
+            let chunk = read_file(&name, offset, RANGE_LIMIT);
+            assert_eq!(chunk.error, "");
+            assert_eq!((chunk.mime.as_str(), chunk.offset, chunk.size), ("video/mp4", offset, bytes.len() as u64));
+            assert!(chunk.truncated, "no range is the whole file");
+            assert_eq!(chunk.sha256, whole, "every range has the whole file's hash");
+            assert!(chunk.data.len() as u64 <= RANGE_LIMIT);
+            offset += chunk.data.len() as u64;
+            read.extend(chunk.data);
+        }
+        assert_eq!(read, bytes);
+        let asked_more = read_file(&name, 0, 0);
+        assert_eq!(asked_more.data.len() as u64, RANGE_LIMIT, "8 MB at most, whatever is asked");
+
+        // A new version has a new hash, though it has the same size.
+        bytes[100] ^= 0xff;
+        std::fs::write(&path, &bytes).expect("rewrite");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).and_then(|file| file.set_modified(later)).expect("touch");
+        let changed = read_file(&name, RANGE_LIMIT, 0);
+        assert_eq!(changed.sha256, crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes)));
+        assert_eq!(whole_sha256(&path).expect("hash"), changed.sha256);
+
+        // A small video in one read is whole.
+        let small = dir.join("small.mov");
+        std::fs::write(&small, movie(b"qt  ")).expect("write");
+        let one = read_file(&small.display().to_string(), 0, 0);
+        assert_eq!((one.mime.as_str(), one.truncated, one.sha256.len()), ("video/quicktime", false, 64));
+
+        // Text from an offset: a range with the whole file's hash.
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "hello world").expect("write");
+        let tail = read_file(&notes.display().to_string(), 6, 0);
+        assert_eq!((tail.data.as_slice(), tail.offset, tail.truncated), (&b"world"[..], 6, true));
+        assert_eq!(tail.sha256, crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"hello world")));
+        let past = read_file(&notes.display().to_string(), 50, 0);
+        assert_eq!((past.data.len(), past.error.as_str()), (0, ""));
+
+        // Over 2 GB (sparse, so nothing is written): refused.
+        let huge = dir.join("huge.mp4");
+        std::fs::write(&huge, movie(b"isom")).expect("write");
+        std::fs::File::options().write(true).open(&huge).and_then(|file| file.set_len(VIDEO_LIMIT + 1)).expect("grow");
+        assert!(read_file(&huge.display().to_string(), 0, 0).error.contains("too big"));
+        assert!(whole_sha256(&huge).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

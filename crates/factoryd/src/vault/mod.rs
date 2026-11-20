@@ -1118,6 +1118,7 @@ impl Vault {
             if !Self::is_granted(&inner, &key, &id, agent)? {
                 return Err(Refusal::NotYours(asked.trim().to_owned()));
             }
+            let public = Self::public_variables(db, &id)?;
             for value in Self::values_of(db, &inner.vault_id, vmk, &id)? {
                 if let Some(other) = variables.iter().find(|other| other.variable == value.variable) {
                     return Err(Refusal::Said(format!(
@@ -1127,6 +1128,7 @@ impl Vault {
                 }
                 variables.push(factory_agent::SecretVariable {
                     secret: name.clone(),
+                    public: public.contains(&value.variable),
                     variable: value.variable,
                     value: value.value,
                     file: value.file,
@@ -1143,17 +1145,22 @@ impl Vault {
         let (Ok(vmk), Ok(db)) = (Self::open_vmk(&inner), Self::db(&inner)) else { return Vec::new() };
         let read = || -> Result<Vec<factory_agent::SecretVariable>, VaultError> {
             let secrets = db
-                .prepare("SELECT id, name FROM secrets")?
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .prepare("SELECT id, name, kind, meta FROM secrets")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut variables = Vec::new();
-            for (id, name) in secrets {
-                for value in Self::values_of(db, &inner.vault_id, vmk, &id)? {
+            for (id, name, kind, meta) in secrets {
+                // What a connection's recipe says isn't secret (a region) stays readable.
+                let public = connections::public_of(&kind, &meta);
+                for value in Self::values_of(db, &inner.vault_id, vmk, &id)?.into_iter().filter(|value| !public.contains(&value.variable)) {
                     variables.push(factory_agent::SecretVariable {
                         secret: name.clone(),
                         variable: value.variable,
                         value: value.value,
                         file: value.file,
+                        public: false,
                     });
                 }
             }

@@ -1507,8 +1507,49 @@ class _DeriveSecretFormState extends State<DeriveSecretForm> {
   @override
   void initState() {
     super.initState();
-    _name.text = '${widget.connection.name} for agents';
+    _name.text = _suggested = widget.connection.name;
     unawaited(_load());
+  }
+
+  /// The name last suggested; while the field still holds it, it follows
+  /// what's chosen ("AWS DeploySite in prod", "Cloudflare claktory.com").
+  var _suggested = '';
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    final choices = _choices;
+    if (choices == null || _name.text != _suggested) return;
+    String label(String id) =>
+        [
+          for (final choice in choices)
+            if (choice.id == id) choice.label,
+        ].firstOrNull ??
+        '';
+    final service = serviceName(
+      AppScope.of(context),
+      widget.connection.connection.connectorId,
+    );
+    final zones = [
+      for (final zone in _of(choices, 'zone', parent: _parent(choices)))
+        if (_zones.contains(zone.id)) zone.label,
+    ];
+    final account = label(_account).replaceAll(RegExp(r'\s*\(\d+\)$'), '');
+    final String suggestion;
+    if (_role.isNotEmpty) {
+      suggestion = account.isEmpty
+          ? '$service ${label(_role)}'
+          : '$service ${label(_role)} in $account';
+    } else if (zones.isNotEmpty) {
+      suggestion = zones.length == 1
+          ? '$service ${zones.single}'
+          : '$service ${zones.first} and ${zones.length - 1} more';
+    } else if (account.isNotEmpty) {
+      suggestion = '$service $account';
+    } else {
+      return;
+    }
+    _name.text = _suggested = suggestion;
   }
 
   @override

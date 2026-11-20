@@ -455,7 +455,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     // Given one of the vault's: it hears what it got, and only that.
     let nothing =
         apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &first.id, true, Vec::new(), ""))).await;
-    assert!(failure(&nothing).1.contains("Pick a secret"), "{nothing:?}");
+    assert!(failure(&nothing).1.contains("Choose a secret"), "{nothing:?}");
     let give = v1::DecideSecretRequest { secret_id: cloudflare.clone(), ..decide("builder", &first.id, true, Vec::new(), "") };
     apply_request(&mut client, &mut view, Request::DecideSecretRequest(give)).await;
     view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you Cloudflare")) && idle(view, "builder")).await;

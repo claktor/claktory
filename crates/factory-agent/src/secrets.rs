@@ -33,6 +33,9 @@ pub struct SecretVariable {
     /// The value goes in a file (mode 0600, removed when the command ends)
     /// and the variable holds its path, as KUBECONFIG does.
     pub file: bool,
+    /// Not secret (an AWS region beside its keys): set like the rest, but
+    /// never hidden.
+    pub public: bool,
 }
 
 impl fmt::Debug for SecretVariable {
@@ -119,6 +122,7 @@ impl Redactor {
         Redactor::build(
             variables
                 .iter()
+                .filter(|variable| !variable.public)
                 .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.value.clone()))
                 .collect(),
         )
@@ -126,12 +130,21 @@ impl Redactor {
 
     /// This redactor, also hiding `variables`.
     pub fn with(&self, variables: &[SecretVariable]) -> Redactor {
+        eprintln!(
+            "WITH {:?} have {:?}",
+            variables.iter().map(|v| (v.variable.clone(), v.public)).collect::<Vec<_>>(),
+            self.values.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>()
+        );
         if variables.is_empty() {
             return Redactor::build(self.values.clone());
         }
         let mut values = self.values.clone();
-        values
-            .extend(variables.iter().map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.value.clone())));
+        values.extend(
+            variables
+                .iter()
+                .filter(|variable| !variable.public)
+                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.value.clone())),
+        );
         Redactor::build(values)
     }
 
@@ -428,8 +441,11 @@ pub const FILTER_VALUES: &str = "CLAKTORY_REDACT";
 
 /// The values `filter_main` gets, for a command's secrets.
 pub(crate) fn filter_values(variables: &[SecretVariable]) -> Zeroizing<String> {
-    let pairs: Vec<(String, &str)> =
-        variables.iter().map(|variable| (format!("{}/{}", variable.secret, variable.variable), variable.value.as_str())).collect();
+    let pairs: Vec<(String, &str)> = variables
+        .iter()
+        .filter(|variable| !variable.public)
+        .map(|variable| (format!("{}/{}", variable.secret, variable.variable), variable.value.as_str()))
+        .collect();
     Zeroizing::new(serde_json::to_string(&pairs).unwrap_or_default())
 }
 
@@ -503,13 +519,23 @@ mod tests {
     use super::*;
 
     fn variable(secret: &str, variable: &str, value: &str) -> SecretVariable {
-        SecretVariable { secret: secret.into(), variable: variable.into(), value: Zeroizing::new(value.into()), file: false }
+        SecretVariable { secret: secret.into(), variable: variable.into(), value: Zeroizing::new(value.into()), file: false, public: false }
     }
 
     const KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
     fn redactor() -> Redactor {
         Redactor::new(&[variable("AWS", "AWS_SECRET_ACCESS_KEY", KEY), variable("Short", "PIN", "1234567")])
+    }
+
+    #[test]
+    fn public_variables_are_set_but_never_hidden() {
+        let region = SecretVariable { public: true, ..variable("AWS", "AWS_REGION", "eu-central-1") };
+        let text = format!("arn:aws:s3:eu-central-1 {KEY}");
+        let shown = "arn:aws:s3:eu-central-1 [secret AWS/AWS_SECRET_ACCESS_KEY]";
+        assert_eq!(Redactor::new(&[variable("AWS", "AWS_SECRET_ACCESS_KEY", KEY), region.clone()]).redact(&text), shown);
+        assert_eq!(Redactor::default().with(&[variable("AWS", "AWS_SECRET_ACCESS_KEY", KEY), region.clone()]).redact(&text), shown);
+        assert!(!filter_values(&[region]).contains("eu-central-1"));
     }
 
     #[test]

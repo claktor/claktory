@@ -1201,12 +1201,21 @@ class Backend {
     return reply.folderList;
   }
 
-  /// The file at [path] (absolute or "~/…"), or its start when it's long; a
-  /// file that can't be read comes back with `error` set.
-  Future<FileContent> readFile(String path, {int maxBytes = 0}) async {
+  /// The file at [path] (absolute or "~/…"), or its start when it's long,
+  /// or from [offset] on (a video, a chunk at a time); a file that can't be
+  /// read comes back with `error` set.
+  Future<FileContent> readFile(
+    String path, {
+    int maxBytes = 0,
+    int offset = 0,
+  }) async {
     final reply = await _call(
       ClientMessage(
-        readFile: ReadFile(path: path, maxBytes: Int64(maxBytes)),
+        readFile: ReadFile(
+          path: path,
+          maxBytes: Int64(maxBytes),
+          offset: Int64(offset),
+        ),
       ),
     );
     if (!reply.hasFileContent()) {

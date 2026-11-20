@@ -589,6 +589,7 @@ void main() {
       (m) => m.hasDeriveSecret() ? m.deriveSecret : null,
     ).single;
     expect(derive.secretId, 'c1');
+    expect(derive.name, 'Cloudflare example.com', reason: 'follows the choice');
     expect(derive.permissions, ['pages:write']);
     expect(derive.resources, ['acc1', 'z1']);
     expect(_sent(harness, (m) => m.hasGrantSecret() ? m : null), isEmpty);

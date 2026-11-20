@@ -37,6 +37,8 @@ class MainFlutterWindow: NSWindow {
     setFrameAutosaveName(Self.frameName)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    // The video viewer's player (VideoPlayers.swift).
+    VideoPlayers.register(with: flutterViewController.registrar(forPlugin: "VideoPlayers"))
 
     windowChannel = FlutterMethodChannel(
       name: "factory/window", binaryMessenger: flutterViewController.engine.binaryMessenger)

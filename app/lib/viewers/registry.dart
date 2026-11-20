@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 
+import '../annotations.dart';
 import '../backend.dart';
 import '../controls.dart';
 import '../identity.dart';
@@ -8,8 +11,10 @@ import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
 import '../scope.dart';
+import '../selection.dart';
 import 'image.dart';
 import 'text.dart';
+import 'video.dart';
 
 /// What a viewer pane shows: one entry per kind (`ViewLeaf.kind`). A new
 /// kind (PDFs, documents, dashboards, extension panels) is a new entry, and
@@ -24,10 +29,10 @@ class Viewer {
     required this.build,
   });
 
-  /// `ViewLeaf.kind`: "text", "image".
+  /// `ViewLeaf.kind`: "text", "image", "video".
   final String kind;
 
-  /// "Text", "Image".
+  /// "Text", "Image", "Video".
   final String label;
 
   /// Its 14px glyph, in the pane's header and the phone's list.
@@ -51,6 +56,14 @@ final _viewers = <Viewer>[
         ExtensionGlyph(icon: 'image', name: 'Image', color: color, size: 14),
     build: (context, leaf) =>
         ImageViewer(key: ValueKey(leaf.path), path: leaf.path),
+  ),
+  Viewer(
+    kind: 'video',
+    label: 'Video',
+    icon: (color) =>
+        ExtensionGlyph(icon: 'film', name: 'Video', color: color, size: 14),
+    build: (context, leaf) =>
+        VideoViewer(key: ValueKey(leaf.path), path: leaf.path),
   ),
 ];
 
@@ -119,8 +132,10 @@ class ViewerProblem extends StatelessWidget {
   }
 }
 
-/// A file, read from the backend when the viewer opens and again on
-/// [reload], so a viewer shows it as it is on the machine Claktory runs on.
+/// A file, read from the backend when the viewer opens, again on
+/// [reload], and by itself when it changes on the machine (FileChanged),
+/// so a viewer shows it as it is on the machine Claktory runs on. Its
+/// [comments] are the file's comments as this viewer shows them.
 mixin FileLoading<T extends StatefulWidget> on State<T> {
   String get path;
 
@@ -130,6 +145,15 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   String? failure;
 
   Listenable? _reloads;
+
+  Backend? _backend;
+
+  /// The comments on the file, for the viewer to show.
+  CommentsController? comments;
+
+  /// Who changed the file last, while the header says so.
+  String? _updatedBy;
+  Timer? _updatedFor;
 
   @override
   void initState() {
@@ -145,12 +169,47 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       _reloads?.removeListener(reload);
       _reloads = reloads?..addListener(reload);
     }
+    final backend = AppScope.of(context);
+    if (backend != _backend) {
+      _backend?.fileChanged.removeListener(_fileChanged);
+      comments?.dispose();
+      _backend = backend..fileChanged.addListener(_fileChanged);
+      comments = CommentsController(backend: backend, path: path);
+    }
   }
 
   @override
   void dispose() {
     _reloads?.removeListener(reload);
+    _backend?.fileChanged.removeListener(_fileChanged);
+    comments?.dispose();
+    _updatedFor?.cancel();
     super.dispose();
+  }
+
+  /// The file changed on the machine: read it again, and say who did it.
+  void _fileChanged() {
+    final changed = _backend?.fileChanged.value;
+    if (changed == null || changed.path != path) return;
+    if (changed.sha256.isNotEmpty && changed.sha256 == file?.sha256) return;
+    unawaited(reload());
+    if (changed.byAgentId.isEmpty) return;
+    setState(() => _updatedBy = changed.byAgentId);
+    _updatedFor?.cancel();
+    _updatedFor = Timer(const Duration(seconds: 6), () {
+      if (mounted) setState(() => _updatedBy = null);
+    });
+  }
+
+  /// The header's details: [usual], or for a few seconds after an agent
+  /// changed the file, who did.
+  String details(String usual) {
+    final by = _updatedBy;
+    if (by == null) return usual;
+    for (final agent in _backend?.workspace.workspace.agents ?? <Agent>[]) {
+      if (agent.id == by) return '${agent.name} just updated this file';
+    }
+    return usual;
   }
 
   Future<void> reload() async {
@@ -192,4 +251,55 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       ? 'Showing the first ${formatBytes(Int64(file.data.length))} of '
             '${formatBytes(file.size)}.'
       : null;
+}
+
+/// A quiet text button for a pane's header: "Fit", "100%".
+class HeaderTextButton extends StatelessWidget {
+  const HeaderTextButton(
+    this.label,
+    this.onTap, {
+    super.key,
+    this.active = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+
+  /// Tinted while what it turns on is on.
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Unselectable(
+      child: Semantics(
+        button: true,
+        label: label,
+        excludeSemantics: true,
+        child: Pressable(
+          onTap: onTap,
+          builder: (context, hovered) => Container(
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: Space.s),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active
+                  ? palette.selected
+                  : hovered
+                  ? palette.hover
+                  : const Color(0x00000000),
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            child: Text(
+              label,
+              style: TextStyles.caption.copyWith(
+                color: active || hovered ? palette.text : palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

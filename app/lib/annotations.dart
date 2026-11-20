@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -53,10 +54,202 @@ class ThreadStore extends ChangeNotifier {
   }
 }
 
+/// What the person selected in a viewer, for a new comment to be on: a
+/// [Passage] of text, or a [Region] of an image.
+sealed class Mark {
+  const Mark();
+
+  /// The thread kind it makes: "markdown", "text" or "image".
+  String get kind;
+
+  /// As W3C Web Annotation selectors.
+  List<Selector> get selectors;
+
+  /// Nothing to comment on (only whitespace, or a sliver).
+  bool get isEmpty;
+}
+
+/// A region of an image, as fractions of its width and height from its
+/// top left (0 to 1).
+class Region extends Mark {
+  const Region(this.rect);
+
+  final Rect rect;
+
+  @override
+  String get kind => 'image';
+
+  /// Too small to mean anything: a click, not a drag.
+  @override
+  bool get isEmpty => rect.width < 0.005 || rect.height < 0.005;
+
+  /// A media fragment, `xywh=percent:x,y,w,h`.
+  @override
+  List<Selector> get selectors => [
+    Selector(
+      json: jsonEncode({
+        'type': 'FragmentSelector',
+        'conformsTo': 'http://www.w3.org/TR/media-frags/',
+        'value': fragment,
+      }),
+    ),
+  ];
+
+  String get fragment =>
+      'xywh=percent:${_percent(rect.left)},${_percent(rect.top)},'
+      '${_percent(rect.width)},${_percent(rect.height)}';
+
+  static String _percent(double fraction) {
+    final value = (fraction * 10000).round() / 100;
+    return value == value.roundToDouble()
+        ? value.round().toString()
+        : value.toString();
+  }
+
+  @override
+  bool operator ==(Object other) => other is Region && other.rect == rect;
+
+  @override
+  int get hashCode => rect.hashCode;
+}
+
+/// A moment of a video, or a stretch of it ([end] after [start]), in
+/// seconds, and perhaps a region of the frame (fractions of it).
+class Moment extends Mark {
+  const Moment(this.start, {this.end, this.region});
+
+  final double start;
+  final double? end;
+  final Rect? region;
+
+  @override
+  String get kind => 'video';
+
+  @override
+  bool get isEmpty => region != null && Region(region!).isEmpty;
+
+  /// A media fragment: `t=31.2,45` (a range), `t=31.2` (a moment), with
+  /// `&xywh=percent:x,y,w,h` for a region of the frame.
+  @override
+  List<Selector> get selectors {
+    String seconds(double value) {
+      final tenths = (value * 10).round() / 10;
+      return tenths == tenths.roundToDouble()
+          ? tenths.round().toString()
+          : tenths.toString();
+    }
+
+    final end = this.end;
+    final region = this.region;
+    final time = end == null || end <= start
+        ? 't=${seconds(start)}'
+        : 't=${seconds(start)},${seconds(end)}';
+    return [
+      Selector(
+        json: jsonEncode({
+          'type': 'FragmentSelector',
+          'conformsTo': 'http://www.w3.org/TR/media-frags/',
+          'value': region == null ? time : '$time&${Region(region).fragment}',
+        }),
+      ),
+    ];
+  }
+
+  /// "0:31–0:45", or "0:31" for a moment.
+  String get label {
+    final end = this.end;
+    return end == null || end <= start
+        ? formatTime(start)
+        : '${formatTime(start)}–${formatTime(end)}';
+  }
+
+  /// Whether [seconds] is in it (a moment: within half a second of it).
+  bool covers(double seconds) {
+    final end = this.end;
+    return end == null || end <= start
+        ? (seconds - start).abs() <= 0.5
+        : seconds >= start && seconds <= end;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is Moment &&
+      other.start == start &&
+      other.end == end &&
+      other.region == region;
+
+  @override
+  int get hashCode => Object.hash(start, end, region);
+}
+
+/// [seconds] as a video's time: "0:07", "1:31", "1:02:05".
+String formatTime(double seconds) {
+  final whole = seconds.isFinite && seconds > 0 ? seconds.floor() : 0;
+  final hours = whole ~/ 3600;
+  final minutes = (whole % 3600) ~/ 60;
+  final rest = (whole % 60).toString().padLeft(2, '0');
+  return hours > 0
+      ? '$hours:${minutes.toString().padLeft(2, '0')}:$rest'
+      : '$minutes:$rest';
+}
+
+/// The moment or stretch a video's thread is on, from its media fragment
+/// selector; null when it has none it can read.
+Moment? momentOf(Thread thread) {
+  for (final selector in thread.selectors) {
+    try {
+      final json = jsonDecode(selector.json);
+      if (json is! Map || json['type'] != 'FragmentSelector') continue;
+      double? start;
+      double? end;
+      Rect? region;
+      for (final part in '${json['value']}'.split('&')) {
+        if (part.startsWith('t=')) {
+          final times = part.substring(2).replaceFirst('npt:', '').split(',');
+          start = double.tryParse(times.first.isEmpty ? '0' : times.first);
+          if (times.length > 1) end = double.tryParse(times[1]);
+        } else if (part.startsWith('xywh=')) {
+          region = _parseXywh(part);
+        }
+      }
+      if (start != null) return Moment(start, end: end, region: region);
+    } on FormatException {
+      continue;
+    }
+  }
+  return null;
+}
+
+/// A media fragment's region, `xywh=percent:x,y,w,h`, as fractions.
+Rect? _parseXywh(String value) {
+  final match = RegExp(
+    r'^xywh=(percent:|pixel:)?([\d.]+),([\d.]+),([\d.]+),([\d.]+)$',
+  ).firstMatch(value);
+  if (match == null || match.group(1) != 'percent:') return null;
+  double at(int group) => double.parse(match.group(group)!) / 100;
+  return Rect.fromLTWH(at(2), at(3), at(4), at(5));
+}
+
+/// The region an image's thread is on, from its media fragment selector;
+/// null when it has none it can read.
+Rect? regionOf(Thread thread) {
+  for (final selector in thread.selectors) {
+    try {
+      final json = jsonDecode(selector.json);
+      if (json is! Map || json['type'] != 'FragmentSelector') continue;
+      final region = _parseXywh('${json['value']}');
+      if (region != null) return region;
+    } on FormatException {
+      continue;
+    }
+  }
+  return null;
+}
+
 /// A passage of a viewer's text the person selected: what a new thread is
 /// anchored to. [start] and [end] are UTF-16 offsets into the text the
 /// viewer shows ([kind] "markdown": the rendered text; "text": the file).
-class Passage {
+class Passage extends Mark {
   factory Passage(String kind, String text, int a, int b) {
     final start = a < b ? a : b;
     final end = a < b ? b : a;
@@ -83,6 +276,7 @@ class Passage {
     required this.suffix,
   });
 
+  @override
   final String kind;
   final int start;
   final int end;
@@ -90,10 +284,11 @@ class Passage {
   final String prefix;
   final String suffix;
 
+  @override
   bool get isEmpty => exact.trim().isEmpty;
 
-  /// As W3C Web Annotation selectors: a quote with its context, and where
-  /// it is.
+  /// A quote with its context, and where it is.
+  @override
   List<Selector> get selectors => [
     Selector(
       json: jsonEncode({
@@ -162,10 +357,11 @@ TextAnchor? anchorIn(Thread thread, String kind) {
 bool hasDraft(Thread thread) => thread.comments.any((c) => c.draft);
 
 /// The viewer side of comments, for one file in one viewer: the threads on
-/// it, where their passages are in the text it shows, the person's
-/// selection, and what's being written. The viewer tells it its text, how
-/// to find a y for an offset ([yOf]) and how to scroll to one ([reveal]),
-/// and calls [relayout] when what it shows moves.
+/// it, where their passages are in the text it shows (or their regions of
+/// the image), the person's selection, and what's being written. The
+/// viewer tells it what it shows, how to find a y for an offset ([yOf]) or
+/// a region ([yOfRegion]) and how to scroll to one ([reveal],
+/// [revealRegion]), and calls [relayout] when what it shows moves.
 class CommentsController extends ChangeNotifier {
   CommentsController({required this.backend, required this.path}) {
     backend.threads.addListener(_threadsChanged);
@@ -175,7 +371,8 @@ class CommentsController extends ChangeNotifier {
   final Backend backend;
   final String path;
 
-  /// "markdown" while the Markdown shows formatted, else "text".
+  /// "markdown" while the Markdown shows formatted, "image" for an image,
+  /// else "text".
   String _kind = 'text';
   String get kind => _kind;
 
@@ -188,11 +385,29 @@ class CommentsController extends ChangeNotifier {
   /// Where each thread's passage is in the text shown, by thread id.
   var located = <String, TextRange>{};
 
-  /// The person's selection, while there is one.
-  final selection = ValueNotifier<Passage?>(null);
+  /// Each image thread's region, as fractions of the image, by thread id.
+  var regions = <String, Rect>{};
 
-  /// The passage a comment is being written on, while it is.
-  Passage? composing;
+  /// Each video thread's moment or stretch, by thread id.
+  var moments = <String, Moment>{};
+
+  /// Plays the video from a thread's moment, when one is picked.
+  void Function(Moment moment)? revealMoment;
+
+  /// The image shown, for the cards' thumbnails of their regions.
+  ui.Image? get image => _image;
+  ui.Image? _image;
+  set image(ui.Image? image) {
+    if (identical(image, _image)) return;
+    _image = image;
+    notifyListeners();
+  }
+
+  /// The person's selection, while there is one.
+  final selection = ValueNotifier<Mark?>(null);
+
+  /// What a comment is being written on, while it is.
+  Mark? composing;
 
   /// What's being written on [composing] suggests a change to it.
   var suggesting = false;
@@ -223,6 +438,50 @@ class CommentsController extends ChangeNotifier {
 
   /// Scrolls the viewer so an offset is in view.
   void Function(int offset)? reveal;
+
+  /// Where a region of the image is, as the y of its top in the viewer's
+  /// box, and how to bring it into view.
+  double? Function(Rect region)? yOfRegion;
+  void Function(Rect region)? revealRegion;
+
+  /// Whether [threadId]'s passage or region is in what's shown.
+  bool isPlaced(String threadId) =>
+      located.containsKey(threadId) ||
+      regions.containsKey(threadId) ||
+      moments.containsKey(threadId);
+
+  /// Where [threadId]'s card goes: level with its passage or region.
+  double? yOfThread(String threadId) {
+    final range = located[threadId];
+    if (range != null) return yOf?.call(range.start);
+    final region = regions[threadId];
+    if (region != null) return yOfRegion?.call(region);
+    return null;
+  }
+
+  /// Where a card for [mark] goes.
+  double? yOfMark(Mark mark) => switch (mark) {
+    Passage(:final start) => yOf?.call(start),
+    Region(:final rect) => yOfRegion?.call(rect),
+    // A video's cards go down the margin in time order.
+    Moment() => null,
+  };
+
+  /// [threads] in reading order, those not placed first.
+  List<Thread> inOrder(List<Thread> threads) =>
+      [...threads]..sort((a, b) => orderOf(a.id).compareTo(orderOf(b.id)));
+
+  /// [threadId]'s place in reading order: its passage's start, or its
+  /// region's top, then left.
+  double orderOf(String threadId) {
+    final range = located[threadId];
+    if (range != null) return range.start.toDouble();
+    final region = regions[threadId];
+    if (region != null) return region.top * 1000 + region.left;
+    final moment = moments[threadId];
+    if (moment != null) return moment.start;
+    return -1;
+  }
 
   /// Fires when what the viewer shows moved (scrolled, laid out again).
   final layout = ChangeNotifier();
@@ -294,7 +553,7 @@ class CommentsController extends ChangeNotifier {
   /// Threads whose passage isn't in the text shown.
   List<Thread> get detached => [
     for (final thread in shown)
-      if (!located.containsKey(thread.id)) thread,
+      if (!isPlaced(thread.id)) thread,
   ];
 
   int get resolvedCount => all
@@ -303,6 +562,27 @@ class CommentsController extends ChangeNotifier {
 
   void _locate() {
     final list = backend.threads.of(path);
+    if (_kind == 'video') {
+      // A moment stays where it was made, on any version of the video.
+      located = {};
+      regions = {};
+      moments = {
+        for (final thread in list?.threads ?? <Thread>[])
+          thread.id: ?momentOf(thread),
+      };
+      return;
+    }
+    moments = {};
+    if (_kind == 'image') {
+      // A region stays where it was made, on any version of the image.
+      located = {};
+      regions = {
+        for (final thread in list?.threads ?? <Thread>[])
+          thread.id: ?regionOf(thread),
+      };
+      return;
+    }
+    regions = {};
     final found = <String, TextRange>{};
     // Positions are for the version they were anchored to; the backend
     // sends them again for the new one after the file changes.
@@ -340,15 +620,20 @@ class CommentsController extends ChangeNotifier {
     focused = threadId;
     final range = threadId == null ? null : located[threadId];
     if (range != null) reveal?.call(range.start);
+    final region = threadId == null ? null : regions[threadId];
+    if (region != null) revealRegion?.call(region);
+    final moment = threadId == null ? null : moments[threadId];
+    if (moment != null) revealMoment?.call(moment);
     notifyListeners();
   }
 
   /// Starts a comment on the selection, or a suggested change to it.
   void comment({bool suggest = false}) {
-    final passage = selection.value;
-    if (passage == null || passage.isEmpty) return;
-    composing = passage;
-    suggesting = suggest;
+    final mark = selection.value;
+    if (mark == null || mark.isEmpty) return;
+    composing = mark;
+    // Only text can be replaced.
+    suggesting = suggest && mark is Passage;
     replyingTo = null;
     editing = null;
     focused = null;
@@ -414,7 +699,7 @@ class CommentsController extends ChangeNotifier {
     final text = body.trim();
     final suggestion = suggesting ? replacement : null;
     if (text.isEmpty && suggestion == null) return;
-    final passage = composing;
+    final mark = composing;
     final reply = replyingTo;
     final edited = editing;
     final ok = await _run(() async {
@@ -422,14 +707,14 @@ class CommentsController extends ChangeNotifier {
         await backend.editComment(edited, text);
       } else if (reply != null) {
         await backend.replyThread(reply, text, sendNow: sendNow);
-      } else if (passage != null) {
+      } else if (mark != null) {
         final thread = await backend.createThread(
           CreateThread(
             agentId: defaultAgent,
             path: path,
-            kind: passage.kind,
+            kind: mark.kind,
             versionSha256: _version,
-            selectors: passage.selectors,
+            selectors: mark.selectors,
             body: text,
             sendNow: sendNow,
             suggestion: suggestion,
@@ -477,15 +762,15 @@ class CommentsController extends ChangeNotifier {
 
   /// Anchors a detached thread to the selection instead.
   Future<void> reattach(Thread thread) async {
-    final passage = selection.value;
-    if (passage == null || passage.isEmpty) return;
+    final mark = selection.value;
+    if (mark == null || mark.isEmpty) return;
     final ok = await _run(
       () => backend.reattachThread(
         ReattachThread(
           threadId: thread.id,
-          kind: passage.kind,
+          kind: mark.kind,
           versionSha256: _version,
-          selectors: passage.selectors,
+          selectors: mark.selectors,
         ),
       ),
     );
@@ -664,8 +949,8 @@ class _CommentPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
     valueListenable: controller.selection,
-    builder: (context, passage, _) {
-      if (passage == null || passage.isEmpty || controller.sheetOpen) {
+    builder: (context, mark, _) {
+      if (mark == null || mark.isEmpty || controller.sheetOpen) {
         return const SizedBox.shrink();
       }
       return Center(
@@ -678,11 +963,13 @@ class _CommentPill extends StatelessWidget {
                 primary: true,
                 onPressed: controller.comment,
               ),
-              const SizedBox(width: Space.xs),
-              Button(
-                label: 'Suggest',
-                onPressed: () => controller.comment(suggest: true),
-              ),
+              if (mark is Passage) ...[
+                const SizedBox(width: Space.xs),
+                Button(
+                  label: 'Suggest',
+                  onPressed: () => controller.comment(suggest: true),
+                ),
+              ],
             ],
           ),
         ),
@@ -731,12 +1018,12 @@ class _Margin extends StatelessWidget {
         final cards = <Widget>[];
         final wanted = <double>[];
         // The person's selection: a button to comment on it, level with it.
-        final passage = controller.selection.value;
+        final mark = controller.selection.value;
         final composing = controller.composing;
         if (composing != null) {
-          cards.add(_ComposerCard(controller: controller, passage: composing));
-          wanted.add(controller.yOf?.call(composing.start) ?? 0);
-        } else if (passage != null && !passage.isEmpty) {
+          cards.add(_ComposerCard(controller: controller, mark: composing));
+          wanted.add(controller.yOfMark(composing) ?? 0);
+        } else if (mark != null && !mark.isEmpty) {
           cards.add(
             Align(
               alignment: Alignment.centerLeft,
@@ -745,31 +1032,23 @@ class _Margin extends StatelessWidget {
                   spacing: Space.xs,
                   children: [
                     Button(label: 'Comment', onPressed: controller.comment),
-                    Button(
-                      label: 'Suggest',
-                      onPressed: () => controller.comment(suggest: true),
-                    ),
+                    if (mark is Passage)
+                      Button(
+                        label: 'Suggest',
+                        onPressed: () => controller.comment(suggest: true),
+                      ),
                   ],
                 ),
               ),
             ),
           );
-          wanted.add(controller.yOf?.call(passage.start) ?? 0);
+          wanted.add(controller.yOfMark(mark) ?? 0);
         }
-        final threads = [...controller.shown]
-          ..sort((a, b) {
-            final ra = controller.located[a.id];
-            final rb = controller.located[b.id];
-            if (ra == null || rb == null) return ra == null ? -1 : 1;
-            return ra.start.compareTo(rb.start);
-          });
+        final threads = controller.inOrder(controller.shown);
         for (final thread in threads) {
-          final range = controller.located[thread.id];
           cards.add(_ThreadCard(controller: controller, thread: thread));
           // Detached ones at the top, the rest level with their passages.
-          wanted.add(
-            range == null ? 0 : controller.yOf?.call(range.start) ?? 0,
-          );
+          wanted.add(controller.yOfThread(thread.id) ?? 0);
         }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -929,7 +1208,9 @@ class _ThreadCard extends StatelessWidget {
     final palette = Palette.of(context);
     final focused = controller.focused == thread.id;
     final resolved = thread.status == ThreadStatus.THREAD_STATUS_RESOLVED;
-    final located = controller.located.containsKey(thread.id);
+    final located = controller.isPlaced(thread.id);
+    final region = controller.regions[thread.id];
+    final moment = controller.moments[thread.id];
     final backend = controller.backend;
     final agent = _agent(backend, thread.agentId);
     final caption = TextStyles.caption.copyWith(color: palette.textMuted);
@@ -990,7 +1271,25 @@ class _ThreadCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: Space.xs),
-              if (!located)
+              if (moment != null) ...[
+                if (thread.anchor == AnchorState.ANCHOR_STATE_OUTDATED) ...[
+                  Text(
+                    'Made on an earlier version of this video.',
+                    style: faint,
+                  ),
+                  const SizedBox(height: Space.xs),
+                ],
+                _MomentLabel(moment: moment),
+              ] else if (region != null) ...[
+                if (thread.anchor == AnchorState.ANCHOR_STATE_OUTDATED) ...[
+                  Text(
+                    'Made on an earlier version of this image.',
+                    style: faint,
+                  ),
+                  const SizedBox(height: Space.xs),
+                ],
+                RegionThumbnail(image: controller.image, region: region),
+              ] else if (!located)
                 Text(
                   thread.anchor == AnchorState.ANCHOR_STATE_DETACHED
                       ? 'The text it was on is gone.'
@@ -1004,7 +1303,9 @@ class _ThreadCard extends StatelessWidget {
                       : 'The text changed since this comment.',
                   style: faint,
                 ),
-              if (suggestion != null)
+              if (region != null || moment != null)
+                const SizedBox.shrink()
+              else if (suggestion != null)
                 _Suggestion(
                   suggestion: suggestion,
                   lines: lines,
@@ -1293,15 +1594,16 @@ class _TextAction extends StatelessWidget {
 
 /// A new comment's card, level with its passage.
 class _ComposerCard extends StatelessWidget {
-  const _ComposerCard({required this.controller, required this.passage});
+  const _ComposerCard({required this.controller, required this.mark});
 
   final CommentsController controller;
-  final Passage passage;
+  final Mark mark;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final suggesting = controller.suggesting;
+    final mark = this.mark;
     return Container(
       padding: const EdgeInsets.all(Space.m),
       decoration: BoxDecoration(
@@ -1313,28 +1615,124 @@ class _ComposerCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            suggesting ? passage.exact.trim() : '“${passage.exact.trim()}”',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyles.caption.copyWith(
-              color: palette.textMuted,
-              fontStyle: suggesting ? null : FontStyle.italic,
-              decoration: suggesting ? TextDecoration.lineThrough : null,
+          switch (mark) {
+            Region(:final rect) => RegionThumbnail(
+              image: controller.image,
+              region: rect,
             ),
-          ),
+            Moment() => _MomentLabel(moment: mark),
+            Passage(:final exact) => Text(
+              suggesting ? exact.trim() : '“${exact.trim()}”',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyles.caption.copyWith(
+                color: palette.textMuted,
+                fontStyle: suggesting ? null : FontStyle.italic,
+                decoration: suggesting ? TextDecoration.lineThrough : null,
+              ),
+            ),
+          },
           const SizedBox(height: Space.s),
           _Composer(
             // A new one when it turns from a comment to a suggestion.
             key: ValueKey(suggesting),
             controller: controller,
             agentName: _agentName(controller.backend, controller.defaultAgent),
-            replacement: suggesting ? passage.exact : null,
+            replacement: suggesting && mark is Passage ? mark.exact : null,
           ),
         ],
       ),
     );
   }
+}
+
+/// Where in the video a comment is: "0:31–0:45", and whether it's on a
+/// part of the frame.
+class _MomentLabel extends StatelessWidget {
+  const _MomentLabel({required this.moment});
+
+  final Moment moment;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Text(
+      moment.region == null
+          ? moment.label
+          : '${moment.label} · part of the frame',
+      style: TextStyles.caption.copyWith(
+        color: palette.textMuted,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+  }
+}
+
+/// A region of the image as a small picture: what a comment is on. Its
+/// size follows the region's shape, at most 72 high and as wide as there's
+/// room for.
+class RegionThumbnail extends StatelessWidget {
+  const RegionThumbnail({super.key, required this.image, required this.region});
+
+  final ui.Image? image;
+  final Rect region;
+
+  @override
+  Widget build(BuildContext context) {
+    final image = this.image;
+    if (image == null) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    final source =
+        Rect.fromLTWH(
+          region.left * image.width,
+          region.top * image.height,
+          region.width * image.width,
+          region.height * image.height,
+        ).intersect(
+          Offset.zero & Size(image.width.toDouble(), image.height.toDouble()),
+        );
+    if (source.isEmpty) return const SizedBox.shrink();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = [
+          72 / source.height,
+          constraints.maxWidth / source.width,
+          1.0,
+        ].reduce((a, b) => a < b ? a : b);
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            width: source.width * scale + 2,
+            height: source.height * scale + 2,
+            decoration: BoxDecoration(
+              border: Border.all(color: palette.hairline),
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: CustomPaint(painter: _Crop(image, source)),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Crop extends CustomPainter {
+  _Crop(this.image, this.source);
+
+  final ui.Image image;
+  final Rect source;
+
+  @override
+  void paint(Canvas canvas, Size size) => canvas.drawImageRect(
+    image,
+    source,
+    Offset.zero & size,
+    Paint()..filterQuality = FilterQuality.medium,
+  );
+
+  @override
+  bool shouldRepaint(_Crop old) => old.image != image || old.source != source;
 }
 
 /// Where a comment is written: Enter makes a new line, ⌘Enter sends it to
@@ -1487,13 +1885,7 @@ class _Sheet extends StatelessWidget {
       builder: (context, _) {
         if (!controller.sheetOpen) return const SizedBox.shrink();
         final composing = controller.composing;
-        final threads = [...controller.shown]
-          ..sort((a, b) {
-            final ra = controller.located[a.id];
-            final rb = controller.located[b.id];
-            if (ra == null || rb == null) return ra == null ? -1 : 1;
-            return ra.start.compareTo(rb.start);
-          });
+        final threads = controller.inOrder(controller.shown);
         return LayoutBuilder(
           builder: (context, constraints) => Stack(
             children: [
@@ -1531,7 +1923,7 @@ class _Sheet extends StatelessWidget {
                             if (composing != null) ...[
                               _ComposerCard(
                                 controller: controller,
-                                passage: composing,
+                                mark: composing,
                               ),
                               const SizedBox(height: Space.s),
                             ],
@@ -1539,7 +1931,20 @@ class _Sheet extends StatelessWidget {
                               Padding(
                                 padding: const EdgeInsets.all(Space.m),
                                 child: Text(
-                                  'Select text to comment on it.',
+                                  switch (controller.kind) {
+                                    'image' =>
+                                      'Turn on Comment, then drag across '
+                                          'the part of the image you want '
+                                          'to comment on.',
+                                    'video' =>
+                                      'Turn on Comment, then '
+                                          '${defaultTargetPlatform == TargetPlatform.iOS ? 'tap' : 'click'} '
+                                          'or drag along the timeline to '
+                                          'comment on a moment or a stretch '
+                                          'of time. Drag across the frame to '
+                                          'point at part of it.',
+                                    _ => 'Select text to comment on it.',
+                                  },
                                   textAlign: TextAlign.center,
                                   style: TextStyles.body.copyWith(
                                     color: palette.textMuted,

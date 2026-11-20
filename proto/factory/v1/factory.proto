@@ -884,8 +884,14 @@ message ReadFile {
   // Absolute, or from the home folder ("~/notes.md").
   string path = 1;
   // At most this many bytes; 0 for the default. Text is read up to 2 MB and
-  // images up to 20 MB, whatever is asked.
+  // images up to 20 MB, whatever is asked; videos (and any read from an
+  // offset) 8 MB at a time.
   uint64 max_bytes = 2;
+  // Read from this byte: a video is played a range at a time (offset 0, 8 MB,
+  // 16 MB…, until offset + data's length is the size). Videos up to 2 GB,
+  // and other files read from an offset too; larger ones come back with
+  // `error`.
+  uint64 offset = 3;
 }
 
 message FileContent {
@@ -893,22 +899,28 @@ message FileContent {
   string path = 1;
   // Sniffed from its content and extension: "text/plain", "text/markdown",
   // "application/json", "image/png", "image/jpeg", "image/gif",
-  // "image/webp", "application/pdf", "application/octet-stream"…
+  // "image/webp", "video/mp4", "video/quicktime", "video/webm",
+  // "application/pdf", "application/octet-stream"…
   string mime = 2;
   // The whole file's size in bytes.
   uint64 size = 3;
-  // Its first bytes, up to the limit.
+  // Its bytes from `offset`, up to the limit.
   bytes data = 4;
-  // `data` is only the start of it.
+  // `data` isn't the whole file: only its start, or a range of it.
   bool truncated = 5;
   // When it was last changed, in ms since 1970.
   int64 modified_ms = 6;
   // Why it couldn't be read ("No such file: …", "… is a folder", "Can't
   // read …: permission denied"); empty when it was. The rest is empty then.
   string error = 7;
-  // The whole file's SHA-256, in lowercase hex; empty when `truncated`. A
-  // thread made on this content says it in CreateThread.version_sha256.
+  // The whole file's SHA-256, in lowercase hex. Text and images read from
+  // the start leave it empty when `truncated`; videos and reads from an
+  // offset always have it, the same for every range of one version of the
+  // file. A thread made on this content says it in
+  // CreateThread.version_sha256.
   string sha256 = 8;
+  // Where `data` starts in the file: ReadFile.offset.
+  uint64 offset = 9;
 }
 
 // Sets an agent's layout (`Agent.layout`) for every device, answered with

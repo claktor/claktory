@@ -5,19 +5,21 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../annotations.dart';
 import '../controls.dart';
 import '../identity.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
-import '../selection.dart';
 import 'registry.dart';
 
 /// An image: fitted to the pane (never enlarged past its pixels), over a
 /// checkerboard where it's transparent, with its pixel size. Zoom with a
 /// pinch, ⌘-scroll, ⌘+ ⌘− ⌘0 once clicked, or the header's controls; a
 /// double click goes to 100% about the pointer and back to fitted; drag or
-/// scroll to move.
+/// scroll to move. Comments are on regions of it: the header's Comment,
+/// then a drag across it, marks one; each comment's region is outlined in
+/// its agent's color, and a click on one picks it.
 class ImageViewer extends StatefulWidget {
   const ImageViewer({super.key, required this.path});
 
@@ -44,14 +46,150 @@ class _ImageViewerState extends State<ImageViewer>
     _zoom.addListener(_zoomChanged);
   }
 
+  CommentsController? _wired;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final comments = this.comments;
+    if (comments != _wired) {
+      _wired = comments;
+      comments
+        ?..yOfRegion = _yOfRegion
+        ..revealRegion = _revealRegion;
+    }
+  }
+
+  /// Dragging across the image marks a region to comment on, rather than
+  /// moving it.
+  var _marking = false;
+
+  /// The drag marking a region, as fractions of the image.
+  Offset? _dragFrom;
+  Offset? _dragTo;
+
+  /// [local] (in the pane) as a fraction of the image, kept inside it.
+  Offset _fraction(Offset local) {
+    final image = _image!;
+    final inverse = Matrix4.inverted(_zoom.value);
+    final at = MatrixUtils.transformPoint(inverse, local);
+    return Offset(
+      (at.dx / image.width).clamp(0.0, 1.0),
+      (at.dy / image.height).clamp(0.0, 1.0),
+    );
+  }
+
+  /// [region] (fractions of the image) where it shows in the pane.
+  Rect _onScreen(Rect region) {
+    final image = _image!;
+    return MatrixUtils.transformRect(
+      _zoom.value,
+      Rect.fromLTWH(
+        region.left * image.width,
+        region.top * image.height,
+        region.width * image.width,
+        region.height * image.height,
+      ),
+    );
+  }
+
+  double? _yOfRegion(Rect region) {
+    if (_image == null || _pane.isEmpty) return null;
+    return _onScreen(region).top.clamp(0.0, _pane.height);
+  }
+
+  /// Moves the image so [region] is in the middle of the pane, if any of
+  /// it is out of sight.
+  void _revealRegion(Rect region) {
+    if (_image == null || _pane.isEmpty) return;
+    final shown = _onScreen(region);
+    if ((Offset.zero & _pane).contains(shown.topLeft) &&
+        (Offset.zero & _pane).contains(shown.bottomRight)) {
+      return;
+    }
+    final by = _pane.center(Offset.zero) - shown.center;
+    setState(() {
+      _fitted = false;
+      _zoom.value = Matrix4.translationValues(by.dx, by.dy, 0)
+        ..multiply(_zoom.value);
+    });
+  }
+
+  void _toggleMarking() {
+    setState(() {
+      _marking = !_marking;
+      _dragFrom = _dragTo = null;
+    });
+    if (!_marking && comments?.selection.value is Region) {
+      comments?.selection.value = null;
+    }
+  }
+
+  void _markStart(DragStartDetails details) {
+    setState(() {
+      _dragFrom = _fraction(details.localPosition);
+      _dragTo = _dragFrom;
+    });
+  }
+
+  void _markUpdate(DragUpdateDetails details) {
+    setState(() => _dragTo = _fraction(details.localPosition));
+  }
+
+  void _markEnd(DragEndDetails details) {
+    final from = _dragFrom;
+    final to = _dragTo;
+    setState(() {
+      _dragFrom = _dragTo = null;
+      _marking = false;
+    });
+    if (from == null || to == null) return;
+    final region = Region(Rect.fromPoints(from, to));
+    if (region.isEmpty) return;
+    final comments = this.comments;
+    if (comments == null) return;
+    comments.selection.value = region;
+    // On a narrow pane, straight to writing it: there's no margin to
+    // offer Comment in.
+    if (comments.narrow.value) comments.comment();
+  }
+
+  /// A click on a comment's region picks it; anywhere else lets go.
+  void _tapped(TapUpDetails details) {
+    final comments = this.comments;
+    if (comments == null || _image == null) return;
+    final at = _fraction(details.localPosition);
+    String? hit;
+    var smallest = double.infinity;
+    for (final thread in comments.shown) {
+      final region = comments.regions[thread.id];
+      if (region == null || !region.contains(at)) continue;
+      final area = region.width * region.height;
+      if (area < smallest) {
+        smallest = area;
+        hit = thread.id;
+      }
+    }
+    comments.focus(hit);
+    if (comments.selection.value is Region && comments.composing == null) {
+      comments.selection.value = null;
+    }
+  }
+
   void _zoomChanged() {
     final phase = SchedulerBinding.instance.schedulerPhase;
+    // The margin's cards follow the regions too.
+    void follow() {
+      _shownScale.value = _scale;
+      comments?.relayout();
+    }
+
     if (phase == SchedulerPhase.idle ||
         phase == SchedulerPhase.postFrameCallbacks) {
-      _shownScale.value = _scale;
+      follow();
     } else {
       SchedulerBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _shownScale.value = _scale;
+        if (mounted) follow();
       });
     }
   }
@@ -96,11 +234,31 @@ class _ImageViewerState extends State<ImageViewer>
         _image = frame.image;
         _fitted = true;
       });
+      _showComments();
     } on Exception {
       if (mounted) {
         setState(() => _undecodable = "Claktory can't open this image.");
       }
     }
+  }
+
+  /// Comments are on whole images Claktory read: a cut one has no
+  /// version to belong to.
+  bool get _commentable {
+    final file = this.file;
+    return file != null &&
+        _image != null &&
+        file.error.isEmpty &&
+        !file.truncated &&
+        file.sha256.isNotEmpty;
+  }
+
+  void _showComments() {
+    final comments = this.comments;
+    if (comments == null || !_commentable) return;
+    comments
+      ..image = _image
+      ..show(kind: 'image', text: '', version: file!.sha256);
   }
 
   @override
@@ -160,10 +318,13 @@ class _ImageViewerState extends State<ImageViewer>
         (_undecodable == null
             ? null
             : ViewerProblem(_undecodable!, path: path));
-    final details = [
-      if (image != null) '${image.width} × ${image.height}',
-      if (file != null && file.error.isEmpty) formatBytes(file.size),
-    ].join(' · ');
+    final details = this.details(
+      [
+        if (image != null) '${image.width} × ${image.height}',
+        if (file != null && file.error.isEmpty) formatBytes(file.size),
+      ].join(' · '),
+    );
+    final comments = _commentable ? this.comments : null;
     Widget glyphButton(String label, String icon, VoidCallback onTap) =>
         GlyphButton(
           label: label,
@@ -173,6 +334,10 @@ class _ImageViewerState extends State<ImageViewer>
               ExtensionGlyph(icon: icon, name: label, color: color),
         );
     final controls = <Widget>[
+      if (comments != null) ...[
+        CommentsButton(controller: comments),
+        HeaderTextButton('Comment', _toggleMarking, active: _marking),
+      ],
       if (image != null) ...[
         ValueListenableBuilder(
           valueListenable: _shownScale,
@@ -189,8 +354,8 @@ class _ImageViewerState extends State<ImageViewer>
         ),
         glyphButton('Zoom out', 'minus', _zoomOut),
         glyphButton('Zoom in', 'plus', _zoomIn),
-        _TextButton('Fit', _fitNow),
-        _TextButton('100%', () => _zoomTo(1)),
+        HeaderTextButton('Fit', _fitNow),
+        HeaderTextButton('100%', () => _zoomTo(1)),
       ],
       reloadButton(),
     ];
@@ -236,10 +401,14 @@ class _ImageViewerState extends State<ImageViewer>
                   _zoomOut,
               const SingleActivator(LogicalKeyboardKey.digit0, meta: true):
                   _fitNow,
+              const SingleActivator(LogicalKeyboardKey.escape): () {
+                if (_marking) _toggleMarking();
+              },
             },
             child: Focus(
               focusNode: _focus,
               child: GestureDetector(
+                onTapUp: comments == null ? null : _tapped,
                 onDoubleTapDown: (details) =>
                     _doubleTapAt = details.localPosition,
                 onDoubleTap: _toggleActualSize,
@@ -257,26 +426,73 @@ class _ImageViewerState extends State<ImageViewer>
                       );
                     }
                   },
-                  child: InteractiveViewer(
-                    transformationController: _zoom,
-                    constrained: false,
-                    minScale: _minScale,
-                    maxScale: 8,
-                    boundaryMargin: const EdgeInsets.all(double.infinity),
-                    onInteractionStart: (_) => _fitted = false,
-                    child: SizedBox(
-                      width: image.width.toDouble(),
-                      height: image.height.toDouble(),
-                      child: CustomPaint(
-                        painter: _Checkerboard(palette.hairline, zoom: _zoom),
-                        child: RawImage(
-                          image: image,
-                          filterQuality: _scale > 2
-                              ? FilterQuality.none
-                              : FilterQuality.medium,
+                  child: Stack(
+                    children: [
+                      InteractiveViewer(
+                        transformationController: _zoom,
+                        constrained: false,
+                        minScale: _minScale,
+                        maxScale: 8,
+                        boundaryMargin: const EdgeInsets.all(double.infinity),
+                        onInteractionStart: (_) => _fitted = false,
+                        child: SizedBox(
+                          width: image.width.toDouble(),
+                          height: image.height.toDouble(),
+                          child: CustomPaint(
+                            painter: _Checkerboard(
+                              palette.hairline,
+                              zoom: _zoom,
+                            ),
+                            child: RawImage(
+                              image: image,
+                              filterQuality: _scale > 2
+                                  ? FilterQuality.none
+                                  : FilterQuality.medium,
+                            ),
+                          ),
                         ),
                       ),
-                    ),
+                      if (comments != null)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _Regions(
+                                comments: comments,
+                                zoom: _zoom,
+                                onScreen: _onScreen,
+                                drag: _dragFrom == null || _dragTo == null
+                                    ? null
+                                    : Rect.fromPoints(_dragFrom!, _dragTo!),
+                                signal: palette.signal,
+                                colorOf: (agentId) => agentColor(
+                                  comments.backend.workspace.workspace.agents
+                                          .where((a) => a.id == agentId)
+                                          .firstOrNull
+                                          ?.color ??
+                                      '',
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      // While marking, a drag draws a region instead of
+                      // moving the image.
+                      if (_marking)
+                        Positioned.fill(
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.precise,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              // From where the pointer went down, not
+                              // where the drag was recognised.
+                              dragStartBehavior: DragStartBehavior.down,
+                              onPanStart: _markStart,
+                              onPanUpdate: _markUpdate,
+                              onPanEnd: _markEnd,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -289,49 +505,73 @@ class _ImageViewerState extends State<ImageViewer>
       details: details,
       controls: controls,
       body: ClipRect(
-        child: ColoredBox(color: palette.canvas, child: body),
+        child: ColoredBox(
+          color: palette.canvas,
+          child: comments == null
+              ? body
+              : Commented(controller: comments, child: body),
+        ),
       ),
     );
   }
 }
 
-/// A quiet text button for a pane's header: "Fit", "100%".
-class _TextButton extends StatelessWidget {
-  const _TextButton(this.label, this.onTap);
+/// Each comment's region outlined in its agent's color, the picked one
+/// stronger, and the person's selection and the region being dragged in
+/// signal, in the pane's coordinates (so lines stay thin at any zoom).
+class _Regions extends CustomPainter {
+  _Regions({
+    required this.comments,
+    required this.zoom,
+    required this.onScreen,
+    required this.drag,
+    required this.signal,
+    required this.colorOf,
+  }) : super(repaint: Listenable.merge([comments, comments.selection, zoom]));
 
-  final String label;
-  final VoidCallback onTap;
+  final CommentsController comments;
+  final TransformationController zoom;
+  final Rect Function(Rect region) onScreen;
+  final Rect? drag;
+  final Color signal;
+  final Color Function(String agentId) colorOf;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return Unselectable(
-      child: Semantics(
-        button: true,
-        label: label,
-        excludeSemantics: true,
-        child: Pressable(
-          onTap: onTap,
-          builder: (context, hovered) => Container(
-            height: 28,
-            padding: const EdgeInsets.symmetric(horizontal: Space.s),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: hovered ? palette.hover : const Color(0x00000000),
-              borderRadius: BorderRadius.circular(Radii.control),
-            ),
-            child: Text(
-              label,
-              style: TextStyles.caption.copyWith(
-                color: hovered ? palette.text : palette.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+  void paint(Canvas canvas, Size size) {
+    void box(Rect region, Color color, {required bool strong}) {
+      final rect = onScreen(region);
+      canvas
+        ..drawRect(
+          rect,
+          Paint()..color = color.withValues(alpha: strong ? 0.20 : 0.10),
+        )
+        ..drawRect(
+          rect,
+          Paint()
+            ..color = color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = strong ? 2.5 : 1.5,
+        );
+    }
+
+    for (final thread in comments.shown) {
+      final region = comments.regions[thread.id];
+      if (region == null) continue;
+      box(
+        region,
+        colorOf(thread.agentId),
+        strong: comments.focused == thread.id,
+      );
+    }
+    final selected = comments.selection.value;
+    if (selected is Region) box(selected.rect, signal, strong: false);
+    final drag = this.drag;
+    if (drag != null) box(drag, signal, strong: false);
   }
+
+  @override
+  bool shouldRepaint(_Regions old) =>
+      old.drag != drag || old.signal != signal || old.comments != comments;
 }
 
 /// Faint squares under an image, so where it's transparent shows: 8

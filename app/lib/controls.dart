@@ -1925,6 +1925,9 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'network': _drawNetwork,
   'paperclip': _drawPaperclip,
   'message-square': _drawMessageSquare,
+  'play': _drawPlay,
+  'pause': _drawPause,
+  'film': _drawFilm,
 };
 
 final _drawEllipsis = _paths(const [
@@ -1963,6 +1966,27 @@ final _drawMonitor = _paths(const [
 final _drawMessageSquare = _paths(const [
   'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202'
       'A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z',
+]);
+
+final _drawPlay = _paths(const [
+  'M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7'
+      'A2 2 0 0 1 5 19z',
+]);
+
+final _drawPause = _paths(const [
+  'M15 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z',
+  'M6 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z',
+]);
+
+final _drawFilm = _paths(const [
+  'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+  'M7 3v18',
+  'M3 7.5h4',
+  'M3 12h18',
+  'M3 16.5h4',
+  'M17 3v18',
+  'M17 7.5h4',
+  'M17 16.5h4',
 ]);
 
 final _drawPaperclip = _paths(const [

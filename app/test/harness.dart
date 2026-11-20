@@ -169,14 +169,39 @@ class RecordingBackend extends Backend {
   /// What [readFile] answers, by path; any other path can't be read.
   final files = <String, FileContent>{};
 
+  /// Whether [readFile] reads from an offset, as backends since videos do.
+  var rangedReads = true;
+
   @override
-  Future<FileContent> readFile(String path, {int maxBytes = 0}) async {
+  Future<FileContent> readFile(
+    String path, {
+    int maxBytes = 0,
+    int offset = 0,
+  }) async {
     await _record(
       ClientMessage(
-        readFile: ReadFile(path: path, maxBytes: Int64(maxBytes)),
+        readFile: ReadFile(
+          path: path,
+          maxBytes: Int64(maxBytes),
+          offset: Int64(offset),
+        ),
       ),
     );
-    return files[path] ?? FileContent(path: path, error: 'No such file: $path');
+    final file = files[path];
+    if (file == null) {
+      return FileContent(path: path, error: 'No such file: $path');
+    }
+    if (offset == 0 && maxBytes == 0) return file;
+    // A backend from before ranged reads answers from the start.
+    if (!rangedReads) offset = 0;
+    // A range of it, as the backend reads a video.
+    final end = maxBytes == 0
+        ? file.data.length
+        : (offset + maxBytes).clamp(0, file.data.length);
+    return file.deepCopy()
+      ..data = file.data.sublist(offset.clamp(0, file.data.length), end)
+      ..offset = Int64(offset)
+      ..truncated = offset > 0 || end < file.data.length;
   }
 
   /// Whether [setLayout] changes the agent's layout, as the backend would

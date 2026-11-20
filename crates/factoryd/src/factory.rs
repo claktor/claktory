@@ -1923,6 +1923,7 @@ impl Factory {
     pub(crate) fn vault_changed(&self) {
         let mut hidden = self.vault.every_variable();
         hidden.extend(self.broker.hidden(&self.vault));
+        eprintln!("HIDDEN {:?}", hidden.iter().map(|v| format!("{}/{} {}", v.secret, v.variable, v.public)).collect::<Vec<_>>());
         self.redaction.set(factory_agent::Redactor::new(&hidden));
         self.broadcast_workspace(&self.lock());
     }

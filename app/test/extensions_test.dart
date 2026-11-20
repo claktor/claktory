@@ -161,6 +161,9 @@ void main() {
       'monitor-smartphone',
       'paperclip',
       'message-square',
+      'play',
+      'pause',
+      'film',
     ]) {
       await tester.pumpWidget(
         Directionality(

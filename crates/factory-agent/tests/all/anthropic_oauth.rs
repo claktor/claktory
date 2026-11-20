@@ -89,12 +89,9 @@ async fn the_callback_with_the_verifier_as_state_exchanges_the_code() {
             assert!(missing.text().await.expect("html").contains("Missing code or state parameter."));
             let ok = reqwest::get(format!("http://127.0.0.1:{port}/callback?code=the-code&state={state}")).await.expect("callback");
             assert_eq!(ok.status().as_u16(), 200);
-            assert!(
-                ok.text()
-                    .await
-                    .expect("html")
-                    .contains("Claktory is finishing your Anthropic sign-in. You can close this tab and go back to Claktory to see how it went.")
-            );
+            assert!(ok.text().await.expect("html").contains(
+                "Claktory is finishing your Anthropic sign-in. You can close this tab and go back to Claktory to see how it went."
+            ));
             return (state, query[5].1.clone(), port);
         }
     });

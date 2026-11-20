@@ -522,7 +522,9 @@ async fn handle(
             crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)
         }
         Some(Request::ReadFile(request)) => {
-            let content = tokio::task::spawn_blocking(move || crate::extensions::viewer::read_file(&request.path, request.max_bytes)).await;
+            let content =
+                tokio::task::spawn_blocking(move || crate::extensions::viewer::read_file(&request.path, request.offset, request.max_bytes))
+                    .await;
             return match content {
                 Ok(content) => Body::FileContent(content),
                 Err(problem) => error(ErrorCode::Internal, problem.to_string()),

@@ -18,6 +18,7 @@
 //! (FileChanged), and its threads are placed again and sent (ThreadList).
 
 pub(crate) mod anchor;
+mod region;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -97,8 +98,6 @@ ALTER TABLE threads ADD COLUMN decision TEXT;
 
 /// Text files are commented on up to this size, as viewers read them.
 const TEXT_LIMIT: u64 = 2_000_000;
-/// Images up to this size.
-const IMAGE_LIMIT: u64 = 20_000_000;
 /// How often files shown in panes are checked for changes.
 const POLL_EVERY: Duration = Duration::from_secs(1);
 /// A quote in an event is cut to this many characters.
@@ -159,12 +158,20 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 
 fn read(path: &Path) -> Content {
     let Ok(metadata) = std::fs::metadata(path) else { return Content::Gone };
-    if !metadata.is_file() || metadata.len() > IMAGE_LIMIT {
+    if !metadata.is_file() {
         return Content::Gone;
+    }
+    // Too big to be text (an image, a video): only its hash, kept while
+    // the file is unchanged; files over 2 GB are gone.
+    if metadata.len() > TEXT_LIMIT {
+        return match crate::extensions::viewer::whole_sha256(path) {
+            Ok(sha) => Content::Bytes { sha },
+            Err(_) => Content::Gone,
+        };
     }
     let Ok(bytes) = std::fs::read(path) else { return Content::Gone };
     let sha = sha256(&bytes);
-    if bytes.len() as u64 > TEXT_LIMIT || bytes.contains(&0) {
+    if bytes.contains(&0) {
         return Content::Bytes { sha };
     }
     match String::from_utf8(bytes) {
@@ -205,6 +212,7 @@ enum Kind {
     Text,
     Markdown,
     Image,
+    Video,
 }
 
 impl Kind {
@@ -213,7 +221,8 @@ impl Kind {
             "text" => Ok(Kind::Text),
             "markdown" => Ok(Kind::Markdown),
             "image" => Ok(Kind::Image),
-            other => Err(RequestError::Comments(format!("kind is \"text\", \"markdown\" or \"image\"; got \"{other}\""))),
+            "video" => Ok(Kind::Video),
+            other => Err(RequestError::Comments(format!("kind is \"text\", \"markdown\", \"image\" or \"video\"; got \"{other}\""))),
         }
     }
 
@@ -222,7 +231,12 @@ impl Kind {
             Kind::Text => "text",
             Kind::Markdown => "markdown",
             Kind::Image => "image",
+            Kind::Video => "video",
         }
+    }
+
+    fn is_text(self) -> bool {
+        matches!(self, Kind::Text | Kind::Markdown)
     }
 
     fn space(self) -> Space {
@@ -336,7 +350,7 @@ impl Thread {
     }
 
     fn is_text(&self) -> bool {
-        self.kind != Kind::Image
+        self.kind.is_text()
     }
 }
 
@@ -448,9 +462,13 @@ fn refresh(db: &Connection, path: &str) -> rusqlite::Result<(Content, bool)> {
     let threads = threads_on(db, path)?;
     let mut changed = false;
     if let Some(sha) = content.sha() {
-        for mut thread in threads.iter().filter(|thread| !thread.is_text() && thread.version != sha).cloned() {
-            if thread.anchor != v1::AnchorState::Outdated {
-                thread.anchor = v1::AnchorState::Outdated;
+        // An image's or video's thread is on the version it was made on:
+        // outdated while the file is another, and anchored again when it's
+        // the same once more (rewritten identically, or caught mid-write).
+        for mut thread in threads.iter().filter(|thread| !thread.is_text()).cloned() {
+            let anchor = if thread.version == sha { v1::AnchorState::Anchored } else { v1::AnchorState::Outdated };
+            if thread.anchor != anchor {
+                thread.anchor = anchor;
                 save_place(db, &thread)?;
                 changed = true;
             }
@@ -619,7 +637,7 @@ impl Factory {
             return Err(RequestError::Empty("body"));
         }
         let kind = Kind::parse(&request.kind)?;
-        if request.suggestion.is_some() && kind == Kind::Image {
+        if request.suggestion.is_some() && !kind.is_text() {
             return Err(RequestError::Comments("Changes can be suggested only for text.".to_owned()));
         }
         let path = absolute(&request.path)?;
@@ -1013,6 +1031,32 @@ fn location(thread: &Thread, doc: Option<&Doc>) -> String {
     }
 }
 
+/// Where an image's or a video's thread is, in words: "a region of the
+/// image, 30% wide and 20% tall, …", with pixels while the image is the one
+/// it was made on; "at 0:31–0:45, in a region of the frame, …" in a video.
+fn media_place(thread: &Thread) -> String {
+    if thread.kind == Kind::Video {
+        let region = region::describe(&thread.selectors, None).map(|words| format!(", in a region of the frame, {words}"));
+        return match region::when(&thread.selectors) {
+            Some(when) => format!("{when}{}", region.unwrap_or_default()),
+            None => format!("a part of the video: {}", thread.selectors),
+        };
+    }
+    let size = match thread.anchor {
+        v1::AnchorState::Outdated => None,
+        _ => std::fs::read(&thread.path).ok().and_then(|bytes| region::size(&bytes)),
+    };
+    match region::describe(&thread.selectors, size) {
+        Some(words) => format!("a region of the image, {words}"),
+        None => format!("a region of the image: {}", thread.selectors),
+    }
+}
+
+/// What a thread that isn't on text is on: "image" or "video".
+fn media(thread: &Thread) -> &'static str {
+    if thread.kind == Kind::Video { "video" } else { "image" }
+}
+
 /// One thread's part of the event: where it is, what it quotes, and the
 /// person's new comments on it.
 fn event_section(thread: &Thread, doc: Option<&Doc>, comments: &[Comment], first: Option<i64>) -> String {
@@ -1023,7 +1067,10 @@ fn event_section(thread: &Thread, doc: Option<&Doc>, comments: &[Comment], first
             let _ = write!(section, " (the text changed since; it was “{}”)", shown(&thread.original));
         }
     } else {
-        let _ = write!(section, " (a region of the image: {})", thread.selectors);
+        let _ = write!(section, ": {}", media_place(thread));
+        if thread.anchor == v1::AnchorState::Outdated {
+            let _ = write!(section, " (on an earlier version of the {})", media(thread));
+        }
     }
     if let Some(suggestion) = thread.suggestion.as_ref().filter(|suggestion| suggestion.by.is_empty()) {
         let _ = write!(section, ", suggesting “{}” instead", shown(&suggestion.replacement));
@@ -1080,14 +1127,16 @@ fn place(db: &Connection, path: &str, kind: Kind, version: &str, selectors: &[v1
         .collect::<Result<_, _>>()
         .map_err(|error| RequestError::Comments(format!("a selector isn't JSON: {error}")))?;
     let (content, _) = refresh(db, path)?;
-    if kind == Kind::Image {
+    if !kind.is_text() {
         let Some(sha) = content.sha() else { return Err(RequestError::Comments(format!("Can't read {path}."))) };
         if parsed.is_empty() {
-            return Err(RequestError::Comments("An image's comment needs a region.".to_owned()));
+            let needs = if kind == Kind::Video { "A video's comment needs a time." } else { "An image's comment needs a region." };
+            return Err(RequestError::Comments(needs.to_owned()));
         }
+        // Kept on the version it was made on, which may be an earlier one.
         let anchor = if version == sha { v1::AnchorState::Anchored } else { v1::AnchorState::Outdated };
         return Ok(Place {
-            version: sha.to_owned(),
+            version: version.to_owned(),
             range: None,
             quote: QuoteJson::default(),
             selectors: Value::Array(parsed).to_string(),
@@ -1136,7 +1185,7 @@ pub(crate) fn written(factory: &Factory, agent: &str, folder: &Path, path: &str)
     let path = Path::new(path);
     let path = if path.is_absolute() { path.to_path_buf() } else { folder.join(path) };
     let path = std::fs::canonicalize(&path).unwrap_or(path).display().to_string();
-    let shown = factory.viewer.paths("text").contains(&path) || factory.viewer.paths("image").contains(&path);
+    let shown = ["text", "image", "video"].iter().any(|kind| factory.viewer.paths(kind).contains(&path));
     let _work = factory.comments_lock();
     let db = factory.store.db();
     let threaded = has_threads(&db, &path).unwrap_or(false);
@@ -1179,6 +1228,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
 fn poll(factory: &Factory) {
     let mut paths = factory.viewer.paths("text");
     paths.extend(factory.viewer.paths("image"));
+    paths.extend(factory.viewer.paths("video"));
     let mut changed = Vec::new();
     {
         let mut seen = guard(&factory.annotations.seen);
@@ -1249,12 +1299,15 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
                 (true, _) => "resolved",
                 (false, v1::AnchorState::Moved) => "open, the text changed since",
                 (false, v1::AnchorState::Detached) => "open, no longer in the file",
+                (false, v1::AnchorState::Outdated) if thread.kind == Kind::Video => "open, the video changed since",
                 (false, v1::AnchorState::Outdated) => "open, the image changed since",
                 _ => "open",
             };
             let _ = write!(out, "[{}] {} ({state})", thread.name(), location(&thread, doc.as_ref()));
             if thread.is_text() {
                 let _ = write!(out, ": “{}”", shown(&thread.quote.exact));
+            } else {
+                let _ = write!(out, ": {}", media_place(&thread));
             }
             out.push('\n');
             if let Some(suggestion) = &thread.suggestion {
