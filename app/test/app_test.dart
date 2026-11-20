@@ -1,3 +1,4 @@
+import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
@@ -320,6 +321,8 @@ void main() {
     expect(update.hasDefaultEffort(), isTrue);
 
     await tester.enterText(settingsField, '300k');
+    await tester.pump();
+    await tester.ensureVisible(find.text('Save'));
     await tester.pump();
     await tester.tap(find.text('Save'));
     await settle(tester);
@@ -648,19 +651,45 @@ void main() {
     await tester.pump();
     expect(height(), closeTo(empty + 2 * line, 1));
 
-    // Working: Stop sits at the end of the row, and the box stays the same.
-    await tester.enterText(find.byType(EditableText), '');
+    // Working: Stop sits on a line above the box, at its end, and the box
+    // and its text field stay exactly as they were.
+    await tester.enterText(
+      find.byType(EditableText),
+      List.filled(40, 'word').join(' '),
+    );
+    await tester.pump();
+    final box = tester.getRect(composerBox());
+    final field = tester.getRect(find.byType(EditableText));
     await harness.apply(tester, workspace(agents: [builder(working: true)]));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Stop  esc'), findsOneWidget);
-    expect(tester.getSize(composerBox()).height, empty);
+    expect(find.text('Working'), findsOneWidget);
+    expect(tester.getRect(composerBox()), box);
+    expect(tester.getRect(find.byType(EditableText)), field);
     expect(
-      (tester.getCenter(find.text('Stop  esc')).dy -
-              tester.getCenter(find.byType(EditableText)).dy)
-          .abs(),
-      lessThan(2),
-      reason: 'level with the line',
+      tester.getBottomRight(find.text('Stop  esc')).dy,
+      lessThan(box.top),
+      reason: 'above the box',
     );
+    expect(
+      tester
+          .getTopRight(
+            find.ancestor(
+              of: find.text('Stop  esc'),
+              matching: find.byType(Button),
+            ),
+          )
+          .dx,
+      closeTo(box.right, 1),
+      reason: 'at its end',
+    );
+
+    // Stopping, it goes, and still nothing in the box moves.
+    await harness.apply(tester, workspace(agents: [builder(working: false)]));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Stop  esc'), findsNothing);
+    expect(tester.getRect(composerBox()), box);
+    expect(tester.getRect(find.byType(EditableText)), field);
   });
 
   testWidgets('the composer wraps text at the full width of its box', (
@@ -680,9 +709,13 @@ void main() {
     );
     final box = tester.getRect(composerBox());
     final field = editable.localToGlobal(Offset.zero) & editable.size;
-    // The field spans the box, less its padding.
+    // The field spans the box, less its padding and the paperclip at its
+    // end.
     expect(field.left - box.left, lessThanOrEqualTo(Space.m + 1));
-    expect(box.right - field.right, lessThanOrEqualTo(Space.m + 1));
+    expect(
+      box.right - field.right,
+      lessThanOrEqualTo(Space.xs + 28 + Space.xs + 1),
+    );
     // And lines run to its right edge, short of one word.
     var right = 0.0;
     for (final line in editable.getBoxesForSelection(
@@ -887,9 +920,12 @@ Finder composerBox() => find
     .first;
 
 /// The first field in Settings after Your name (which holds the harness's
-/// "Matt").
+/// "Matt") and the Claktory's name.
 Finder get settingsField => find
-    .byWidgetPredicate(
-      (widget) => widget is EditableText && widget.controller.text != 'Matt',
+    .byElementPredicate(
+      (element) =>
+          element.widget is EditableText &&
+          (element.widget as EditableText).controller.text != 'Matt' &&
+          element.findAncestorWidgetOfExactType<ClaktoryIdentity>() == null,
     )
     .first;

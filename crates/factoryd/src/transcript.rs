@@ -710,10 +710,13 @@ fn notice(text: String, level: NoticeLevel) -> Kind {
 fn user_kind(message: &UserMessage) -> Kind {
     let text = user_text(&message.content);
     let Some(event) = &message.event else {
+        // Attached images are shown as attachments, not as "[image]".
+        let text = if message.attachments.is_empty() { text } else { text_parts(&message.content) };
         return Kind::User(v1::UserText {
             text,
             sent_from: message.sent_from.as_ref().map(sent_from),
             client_id: message.client_id.clone(),
+            attachments: message.attachments.iter().map(attachment).collect(),
         });
     };
     let source = match event.source {
@@ -729,6 +732,28 @@ fn user_kind(message: &UserMessage) -> Kind {
         summary: event.summary.clone(),
         text,
     })
+}
+
+/// A file attached to the person's message, for clients.
+pub(crate) fn attachment(attached: &factory_agent::Attachment) -> v1::Attachment {
+    v1::Attachment { path: attached.path.clone(), name: attached.name.clone(), size: attached.size, mime: attached.mime.clone() }
+}
+
+/// The message's text alone, without its images.
+fn text_parts(content: &UserContent) -> String {
+    match content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Parts(parts) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter_map(|part| match part {
+                    UserPart::Text { text } => Some(text.as_str()),
+                    UserPart::Image { .. } => None,
+                })
+                .collect();
+            texts.join("\n")
+        }
+    }
 }
 
 /// Where the person sent a message from, for clients.

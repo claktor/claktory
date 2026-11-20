@@ -20,4 +20,6 @@ flutter_rust_bridge = "=2.13.0"
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 anyhow = "1"
+# claktory/2: the tunnel's streams compressed (zstd), as the backend's (crates/factoryd).
+async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 hex = "0.4"

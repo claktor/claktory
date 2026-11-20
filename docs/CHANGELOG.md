@@ -6,6 +6,14 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.6
+Released 2026-11-20 11:14 UTC.
+- Added: Send files and pictures to an agent with your message: drag them into the window, paste them, or click the paperclip in the message box (on iPhone, from Photos or Files). The agent gets them in its folder, and sees pictures too when its model can.
+- Changed: Open any project's files beside the conversation with Show files on its row in the sidebar, and a file you click opens right next to them. Move, resize or close them like any pane. On iPhone, touch and hold a project and choose Files. Focusing a project no longer opens its files.
+- Added: Give your Claktory a name and color that every device shows. Right-click it in the rail, or go to Settings → General.
+- Changed: Claktory stays quick on your iPhone or another computer: it sends far less over the network while agents work.
+- Fixed: Your text no longer jumps while you type as an agent starts or stops working: Working and Stop now sit on their own line above the message box.
+
 ## v0.1.5
 Released 2026-11-20 10:41 UTC.
 - Added: See at a glance whether you're connected. The bottom of the sidebar always says Connected, Reconnecting… or Can't connect, and each Claktory in the rail shows a pulsing or red dot when it isn't connected. Click the line to see how you're connected, or to reconnect.

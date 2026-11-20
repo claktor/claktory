@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:protobuf/protobuf.dart';
 
 import 'app_update.dart';
+import 'attachments.dart';
 import 'connections.dart';
 import 'device_kind.dart' show thisDeviceKindForHello;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -15,6 +16,7 @@ import 'outbox.dart';
 import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
+import 'workspace_patch.dart';
 
 /// Must match `PROTOCOL_VERSION` in the backend's factory-protocol crate.
 const _protocolVersion = 1;
@@ -99,16 +101,25 @@ class Backend {
   final ExtensionViewStore extensionView;
   final QueuedStore queued;
 
+  /// Files waiting in the agents' message boxes, on this device.
+  final attachments = AttachmentDrafts();
+
   /// The person's messages on their way, shown in the conversation at once.
-  late final outbox = Outbox(
-    (agentId, text, clientId) => sendMessage(agentId, text, clientId: clientId),
-  );
+  late final outbox = Outbox(BackendOutbox(this));
 
   /// What glows as state changes, and what's said beside it.
   final HighlightStore highlights;
 
   /// True from the backend's `welcome` until the connection drops.
   final connected = ValueNotifier<bool>(false);
+
+  /// Whether to ask for Workspace patches; off, the backend sends whole
+  /// Workspaces, as to apps before them (to compare the two in tests).
+  bool askForPatches = true;
+
+  /// Whether this connection has had a whole Workspace, which its patches
+  /// change: the first state after connecting always is one.
+  var _wholeWorkspace = false;
 
   /// When the backend last welcomed this connection; null while it's down.
   final connectedSince = ValueNotifier<DateTime?>(null);
@@ -253,6 +264,11 @@ class Backend {
   /// (`Welcome.device_id`); empty on this Mac's.
   var deviceId = '';
 
+  /// The Claktory's name and color as it said on connecting
+  /// (`Welcome.name`, `Welcome.color`), until its Settings carry them.
+  var welcomeName = '';
+  var welcomeColor = '';
+
   final Tunnels _tunnels;
 
   /// Reads this Mac's own pairing code, each time it connects: a backend
@@ -347,6 +363,8 @@ class Backend {
               clientVersion: _clientVersion,
               token: _helloVia?.token,
               deviceKind: await thisDeviceKindForHello(),
+              // Changes come as patches to the last Workspace, not whole.
+              workspacePatches: askForPatches,
             ),
           ),
         );
@@ -449,12 +467,6 @@ class Backend {
     unawaited(_socket?.close());
     if (target != _tunnelTarget) unawaited(_closeTunnel());
     _wakeUp();
-  }
-
-  /// [target] under another name the person gave it: the same Factory
-  /// (pairing codes are equal), so the connection stays as it is.
-  void relabel(RemoteFactory target) {
-    if (target == _target) _target = target;
   }
 
   /// The tunnel to [target], opened the first time, as [key] (else this
@@ -584,15 +596,72 @@ class Backend {
     String agentId,
     String text, {
     String clientId = '',
+    List<Attachment> attachments = const [],
   }) => _request(
     ClientMessage(
       sendMessage: SendMessage(
         agentId: agentId,
         text: text,
         clientId: clientId,
+        attachments: attachments,
       ),
     ),
   );
+
+  /// Starts sending a file to [agentId]'s scratch space as [uploadId], or
+  /// picks it up where it stopped: answers how many of its bytes the
+  /// backend has.
+  Future<int> startUpload(
+    String uploadId,
+    String agentId, {
+    required String name,
+    required int size,
+    String mime = '',
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        startUpload: StartUpload(
+          uploadId: uploadId,
+          agentId: agentId,
+          name: name,
+          size: Int64(size),
+          mime: mime,
+        ),
+      ),
+    );
+    return reply.uploadProgress.received.toInt();
+  }
+
+  /// Sends the file's [data] from [offset]: answers how many of its bytes
+  /// the backend has.
+  Future<int> uploadChunk(String uploadId, int offset, List<int> data) async {
+    final reply = await _call(
+      ClientMessage(
+        uploadChunk: UploadChunk(
+          uploadId: uploadId,
+          offset: Int64(offset),
+          data: data,
+        ),
+      ),
+    );
+    return reply.uploadProgress.received.toInt();
+  }
+
+  /// The whole file is there: answers where the backend put it, to send
+  /// with the message.
+  Future<Attachment> finishUpload(String uploadId) async {
+    final reply = await _call(
+      ClientMessage(finishUpload: FinishUpload(uploadId: uploadId)),
+    );
+    if (!reply.hasUploadedFile()) {
+      throw const RequestFailure('Claktory sent nothing back for the file.');
+    }
+    return reply.uploadedFile.attachment;
+  }
+
+  /// Drops what the backend has of [uploadId].
+  Future<void> cancelUpload(String uploadId) =>
+      _request(ClientMessage(cancelUpload: CancelUpload(uploadId: uploadId)));
 
   /// Loads the entries before the first one [transcript] holds, when it's
   /// [agentId]'s: the backend sends only the latest at first. Throws
@@ -931,6 +1000,18 @@ class Backend {
     ),
   );
 
+  /// The project whose Files this device shows on their own (the phone's
+  /// Files page), or empty: the backend sends its Explorer meanwhile, on
+  /// this connection and the next.
+  Future<void> watchFiles(String projectId) {
+    _watching = projectId;
+    return _request(
+      ClientMessage(watchFiles: WatchFiles(projectId: projectId)),
+    );
+  }
+
+  var _watching = '';
+
   Future<void> showAllFiles(String projectId, bool showAll) => _request(
     ClientMessage(
       showAllFiles: ShowAllFiles(projectId: projectId, showAll: showAll),
@@ -1110,10 +1191,14 @@ class Backend {
         _quiet?.cancel();
         reconnecting.value = false;
         deviceId = message.welcome.deviceId;
+        welcomeName = message.welcome.name;
+        welcomeColor = message.welcome.color;
         pairing.value = null;
         connectedSince.value = DateTime.now();
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
+        // The backend forgets a watch when the connection closes.
+        if (_watching.isNotEmpty) fireAndLog(watchFiles(_watching));
       case ServerMessage_Body.ack:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.pairingPending:
@@ -1132,7 +1217,20 @@ class Backend {
           _log('error ${message.error.code.name}: ${message.error.message}');
         }
       case ServerMessage_Body.workspace:
+        _wholeWorkspace = true;
         workspace.apply(message.workspace);
+      case ServerMessage_Body.workspacePatch:
+        final next = _wholeWorkspace
+            ? patchWorkspace(workspace.workspace, message.workspacePatch)
+            : null;
+        if (next == null) {
+          // It can't be applied: start again, from a whole one.
+          _log('a workspace patch that does not fit: reconnecting');
+          _wholeWorkspace = false;
+          _restart();
+          return;
+        }
+        workspace.apply(next);
       case ServerMessage_Body.transcript:
         transcript.load(message.transcript);
       case ServerMessage_Body.entry:
@@ -1157,6 +1255,15 @@ class Backend {
       case ServerMessage_Body.recoveryKey:
       case ServerMessage_Body.secretUses:
       case ServerMessage_Body.entryPage:
+      case ServerMessage_Body.uploadProgress:
+      case ServerMessage_Body.uploadedFile:
+      case ServerMessage_Body.connectStarted:
+      case ServerMessage_Body.connectChoices:
+      // Comments on files (Zoe's side to come): answers complete requests,
+      // broadcasts (reply_to 0) are let be until then.
+      case ServerMessage_Body.threadList:
+      case ServerMessage_Body.thread:
+      case ServerMessage_Body.fileChanged:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
@@ -1166,6 +1273,7 @@ class Backend {
 
   void _disconnected() {
     _socket = null;
+    _wholeWorkspace = false;
     // A connection that was up and dropped is most likely a network change:
     // it comes back without a word, if it can.
     if (connected.value && !_closed) _reconnectQuietly();

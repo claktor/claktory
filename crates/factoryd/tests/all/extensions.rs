@@ -90,6 +90,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
         [
             "agents",
             "checklist",
+            "comments",
             "database",
             "database:factory",
             "highlight",
@@ -104,21 +105,22 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[6];
+    let manual = &view.workspace.extensions[7];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
-    let records = &view.workspace.extensions[3];
+    let records = &view.workspace.extensions[4];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
     let builder = view.agent("builder").extensions.clone();
     assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[1].enabled), ("agents", true, false));
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[4].enabled && !builder[4].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[5].enabled && !builder[5].enabled, "a new Factory's Rivet points at things");
+    assert!(!builder[2].enabled, "comments off until the app shows them");
     assert!(
-        !builder[2].enabled
-            && !view.agent("rivet").extensions[2].enabled
-            && !builder[3].enabled
-            && view.agent("rivet").extensions[3].enabled,
+        !builder[3].enabled
+            && !view.agent("rivet").extensions[3].enabled
+            && !builder[4].enabled
+            && view.agent("rivet").extensions[4].enabled,
         "a database of its own only when turned on; admins Factory's records"
     );
 

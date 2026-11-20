@@ -1,0 +1,284 @@
+//! Comments on files: the person comments on text in a viewer, sends the
+//! comments to an agent as one event, and the agent answers with its tools;
+//! the threads follow their text as the file is rewritten.
+
+use crate::common::{Client, Scripted, View, apply_request, create_agent, create_project, describe, send_message, start_with, temp_dir};
+use factory_protocol::v1::{self, AgentStatus, AnchorState, ErrorCode, ThreadStatus, client_message, server_message::Body};
+
+fn idle(view: &View, agent: &str) -> bool {
+    let agent = view.agent(agent);
+    agent.status() == AgentStatus::Idle && agent.queued_messages == 0
+}
+
+/// What `agent`'s tool call said.
+async fn call(client: &mut Client, view: &mut View, agent: &str, text: &str) -> String {
+    let before = view.entries.len();
+    apply_request(client, view, send_message(agent, text)).await;
+    view.follow(client, |view| view.entries.len() >= before + 3 && idle(view, agent)).await;
+    describe(&view.entries[before + 1..before + 2]).remove(0)
+}
+
+/// Applies what comes to `view` until `pick` finds what it's looking for.
+async fn until<T>(client: &mut Client, view: &mut View, mut pick: impl FnMut(&Body) -> Option<T>) -> T {
+    loop {
+        let message = client.receive().await;
+        if let Some(body) = &message.body {
+            view.apply(body);
+            if let Some(found) = pick(body) {
+                return found;
+            }
+        }
+    }
+}
+
+async fn turn_on_comments(client: &mut Client, view: &mut View) {
+    let on = v1::ExtensionChange { id: "comments".into(), enabled: Some(true), ..Default::default() };
+    let change = v1::UpdateAgent { agent_id: "writer".into(), extension: Some(on), ..Default::default() };
+    apply_request(client, view, client_message::Body::UpdateAgent(change)).await;
+}
+
+fn quote(exact: &str, prefix: &str, suffix: &str) -> v1::Selector {
+    v1::Selector { json: serde_json::json!({"type": "TextQuoteSelector", "exact": exact, "prefix": prefix, "suffix": suffix}).to_string() }
+}
+
+fn position(start: usize, end: usize) -> v1::Selector {
+    v1::Selector { json: serde_json::json!({"type": "TextPosition", "start": start, "end": end}).to_string() }
+}
+
+fn create(path: &str, kind: &str, version: &str, selectors: Vec<v1::Selector>, body: &str) -> client_message::Body {
+    client_message::Body::CreateThread(v1::CreateThread {
+        agent_id: "writer".into(),
+        path: path.into(),
+        kind: kind.into(),
+        version_sha256: version.into(),
+        selectors,
+        body: body.into(),
+        send_now: false,
+    })
+}
+
+fn list(path: &str) -> client_message::Body {
+    client_message::Body::ListThreads(v1::ListThreads { path: path.into() })
+}
+
+async fn threads(client: &mut Client, path: &str) -> v1::ThreadList {
+    match client.request(list(path)).await.body {
+        Body::ThreadList(list) => list,
+        other => panic!("expected threads, got {other:?}"),
+    }
+}
+
+fn find<'a>(list: &'a v1::ThreadList, id: &str) -> &'a v1::Thread {
+    list.threads.iter().find(|thread| thread.id == id).expect("thread")
+}
+
+fn utf16(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+#[tokio::test]
+async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(view.workspace.extensions.iter().any(|extension| extension.id == "comments"));
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    let essay =
+        "# Essay\n\nThe industrial revolution was **not** a single event but a long series of changes.\n\nIt was, arguably, slow.\n";
+    std::fs::write(dir.join("site/essay.md"), essay).expect("write");
+    let path = std::fs::canonicalize(dir.join("site/essay.md")).expect("path").display().to_string();
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0 })).await;
+    let Body::FileContent(content) = read.body else { panic!("expected the file") };
+    assert_eq!(content.sha256.len(), 64, "the version comments are made on");
+
+    // In the formatted view: a quote of what it shows, placed on the source.
+    let made = client
+        .request(create(&path, "markdown", &content.sha256, vec![quote("not a single event", "revolution was ", " but")], "Too vague."))
+        .await;
+    let Body::Thread(first) = made.body else { panic!("expected the thread, got {:?}", made.body) };
+    assert_eq!((first.id.as_str(), first.anchor(), first.status()), ("t-1", AnchorState::Anchored, ThreadStatus::Open));
+    let source = first.source.clone().expect("source");
+    assert_eq!((source.exact.as_str(), source.first_line, source.last_line), ("**not** a single event", 3, 3));
+    assert_eq!(first.rendered.as_ref().map(|rendered| rendered.exact.as_str()), Some("not a single event"));
+    assert!(first.comments[0].draft && first.comments[0].author_agent_id.is_empty(), "the person's draft");
+    assert!(
+        made.events.iter().any(|event| matches!(&event.body, Some(Body::ThreadList(list)) if list.path == path)),
+        "every device hears of it"
+    );
+
+    // In the plain view: the file's own text, by position.
+    let at = utf16(&essay[..essay.find("arguably").expect("arguably")]);
+    let made = client
+        .request(create(&path, "text", &content.sha256, vec![quote("arguably", "was, ", ", slow"), position(at, at + 8)], "Cut hedges."))
+        .await;
+    assert!(matches!(made.body, Body::Thread(ref thread) if thread.id == "t-2"), "{:?}", made.body);
+    match client.request(create(&path, "text", &content.sha256, vec![quote("nowhere in it at all", "", "")], "?")).await.body {
+        Body::Error(error) => {
+            assert_eq!((error.code(), error.message.as_str()), (ErrorCode::InvalidRequest, "The text changed; select it again."))
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+
+    // Sent as one event, which the agent reads with where each is.
+    apply_request(
+        &mut client,
+        &mut view,
+        client_message::Body::SendComments(v1::SendComments { agent_id: "writer".into(), path: path.clone() }),
+    )
+    .await;
+    view.follow(&mut client, |view| idle(view, "writer")).await;
+    let prompt = requests.lock().expect("lock").last().expect("a request").prompt.clone();
+    for part in [
+        "left 2 comments on essay.md",
+        "[t-1]",
+        "essay.md, line 3: “not a single event”",
+        "Too vague.",
+        "[t-2]",
+        "“arguably”",
+        "Cut hedges.",
+        "comments_reply",
+    ] {
+        assert!(prompt.contains(part), "{part:?} in {prompt}");
+    }
+    let sent = threads(&mut client, &path).await;
+    assert!(sent.threads.iter().all(|thread| thread.comments.iter().all(|comment| !comment.draft)), "sent, they're drafts no more");
+    match client.request(client_message::Body::SendComments(v1::SendComments { agent_id: "writer".into(), path: path.clone() })).await.body
+    {
+        Body::Error(error) => assert_eq!(error.code(), ErrorCode::InvalidRequest),
+        other => panic!("nothing left to send: {other:?}"),
+    }
+
+    // The agent answers, resolves and lists.
+    let replied = call(&mut client, &mut view, "writer", r#"call comments_reply {"thread":"t-1","body":"Made it concrete."}"#).await;
+    assert!(replied.starts_with("tool comments_reply: Replied on t-1"), "{replied}");
+    let resolved = call(&mut client, &mut view, "writer", r#"call comments_resolve {"thread":"t-2","note":"Cut it."}"#).await;
+    assert!(resolved.starts_with("tool comments_resolve: Resolved t-2"), "{resolved}");
+    let listed = call(&mut client, &mut view, "writer", r#"call comments_list {}"#).await;
+    assert!(listed.contains("[t-1]") && listed.contains("You: Made it concrete.") && !listed.contains("[t-2]"), "{listed}");
+    let all = call(&mut client, &mut view, "writer", r#"call comments_list {"status":"all"}"#).await;
+    assert!(all.contains("[t-2]") && all.contains("(resolved)"), "{all}");
+    let answered = threads(&mut client, &path).await;
+    let t1 = find(&answered, "t-1");
+    assert_eq!((t1.comments.len(), t1.comments[1].author_agent_id.as_str()), (2, "writer"));
+    assert_eq!(find(&answered, "t-2").status(), ThreadStatus::Resolved);
+
+    // The agent rewrites the file: comments follow their text, and apps hear who changed it.
+    let rewritten =
+        "# Essay\n\nA new opening.\n\nThe industrial revolution was **not** a single event but a long series of changes.\n\nIt was slow.\n";
+    let write = serde_json::json!({"path": "essay.md", "content": rewritten}).to_string();
+    let before = view.entries.len();
+    apply_request(&mut client, &mut view, send_message("writer", &format!("call write_file {write}"))).await;
+    let changed = until(&mut client, &mut view, |body| match body {
+        Body::FileChanged(changed) if changed.path == path => Some(changed.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(changed.by_agent_id, "writer");
+    view.follow(&mut client, |view| view.entries.len() >= before + 3 && idle(view, "writer")).await;
+    let after = threads(&mut client, &path).await;
+    let t1 = find(&after, "t-1");
+    assert_eq!((t1.anchor(), t1.source.as_ref().map(|source| source.first_line)), (AnchorState::Anchored, Some(5)));
+    assert_eq!(find(&after, "t-2").anchor(), AnchorState::Detached, "its text is gone, the thread isn't");
+
+    // Someone else rewords it, in a pane: it's checked, and the thread moves with the text.
+    let pane = v1::ViewNode {
+        id: "pane-1".into(),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: "text".into(), path: path.clone(), title: String::new() })),
+    };
+    let chat = v1::ViewNode {
+        id: "chat".into(),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: "chat".into(), path: String::new(), title: String::new() })),
+    };
+    let split = v1::ViewSplit { axis: v1::ViewAxis::Row.into(), children: vec![chat, pane], weights: Vec::new() };
+    let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
+    apply_request(&mut client, &mut view, client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root) }))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    std::fs::write(&path, rewritten.replace("**not** a single event", "**not** one single event")).expect("write");
+    let moved = client
+        .wait_for(|body| match body {
+            Body::ThreadList(list) if list.path == path && find(list, "t-1").anchor() == AnchorState::Moved => Some(list.clone()),
+            _ => None,
+        })
+        .await;
+    let t1 = find(&moved, "t-1");
+    assert_eq!(t1.original_exact, "not a single event");
+    assert_eq!(t1.rendered.as_ref().map(|rendered| rendered.exact.as_str()), Some("not one single event"));
+
+    // Only the person's own comments are theirs to change; a thread left without comments goes.
+    let agents = &find(&moved, "t-1").comments[1].id;
+    match client.request(client_message::Body::EditComment(v1::EditComment { comment_id: agents.clone(), body: "x".into() })).await.body {
+        Body::Error(error) => assert_eq!(error.code(), ErrorCode::InvalidRequest),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    let mine = find(&moved, "t-1").comments[0].id.clone();
+    client.ok(client_message::Body::EditComment(v1::EditComment { comment_id: mine.clone(), body: "Still vague.".into() })).await;
+    client
+        .ok(client_message::Body::ReplyThread(v1::ReplyThread { thread_id: "t-2".into(), body: "Thanks.".into(), send_now: false }))
+        .await;
+    let now = threads(&mut client, &path).await;
+    assert_eq!(find(&now, "t-1").comments[0].body, "Still vague.");
+    assert!(find(&now, "t-1").comments[0].edited_ms > 0);
+    assert_eq!(find(&now, "t-2").status(), ThreadStatus::Open, "a reply reopens it");
+    let made = client.request(create(&path, "text", "", vec![quote("A new opening.", "", "")], "Nice.")).await;
+    let Body::Thread(third) = made.body else { panic!("expected the thread") };
+    client.ok(client_message::Body::DeleteComment(v1::DeleteComment { comment_id: third.comments[0].id.clone() })).await;
+    assert!(threads(&mut client, &path).await.threads.iter().all(|thread| thread.id != third.id), "a thread with no comments goes");
+    match client
+        .request(client_message::Body::ReaddressThread(v1::ReaddressThread { thread_id: "t-1".into(), agent_id: "nobody".into() }))
+        .await
+        .body
+    {
+        Body::Error(error) => assert_eq!(error.code(), ErrorCode::NotFound),
+        other => panic!("expected an error, got {other:?}"),
+    }
+
+    // Kept across a restart.
+    drop(client);
+    let (restarted, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut again, _, _) = Client::connect(restarted).await;
+    assert_eq!(threads(&mut again, &path).await.threads.len(), 2);
+}
+
+#[tokio::test]
+async fn agents_comment_on_files_for_the_person_and_send_now_goes_at_once() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    std::fs::write(dir.join("site/notes.txt"), "one\ntwo\nthree\n").expect("write");
+    let path = std::fs::canonicalize(dir.join("site/notes.txt")).expect("path").display().to_string();
+
+    let added = call(
+        &mut client,
+        &mut view,
+        "writer",
+        r#"call comments_add {"path":"notes.txt","quote":{"exact":"two"},"body":"I cut the rest."}"#,
+    )
+    .await;
+    assert!(added.contains("line 2 (t-1)"), "{added}");
+    let missing =
+        call(&mut client, &mut view, "writer", r#"call comments_add {"path":"notes.txt","quote":{"exact":"four"},"body":"?"}"#).await;
+    assert!(missing.contains("isn't in"), "{missing}");
+    let list = threads(&mut client, &path).await;
+    let thread = find(&list, "t-1");
+    assert_eq!((thread.comments[0].author_agent_id.as_str(), thread.comments[0].draft), ("writer", false));
+
+    // The person's reply, sent at once.
+    let before = view.entries.len();
+    let reply = v1::ReplyThread { thread_id: "t-1".into(), body: "Why?".into(), send_now: true };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::ReplyThread(reply)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| view.entries.len() >= before + 2 && idle(view, "writer")).await;
+    let prompt = requests.lock().expect("lock").last().expect("a request").prompt.clone();
+    assert!(prompt.contains("commented on notes.txt") && prompt.contains("Reply: Why?"), "{prompt}");
+}

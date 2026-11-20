@@ -9,7 +9,7 @@ use std::sync::Arc;
 use factory_agent::compaction::Reason;
 use factory_agent::{
     Agent, AgentEvent, AgentOptions, Arrived, Background, Event, EventSource, Finished, Inbox, Message, StopReason, Task, ThinkingLevel,
-    Tool, ToolSpec, UserMessage,
+    Tool, ToolSpec, UserContent, UserMessage,
 };
 use factory_protocol::v1::{self, NoticeLevel};
 
@@ -844,9 +844,10 @@ impl Factory {
             self.unsent(id, &job.prompts, "Stopped.".to_owned(), NoticeLevel::Info);
             return;
         }
+        let images = agent.state.model.input.iter().any(|input| input == "image");
         let mut prompts = Vec::with_capacity(job.prompts.len());
         for queued in job.prompts {
-            prompts.push(user_message(queued));
+            prompts.push(user_message(queued, images));
         }
         if let Some(reason) = job.compact {
             let idle = reason == Reason::Idle;
@@ -1020,6 +1021,19 @@ impl Factory {
 
     /// Records an agent event: updates the transcript, tells clients, saves.
     async fn apply(&self, id: &str, epoch: u64, event: AgentEvent) {
+        // A file it wrote: apps showing it, and comments on it, follow at once.
+        if let AgentEvent::ToolExecutionEnd { tool_name, result, is_error: false, .. } = &event
+            && matches!(tool_name.as_str(), "write_file" | "edit_file")
+            && let Some(path) = result.details.get("path").and_then(serde_json::Value::as_str)
+        {
+            let folder = {
+                let inner = self.lock();
+                inner.config.agent(id).map(|agent| places(&self.home, &inner.config, agent).folder)
+            };
+            if let Some(folder) = folder {
+                crate::annotations::written(self, id, &folder, path);
+            }
+        }
         let persist = {
             let mut inner = self.lock();
             // A model call's tokens, for the account's check-ins.
@@ -1110,7 +1124,7 @@ impl Factory {
         let Some(transcript) = inner.agents.get_mut(id).and_then(|runtime| runtime.transcript.as_mut()) else { return };
         let mut entries = Vec::with_capacity(prompts.len() + 1);
         for queued in prompts {
-            entries.push(transcript.unsent(&user_message(queued.clone())));
+            entries.push(transcript.unsent(&user_message(queued.clone(), false)));
         }
         entries.push(transcript.notice(problem, level));
         for entry in entries {
@@ -1129,6 +1143,7 @@ impl Factory {
             Box::pin(async move {
                 let Some(factory) = factory else { return Arrived::default() };
                 let current = factory.extension_specs(&agent);
+                let images = factory.takes_images(&agent);
                 let messages = {
                     let mut inner = factory.lock();
                     if inner.agents.get(&agent).is_none_or(|runtime| runtime.abort.is_none()) {
@@ -1143,7 +1158,7 @@ impl Factory {
                         runtime.taken.extend(arrived.iter().map(|queued| (queued.clone(), run)));
                         factory.broadcast_workspace(&inner);
                     }
-                    arrived.into_iter().map(user_message).collect()
+                    arrived.into_iter().map(|queued| user_message(queued, images)).collect()
                 };
                 // Its own settings apply from its next model call.
                 let settings = factory.settings_now(&agent, epoch).await;
@@ -1291,11 +1306,28 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
     prompt
 }
 
-fn user_message(queued: Queued) -> UserMessage {
+/// A queued message as the agent gets it. The person's attached images go
+/// in as images too when its model takes them (`images`) and they're small
+/// enough; every attachment is also named by path.
+fn user_message(queued: Queued, images: bool) -> UserMessage {
     let now = factory_agent::clock::now_ms();
     match queued.event {
         Some(event) => UserMessage::event(queued.text, event, now),
-        None => UserMessage { sent_from: queued.sent_from, client_id: queued.client_id, ..UserMessage::text(queued.text, now) },
+        None => {
+            let mut message = UserMessage::text(queued.text, now);
+            if images && let UserContent::Parts(parts) = &mut message.content {
+                parts.extend(queued.attachments.iter().filter_map(factory_agent::Attachment::image));
+            }
+            UserMessage { sent_from: queued.sent_from, client_id: queued.client_id, attachments: queued.attachments, ..message }
+        }
+    }
+}
+
+impl Factory {
+    /// Whether the agent's model takes images.
+    fn takes_images(&self, agent: &str) -> bool {
+        let model = self.lock().config.agent(agent).map(|agent| agent.model.clone()).unwrap_or_default();
+        self.models.resolve(&model).is_some_and(|model| model.input.iter().any(|input| input == "image"))
     }
 }
 

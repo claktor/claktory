@@ -1,4 +1,5 @@
-//! The focused project and its file explorer.
+//! The focused project, and the file explorers of the projects whose files
+//! are open.
 //!
 //! The explorer shows the project's folder as the agents see it, minus what
 //! the folder's `.factoryignore` hides (gitignore syntax). Without one, common
@@ -13,13 +14,16 @@
 //! inside another isn't listed in the other's tree, and the project's own
 //! root is empty when one of its folders is the project's folder itself.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use factory_protocol::v1::{self, server_message::Body};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::config::{Config, FolderView};
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, Inner, RequestError};
 
 pub const IGNORE_FILE: &str = ".factoryignore";
 
@@ -142,65 +146,165 @@ impl Factory {
         Ok(())
     }
 
-    /// Lists the focused project's folder again and sends it if it changed.
+    /// Lists the folders of every project whose files are open again, and
+    /// sends each tree that changed. The focused project's goes last, and
+    /// again after any other's, for apps that keep only the last one.
     pub(crate) async fn refresh_explorer(&self) {
         let _listing = self.explorer_lock.lock().await;
-        let focus = {
+        let (plans, focused) = {
             let inner = self.lock();
-            let project = inner.state.focused_project.as_deref().and_then(|id| inner.config.project(id));
-            project.map(|project| {
-                let view = inner.state.explorer.get(&project.id).cloned().unwrap_or_default();
-                let mut roots: Vec<(v1::ExplorerRoot, PathBuf, FolderView)> = Vec::new();
-                for folder in &project.folders {
-                    if roots.iter().any(|(_, path, _)| *path == folder.path) {
-                        continue;
-                    }
-                    let mut own = inner.state.explorer.get(&view_key(&project.id, &folder.id)).cloned().unwrap_or_default();
-                    own.show_all = view.show_all;
-                    let root = v1::ExplorerRoot { folder_id: folder.id.clone(), ..v1::ExplorerRoot::default() };
-                    roots.push((root, folder.path.clone(), own));
-                }
-                let agents = inner.config.agents.iter().filter(|agent| agent.project.as_deref() == Some(project.id.as_str()));
-                for agent in agents {
-                    let Some(checkout) = crate::runner::checkout(&self.home, &inner.config, agent) else { continue };
-                    if roots.iter().any(|(_, path, _)| *path == checkout.folder) {
-                        continue;
-                    }
-                    let mut own = inner.state.explorer.get(&checkout_key(&project.id, &agent.id)).cloned().unwrap_or_default();
-                    own.show_all = view.show_all;
-                    let root = v1::ExplorerRoot { agent_id: agent.id.clone(), branch: checkout.branch, ..v1::ExplorerRoot::default() };
-                    roots.push((root, checkout.folder, own));
-                }
-                (project.id.clone(), project.path.clone(), view, roots)
-            })
+            let mut open: BTreeSet<String> = self.viewer.paths(FILES_PANE).into_iter().collect();
+            open.extend(self.file_watches.projects());
+            open.extend(inner.state.focused_project.clone());
+            let plans: Vec<Plan> = open.iter().filter_map(|id| self.plan(&inner, id)).collect();
+            (plans, inner.state.focused_project.clone())
         };
-        let Some((id, root, view, roots)) = focus else {
-            self.lock().explorer = None;
-            return;
-        };
-        let listed = tokio::task::spawn_blocking(move || {
-            // Each root's tree leaves out the other roots inside it.
-            let paths: Vec<PathBuf> = roots.iter().map(|(_, path, _)| path.clone()).collect();
-            let (entries, error) = if paths.contains(&root) { (Vec::new(), String::new()) } else { listed(&root, &view, &paths) };
-            let mut folders = Vec::new();
-            for (root, path, own) in roots {
-                let (entries, error) = listed(&path, &own, &paths);
-                folders.push(v1::ExplorerRoot { path: path.display().to_string(), entries, error, ..root });
-            }
-            v1::Explorer { project_id: id, show_all: view.show_all, entries, error, folders }
-        })
-        .await;
-        let explorer = match listed {
-            Ok(explorer) => explorer,
+        let listed = tokio::task::spawn_blocking(move || plans.into_iter().map(Plan::list).collect::<Vec<v1::Explorer>>()).await;
+        let listed = match listed {
+            Ok(listed) => listed,
             Err(error) => {
                 tracing::error!(%error, "listing the explorer failed");
                 return;
             }
         };
         let mut inner = self.lock();
-        if inner.explorer.as_ref() != Some(&explorer) {
-            inner.explorer = Some(explorer.clone());
-            self.send(Body::Explorer(explorer));
+        inner.explorers.retain(|id, _| listed.iter().any(|explorer| explorer.project_id == *id));
+        let mut send_focused = false;
+        for explorer in listed {
+            if inner.explorers.get(&explorer.project_id) == Some(&explorer) {
+                continue;
+            }
+            if focused.as_deref() == Some(explorer.project_id.as_str()) {
+                send_focused = true;
+            } else {
+                self.send(Body::Explorer(explorer.clone()));
+                send_focused |= focused.is_some();
+            }
+            inner.explorers.insert(explorer.project_id.clone(), explorer);
+        }
+        if send_focused && let Some(explorer) = focused.and_then(|id| inner.explorers.get(&id)) {
+            self.send(Body::Explorer(explorer.clone()));
+        }
+    }
+
+    /// What to list for a project's explorer; None if there's no such project.
+    fn plan(&self, inner: &Inner, id: &str) -> Option<Plan> {
+        let project = inner.config.project(id)?;
+        let view = inner.state.explorer.get(&project.id).cloned().unwrap_or_default();
+        let mut roots: Vec<(v1::ExplorerRoot, PathBuf, FolderView)> = Vec::new();
+        for folder in &project.folders {
+            if roots.iter().any(|(_, path, _)| *path == folder.path) {
+                continue;
+            }
+            let mut own = inner.state.explorer.get(&view_key(&project.id, &folder.id)).cloned().unwrap_or_default();
+            own.show_all = view.show_all;
+            let root = v1::ExplorerRoot { folder_id: folder.id.clone(), ..v1::ExplorerRoot::default() };
+            roots.push((root, folder.path.clone(), own));
+        }
+        let agents = inner.config.agents.iter().filter(|agent| agent.project.as_deref() == Some(project.id.as_str()));
+        for agent in agents {
+            let Some(checkout) = crate::runner::checkout(&self.home, &inner.config, agent) else { continue };
+            if roots.iter().any(|(_, path, _)| *path == checkout.folder) {
+                continue;
+            }
+            let mut own = inner.state.explorer.get(&checkout_key(&project.id, &agent.id)).cloned().unwrap_or_default();
+            own.show_all = view.show_all;
+            let root = v1::ExplorerRoot { agent_id: agent.id.clone(), branch: checkout.branch, ..v1::ExplorerRoot::default() };
+            roots.push((root, checkout.folder, own));
+        }
+        Some(Plan { id: project.id.clone(), root: project.path.clone(), view, roots })
+    }
+
+    /// The projects' explorers to send a client on connect: the focused
+    /// project's last.
+    pub(crate) fn explorers(&self, inner: &Inner) -> Vec<v1::Explorer> {
+        let focused = inner.state.focused_project.as_deref();
+        let (mut explorers, last): (Vec<_>, Vec<_>) =
+            inner.explorers.values().cloned().partition(|explorer| Some(explorer.project_id.as_str()) != focused);
+        explorers.extend(last);
+        explorers
+    }
+
+    /// WatchFiles: the connection shows `project`'s files (none if empty).
+    pub(crate) async fn watch_files(&self, watch: &Watch, project: &str) -> Result<(), RequestError> {
+        if !project.is_empty() && self.lock().config.project(project).is_none() {
+            return Err(RequestError::UnknownProject(project.to_owned()));
+        }
+        self.file_watches.set(watch.id, project);
+        self.refresh_explorer().await;
+        Ok(())
+    }
+}
+
+/// The kind of pane (ViewLeaf) that shows a project's files; its path is the
+/// project's id.
+const FILES_PANE: &str = "files";
+
+/// A project's explorer, to be listed.
+struct Plan {
+    id: String,
+    root: PathBuf,
+    view: FolderView,
+    roots: Vec<(v1::ExplorerRoot, PathBuf, FolderView)>,
+}
+
+impl Plan {
+    fn list(self) -> v1::Explorer {
+        let Plan { id, root, view, roots } = self;
+        // Each root's tree leaves out the other roots inside it.
+        let paths: Vec<PathBuf> = roots.iter().map(|(_, path, _)| path.clone()).collect();
+        let (entries, error) = if paths.contains(&root) { (Vec::new(), String::new()) } else { listed(&root, &view, &paths) };
+        let mut folders = Vec::new();
+        for (root, path, own) in roots {
+            let (entries, error) = listed(&path, &own, &paths);
+            folders.push(v1::ExplorerRoot { path: path.display().to_string(), entries, error, ..root });
+        }
+        v1::Explorer { project_id: id, show_all: view.show_all, entries, error, folders }
+    }
+}
+
+/// The projects connections watch (WatchFiles), one at most for each.
+#[derive(Default)]
+pub(crate) struct Watches {
+    next: AtomicU64,
+    by_connection: Mutex<HashMap<u64, String>>,
+}
+
+impl Watches {
+    fn lock(&self) -> MutexGuard<'_, HashMap<u64, String>> {
+        self.by_connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A connection's watch, which watches nothing until set and is
+    /// forgotten when dropped.
+    pub(crate) fn watch(factory: &Arc<Factory>) -> Watch {
+        Watch { id: factory.file_watches.next.fetch_add(1, Ordering::Relaxed), factory: Arc::downgrade(factory) }
+    }
+
+    fn set(&self, id: u64, project: &str) {
+        let mut watches = self.lock();
+        if project.is_empty() {
+            watches.remove(&id);
+        } else {
+            watches.insert(id, project.to_owned());
+        }
+    }
+
+    fn projects(&self) -> Vec<String> {
+        self.lock().values().cloned().collect()
+    }
+}
+
+/// What one connection watches.
+pub(crate) struct Watch {
+    id: u64,
+    factory: Weak<Factory>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(factory) = self.factory.upgrade() {
+            factory.file_watches.set(self.id, "");
         }
     }
 }

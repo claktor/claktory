@@ -8,11 +8,13 @@ import 'agent_name.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'connection.dart';
+import 'explorer.dart' show filesShown, openFiles;
 import 'controls.dart';
 import 'forms.dart';
 import 'highlights.dart';
 import 'identity.dart';
 import 'markdown.dart';
+import 'phone.dart' show PhoneProjects;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart' show isAdminAgent;
@@ -767,9 +769,64 @@ void _openProjectSettings(BuildContext context, Project project) => showModal(
   (context, close) => ProjectSettingsForm(project: project, close: close),
 );
 
-/// A project: a folder glyph and its name, and on hover a "+" that asks
-/// Rivet for a new agent in it. A click focuses it; a right click opens its
-/// settings (rename, delete).
+/// A project's right click: its settings; on a phone, a touch and hold
+/// offers its Files too.
+void _projectMenu(BuildContext context, Project project) {
+  final phone = PhoneProjects.of(context);
+  if (phone != null) return phone.menu(project);
+  _openProjectSettings(context, project);
+}
+
+/// The button on a project's row that opens its Files in a pane beside the
+/// conversation, shown on hover, and kept tinted while the pane is open.
+class _FilesButton extends StatelessWidget {
+  const _FilesButton({required this.project, required this.shown});
+
+  final Project project;
+  final bool shown;
+
+  static const _tip = 'Show files';
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return HoverCard(
+      card: (context) => const Text(_tip),
+      child: Semantics(
+        button: true,
+        label: _tip,
+        child: Pressable(
+          onTap: () => openFiles(
+            context,
+            project,
+            phone: PhoneProjects.of(context)?.files,
+          ),
+          builder: (context, hovered) => AnimatedContainer(
+            duration: Motion.fast,
+            curve: Curves.easeOut,
+            width: 20,
+            height: 20,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: hovered ? palette.hover : const Color(0x00000000),
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            child: Transform.scale(
+              scale: 0.875,
+              child: FileGlyph(
+                color: shown || hovered ? palette.textMuted : palette.textFaint,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A project: a folder glyph and its name, and on hover a Files button and
+/// a "+" that asks Rivet for a new agent in it. A click focuses it; a right
+/// click opens its settings (rename, delete).
 class _ProjectRow extends StatelessWidget {
   const _ProjectRow({required this.project});
 
@@ -787,7 +844,7 @@ class _ProjectRow extends StatelessWidget {
         AppScope.scope(context).history.clear();
         fireAndLog(AppScope.of(context).focusProject(project.id));
       },
-      onSecondaryTap: () => _openProjectSettings(context, project),
+      onSecondaryTap: () => _projectMenu(context, project),
       builder: (context, hovered) => Row(
         children: [
           SizedBox(
@@ -809,6 +866,13 @@ class _ProjectRow extends StatelessWidget {
               ),
             ),
           ),
+          if (hovered || filesShown(context, project.id)) ...[
+            _FilesButton(
+              project: project,
+              shown: filesShown(context, project.id),
+            ),
+            const SizedBox(width: Space.xs),
+          ],
           if (hovered) _askForAgent(project),
         ],
       ),
@@ -830,8 +894,9 @@ Widget _askForAgent(Project project) => _AskRivet(
       CreateAgentForm(projectId: project.id, close: close),
 );
 
-/// The focused project's name, heading the sidebar. A click or right click
-/// opens its settings (rename, delete).
+/// The focused project's name, heading the sidebar, with a Files button on
+/// hover. A click or right click opens its settings (rename, delete); on a
+/// phone, a menu with its Files too.
 class _ProjectHeading extends StatelessWidget {
   const _ProjectHeading({required this.project});
 
@@ -840,7 +905,7 @@ class _ProjectHeading extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    void open() => _openProjectSettings(context, project);
+    void open() => _projectMenu(context, project);
     return _glowFor(context, project, _row(palette, open));
   }
 
@@ -865,6 +930,13 @@ class _ProjectHeading extends StatelessWidget {
               style: TextStyles.label.copyWith(color: palette.text),
             ),
           ),
+          if (hovered || filesShown(context, project.id)) ...[
+            _FilesButton(
+              project: project,
+              shown: filesShown(context, project.id),
+            ),
+            const SizedBox(width: Space.xs),
+          ],
           if (hovered) ...[
             _askForAgent(project),
             const SizedBox(width: Space.xs),
@@ -1361,7 +1433,6 @@ class _Footer extends StatelessWidget {
     final scope = AppScope.scope(context);
     final appVersion = scope.appBuild.version;
     void openSettings() => AppScope.openSettings(context);
-    final remote = scope.backend.target;
     final status = <Widget>[];
     if (workspace.hasLogin() &&
         !AppScope.pageShown(context, AppPage.settings)) {
@@ -1484,14 +1555,7 @@ class _Footer extends StatelessWidget {
           // and whether what shows is live.
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.s, Space.xs, Space.s, 0),
-            child: ConnectionLine(
-              backend: scope.backend,
-              machine: remote == null
-                  ? null
-                  : workspace.remote.machine.isEmpty
-                  ? remote.label
-                  : workspace.remote.machine,
-            ),
+            child: ConnectionLine(backend: scope.backend),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.s, 2, Space.s, 0),

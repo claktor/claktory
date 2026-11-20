@@ -3,7 +3,8 @@
 //! port; each TCP connection the app opens there (one WebSocket) becomes a
 //! new bidirectional stream on one iroh connection to the backend, carrying
 //! exactly the socket's bytes both ways. The protocol code above it is the
-//! same as over a plain socket.
+//! same as over a plain socket. A backend that has `claktory/2` gets them
+//! compressed (zstd); an older one, as they are (`claktory/1`).
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -11,12 +12,13 @@ use std::{
     time::Duration,
 };
 
+use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, Watcher,
-    endpoint::{Connection, ConnectionError, presets},
+    endpoint::{ConnectError, ConnectOptions, Connection, ConnectionError, presets},
 };
 use tokio::{
-    io::{AsyncWriteExt, copy},
+    io::{AsyncWriteExt, BufReader, copy},
     net::{TcpListener, TcpStream},
     sync::Mutex as AsyncMutex,
     task::JoinHandle,
@@ -24,6 +26,10 @@ use tokio::{
 
 /// The backend's protocol on iroh, both sides (private-tunnel.md).
 pub const ALPN: &[u8] = b"claktory/1";
+/// The same bytes, each way one zstd stream flushed whenever what's written
+/// is (the WebSocket flushes after every message). Offered first; backends
+/// before it answer with [ALPN].
+pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
 
 /// How long a dial may take before the app says why it can't connect,
 /// rather than waiting on.
@@ -238,6 +244,21 @@ async fn forward(socket: TcpStream, shared: Arc<Shared>) {
         }
     };
     let (mut read, mut write) = socket.into_split();
+    if connection.alpn() == ALPN_COMPRESSED {
+        // copy flushes whenever the socket has nothing more to give, so each
+        // message goes at once.
+        let up = async {
+            let mut send = ZstdEncoder::new(send);
+            let _ = copy(&mut read, &mut send).await;
+            let _ = send.shutdown().await;
+        };
+        let down = async {
+            let _ = copy(&mut ZstdDecoder::new(BufReader::new(receive)), &mut write).await;
+            let _ = write.shutdown().await;
+        };
+        tokio::join!(up, down);
+        return;
+    }
     let up = async {
         let _ = copy(&mut read, &mut send).await;
         let _ = send.finish();
@@ -247,6 +268,12 @@ async fn forward(socket: TcpStream, shared: Arc<Shared>) {
         let _ = write.shutdown().await;
     };
     tokio::join!(up, down);
+}
+
+/// Dials the backend offering [ALPN_COMPRESSED], then [ALPN].
+async fn dial(shared: &Shared) -> Result<Connection, ConnectError> {
+    let options = ConnectOptions::new().with_additional_alpns(vec![ALPN.to_vec()]);
+    Ok(shared.endpoint.connect_with_opts(shared.backend.clone(), ALPN_COMPRESSED, options).await?.await?)
 }
 
 /// The open connection, or a new one; None when it can't be made (the
@@ -259,8 +286,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         return Some(open.clone());
     }
     shared.status.lock().unwrap().phase = Phase::Dialing;
-    let dial = shared.endpoint.connect(shared.backend.clone(), ALPN);
-    let connection = match tokio::time::timeout(DIAL_TIMEOUT, dial).await {
+    let connection = match tokio::time::timeout(DIAL_TIMEOUT, dial(shared)).await {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
             let (said, failure) = explain_connect(&error);
@@ -395,16 +421,41 @@ mod tests {
 
     /// A backend stand-in on this machine, no relays: echoes every stream.
     async fn echo_backend() -> Endpoint {
-        let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).alpns(vec![ALPN.to_vec()]).bind().await.unwrap();
+        echo_backend_with(&[ALPN]).await
+    }
+
+    /// An echoing backend with these ALPNs: on `claktory/2` it decompresses
+    /// what comes and compresses what it sends back, as factoryd does.
+    async fn echo_backend_with(alpns: &[&[u8]]) -> Endpoint {
+        let alpns = alpns.iter().map(|alpn| alpn.to_vec()).collect();
+        let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).alpns(alpns).bind().await.unwrap();
         let server = endpoint.clone();
         tokio::spawn(async move {
             while let Some(incoming) = server.accept().await {
                 tokio::spawn(async move {
                     let connection = incoming.await.unwrap();
+                    let compressed = connection.alpn() == ALPN_COMPRESSED;
                     while let Ok((mut send, mut receive)) = connection.accept_bi().await {
                         tokio::spawn(async move {
-                            let _ = copy(&mut receive, &mut send).await;
-                            let _ = send.finish();
+                            if compressed {
+                                let mut decoder = ZstdDecoder::new(BufReader::new(receive));
+                                let mut encoder = ZstdEncoder::new(send);
+                                // Message by message, flushed, as a WebSocket sends.
+                                let mut buffer = [0u8; 4096];
+                                loop {
+                                    match decoder.read(&mut buffer).await {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(read) => {
+                                            encoder.write_all(&buffer[..read]).await.unwrap();
+                                            encoder.flush().await.unwrap();
+                                        }
+                                    }
+                                }
+                                let _ = encoder.shutdown().await;
+                            } else {
+                                let _ = copy(&mut receive, &mut send).await;
+                                let _ = send.finish();
+                            }
                         });
                     }
                 });
@@ -507,6 +558,33 @@ mod tests {
         assert_eq!(status.failure, Failure::Refused);
         assert!(status.error.contains("this device isn't paired"), "{}", status.error);
         tunnel.close().await;
+    }
+
+    /// Bytes through the tunnel come back whole, one message at a time.
+    async fn round_trip(tunnel: &Tunnel) {
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        for message in [&b"hello"[..], &[7u8; 100_000][..], b"bye"] {
+            socket.write_all(message).await.unwrap();
+            let mut got = vec![0u8; message.len()];
+            tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").unwrap();
+            assert_eq!(got, message);
+        }
+        socket.shutdown().await.unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_backend_with_claktory_2_gets_it_and_one_without_gets_claktory_1() {
+        for (alpns, expected) in [(&[ALPN_COMPRESSED, ALPN][..], ALPN_COMPRESSED), (&[ALPN][..], ALPN)] {
+            let backend = echo_backend_with(alpns).await;
+            let tunnel = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
+            round_trip(&tunnel).await;
+            let connection = tunnel.shared.connection.lock().await.clone().expect("connected");
+            assert_eq!(connection.alpn(), expected);
+            tunnel.close().await;
+        }
     }
 
     #[test]

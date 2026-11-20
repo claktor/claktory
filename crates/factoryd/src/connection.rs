@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use crate::factory::{AgentChange, Event, Factory, RequestError};
+use crate::patch::Workspaces;
 use crate::remote::{Authorized, Pairing};
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -103,6 +104,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     factory.health.connecting();
     let mut device = None;
     let kind;
+    let workspace_patches;
     let hello_id = loop {
         let frame = socket.next().await;
         let message = match read(&mut socket, frame).await? {
@@ -118,6 +120,7 @@ pub(crate) async fn serve_stream<S: Stream>(
             return reject(socket, message.id, ErrorCode::UnsupportedProtocolVersion, reason).await;
         }
         kind = hello.device_kind();
+        workspace_patches = hello.workspace_patches;
         if let Some(peer) = &peer {
             let connected = match factory.authorize(&hello.token, peer, kind).await {
                 Authorized::Connected(connected) => connected,
@@ -163,7 +166,14 @@ pub(crate) async fn serve_stream<S: Stream>(
         break message.id;
     };
     let device_id = device.as_ref().map(|connected| connected.device.id.clone()).unwrap_or_default();
-    let welcome = Welcome { protocol_version: PROTOCOL_VERSION, server_version: SERVER_VERSION.to_owned(), device_id };
+    let claktory = factory.identity();
+    let welcome = Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        server_version: SERVER_VERSION.to_owned(),
+        device_id,
+        name: claktory.name,
+        color: claktory.color,
+    };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
     // This machine's own app may do what the loopback port's may.
     let remote = device.as_ref().is_some_and(|connected| !connected.device.local);
@@ -175,7 +185,8 @@ pub(crate) async fn serve_stream<S: Stream>(
         _ => crate::remote::machine_name().to_owned(),
     };
     let sent_from = crate::transcript::device(&from, kind);
-    let connection = Connection { remote, device: name, sent_from };
+    let files = crate::explorer::Watches::watch(&factory);
+    let connection = Connection { remote, device: name, sent_from, workspace_patches, files };
     session(&mut socket, &factory, connection, device.as_ref().map(|connected| connected.closed.clone())).await?;
     tracing::info!("client disconnected");
     Ok(())
@@ -189,6 +200,10 @@ struct Connection {
     device: String,
     /// Where the person's messages come from.
     sent_from: factory_agent::SentFrom,
+    /// The app applies WorkspacePatch.
+    workspace_patches: bool,
+    /// The project whose files it shows on their own (WatchFiles).
+    files: crate::explorer::Watch,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is a paired
@@ -200,7 +215,8 @@ async fn session<S: Stream>(
     unpaired: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone());
-    let mut events = sync(socket, factory).await?;
+    let mut sent = Workspaces::new(connection.workspace_patches);
+    let mut events = sync(socket, &mut sent, factory).await?;
     factory.health.served();
     // A vault still locked after a restart tries the account service again.
     tokio::spawn({
@@ -224,14 +240,14 @@ async fn session<S: Stream>(
                 let reply = handle(factory, message.body, &connection, &mut vault_session).await;
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
-                flush(socket, &mut events, factory).await?;
+                flush(socket, &mut sent, &mut events, factory).await?;
                 send(socket, message.id, reply).await?;
             }
             event = events.recv() => match event {
-                Ok(event) => forward(socket, event).await?,
+                Ok(event) => forward(socket, &mut sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "client fell behind; resending state");
-                    events = sync(socket, factory).await?;
+                    events = sync(socket, &mut sent, factory).await?;
                 }
                 Err(RecvError::Closed) => return Ok(()),
             },
@@ -239,14 +255,17 @@ async fn session<S: Stream>(
     }
 }
 
-/// Sends the full current state and returns the events that follow it.
-async fn sync<S: Stream>(socket: &mut Socket<S>, factory: &Factory) -> Result<Receiver<Event>, ConnectionError> {
+/// Sends the full current state, the Workspace whole, and returns the events
+/// that follow it.
+async fn sync<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, factory: &Factory) -> Result<Receiver<Event>, ConnectionError> {
     let snapshot = factory.connect().await;
-    send(socket, 0, Body::Workspace(snapshot.workspace)).await?;
+    sent.reset();
+    let workspace = ServerMessage { reply_to: 0, body: Some(Body::Workspace(snapshot.workspace)) };
+    forward(socket, sent, workspace.encode_to_vec().into()).await?;
     if let Some(transcript) = snapshot.transcript {
         send(socket, 0, Body::Transcript(transcript)).await?;
     }
-    if let Some(explorer) = snapshot.explorer {
+    for explorer in snapshot.explorers {
         send(socket, 0, Body::Explorer(explorer)).await?;
     }
     if let Some(view) = snapshot.view {
@@ -258,14 +277,19 @@ async fn sync<S: Stream>(socket: &mut Socket<S>, factory: &Factory) -> Result<Re
     Ok(snapshot.events)
 }
 
-async fn flush<S: Stream>(socket: &mut Socket<S>, events: &mut Receiver<Event>, factory: &Factory) -> Result<(), ConnectionError> {
+async fn flush<S: Stream>(
+    socket: &mut Socket<S>,
+    sent: &mut Workspaces,
+    events: &mut Receiver<Event>,
+    factory: &Factory,
+) -> Result<(), ConnectionError> {
     loop {
         match events.try_recv() {
-            Ok(event) => forward(socket, event).await?,
+            Ok(event) => forward(socket, sent, event).await?,
             Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(()),
             Err(TryRecvError::Lagged(missed)) => {
                 tracing::warn!(missed, "client fell behind; resending state");
-                *events = sync(socket, factory).await?;
+                *events = sync(socket, sent, factory).await?;
                 return Ok(());
             }
         }
@@ -322,9 +346,13 @@ async fn handle(
             factory.update_agent(&agent_id, change).await
         }
         Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
-        Some(Request::SendMessage(request)) => {
-            factory.send_message(&request.agent_id, &request.text, Some(connection.sent_from.clone()), &request.client_id)
-        }
+        Some(Request::SendMessage(request)) => factory.send_message(
+            &request.agent_id,
+            &request.text,
+            Some(connection.sent_from.clone()),
+            &request.client_id,
+            &request.attachments,
+        ),
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
         Some(Request::UpdateProject(request)) => {
@@ -376,12 +404,54 @@ async fn handle(
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
+        Some(Request::StartUpload(request)) => {
+            return match factory.start_upload(request) {
+                Ok(progress) => Body::UploadProgress(progress),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::UploadChunk(request)) => {
+            return match factory.upload_chunk(request) {
+                Ok(progress) => Body::UploadProgress(progress),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::FinishUpload(request)) => {
+            return match factory.finish_upload(request) {
+                Ok(uploaded) => Body::UploadedFile(uploaded),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::CancelUpload(request)) => {
+            factory.cancel_upload(&request);
+            Ok(())
+        }
         Some(Request::FetchApp(request)) => {
             return match factory.fetch_app(&request.version, request.offset).await {
                 Ok(chunk) => Body::AppChunk(chunk),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
+        Some(Request::ListThreads(request)) => {
+            return match factory.list_threads(&request.path) {
+                Ok(list) => Body::ThreadList(list),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::CreateThread(request)) => {
+            return match factory.create_thread(&request) {
+                Ok(thread) => Body::Thread(thread),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::ReplyThread(request)) => factory.reply_thread(&request),
+        Some(Request::EditComment(request)) => factory.edit_comment(&request),
+        Some(Request::DeleteComment(request)) => factory.delete_comment(&request),
+        Some(Request::SetThreadStatus(request)) => factory.set_thread_status(&request),
+        Some(Request::ReaddressThread(request)) => factory.readdress_thread(&request),
+        Some(Request::ReattachThread(request)) => factory.reattach_thread(&request),
+        Some(Request::SendComments(request)) => factory.send_comments(&request),
+        Some(Request::WatchFiles(request)) => factory.watch_files(&connection.files, &request.project_id).await,
         Some(Request::LoadEntries(request)) => {
             return match factory.load_entries(&request).await {
                 Ok(page) => Body::EntryPage(page),
@@ -455,6 +525,16 @@ async fn handle(
         Some(Request::SetRemoteAccess(request)) if request.set_relays => factory.set_relays(&request.relays).await,
         Some(Request::SetRemoteAccess(_)) => Ok(()),
         // Empty, or from a newer client that this server doesn't know.
+        // Connecting services: in the protocol before the backend does it.
+        Some(
+            Request::StartConnect(_)
+            | Request::FinishConnect(_)
+            | Request::CancelConnect(_)
+            | Request::DismissConnectProposal(_)
+            | Request::ListConnectChoices(_)
+            | Request::DeriveSecret(_)
+            | Request::DisconnectService(_),
+        ) => return error(ErrorCode::InvalidRequest, "This Claktory can't connect services yet."),
         None => return error(ErrorCode::UnknownMessage, "unknown message"),
     };
     match result {
@@ -492,8 +572,11 @@ async fn read<S: Stream>(socket: &mut Socket<S>, frame: Option<Result<Message, t
     }
 }
 
-async fn forward<S: Stream>(socket: &mut Socket<S>, event: Event) -> Result<(), ConnectionError> {
-    socket.send(Message::Binary(event)).await?;
+/// Sends an event, a Workspace only as what this app doesn't have yet.
+async fn forward<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, event: Event) -> Result<(), ConnectionError> {
+    if let Some(event) = sent.outgoing(event) {
+        socket.send(Message::Binary(event)).await?;
+    }
     Ok(())
 }
 

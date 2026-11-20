@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'attachments.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
@@ -106,7 +108,13 @@ class _AgentViewState extends State<AgentView> {
           ),
         ),
         ArchivedLine(agent: agent),
-        const ReconnectingLine(),
+        // One line above the box, so the box never changes as the agent
+        // starts and stops: reconnecting, else working with Stop.
+        ReconnectingLine(
+          otherwise: _working
+              ? WorkingLine(onStop: _stop)
+              : const SizedBox.shrink(),
+        ),
         _Composer(agent: agent, onSent: () => _follow.value++, onStop: _stop),
       ],
     );
@@ -436,6 +444,37 @@ class _ComposerState extends State<_Composer> {
     // has the focus already, as it autofocuses.
     _drafts.takeFocus(widget.agent.id);
     _drafts.addListener(_draftChanged);
+    // Files dropped on the window come here, for this agent.
+    _drops = FileDrop.dropped.listen(_attach);
+    unawaited(FileDrop.accept(true));
+  }
+
+  StreamSubscription<List<String>>? _drops;
+
+  /// Puts the files at [paths] in this agent's box, saying why any couldn't
+  /// go.
+  Future<void> _attach(List<String> paths) async {
+    if (paths.isEmpty || !widget.agent.modelAvailable) return;
+    final left = await AppScope.of(context).attachments
+        .add(widget.agent.id, paths);
+    if (!mounted) return;
+    setState(
+      () => _error = left == 0
+          ? null
+          : left == paths.length && left == 1
+          ? "Can't attach this: it's a folder or can't be read."
+          : "Some items weren't attached: folders, and files that can't "
+                'be read.',
+    );
+    _focus.requestFocus();
+  }
+
+  /// The paperclip: the system's picker for files (and photos, on iPhone).
+  Future<void> _pick() async {
+    final paths = defaultTargetPlatform == TargetPlatform.iOS
+        ? await pickAttachments()
+        : await pickFiles();
+    await _attach(paths);
   }
 
   /// The draft changed from outside the box: a message started for this
@@ -543,6 +582,8 @@ class _ComposerState extends State<_Composer> {
 
   @override
   void dispose() {
+    unawaited(_drops?.cancel());
+    unawaited(FileDrop.accept(false));
     _drafts.removeListener(_draftChanged);
     _text.dispose();
     _focus.dispose();
@@ -687,29 +728,31 @@ class _ComposerState extends State<_Composer> {
 
   Future<void> _send() async {
     final text = _text.text.trim();
-    if (text.isEmpty) return;
     final agentId = widget.agent.id;
     final backend = AppScope.of(context);
+    // Files can go on their own.
+    if (text.isEmpty && backend.attachments.of(agentId).isEmpty) return;
     _text.clear();
     setState(() => _error = null);
     widget.onSent();
-    // It shows in the conversation at once; one that isn't sent stays
-    // there, with Retry.
-    backend.outbox.send(agentId, text);
+    // It shows in the conversation at once, its files uploading; one that
+    // isn't sent stays there, with Retry.
+    backend.outbox.send(
+      agentId,
+      text,
+      files: backend.attachments.take(agentId),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final agent = widget.agent;
-    final working = agent.status == AgentStatus.AGENT_STATUS_WORKING;
     final hasModels = AppScope.of(context)
         .workspace
         .workspace
         .models
         .isNotEmpty;
-    // What's queued shows in the conversation itself, faded.
-    final status = working ? 'Working' : '';
     // A phone has no Enter key to send with, nor room to spare.
     final phone = isPhoneLayout(context);
     return Align(
@@ -735,131 +778,155 @@ class _ComposerState extends State<_Composer> {
                     controller: _menu,
                     overlayChildBuilder: (context) =>
                         _buildMenu(context, constraints.maxWidth),
-                    child: Container(
-                      // Hugs its content: one row, as tall as one line
-                      // (or a button) when empty, growing with the text.
-                      padding: const EdgeInsets.fromLTRB(
-                        Space.m,
-                        Space.xs,
-                        Space.xs,
-                        Space.xs,
-                      ),
-                      decoration: BoxDecoration(
-                        color: palette.sidebar,
-                        borderRadius: BorderRadius.circular(Radii.panel),
-                        border: Border.all(color: palette.hairline),
-                      ),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(
-                          minHeight: _composerRow,
+                    child: ValueListenableBuilder(
+                      valueListenable: FileDrop.over,
+                      builder: (context, filesOver, child) => AnimatedContainer(
+                        duration: Motion.fast,
+                        // Hugs its content: one row, as tall as one line
+                        // (or a button) when empty, growing with the text.
+                        padding: const EdgeInsets.fromLTRB(
+                          Space.m,
+                          Space.xs,
+                          Space.xs,
+                          Space.xs,
                         ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Expanded(
-                              child: agent.modelAvailable
-                                  ? Container(
-                                      constraints: const BoxConstraints(
-                                        minHeight: _composerRow,
-                                      ),
-                                      alignment: Alignment.centerLeft,
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 4.5,
-                                      ),
-                                      child: TextField(
-                                        controller: _text,
-                                        focusNode: _focus,
-                                        placeholder: agent.placeholder.isEmpty
-                                            ? 'Message ${agent.name}'
-                                            : agent.placeholder,
-                                        // On a phone the keyboard would
-                                        // cover the conversation at once.
-                                        autofocus: !phone,
-                                        minLines: 1,
-                                        maxLines: 12,
-                                        bordered: false,
-                                      ),
-                                    )
-                                  // Sending couldn't work, so don't offer to.
-                                  : SizedBox(
-                                      height: _composerRow,
-                                      child: Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Text(
-                                          "No model available, so "
-                                          "${agent.name} can't run.",
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyles.body.copyWith(
-                                            color: palette.textMuted,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
+                        decoration: BoxDecoration(
+                          color: palette.sidebar,
+                          borderRadius: BorderRadius.circular(Radii.panel),
+                          // Files dragged over the window land here.
+                          border: Border.all(
+                            color: filesOver && agent.modelAvailable
+                                ? palette.signal
+                                : palette.hairline,
+                          ),
+                        ),
+                        child: child,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _Attachments(agentId: agent.id),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              minHeight: _composerRow,
                             ),
-                            // At the end of the row, level with the last
-                            // line: what it's doing, and what can be done.
-                            SizedBox(
-                              height: _composerRow,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (working) ...[
-                                    const SizedBox(width: Space.s),
-                                    const LiveDot(),
-                                    const SizedBox(width: Space.s),
-                                    Text(
-                                      status,
-                                      style: TextStyles.caption.copyWith(
-                                        color: palette.textMuted,
-                                      ),
-                                    ),
-                                    const SizedBox(width: Space.s),
-                                    Button(
-                                      label: phone ? 'Stop' : 'Stop  esc',
-                                      onPressed: widget.onStop,
-                                    ),
-                                  ],
-                                  if (phone && agent.modelAvailable) ...[
-                                    const SizedBox(width: Space.s),
-                                    ListenableBuilder(
-                                      listenable: _text,
-                                      builder: (context, _) => Button(
-                                        label: 'Send',
-                                        primary: true,
-                                        onPressed: _text.text.trim().isEmpty
-                                            ? null
-                                            : _send,
-                                      ),
-                                    ),
-                                  ],
-                                  if (!agent.modelAvailable) ...[
-                                    if (hasModels) ...[
-                                      const SizedBox(width: Space.s),
-                                      Button(
-                                        label: 'Change model…',
-                                        onPressed: () => showModal(
-                                          context,
-                                          (context, close) => AgentSettingsForm(
-                                            agent: agent,
-                                            close: close,
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Expanded(
+                                  child: agent.modelAvailable
+                                      ? Container(
+                                          constraints: const BoxConstraints(
+                                            minHeight: _composerRow,
+                                          ),
+                                          alignment: Alignment.centerLeft,
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 4.5,
+                                          ),
+                                          child: TextField(
+                                            controller: _text,
+                                            focusNode: _focus,
+                                            placeholder:
+                                                agent.placeholder.isEmpty
+                                                ? 'Message ${agent.name}'
+                                                : agent.placeholder,
+                                            // On a phone the keyboard would
+                                            // cover the conversation at once.
+                                            autofocus: !phone,
+                                            minLines: 1,
+                                            maxLines: 12,
+                                            bordered: false,
+                                          ),
+                                        )
+                                      // Sending couldn't work, so don't offer to.
+                                      : SizedBox(
+                                          height: _composerRow,
+                                          child: Align(
+                                            alignment: Alignment.centerLeft,
+                                            child: Text(
+                                              "No model available, so "
+                                              "${agent.name} can't run.",
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyles.body.copyWith(
+                                                color: palette.textMuted,
+                                              ),
+                                            ),
                                           ),
                                         ),
-                                      ),
+                                ),
+                                // At the end of the row, level with the last
+                                // line: what it's doing, and what can be done.
+                                SizedBox(
+                                  height: _composerRow,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (agent.modelAvailable) ...[
+                                        const SizedBox(width: Space.xs),
+                                        GlyphButton(
+                                          label: 'Attach files',
+                                          active: false,
+                                          onTap: _pick,
+                                          glyph: (color) => ExtensionGlyph(
+                                            icon: 'paperclip',
+                                            name: 'Attach files',
+                                            color: color,
+                                          ),
+                                        ),
+                                      ],
+                                      if (phone && agent.modelAvailable) ...[
+                                        const SizedBox(width: Space.s),
+                                        ListenableBuilder(
+                                          listenable: Listenable.merge([
+                                            _text,
+                                            AppScope.of(context).attachments,
+                                          ]),
+                                          builder: (context, _) => Button(
+                                            label: 'Send',
+                                            primary: true,
+                                            onPressed:
+                                                _text.text.trim().isEmpty &&
+                                                    AppScope.of(context)
+                                                        .attachments
+                                                        .of(agent.id)
+                                                        .isEmpty
+                                                ? null
+                                                : _send,
+                                          ),
+                                        ),
+                                      ],
+                                      if (!agent.modelAvailable) ...[
+                                        if (hasModels) ...[
+                                          const SizedBox(width: Space.s),
+                                          Button(
+                                            label: 'Change model…',
+                                            onPressed: () => showModal(
+                                              context,
+                                              (context, close) =>
+                                                  AgentSettingsForm(
+                                                    agent: agent,
+                                                    close: close,
+                                                  ),
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(width: Space.xs),
+                                        Button(
+                                          label: 'Sign in…',
+                                          primary: true,
+                                          onPressed: () =>
+                                              AppScope.openSettings(context),
+                                        ),
+                                      ],
                                     ],
-                                    const SizedBox(width: Space.xs),
-                                    Button(
-                                      label: 'Sign in…',
-                                      primary: true,
-                                      onPressed: () =>
-                                          AppScope.openSettings(context),
-                                    ),
-                                  ],
-                                ],
-                              ),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -869,6 +936,41 @@ class _ComposerState extends State<_Composer> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The files in an agent's message box, as chips over its text, each with
+/// × to take it out.
+class _Attachments extends StatelessWidget {
+  const _Attachments({required this.agentId});
+
+  final String agentId;
+
+  @override
+  Widget build(BuildContext context) {
+    final attachments = AppScope.of(context).attachments;
+    return ListenableBuilder(
+      listenable: attachments,
+      builder: (context, _) {
+        final files = attachments.of(agentId);
+        if (files.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 2, right: Space.xs, bottom: 2),
+          child: Wrap(
+            spacing: Space.xs,
+            runSpacing: Space.xs,
+            children: [
+              for (final file in files)
+                AttachmentChip(
+                  name: file.name,
+                  size: file.size,
+                  onRemove: () => attachments.remove(agentId, file),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -897,7 +999,10 @@ class _Note extends StatelessWidget {
 /// reconnecting and that what shows may be out of date. The backend's
 /// snapshot brings the conversation up to date once it's back.
 class ReconnectingLine extends StatefulWidget {
-  const ReconnectingLine({super.key});
+  const ReconnectingLine({super.key, this.otherwise = const SizedBox.shrink()});
+
+  /// What the line shows while the connection is fine.
+  final Widget otherwise;
 
   /// How long the connection is down before the line shows.
   static const after = Duration(seconds: 1);
@@ -949,7 +1054,7 @@ class _ReconnectingLineState extends State<ReconnectingLine> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_shown) return const SizedBox.shrink();
+    if (!_shown) return widget.otherwise;
     final palette = Palette.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Space.xl, Space.s, Space.xl, 0),
@@ -966,6 +1071,50 @@ class _ReconnectingLineState extends State<ReconnectingLine> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// While the agent works, a line above the message box at its end: the
+/// live dot, "Working", and Stop (Esc on a Mac). Above the box rather than
+/// in it, so the text being typed never moves as the agent starts and
+/// stops.
+class WorkingLine extends StatelessWidget {
+  const WorkingLine({super.key, required this.onStop});
+
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: contentMaxWidth),
+        child: Padding(
+          // Its end lines up with the box's.
+          padding: EdgeInsets.fromLTRB(
+            phone ? Space.s : Space.xl,
+            Space.s,
+            phone ? Space.s : Space.xl,
+            0,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const LiveDot(),
+              const SizedBox(width: Space.s),
+              Text(
+                'Working',
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+              const SizedBox(width: Space.s),
+              Button(label: phone ? 'Stop' : 'Stop  esc', onPressed: onStop),
+            ],
+          ),
+        ),
       ),
     );
   }

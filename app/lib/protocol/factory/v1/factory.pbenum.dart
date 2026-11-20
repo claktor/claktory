@@ -123,6 +123,65 @@ class ViewAxis extends $pb.ProtobufEnum {
   const ViewAxis._(super.value, super.name);
 }
 
+class ThreadStatus extends $pb.ProtobufEnum {
+  static const ThreadStatus THREAD_STATUS_UNSPECIFIED =
+      ThreadStatus._(0, _omitEnumNames ? '' : 'THREAD_STATUS_UNSPECIFIED');
+  static const ThreadStatus THREAD_STATUS_OPEN =
+      ThreadStatus._(1, _omitEnumNames ? '' : 'THREAD_STATUS_OPEN');
+  static const ThreadStatus THREAD_STATUS_RESOLVED =
+      ThreadStatus._(2, _omitEnumNames ? '' : 'THREAD_STATUS_RESOLVED');
+
+  static const $core.List<ThreadStatus> values = <ThreadStatus>[
+    THREAD_STATUS_UNSPECIFIED,
+    THREAD_STATUS_OPEN,
+    THREAD_STATUS_RESOLVED,
+  ];
+
+  static final $core.List<ThreadStatus?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ThreadStatus? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ThreadStatus._(super.value, super.name);
+}
+
+class AnchorState extends $pb.ProtobufEnum {
+  static const AnchorState ANCHOR_STATE_UNSPECIFIED =
+      AnchorState._(0, _omitEnumNames ? '' : 'ANCHOR_STATE_UNSPECIFIED');
+
+  /// On the text it was made on.
+  static const AnchorState ANCHOR_STATE_ANCHORED =
+      AnchorState._(1, _omitEnumNames ? '' : 'ANCHOR_STATE_ANCHORED');
+
+  /// Found again, but the text there changed since (see original_exact).
+  static const AnchorState ANCHOR_STATE_MOVED =
+      AnchorState._(2, _omitEnumNames ? '' : 'ANCHOR_STATE_MOVED');
+
+  /// Not found in the file any more (or the file is gone); kept, never
+  /// dropped. ReattachThread puts it on new text.
+  static const AnchorState ANCHOR_STATE_DETACHED =
+      AnchorState._(3, _omitEnumNames ? '' : 'ANCHOR_STATE_DETACHED');
+
+  /// An image thread on a file that changed since: it may still be right.
+  static const AnchorState ANCHOR_STATE_OUTDATED =
+      AnchorState._(4, _omitEnumNames ? '' : 'ANCHOR_STATE_OUTDATED');
+
+  static const $core.List<AnchorState> values = <AnchorState>[
+    ANCHOR_STATE_UNSPECIFIED,
+    ANCHOR_STATE_ANCHORED,
+    ANCHOR_STATE_MOVED,
+    ANCHOR_STATE_DETACHED,
+    ANCHOR_STATE_OUTDATED,
+  ];
+
+  static final $core.List<AnchorState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static AnchorState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AnchorState._(super.value, super.name);
+}
+
 class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_UNSPECIFIED =
       ErrorCode._(0, _omitEnumNames ? '' : 'ERROR_CODE_UNSPECIFIED');
@@ -780,6 +839,140 @@ class MapEdgeKind extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MapEdgeKind._(super.value, super.name);
+}
+
+class ConnectorFlowKind extends $pb.ProtobufEnum {
+  static const ConnectorFlowKind CONNECTOR_FLOW_KIND_UNSPECIFIED =
+      ConnectorFlowKind._(
+          0, _omitEnumNames ? '' : 'CONNECTOR_FLOW_KIND_UNSPECIFIED');
+
+  /// The app opens the service's page and catches where the browser comes
+  /// back (FinishConnect).
+  static const ConnectorFlowKind CONNECTOR_FLOW_KIND_BROWSER =
+      ConnectorFlowKind._(
+          1, _omitEnumNames ? '' : 'CONNECTOR_FLOW_KIND_BROWSER');
+
+  /// The app opens a page with a code filled in; the backend asks the service
+  /// until the person approves. No FinishConnect.
+  static const ConnectorFlowKind CONNECTOR_FLOW_KIND_DEVICE =
+      ConnectorFlowKind._(
+          2, _omitEnumNames ? '' : 'CONNECTOR_FLOW_KIND_DEVICE');
+
+  static const $core.List<ConnectorFlowKind> values = <ConnectorFlowKind>[
+    CONNECTOR_FLOW_KIND_UNSPECIFIED,
+    CONNECTOR_FLOW_KIND_BROWSER,
+    CONNECTOR_FLOW_KIND_DEVICE,
+  ];
+
+  static final $core.List<ConnectorFlowKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ConnectorFlowKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ConnectorFlowKind._(super.value, super.name);
+}
+
+class ConnectProposalState extends $pb.ProtobufEnum {
+  static const ConnectProposalState CONNECT_PROPOSAL_STATE_UNSPECIFIED =
+      ConnectProposalState._(
+          0, _omitEnumNames ? '' : 'CONNECT_PROPOSAL_STATE_UNSPECIFIED');
+  static const ConnectProposalState CONNECT_PROPOSAL_STATE_PENDING =
+      ConnectProposalState._(
+          1, _omitEnumNames ? '' : 'CONNECT_PROPOSAL_STATE_PENDING');
+  static const ConnectProposalState CONNECT_PROPOSAL_STATE_CONNECTED =
+      ConnectProposalState._(
+          2, _omitEnumNames ? '' : 'CONNECT_PROPOSAL_STATE_CONNECTED');
+  static const ConnectProposalState CONNECT_PROPOSAL_STATE_DISMISSED =
+      ConnectProposalState._(
+          3, _omitEnumNames ? '' : 'CONNECT_PROPOSAL_STATE_DISMISSED');
+
+  static const $core.List<ConnectProposalState> values = <ConnectProposalState>[
+    CONNECT_PROPOSAL_STATE_UNSPECIFIED,
+    CONNECT_PROPOSAL_STATE_PENDING,
+    CONNECT_PROPOSAL_STATE_CONNECTED,
+    CONNECT_PROPOSAL_STATE_DISMISSED,
+  ];
+
+  static final $core.List<ConnectProposalState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static ConnectProposalState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ConnectProposalState._(super.value, super.name);
+}
+
+class ConnectFlowState extends $pb.ProtobufEnum {
+  static const ConnectFlowState CONNECT_FLOW_STATE_UNSPECIFIED =
+      ConnectFlowState._(
+          0, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_UNSPECIFIED');
+
+  /// Waiting for the person, in the browser.
+  static const ConnectFlowState CONNECT_FLOW_STATE_WAITING =
+      ConnectFlowState._(1, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_WAITING');
+
+  /// Signing in with what the browser brought back.
+  static const ConnectFlowState CONNECT_FLOW_STATE_EXCHANGING =
+      ConnectFlowState._(
+          2, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_EXCHANGING');
+
+  /// Reading the account and what was granted.
+  static const ConnectFlowState CONNECT_FLOW_STATE_CHECKING =
+      ConnectFlowState._(
+          3, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_CHECKING');
+  static const ConnectFlowState CONNECT_FLOW_STATE_CONNECTED =
+      ConnectFlowState._(
+          4, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_CONNECTED');
+  static const ConnectFlowState CONNECT_FLOW_STATE_FAILED =
+      ConnectFlowState._(5, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_FAILED');
+  static const ConnectFlowState CONNECT_FLOW_STATE_EXPIRED =
+      ConnectFlowState._(6, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_EXPIRED');
+  static const ConnectFlowState CONNECT_FLOW_STATE_CANCELLED =
+      ConnectFlowState._(
+          7, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_CANCELLED');
+
+  static const $core.List<ConnectFlowState> values = <ConnectFlowState>[
+    CONNECT_FLOW_STATE_UNSPECIFIED,
+    CONNECT_FLOW_STATE_WAITING,
+    CONNECT_FLOW_STATE_EXCHANGING,
+    CONNECT_FLOW_STATE_CHECKING,
+    CONNECT_FLOW_STATE_CONNECTED,
+    CONNECT_FLOW_STATE_FAILED,
+    CONNECT_FLOW_STATE_EXPIRED,
+    CONNECT_FLOW_STATE_CANCELLED,
+  ];
+
+  static final $core.List<ConnectFlowState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static ConnectFlowState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ConnectFlowState._(super.value, super.name);
+}
+
+class ConnectionStatus extends $pb.ProtobufEnum {
+  static const ConnectionStatus CONNECTION_STATUS_UNSPECIFIED =
+      ConnectionStatus._(
+          0, _omitEnumNames ? '' : 'CONNECTION_STATUS_UNSPECIFIED');
+  static const ConnectionStatus CONNECTION_STATUS_READY =
+      ConnectionStatus._(1, _omitEnumNames ? '' : 'CONNECTION_STATUS_READY');
+
+  /// The service no longer accepts it: connect again (StartConnect.secret_id).
+  static const ConnectionStatus CONNECTION_STATUS_NEEDS_RECONNECT =
+      ConnectionStatus._(
+          2, _omitEnumNames ? '' : 'CONNECTION_STATUS_NEEDS_RECONNECT');
+
+  static const $core.List<ConnectionStatus> values = <ConnectionStatus>[
+    CONNECTION_STATUS_UNSPECIFIED,
+    CONNECTION_STATUS_READY,
+    CONNECTION_STATUS_NEEDS_RECONNECT,
+  ];
+
+  static final $core.List<ConnectionStatus?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ConnectionStatus? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ConnectionStatus._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

@@ -10,6 +10,14 @@ import 'protocol/factory/v1/factory.pb.dart';
 /// The kind of the conversation's pane, the one that can't be closed.
 const chatKind = 'chat';
 
+/// The kind of a project's Files pane; its path is the project's id.
+const filesKind = 'files';
+
+/// Whether [node] is a file's viewer: not the conversation, a page
+/// (Settings…, which have no path) or a project's Files.
+bool _isViewer(ViewNode node) =>
+    !_isChat(node) && node.leaf.kind != filesKind && node.leaf.path.isNotEmpty;
+
 /// At most this many panes (the backend refuses more).
 const maxPanes = 12;
 
@@ -220,17 +228,65 @@ ViewNode resize(ViewNode root, String id, List<double> shares) {
 /// [root] showing [path]: unchanged when a pane already shows it (that
 /// pane's id is in [shown]), else with a viewer for it as an agent's `show`
 /// adds one: beside the conversation, then stacked in a column right of
-/// it. At [maxPanes] the oldest viewer gives way.
-({ViewNode root, String paneId}) open(ViewNode root, String path) {
+/// it. Opened from a project's Files pane ([beside]), the first viewer goes
+/// right of that pane instead. At [maxPanes] the oldest viewer gives way.
+({ViewNode root, String paneId}) open(
+  ViewNode root,
+  String path, {
+  String? beside,
+}) {
   for (final leaf in leaves(root)) {
-    if (leaf.leaf.path == path && !_isChat(leaf)) {
+    if (leaf.leaf.path == path && _isViewer(leaf)) {
       return (root: root, paneId: leaf.id);
     }
+  }
+  if (beside != null &&
+      find(root, beside) != null &&
+      !leaves(root).any(_isViewer)) {
+    final pane = viewerLeaf(path);
+    var tree = root;
+    if (leaves(tree).length >= maxPanes) {
+      final oldest = leaves(tree)
+          .firstWhere((leaf) => !_isChat(leaf) && leaf.id != beside);
+      tree = close(tree, oldest.id) ?? tree;
+    }
+    // In a row, right of the Files, taking half the room of the widest
+    // pane there (the conversation, usually) so the Files keep theirs.
+    final parent = _parentOf(tree, beside);
+    if (parent != null && parent.split.axis == ViewAxis.VIEW_AXIS_ROW) {
+      final split = parent.split;
+      final shares = [..._shares(split.weights, split.children.length)];
+      var widest = 0;
+      for (var i = 1; i < shares.length; i++) {
+        if (shares[i] > shares[widest]) widest = i;
+      }
+      final half = shares[widest] / 2;
+      shares[widest] = half;
+      final at = split.children.indexWhere((child) => child.id == beside);
+      final children = [...split.children]..insert(at + 1, pane);
+      shares.insert(at + 1, half);
+      ViewNode place(ViewNode node) {
+        if (!node.hasSplit()) return node;
+        if (node.id == parent.id) {
+          return _split(node.id, split.axis, children, shares);
+        }
+        return _split(node.id, node.split.axis, [
+          for (final child in node.split.children) place(child),
+        ], node.split.weights);
+      }
+
+      return (root: place(tree), paneId: pane.id);
+    }
+    return (
+      root: insert(tree, pane, beside, DropEdge.right) ?? tree,
+      paneId: pane.id,
+    );
   }
   final pane = viewerLeaf(path);
   var tree = root;
   if (leaves(tree).length >= maxPanes) {
-    final oldest = leaves(tree).firstWhere((leaf) => !_isChat(leaf));
+    final oldest = leaves(tree)
+        .firstWhere((leaf) => !_isChat(leaf) && leaf.id != beside);
     tree = close(tree, oldest.id) ?? tree;
   }
   if (isChatOnly(tree)) {
@@ -243,8 +299,11 @@ ViewNode resize(ViewNode root, String id, List<double> shares) {
     );
   }
   // Below the last viewer, so viewers stack beside the conversation.
-  final last = leaves(tree)
-      .lastWhere((leaf) => !_isChat(leaf), orElse: () => leaves(tree).last);
+  // From a Files pane, below the last file's viewer rather than a page.
+  final last = leaves(tree).lastWhere(
+    beside != null ? _isViewer : (leaf) => !_isChat(leaf),
+    orElse: () => leaves(tree).last,
+  );
   if (_isChat(last)) {
     return (
       root: insert(tree, pane, last.id, DropEdge.right)!,

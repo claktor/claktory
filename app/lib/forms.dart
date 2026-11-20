@@ -805,7 +805,7 @@ class _AgentFields extends StatelessWidget {
         ),
         Field(
           label: 'Color',
-          child: _ColorPicker(value: color, onChanged: onColor),
+          child: ColorPicker(value: color, onChanged: onColor),
         ),
         Field(
           label: 'Prompt',
@@ -922,8 +922,8 @@ class _AgentFields extends StatelessWidget {
 }
 
 /// The agent colors as swatches; the chosen one is ringed.
-class _ColorPicker extends StatelessWidget {
-  const _ColorPicker({required this.value, required this.onChanged});
+class ColorPicker extends StatelessWidget {
+  const ColorPicker({super.key, required this.value, required this.onChanged});
 
   final String value;
   final ValueChanged<String> onChanged;

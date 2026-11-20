@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'focus_test.dart' show tree;
 import 'harness.dart';
 
 final agentsExtension = Extension(
@@ -160,6 +159,8 @@ void main() {
       'smartphone',
       'tablet',
       'monitor-smartphone',
+      'paperclip',
+      'message-square',
     ]) {
       await tester.pumpWidget(
         Directionality(
@@ -286,15 +287,13 @@ void main() {
   testWidgets('each agent shows the panel it has open', (tester) async {
     final snapshot = workspace(focused: 'p1', openPanel: 'checklist');
     final harness = await showWith(tester, snapshot);
-    harness.backend.explorer.apply(tree());
     await settle(tester);
     expect(glyphButton('Close Checklist'), findsOneWidget);
 
-    // Tester has none open: the explorer is back beside it.
+    // Tester has none open.
     await harness.apply(tester, snapshot.deepCopy()..selectedAgentId = 'a2');
     await settle(tester);
     expect(glyphButton('Close Checklist'), findsNothing);
-    expect(find.text('Show everything'), findsOneWidget);
     // Opening one there opens Tester's.
     await tester.tap(glyphButton('Checklist'));
     await settle(tester);
@@ -319,28 +318,24 @@ void main() {
     expect(find.text('This panel needs a newer Claktory.'), findsOneWidget);
   });
 
-  testWidgets('the panel takes the explorer\'s place while open', (
+  testWidgets('a panel shows only while open, for an agent that has it', (
     tester,
   ) async {
     final harness = await showWith(tester, workspace(focused: 'p1'));
-    harness.backend.explorer.apply(tree());
-    await settle(tester);
-    expect(find.text('Show everything'), findsOneWidget);
+    expect(glyphButton('Close Checklist'), findsNothing);
 
     await harness.apply(
       tester,
       workspace(focused: 'p1', openPanel: 'checklist'),
     );
-    expect(find.text('Show everything'), findsNothing);
     expect(glyphButton('Close Checklist'), findsOneWidget);
 
-    // An agent without the extension shows no panel, so the explorer is back.
+    // An agent without the extension shows no panel.
     await harness.apply(
       tester,
       workspace(focused: 'p1', openPanel: 'checklist', checklist: false),
     );
     expect(glyphButton('Close Checklist'), findsNothing);
-    expect(find.text('Show everything'), findsOneWidget);
   });
 
   testWidgets('the marketplace lists the extensions', (tester) async {

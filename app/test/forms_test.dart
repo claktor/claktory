@@ -91,7 +91,10 @@ void main() {
     final harness = Harness(folders.snapshot());
     await harness.show(tester, size: const Size(375, 812));
     await pumpFrames(tester);
+    // A phone's project menu offers its settings.
     await tester.tap(find.text('Factory').first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Project settings'));
     await pumpFrames(tester);
 
     await tester.ensureVisible(find.text('Delete project…'));

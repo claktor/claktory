@@ -10,7 +10,7 @@ use factory_agent::auth::{AuthEvent, AuthInteraction, AuthPrompt};
 use factory_agent::stream::event_stream;
 use factory_agent::types::ModelCost;
 use factory_agent::{
-    AssistantMessage, AssistantPart, Error, Message, Model, StopReason, StreamEvent, StreamFn, Usage, UserContent, UserPart,
+    AssistantMessage, AssistantPart, Error, Message, Model, StopReason, StreamEvent, StreamFn, Usage, UserContent, UserMessage, UserPart,
 };
 use factory_protocol::PROTOCOL_VERSION;
 use factory_protocol::v1::{self, ClientMessage, Hello, ServerMessage, client_message, server_message::Body};
@@ -76,10 +76,15 @@ pub async fn start(dir: &Path) -> (SocketAddr, Arc<Factory>) {
 }
 
 pub async fn start_with(dir: &Path, models: Scripted) -> (SocketAddr, Arc<Factory>) {
+    start_with_models(dir, Arc::new(models)).await
+}
+
+/// A Factory with models of the test's own.
+pub async fn start_with_models(dir: &Path, models: Arc<dyn Models>) -> (SocketAddr, Arc<Factory>) {
     raise_open_files();
     // Logs of commands with secrets go through the real `factoryd redact`.
     factoryd::set_filter_executable(env!("CARGO_BIN_EXE_factoryd").into());
-    let factory = Factory::open(home(dir), Arc::new(models)).await.expect("open factory");
+    let factory = Factory::open(home(dir), models).await.expect("open factory");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(factoryd::serve(listener, factory.clone()));
@@ -120,6 +125,8 @@ pub struct Request {
     pub cache_ttl: String,
     /// The last message's text as the model read it, tags and all.
     pub prompt: String,
+    /// The images in it.
+    pub images: Vec<String>,
 }
 
 const ACCOUNT: &str = "Scripted account";
@@ -274,7 +281,8 @@ impl Models for Scripted {
             provider: if long { "anthropic" } else { "scripted" }.into(),
             base_url: String::new(),
             reasoning: false,
-            input: vec!["text".into()],
+            // Parrot reads images too.
+            input: if id == OTHER_MODEL { vec!["text".into(), "image".into()] } else { vec!["text".into()] },
             cost: ModelCost::default(),
             context_window: if long { 200_000 } else { 10_000 },
             max_tokens: 1_000,
@@ -300,6 +308,16 @@ impl Models for Scripted {
                 prompt: match context.messages.last() {
                     Some(Message::User(user)) => text_of(&user.content),
                     _ => String::new(),
+                },
+                images: match context.messages.last() {
+                    Some(Message::User(UserMessage { content: UserContent::Parts(parts), .. })) => parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            UserPart::Image { mime_type, .. } => Some(mime_type.clone()),
+                            UserPart::Text { .. } => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
                 },
             });
             *system_prompt.lock().expect("lock") = context.system_prompt.clone().unwrap_or_default();
@@ -475,9 +493,19 @@ impl Client {
 
     /// Connects as an app on the kind of device given.
     pub async fn connect_as(addr: SocketAddr, kind: v1::DeviceKind) -> (Client, v1::Workspace, Option<v1::Transcript>) {
+        Client::connect_with(addr, kind, false).await
+    }
+
+    /// Connects as an app that applies WorkspacePatch (`patches`) or not.
+    pub async fn connect_with(addr: SocketAddr, kind: v1::DeviceKind, patches: bool) -> (Client, v1::Workspace, Option<v1::Transcript>) {
         let mut client = Client::open(addr).await;
-        let hello =
-            Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token: String::new(), device_kind: kind.into() };
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_version: "test".into(),
+            token: String::new(),
+            device_kind: kind.into(),
+            workspace_patches: patches,
+        };
         client.send(ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) }).await;
         match client.receive().await.body {
             Some(Body::Welcome(_)) => {}
@@ -573,6 +601,60 @@ pub fn last_workspace(events: &[ServerMessage]) -> Option<&v1::Workspace> {
     found
 }
 
+/// The Workspace a patch makes of `last`, the way the protocol says an app
+/// applies one: field by field, generically.
+pub fn apply_patch(last: &v1::Workspace, patch: &v1::WorkspacePatch) -> v1::Workspace {
+    let mut next = patch.workspace.clone().expect("a patch carries a workspace");
+    assert!(!patch.kept.contains(&2), "agents are never kept whole");
+    next.merge(kept_fields(&last.encode_to_vec(), &patch.kept).as_slice()).expect("kept fields");
+    for agent in &mut next.agents {
+        let old = || last.agents.iter().find(|old| old.id == agent.id).expect("a kept agent was there").clone();
+        if patch.kept_agents.contains(&agent.id) {
+            *agent = old();
+        } else if let Some(fields) = patch.kept_agent_fields.iter().find(|fields| fields.id == agent.id) {
+            assert!(!fields.kept.contains(&1), "an agent's id is never kept");
+            agent.merge(kept_fields(&old().encode_to_vec(), &fields.kept).as_slice()).expect("kept agent fields");
+        }
+    }
+    next
+}
+
+/// The encoded occurrences of `message`'s fields numbered in `kept`.
+fn kept_fields(message: &[u8], kept: &[u32]) -> Vec<u8> {
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while at < message.len() {
+        let start = at;
+        let key = varint(message, &mut at);
+        match key & 7 {
+            0 => {
+                varint(message, &mut at);
+            }
+            1 => at += 8,
+            2 => at += varint(message, &mut at) as usize,
+            5 => at += 4,
+            other => panic!("wire type {other}"),
+        }
+        if kept.contains(&((key >> 3) as u32)) {
+            fields.extend_from_slice(&message[start..at]);
+        }
+    }
+    fields
+}
+
+fn varint(bytes: &[u8], at: &mut usize) -> u64 {
+    let mut value = 0;
+    for shift in (0..64).step_by(7) {
+        let byte = bytes[*at];
+        *at += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    value
+}
+
 pub fn create_project(name: &str, path: &Path) -> client_message::Body {
     client_message::Body::CreateProject(v1::CreateProject { name: name.into(), path: path.display().to_string() })
 }
@@ -591,7 +673,7 @@ pub fn create_agent(project_id: &str, name: &str, prompt: &str) -> client_messag
 }
 
 pub fn send_message(agent_id: &str, text: &str) -> client_message::Body {
-    client_message::Body::SendMessage(v1::SendMessage { agent_id: agent_id.into(), text: text.into(), client_id: String::new() })
+    client_message::Body::SendMessage(v1::SendMessage { agent_id: agent_id.into(), text: text.into(), ..Default::default() })
 }
 
 /// A transcript's entries as short strings, for comparing whole conversations.
@@ -610,6 +692,9 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
             Some(Kind::Event(event)) => format!("event from {}: {}", event.from, event.summary),
             Some(Kind::Proposal(proposal)) => format!("proposal {} ({:?}): {}", proposal.id, proposal.state(), proposal.text),
             Some(Kind::SecretRequest(request)) => format!("secret request {} ({:?}): {}", request.id, request.state(), request.reason),
+            Some(Kind::ConnectProposal(proposal)) => {
+                format!("connect proposal {} ({:?}): {} for {}", proposal.id, proposal.state(), proposal.connector_id, proposal.purpose)
+            }
             None => "empty".into(),
         });
     }
@@ -627,7 +712,10 @@ pub struct View {
     pub entries: Vec<v1::Entry>,
     pub has_earlier: bool,
     pub deltas: usize,
+    /// The explorer sent last, as an app that keeps only one sees it.
     pub explorer: Option<v1::Explorer>,
+    /// Every project's explorer, as last sent.
+    pub explorers: std::collections::BTreeMap<String, v1::Explorer>,
     /// The open extension panel's content, as last sent.
     pub extension_view: Option<v1::ExtensionView>,
     /// What waits for the selected agent, as last sent.
@@ -655,7 +743,11 @@ impl View {
     pub fn apply(&mut self, body: &Body) {
         match body {
             Body::Workspace(workspace) => self.workspace = workspace.clone(),
-            Body::Explorer(explorer) => self.explorer = Some(explorer.clone()),
+            Body::WorkspacePatch(patch) => self.workspace = apply_patch(&self.workspace, patch),
+            Body::Explorer(explorer) => {
+                self.explorer = Some(explorer.clone());
+                self.explorers.insert(explorer.project_id.clone(), explorer.clone());
+            }
             Body::ExtensionView(view) => self.extension_view = Some(view.clone()),
             Body::QueuedMessages(queued) => self.queued = Some(queued.clone()),
             Body::Highlight(highlight) => self.highlights.push(highlight.clone()),

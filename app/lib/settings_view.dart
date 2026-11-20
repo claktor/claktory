@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 
 import 'account.dart';
 import 'backend.dart';
+import 'claktory_identity.dart' show ClaktoryIdentity;
 import 'controls.dart';
 import 'devices.dart';
 import 'identity.dart';
@@ -75,7 +76,10 @@ class SettingsView extends StatelessWidget {
                       children: [
                         _Section(
                           title: 'General',
-                          children: [_YourName(workspace: workspace)],
+                          children: [
+                            _YourName(workspace: workspace),
+                            ClaktoryIdentity(workspace: workspace),
+                          ],
                         ),
                         // Only while the backend has the account on.
                         if (workspace.hasAccount() &&

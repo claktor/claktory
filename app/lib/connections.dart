@@ -8,9 +8,10 @@ import 'package:flutter/services.dart';
 import 'tunnel_client.dart' show newDeviceKey;
 
 /// A Factory on another machine, as its pairing code describes it. Since
-/// the private tunnel: `factory://?t=<token>&name=<machine>&e=<endpoint>`
+/// the private tunnel: `factory://?t=<token>&name=<name>&e=<endpoint>`
 /// (its iroh endpoint id), then `&r=<relay URL>` for each relay it can be
-/// reached through and `&a=<ip:port>` for each direct address. Before it:
+/// reached through and `&a=<ip:port>` for each direct address, and its
+/// `&color=`. Before it:
 /// `factory://<host>:<port>?t=<token>&fp=<SHA-256>&name=<machine>`, with
 /// its certificate's SHA-256.
 @immutable
@@ -22,6 +23,7 @@ class RemoteFactory {
     required this.token,
     required this.fingerprint,
     required this.name,
+    this.color = '',
     this.endpointId = '',
     this.relays = const [],
     this.addresses = const [],
@@ -39,8 +41,12 @@ class RemoteFactory {
   /// this app accepts from it.
   final String fingerprint;
 
-  /// Its machine's name, e.g. "mac-mini".
+  /// Its name when the code was made (the Claktory's, or before names
+  /// its machine's, e.g. "mac-mini"). Once connected, its Settings say.
   final String name;
+
+  /// Its color when the code was made (an agent color's name), or empty.
+  final String color;
 
   /// Its iroh endpoint id: the app reaches it only through the private
   /// tunnel, dialled by this key. Empty in a code from before the tunnel,
@@ -59,20 +65,6 @@ class RemoteFactory {
 
   /// Where the app connects: TLS on its remote listener.
   Uri get endpoint => Uri(scheme: 'wss', host: host, port: port);
-
-  /// The same Factory under another [name], as the person renamed it on
-  /// this device.
-  RemoteFactory named(String name) => RemoteFactory(
-    code: code,
-    host: host,
-    port: port,
-    token: token,
-    fingerprint: fingerprint,
-    name: name,
-    endpointId: endpointId,
-    relays: relays,
-    addresses: addresses,
-  );
 
   /// "mac-mini", or its address when the code has no name.
   String get label => name.isNotEmpty
@@ -155,18 +147,19 @@ RemoteFactory? parsePairingCode(String text) {
     token: token,
     fingerprint: fingerprint.toLowerCase(),
     name: uri.queryParameters['name'] ?? '',
+    color: uri.queryParameters['color'] ?? '',
     endpointId: endpointId,
     relays: relays,
     addresses: addresses,
   );
 }
 
-/// What this Mac's own Factory is called until the person renames it.
+/// What this Mac's own Factory is called until it says its name.
 const thisMacName = 'This Mac';
 
 /// Every Factory this app connects to (this Mac's, and the ones on other
-/// machines it's paired with, all live at once), which one the window
-/// shows, and what the person calls each. Kept on this device, the third
+/// machines it's paired with, all live at once), and which one the window
+/// shows. Kept on this device, the third
 /// thing besides the window's frame and the drafts (the person's decision):
 /// a device can't ask a backend where its backend is.
 class Connections extends ChangeNotifier {
@@ -175,10 +168,8 @@ class Connections extends ChangeNotifier {
     this._current,
     List<RemoteFactory>? saved,
     Map<String, String>? keys,
-    Map<String, String>? names,
   ]) : _saved = saved ?? [],
-       _keys = keys ?? {},
-       _names = names ?? {};
+       _keys = keys ?? {};
 
   /// Reads what this device keeps. Anything unreadable is left out.
   static Future<Connections> load(ConnectionStorage storage) async {
@@ -192,20 +183,10 @@ class Connections extends ChangeNotifier {
     final current = parsePairingCode(kept.current);
     if (current != null && !saved.contains(current)) saved.add(current);
     bool known(String code) => saved.any((target) => target.code == code);
-    return Connections(
-      storage,
-      current,
-      saved,
-      {
-        for (final MapEntry(:key, :value) in kept.keys.entries)
-          if (known(key)) key: value,
-      },
-      {
-        for (final MapEntry(:key, :value) in kept.names.entries)
-          if ((key.isEmpty || known(key)) && value.trim().isNotEmpty)
-            key: value.trim(),
-      },
-    );
+    return Connections(storage, current, saved, {
+      for (final MapEntry(:key, :value) in kept.keys.entries)
+        if (known(key)) key: value,
+    });
   }
 
   final ConnectionStorage _storage;
@@ -216,10 +197,6 @@ class Connections extends ChangeNotifier {
   /// tunnel, by pairing code: made here, never sent anywhere. One per
   /// pairing, so two Factories can't tell it's the same device.
   final Map<String, String> _keys;
-
-  /// What the person calls each Factory on this device, by pairing code
-  /// ('' for this Mac's), where they've renamed it.
-  final Map<String, String> _names;
 
   /// This device's key for [target], made and kept the first time.
   String deviceKey(RemoteFactory target, {String Function()? make}) {
@@ -232,40 +209,11 @@ class Connections extends ChangeNotifier {
   }
 
   /// The Factory on another machine this app shows; null for this Mac's.
-  /// Under the name the person gave it, if they renamed it.
-  RemoteFactory? get current => _named(_current);
+  RemoteFactory? get current => _current;
 
-  /// Every other Factory this device has connected to, oldest first, under
-  /// the names the person gave them. All of them are connected at once.
-  List<RemoteFactory> get saved =>
-      List.unmodifiable([for (final target in _saved) _named(target)!]);
-
-  RemoteFactory? _named(RemoteFactory? target) {
-    if (target == null) return null;
-    final name = _names[target.code];
-    return name == null ? target : target.named(name);
-  }
-
-  /// What [target] is called here (null for this Mac's): the name the
-  /// person gave it, else its machine's.
-  String nameOf(RemoteFactory? target) =>
-      _names[target?.code ?? ''] ??
-      (target == null ? thisMacName : target.label);
-
-  /// Calls [target] (null for this Mac's) [name] on this device; an empty
-  /// name goes back to its machine's.
-  void rename(RemoteFactory? target, String name) {
-    final key = target?.code ?? '';
-    final trimmed = name.trim();
-    final original = target == null ? thisMacName : target.label;
-    if (trimmed.isEmpty || trimmed == original) {
-      if (_names.remove(key) == null) return;
-    } else {
-      if (_names[key] == trimmed) return;
-      _names[key] = trimmed;
-    }
-    _changed();
-  }
+  /// Every other Factory this device has connected to, oldest first. All
+  /// of them are connected at once.
+  List<RemoteFactory> get saved => List.unmodifiable(_saved);
 
   /// [text] as a QR code, made on this device; null where it can't be.
   Future<QrModules?> qrCode(String text) async {
@@ -281,7 +229,6 @@ class Connections extends ChangeNotifier {
   /// a new one joins the end of [saved], one already there keeps its place.
   void use(RemoteFactory? target) {
     if (target != null && !_saved.contains(target)) _saved.add(target);
-    // The one kept, not [target]: it may come under the person's name.
     _current = target == null
         ? null
         : _saved.firstWhere((other) => other == target);
@@ -292,7 +239,6 @@ class Connections extends ChangeNotifier {
   void forget(RemoteFactory target) {
     _saved.removeWhere((other) => other == target);
     _keys.remove(target.code);
-    _names.remove(target.code);
     if (_current == target) _current = null;
     _changed();
   }
@@ -305,7 +251,6 @@ class Connections extends ChangeNotifier {
             current: _current?.code ?? '',
             saved: [for (final target in _saved) target.code],
             keys: Map.of(_keys),
-            names: Map.of(_names),
           ),
         )
         .catchError(
@@ -325,7 +270,6 @@ class StoredConnections {
     required this.current,
     required this.saved,
     this.keys = const {},
-    this.names = const {},
   });
 
   /// The code of the Factory showing; empty for this Mac's.
@@ -334,10 +278,6 @@ class StoredConnections {
 
   /// This device's key by pairing code.
   final Map<String, String> keys;
-
-  /// What the person calls each Factory here, by pairing code ('' for this
-  /// Mac's).
-  final Map<String, String> names;
 }
 
 /// Where [Connections] are kept, and how a pairing code becomes a QR code.
@@ -380,11 +320,6 @@ class DeviceConnectionStorage implements ConnectionStorage {
             in (kept?['keys'] as Map<Object?, Object?>? ?? const {}).entries)
           if (key is String && value is String) key: value,
       },
-      names: {
-        for (final MapEntry(:key, :value)
-            in (kept?['names'] as Map<Object?, Object?>? ?? const {}).entries)
-          if (key is String && value is String) key: value,
-      },
     );
   }
 
@@ -394,7 +329,6 @@ class DeviceConnectionStorage implements ConnectionStorage {
         'current': connections.current,
         'saved': connections.saved,
         'keys': connections.keys,
-        'names': connections.names,
       });
 
   @override

@@ -6,6 +6,8 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The tunnel's compressed streams (`claktory/2`, remote.rs): zstd, as the app's.
+async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 bytes = "1.12.2"
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
@@ -30,6 +32,7 @@ libc = "0.2"
 pdf-extract = "0.12"
 primp = "2"
 prost = "0.14.6"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 # `factoryd pair` shows the code as a QR code in the terminal; no image formats.
 qrcode = { version = "0.15", default-features = false, features = ["std"] }
 regex = "1"
@@ -41,6 +44,7 @@ scraper = "0.29"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11"
+similar = { version = "3.2.1", default-features = false, features = ["std"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync", "process", "signal"] }

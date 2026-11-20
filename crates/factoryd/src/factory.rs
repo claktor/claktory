@@ -7,7 +7,7 @@
 //!
 //! Events are encoded once and the same bytes go to every client.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime};
@@ -122,11 +122,21 @@ pub enum RequestError {
     /// A layout that can't be used, and why.
     #[error("{0}")]
     Layout(String),
+    #[error("no comment thread \"{0}\"")]
+    UnknownThread(String),
+    #[error("no comment \"{0}\"")]
+    UnknownComment(String),
+    /// A comment that can't be made or changed so, and why.
+    #[error("{0}")]
+    Comments(String),
     #[error(transparent)]
     Vault(#[from] crate::vault::VaultError),
     /// The account service's answer, or why it can't be asked (`crate::account`).
     #[error("{1}")]
     Account(v1::ErrorCode, String),
+    /// A file that can't be uploaded or attached, and why (`crate::uploads`).
+    #[error("{0}")]
+    Upload(String),
 }
 
 impl RequestError {
@@ -142,7 +152,9 @@ impl RequestError {
             | RequestError::NoTask(_)
             | RequestError::UnknownDevice(_)
             | RequestError::NoApp { .. }
-            | RequestError::UnknownProposal(_) => v1::ErrorCode::NotFound,
+            | RequestError::UnknownProposal(_)
+            | RequestError::UnknownThread(_)
+            | RequestError::UnknownComment(_) => v1::ErrorCode::NotFound,
             RequestError::Empty(_)
             | RequestError::RelativePath(_)
             | RequestError::ConfigBroken
@@ -160,7 +172,9 @@ impl RequestError {
             | RequestError::Proposal(_)
             | RequestError::BuildCache(_)
             | RequestError::Layout(_)
-            | RequestError::NoEntries(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::NoEntries(_)
+            | RequestError::Upload(_)
+            | RequestError::Comments(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
                 v1::ErrorCode::Internal
@@ -207,7 +221,9 @@ pub struct Snapshot {
     pub events: broadcast::Receiver<Event>,
     pub workspace: v1::Workspace,
     pub transcript: Option<v1::Transcript>,
-    pub explorer: Option<v1::Explorer>,
+    /// The explorers of the projects whose files are open, the focused
+    /// project's last.
+    pub explorers: Vec<v1::Explorer>,
     pub view: Option<v1::ExtensionView>,
     pub queued: Option<v1::QueuedMessages>,
 }
@@ -222,6 +238,8 @@ pub struct Factory {
     pub(crate) files: tokio::sync::Mutex<()>,
     /// Serializes listings of the explorer.
     pub(crate) explorer_lock: tokio::sync::Mutex<()>,
+    /// The projects connections show the files of (`crate::explorer`).
+    pub(crate) file_watches: crate::explorer::Watches,
     pub(crate) health: crate::update::Health,
     /// The selected agent's queue as last sent to clients.
     queued_sent: Mutex<Option<v1::QueuedMessages>>,
@@ -246,12 +264,18 @@ pub struct Factory {
     pub(crate) build_caches: crate::extensions::tree::caches::State,
     /// When idle agents compact (`crate::idle`).
     pub(crate) idle: crate::idle::State,
+    /// Files the person is uploading for agents (`crate::uploads`).
+    pub(crate) uploads: crate::uploads::Uploads,
     /// Agents' layouts (`extensions::viewer`).
     pub(crate) viewer: crate::extensions::viewer::State,
+    /// Comments on files: the files in panes as last checked (`crate::annotations`).
+    pub(crate) annotations: crate::annotations::State,
     /// The secrets agents use (`crate::vault`).
     pub(crate) vault: crate::vault::Vault,
     /// Hides the vault's values in what agents and the app are shown.
     pub(crate) redaction: factory_agent::Redaction,
+    /// This Claktory's color until the person picks one (`remote::key_color`).
+    pub(crate) key_color: &'static str,
     /// This Claktory's account at claktory.com (`crate::account`).
     pub(crate) account: crate::account::State,
     /// Notified when a project is unarchived: its agents read what waited.
@@ -275,8 +299,9 @@ pub(crate) struct Inner {
     pub(crate) latest_release: crate::update::Release,
     /// Why the last update was undone; "" when it wasn't.
     pub(crate) update_error: String,
-    /// The focused project's explorer as last sent.
-    pub(crate) explorer: Option<v1::Explorer>,
+    /// The explorers of the projects whose files are open, by project id,
+    /// as last sent.
+    pub(crate) explorers: BTreeMap<String, v1::Explorer>,
     /// The open extension panel's view as last sent.
     pub(crate) view: Option<v1::ExtensionView>,
     /// Background tasks being stopped, by (agent, task): who stopped them
@@ -298,15 +323,17 @@ pub(crate) struct Queued {
     pub(crate) sent_from: Option<factory_agent::SentFrom>,
     /// The person's: the id their app made up for this send; empty without one.
     pub(crate) client_id: String,
+    /// The person's: the files they attached.
+    pub(crate) attachments: Vec<factory_agent::Attachment>,
 }
 
 impl Queued {
     pub(crate) fn from_person(text: impl Into<String>, sent_from: Option<factory_agent::SentFrom>) -> Queued {
-        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from, client_id: String::new() }
+        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from, client_id: String::new(), attachments: Vec::new() }
     }
 
     pub(crate) fn event(text: String, event: factory_agent::Event) -> Queued {
-        Queued { id: 0, text, event: Some(event), created: now_ms(), sent_from: None, client_id: String::new() }
+        Queued { event: Some(event), ..Queued::from_person(text, None) }
     }
 }
 
@@ -326,7 +353,7 @@ impl From<Saved> for Queued {
     fn from(saved: Saved) -> Queued {
         match saved {
             Saved::Text(text) => Queued::from_person(text, None),
-            Saved::Queued { text, event } => Queued { id: 0, text, event, created: now_ms(), sent_from: None, client_id: String::new() },
+            Saved::Queued { text, event } => Queued { event, ..Queued::from_person(text, None) },
         }
     }
 }
@@ -463,7 +490,7 @@ impl Factory {
             login_generation: 0,
             latest_release: crate::update::latest(&home).await,
             update_error: crate::update::failure_message(&home),
-            explorer: None,
+            explorers: BTreeMap::new(),
             view: None,
             stopping: HashMap::new(),
             agents: HashMap::new(),
@@ -472,6 +499,7 @@ impl Factory {
         let presences = crate::characters::presences(&store.db())?;
         let viewer = crate::extensions::viewer::State::load(&store);
         let remote = crate::remote::State::new(&home);
+        let key_color = crate::remote::key_color(&home);
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
         let account = crate::account::State::new(&home);
         let factory = Arc::new(Factory {
@@ -482,6 +510,7 @@ impl Factory {
             store,
             files: tokio::sync::Mutex::new(()),
             explorer_lock: tokio::sync::Mutex::new(()),
+            file_watches: crate::explorer::Watches::default(),
             health: crate::update::Health::default(),
             queued_sent: Mutex::new(None),
             nudge_after: std::sync::atomic::AtomicU64::new(30_000),
@@ -494,11 +523,14 @@ impl Factory {
             resources: crate::extensions::resources::State::default(),
             build_caches: crate::extensions::tree::caches::State::default(),
             idle: crate::idle::State::default(),
+            uploads: crate::uploads::Uploads::default(),
             viewer,
+            annotations: crate::annotations::State::default(),
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
             account,
             unarchived: tokio::sync::Notify::new(),
+            key_color,
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
@@ -522,6 +554,7 @@ impl Factory {
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -588,7 +621,7 @@ impl Factory {
                 events: receiver,
                 workspace: self.workspace(&inner),
                 transcript,
-                explorer: inner.explorer.clone(),
+                explorers: self.explorers(&inner),
                 view: inner.view.clone(),
                 // A client starts out with nothing queued.
                 queued: self.queued_of(&inner).filter(|queued| !queued.messages.is_empty()),
@@ -758,6 +791,12 @@ impl Factory {
         }
     }
 
+    /// What this Claktory is called and its color, as every device shows it.
+    pub(crate) fn identity(&self) -> crate::remote::Identity {
+        let config = &self.lock().config;
+        crate::remote::Identity { name: config.claktory_name(), color: config.claktory_color(self.key_color).to_owned() }
+    }
+
     pub async fn update_settings(&self, request: v1::UpdateSettings) -> Result<(), RequestError> {
         let v1::UpdateSettings {
             default_model: model,
@@ -775,6 +814,8 @@ impl Factory {
             idle_compaction,
             idle_compaction_short_cache,
             cache_ttl,
+            name,
+            color,
         } = request;
         let (model, effort) = (model.as_deref(), effort.as_deref());
         let models = self.lock().models.clone();
@@ -809,6 +850,13 @@ impl Factory {
             }
             if let Some(name) = user_name {
                 config.user.name = name.trim().to_owned();
+            }
+            // Empty goes back to this computer's name and the key's color.
+            if let Some(name) = name {
+                config.name = name.trim().to_owned();
+            }
+            if let Some(color) = color {
+                config.color = color.trim().to_owned();
             }
             if let Some(minutes) = vault_unlock_minutes {
                 config.vault.unlock_minutes = minutes;
@@ -957,23 +1005,26 @@ impl Factory {
     }
 
     /// The person's message for an agent, sent from the device `sent_from`
-    /// names, when known, with the id their app made up for it (`client_id`).
+    /// names, when known, with the id their app made up for it (`client_id`)
+    /// and the files they attached (uploaded to the agent's uploads folder).
     pub fn send_message(
         self: &Arc<Self>,
         id: &str,
         text: &str,
         sent_from: Option<factory_agent::SentFrom>,
         client_id: &str,
+        attached: &[v1::Attachment],
     ) -> Result<(), RequestError> {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() && attached.is_empty() {
             return Err(RequestError::Empty("message"));
         }
-        let mut inner = self.lock();
-        if inner.config.agent(id).is_none() {
+        if self.lock().config.agent(id).is_none() {
             return Err(RequestError::UnknownAgent(id.to_owned()));
         }
-        let queued = Queued { client_id: client_id.to_owned(), ..Queued::from_person(text, sent_from) };
+        let attachments = self.attachments(id, attached)?;
+        let mut inner = self.lock();
+        let queued = Queued { client_id: client_id.to_owned(), attachments, ..Queued::from_person(text, sent_from) };
         self.enqueue(&mut inner, id, queued)?;
         Ok(())
     }
@@ -1507,6 +1558,7 @@ impl Factory {
                     summary: event.map(|event| event.summary.clone()).unwrap_or_default(),
                     sent_from: queued.sent_from.as_ref().map(crate::transcript::sent_from),
                     client_id: queued.client_id.clone(),
+                    attachments: queued.attachments.iter().map(crate::transcript::attachment).collect(),
                 }
             })
             .collect();
@@ -1666,6 +1718,8 @@ impl Factory {
                     .iter()
                     .map(|(key, ttl)| v1::CacheTtl { key: key.clone(), ttl: ttl.as_str().to_owned() })
                     .collect(),
+                name: config.claktory_name(),
+                color: config.claktory_color(self.key_color).to_owned(),
             }),
         }
     }

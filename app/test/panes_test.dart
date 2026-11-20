@@ -212,8 +212,11 @@ void main() {
       "an agent's showing it again reads it again", (tester) async {
     final harness = await showPanes(
       tester,
-      beside('text', '/w/main.rs'),
-      focused: 'p1',
+      split('s1', row, [
+        leaf('chat', 'chat'),
+        leaf('f1', 'files', 'p1'),
+        leaf('v1', 'text', '/w/main.rs'),
+      ]),
       explorer: Explorer(
         projectId: 'p1',
         entries: [FileEntry(path: 'main.rs', name: 'main.rs')],
@@ -222,7 +225,7 @@ void main() {
     expect(reads(harness), 1);
     await tester.tap(
       find.descendant(
-        of: find.byType(ExplorerPane),
+        of: find.byType(FilesPane),
         matching: find.text('main.rs'),
       ),
     );

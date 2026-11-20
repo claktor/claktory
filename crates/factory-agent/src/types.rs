@@ -131,6 +131,75 @@ pub struct UserMessage {
     /// the message it showed at once to this one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_id: String,
+    /// The person's: files they attached, which the model reads as tags
+    /// after the text (images, when it takes them, are in `content` too).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file the person attached to a message, uploaded to the agent's uploads
+/// folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub path: String,
+    pub name: String,
+    /// In bytes.
+    pub size: u64,
+    /// Such as "image/png"; empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime: String,
+}
+
+/// The largest image given to the model as an image: 3.75 MiB, 5 MiB in
+/// base64, Anthropic's limit (OpenAI's is higher).
+pub const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024 + 768 * 1024;
+
+impl Attachment {
+    /// `<attachment path="…" name="…" size="…" type="…"/>`: how the model reads it.
+    fn tag(&self) -> String {
+        let attribute = |value: &str| value.replace('"', "'").replace(['\n', '\r'], " ");
+        let kind = if self.mime.is_empty() { String::new() } else { format!(" type=\"{}\"", attribute(&self.mime)) };
+        format!("<attachment path=\"{}\" name=\"{}\" size=\"{}\"{kind}/>", attribute(&self.path), attribute(&self.name), self.size)
+    }
+
+    /// The image type models read, from its type or, when the app gave none,
+    /// its extension: PNG, JPEG, GIF or WebP; None for anything else.
+    pub fn image_type(&self) -> Option<&'static str> {
+        let known = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+        if let Some(mime) = known.iter().find(|known| self.mime.eq_ignore_ascii_case(known)) {
+            return Some(mime);
+        }
+        // A type the app gave that isn't one of those wins over the name.
+        if !self.mime.is_empty() && !self.mime.eq_ignore_ascii_case("application/octet-stream") {
+            return None;
+        }
+        let extension = std::path::Path::new(&self.name).extension()?.to_str()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        }
+    }
+
+    /// The file as an image for the model, when it's one models read and no
+    /// bigger than `MAX_IMAGE_BYTES`; None otherwise, or if it can't be read.
+    pub fn image(&self) -> Option<UserPart> {
+        use base64::Engine as _;
+        let mime_type = self.image_type()?;
+        let file = std::fs::File::open(&self.path).ok()?;
+        if file.metadata().ok()?.len() > MAX_IMAGE_BYTES {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_IMAGE_BYTES + 1), &mut bytes).ok()?;
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return None;
+        }
+        Some(UserPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&bytes), mime_type: mime_type.to_owned() })
+    }
 }
 
 /// The device the person sent a message from, which the model reads with it.
@@ -161,6 +230,7 @@ impl UserMessage {
             event: None,
             sent_from: None,
             client_id: String::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -170,7 +240,8 @@ impl UserMessage {
 
     /// What the model reads: an event comes wrapped in a tag naming where it's
     /// from, so it's never mistaken for the person; the person's message, in
-    /// one naming the device they sent it from, when known.
+    /// one naming the device they sent it from, when known, with a tag for
+    /// each file attached after its text.
     pub fn for_model(&self) -> UserMessage {
         let (open, close) = match (&self.event, &self.sent_from) {
             (Some(event), _) => {
@@ -179,19 +250,38 @@ impl UserMessage {
                 (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), event.from), "\n</event>")
             }
             (None, Some(sent_from)) => (sent_from.tag(), "\n</sent>"),
-            (None, None) => return self.clone(),
+            (None, None) if self.attachments.is_empty() => return self.clone(),
+            (None, None) => (String::new(), ""),
+        };
+        let tags = if self.attachments.is_empty() {
+            None
+        } else {
+            let tags: Vec<String> = self.attachments.iter().map(Attachment::tag).collect();
+            let written = match &self.content {
+                UserContent::Text(text) => !text.is_empty(),
+                UserContent::Parts(parts) => parts.iter().any(|part| matches!(part, UserPart::Text { text } if !text.is_empty())),
+            };
+            Some(format!("{}{}", if written { "\n" } else { "" }, tags.join("\n")))
         };
         let content = match &self.content {
-            UserContent::Text(text) => UserContent::Text(format!("{open}{text}{close}")),
+            UserContent::Text(text) if tags.is_none() => UserContent::Text(format!("{open}{text}{close}")),
+            UserContent::Text(text) => UserContent::Text(format!("{open}{text}{}{close}", tags.unwrap_or_default())),
             UserContent::Parts(parts) => {
-                let mut wrapped = Vec::with_capacity(parts.len() + 2);
-                wrapped.push(UserPart::Text { text: open });
+                let mut wrapped = Vec::with_capacity(parts.len() + 3);
+                if !open.is_empty() {
+                    wrapped.push(UserPart::Text { text: open });
+                }
                 wrapped.extend(parts.iter().cloned());
-                wrapped.push(UserPart::Text { text: close.to_owned() });
+                if let Some(tags) = tags {
+                    wrapped.push(UserPart::Text { text: tags });
+                }
+                if !close.is_empty() {
+                    wrapped.push(UserPart::Text { text: close.to_owned() });
+                }
                 UserContent::Parts(wrapped)
             }
         };
-        UserMessage { content, timestamp: self.timestamp, event: None, sent_from: None, client_id: String::new() }
+        UserMessage { content, timestamp: self.timestamp, ..UserMessage::text("", 0) }
     }
 }
 

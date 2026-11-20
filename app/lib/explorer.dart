@@ -4,122 +4,195 @@ import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
 import 'layout.dart';
+import 'pane_chrome.dart';
+import 'panes.dart' show filesPane, withFiles;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'tell_rivet.dart';
 
-/// Width of the explorer beside a focused project.
-const explorerWidth = 260.0;
+/// A project's Files: its folder, its folders and its agents' checkouts,
+/// as its agents see them, in a pane of the selected agent's layout (a
+/// leaf of [filesKind] whose path is the project's id). Works like VS
+/// Code's file tree: a click on a folder opens or closes it, and a file
+/// opens in a viewer beside the pane. The rows come from the backend
+/// already flattened and sorted, and follow the folders live.
+class FilesPane extends StatelessWidget {
+  const FilesPane({super.key, required this.projectId, required this.paneId});
 
-/// The focused project's folder, as its agents see it. Works like VS Code's
-/// file tree: a click on a folder opens or closes it. The rows come from the
-/// backend already flattened and sorted, and follow the folder live.
-class ExplorerPane extends StatelessWidget {
-  const ExplorerPane({super.key, required this.project});
-
-  final Project project;
+  final String projectId;
+  final String paneId;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: palette.sidebar,
-        border: Border(left: BorderSide(color: palette.hairline)),
-      ),
-      child: SizedBox(
-        width: explorerWidth,
-        child: ListenableBuilder(
-          listenable: backend.explorer,
-          builder: (context, _) {
-            final explorer = backend.explorer.of(project.id);
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _Header(project: project, explorer: explorer),
-                Expanded(
-                  child: _Tree(project: project, explorer: explorer),
+    return ListenableBuilder(
+      listenable: Listenable.merge([backend.explorer, backend.workspace]),
+      builder: (context, _) {
+        final project = projectById(backend.workspace.workspace, projectId);
+        final explorer = backend.explorer.of(projectId);
+        return LayoutBuilder(
+          builder: (context, constraints) => PaneScaffold(
+            details: project?.name ?? '',
+            controls: [
+              if (project != null && explorer != null)
+                ShowEverything(
+                  project: project,
+                  explorer: explorer,
+                  // A narrow pane keeps only the check, named on hover.
+                  compact: constraints.maxWidth < 300,
                 ),
-              ],
-            );
-          },
-        ),
-      ),
+            ],
+            body: ColoredBox(
+              color: palette.sidebar,
+              child: project == null
+                  ? const FilesNote('This project was deleted.')
+                  : FilesTree(
+                      project: project,
+                      explorer: explorer,
+                      onOpen: (path) => openFile(context, path, beside: paneId),
+                    ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
 
-/// The folder's name, and whether hidden files show.
-class _Header extends StatelessWidget {
-  const _Header({required this.project, required this.explorer});
+/// The project with [id], or null.
+Project? projectById(Workspace workspace, String id) {
+  for (final project in workspace.projects) {
+    if (project.id == id) return project;
+  }
+  return null;
+}
+
+/// Opens [project]'s Files: on a Mac a pane right of the selected agent's
+/// conversation (or the pane glows when it's open already); on a phone
+/// [phone] shows it as a page of its own.
+void openFiles(
+  BuildContext context,
+  Project project, {
+  void Function(Project project)? phone,
+}) {
+  if (phone != null) return phone(project);
+  final scope = AppScope.scope(context);
+  final backend = scope.backend;
+  // With no agent selected (an empty project focused), beside one of the
+  // project's agents, or any.
+  final agent =
+      backend.workspace.selectedAgent ??
+      backend.workspace.agentsIn(project.id).firstOrNull ??
+      backend.workspace.workspace.agents.firstOrNull;
+  if (agent == null) return;
+  if (backend.workspace.selectedAgent == null) {
+    fireAndLog(backend.selectAgent(agent.id));
+  }
+  if (scope.page.value != AppPage.agent) AppScope.closePage(context);
+  final root = layoutOf(agent);
+  final shown = filesPane(root, project.id);
+  if (shown != null) {
+    backend.highlights.glow('pane:${agent.id}:${shown.id}', [
+      agentColor(agent.color),
+    ]);
+    return;
+  }
+  fireAndLog(backend.setLayout(agent.id, withFiles(root, project)));
+}
+
+/// Whether [projectId]'s Files show in the selected agent's layout.
+bool filesShown(BuildContext context, String projectId) {
+  final agent = AppScope.of(context).workspace.selectedAgent;
+  return agent != null && filesPane(layoutOf(agent), projectId) != null;
+}
+
+/// Shows the files .factoryignore hides, or hides them again: a check and
+/// "Show everything", in a Files pane's header.
+class ShowEverything extends StatelessWidget {
+  const ShowEverything({
+    super.key,
+    required this.project,
+    required this.explorer,
+    this.compact = false,
+  });
 
   final Project project;
-  final Explorer? explorer;
+  final Explorer explorer;
+
+  /// Just the check, its name in a hover card.
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    final explorer = this.explorer;
-    final folder =
-        project.path.split('/').where((part) => part.isNotEmpty).lastOrNull ??
-        project.path;
-    // Lines up with the agent's header bar beside it, at the top of the
-    // window, so it drags the window too.
-    return WindowDrag(
-      child: Container(
-        height: titleBarHeight,
-        margin: const EdgeInsets.only(bottom: Space.s),
-        padding: const EdgeInsets.fromLTRB(Space.l, 0, Space.m, 0),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: palette.hairline)),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                folder,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyles.label.copyWith(color: palette.text),
-              ),
-            ),
-            if (explorer != null)
-              Pressable(
-                onTap: () => fireAndLog(
-                  backend.showAllFiles(project.id, !explorer.showAll),
+    const label = 'Show everything';
+    final toggle = Semantics(
+      button: true,
+      checked: explorer.showAll,
+      label: compact ? label : null,
+      child: Pressable(
+        onTap: () =>
+            fireAndLog(backend.showAllFiles(project.id, !explorer.showAll)),
+        builder: (context, hovered) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CheckMark(on: explorer.showAll),
+              if (!compact) ...[
+                const SizedBox(width: Space.xs + 2),
+                Text(
+                  label,
+                  style: TextStyles.caption.copyWith(
+                    color: hovered || explorer.showAll
+                        ? palette.text
+                        : palette.textMuted,
+                  ),
                 ),
-                builder: (context, hovered) => Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CheckMark(on: explorer.showAll),
-                    const SizedBox(width: Space.xs + 2),
-                    Text(
-                      'Show everything',
-                      style: TextStyles.caption.copyWith(
-                        color: hovered || explorer.showAll
-                            ? palette.text
-                            : palette.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
+              ],
+            ],
+          ),
         ),
       ),
     );
+    if (!compact) return toggle;
+    return HoverCard(card: (context) => const Text(label), child: toggle);
   }
+}
+
+/// A faint line where the files would be.
+class FilesNote extends StatelessWidget {
+  const FilesNote(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.all(Space.m),
+    child: Text(
+      text,
+      style: TextStyles.body.copyWith(color: Palette.of(context).textFaint),
+    ),
+  );
 }
 
 /// The project's own folder, then each of its folders, under the folder's
 /// name and path.
-class _Tree extends StatelessWidget {
-  const _Tree({required this.project, required this.explorer});
+class FilesTree extends StatelessWidget {
+  const FilesTree({
+    super.key,
+    required this.project,
+    required this.explorer,
+    required this.onOpen,
+  });
 
   final Project project;
   final Explorer? explorer;
+
+  /// A file was clicked: its absolute path.
+  final ValueChanged<String> onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -134,12 +207,7 @@ class _Tree extends StatelessWidget {
         ),
       ),
     );
-    if (explorer == null) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Space.s),
-        child: note('Reading the folder…'),
-      );
-    }
+    if (explorer == null) return const FilesNote('Reading the folder…');
     // Rows are built as they scroll into view.
     final rows = <Widget Function()>[];
     void folder(
@@ -175,6 +243,7 @@ class _Tree extends StatelessWidget {
             () => SizedBox(
               height: 24,
               child: _FileRow(
+                onOpen: onOpen,
                 projectId: project.id,
                 folderId: folderId,
                 agentId: agentId,
@@ -312,8 +381,9 @@ String _join(String base, String path) =>
     base.endsWith('/') ? '$base$path' : '$base/$path';
 
 /// Opens [path] in a viewer beside the selected agent's conversation, as an
-/// agent's `show` does, or makes its pane glow when it's open already.
-void openFile(BuildContext context, String path) {
+/// agent's `show` does, or makes its pane glow when it's open already. From
+/// a Files pane ([beside]), the first viewer goes right of it.
+void openFile(BuildContext context, String path, {String? beside}) {
   final scope = AppScope.scope(context);
   final backend = scope.backend;
   final agent = backend.workspace.selectedAgent;
@@ -321,7 +391,7 @@ void openFile(BuildContext context, String path) {
   // From Settings or the Marketplace, back to the agent.
   if (scope.page.value != AppPage.agent) AppScope.closePage(context);
   final root = layoutOf(agent);
-  final opened = open(root, path);
+  final opened = open(root, path, beside: beside);
   if (identical(opened.root, root)) {
     backend.highlights.glow('pane:${agent.id}:${opened.paneId}', [
       agentColor(agent.color),
@@ -337,6 +407,7 @@ String shortPath(String path) =>
 
 class _FileRow extends StatelessWidget {
   const _FileRow({
+    required this.onOpen,
     required this.projectId,
     required this.folderId,
     required this.entry,
@@ -344,6 +415,7 @@ class _FileRow extends StatelessWidget {
     this.agentId = '',
   });
 
+  final ValueChanged<String> onOpen;
   final String projectId;
 
   /// The folder the entry's path is from.
@@ -371,7 +443,7 @@ class _FileRow extends StatelessWidget {
                 agentId: agentId,
               ),
             )
-          : () => openFile(context, _join(base, entry.path)),
+          : () => onOpen(_join(base, entry.path)),
       builder: (context, hovered) {
         final color = hovered ? palette.text : palette.textMuted;
         return Opacity(

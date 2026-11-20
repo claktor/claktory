@@ -969,6 +969,7 @@ impl Vault {
             locked_mode: inner.locked_mode,
             secrets,
             requests: asks::pending(db)?,
+            ..v1::VaultState::default()
         };
         Ok((state, recent))
     }

@@ -80,12 +80,14 @@ class RecordingBackend extends Backend {
     String agentId,
     String text, {
     String clientId = '',
+    List<Attachment> attachments = const [],
   }) => _record(
     ClientMessage(
       sendMessage: SendMessage(
         agentId: agentId,
         text: text,
         clientId: clientId,
+        attachments: attachments,
       ),
     ),
   );
@@ -373,6 +375,10 @@ class RecordingBackend extends Backend {
       openPanel: OpenPanel(agentId: agentId, extensionId: extensionId),
     ),
   );
+
+  @override
+  Future<void> watchFiles(String projectId) =>
+      _record(ClientMessage(watchFiles: WatchFiles(projectId: projectId)));
 
   @override
   Future<void> showAllFiles(String projectId, bool showAll) => _record(

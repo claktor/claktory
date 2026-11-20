@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'explorer.dart' show FilesPane;
 import 'highlights.dart';
 import 'identity.dart';
 import 'changelog.dart';
@@ -60,11 +61,39 @@ ViewNode? pagePane(ViewNode root, AppPage page) {
 /// takes half the conversation's share and the panes beside keep theirs;
 /// else the two share the conversation's place. At [maxPanes] the oldest
 /// pane other than the conversation gives way.
-ViewNode withPage(ViewNode root, AppPage page) {
-  final pane = ViewNode(
+ViewNode withPage(ViewNode root, AppPage page) => _besideChat(
+  root,
+  ViewNode(
     id: newPaneId(pageKinds[page]!),
     leaf: ViewLeaf(kind: pageKinds[page]!),
-  );
+  ),
+);
+
+/// The pane showing [projectId]'s Files in [root], or null.
+ViewNode? filesPane(ViewNode root, String projectId) {
+  for (final leaf in leaves(root)) {
+    if (leaf.leaf.kind == filesKind && leaf.leaf.path == projectId) {
+      return leaf;
+    }
+  }
+  return null;
+}
+
+/// [root] with [project]'s Files right of the conversation, as [withPage]
+/// places a page, taking a quarter of the conversation's share: a file tree
+/// needs less room than what's read beside it.
+ViewNode withFiles(ViewNode root, Project project) => _besideChat(
+  root,
+  ViewNode(
+    id: newPaneId(filesKind),
+    leaf: ViewLeaf(kind: filesKind, path: project.id, title: project.name),
+  ),
+  share: 1 / 4,
+);
+
+/// [root] with [pane] right of the conversation, taking [share] of the
+/// conversation's share in a row.
+ViewNode _besideChat(ViewNode root, ViewNode pane, {double share = 0.5}) {
   var tree = root;
   if (leaves(tree).length >= maxPanes) {
     final oldest = leaves(tree)
@@ -93,15 +122,31 @@ ViewNode withPage(ViewNode root, AppPage page) {
         axis: split.axis,
         children: [...split.children]..insert(at + 1, pane),
         weights: [...shares]
-          ..[at] = shares[at] / 2
-          ..insert(at + 1, shares[at] / 2),
+          ..[at] = shares[at] * (1 - share)
+          ..insert(at + 1, shares[at] * share),
       ),
     );
   }
 
   final placed = place(tree);
   if (find(placed, pane.id) != null) return placed;
-  return insert(tree, pane, chat.id, DropEdge.right) ?? tree;
+  final inserted = insert(tree, pane, chat.id, DropEdge.right);
+  if (inserted == null) return tree;
+  if (share == 0.5) return inserted;
+  // The new split holds just the conversation and the pane.
+  ViewNode? parent(ViewNode node) {
+    if (!node.hasSplit()) return null;
+    if (node.split.children.any((child) => child.id == pane.id)) return node;
+    for (final child in node.split.children) {
+      final found = parent(child);
+      if (found != null) return found;
+    }
+    return null;
+  }
+
+  final split = parent(inserted);
+  if (split == null || split.split.children.length != 2) return inserted;
+  return resize(inserted, split.id, [1 - share, share]);
 }
 
 /// What a pane's header carries while it's dragged.
@@ -295,6 +340,10 @@ class _PaneLayoutState extends State<PaneLayout> {
               AppPage.changelog => const _PagePane(child: ChangelogView()),
               // A canvas pans by itself: no sideways scroll around it.
               AppPage.map => const InPane(child: MapView()),
+              _ when leaf.kind == filesKind => FilesPane(
+                projectId: leaf.path,
+                paneId: node.id,
+              ),
               _ => Builder(builder: (context) => viewerBody(context, leaf)),
             },
           );
@@ -507,6 +556,7 @@ class _PaneState extends State<Pane> {
 /// What a pane's header says it is.
 String paneTitle(ViewLeaf leaf) {
   if (leaf.kind == chatKind) return 'Conversation';
+  if (leaf.kind == filesKind) return 'Files';
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => 'Settings',
     AppPage.marketplace => 'Marketplace',
@@ -519,6 +569,7 @@ String paneTitle(ViewLeaf leaf) {
 /// A pane's 14px glyph: the agent for the conversation, else its viewer's.
 Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
   if (leaf.kind == chatKind) return AgentCharacter(agent: agent, size: 14);
+  if (leaf.kind == filesKind) return FolderGlyph(color: color);
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => SizedBox.square(
       dimension: 14,

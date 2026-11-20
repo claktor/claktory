@@ -3,17 +3,32 @@ import 'package:markdown/markdown.dart' as md;
 
 import 'identity.dart';
 
+/// Builds one block of rendered text: [span] is all it shows (with its
+/// style), [index] its place among the blocks in reading order (from 0,
+/// counted afresh each build), and [build] makes the plain widget for a
+/// span. A viewer that comments on what it shows (annotations) uses it to
+/// know each block's text, paint highlights and find where it is.
+typedef MarkdownTextBlock = Widget Function(
+  int index,
+  TextSpan span,
+  Widget Function(TextSpan span) build,
+);
+
 /// Renders agent markdown: paragraphs, headings, lists, quotes, tables,
 /// emphasis, inline code and fenced code. Parsing happens in [build], so a
 /// streaming entry re-parses at most once per frame however many deltas
 /// arrive.
 class Markdown extends StatelessWidget {
-  const Markdown(this.text, {super.key, this.color});
+  const Markdown(this.text, {super.key, this.color, this.textBlock});
 
   final String text;
 
   /// Body text color; `text` by default.
   final Color? color;
+
+  /// Builds each block of text instead of a plain [Text] (see
+  /// [MarkdownTextBlock]); null for the plain ones.
+  final MarkdownTextBlock? textBlock;
 
   @override
   Widget build(BuildContext context) {
@@ -22,7 +37,12 @@ class Markdown extends StatelessWidget {
       encodeHtml: false,
     ).parse(text);
     final palette = Palette.of(context);
-    final renderer = _Renderer(palette, color ?? palette.text);
+    final textBlock = this.textBlock;
+    final renderer = _Renderer(
+      palette,
+      color ?? palette.text,
+      textBlock == null ? null : _Blocks(textBlock),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: renderer.blocks(nodes),
@@ -33,10 +53,14 @@ class Markdown extends StatelessWidget {
 /// A fenced code block: Geist Mono on a panel, scrolling sideways rather
 /// than wrapping.
 class CodeBlock extends StatelessWidget {
-  const CodeBlock(this.code, {super.key, this.color});
+  const CodeBlock(this.code, {super.key, this.color, this.text});
 
   final String code;
   final Color? color;
+
+  /// Shown instead of the plain [Text] of [code] (see
+  /// [Markdown.textBlock]).
+  final Widget? text;
 
   @override
   Widget build(BuildContext context) {
@@ -53,21 +77,40 @@ class CodeBlock extends StatelessWidget {
           horizontal: Space.m,
           vertical: Space.s + 2,
         ),
-        child: Text(
-          code,
-          softWrap: false,
-          style: TextStyles.code.copyWith(color: color ?? palette.text),
-        ),
+        child:
+            text ??
+            Text(
+              code,
+              softWrap: false,
+              style: TextStyles.code.copyWith(color: color ?? palette.text),
+            ),
       ),
     );
   }
 }
 
+/// [Markdown.textBlock] with the count of blocks built so far, shared by
+/// a quote's renderer so blocks are counted in reading order.
+class _Blocks {
+  _Blocks(this.build);
+
+  final MarkdownTextBlock build;
+  var _next = 0;
+
+  Widget block(TextSpan span, Widget Function(TextSpan span) plain) =>
+      build(_next++, span, plain);
+}
+
+Widget _plainRich(TextSpan span) => Text.rich(span);
+
 class _Renderer {
-  _Renderer(this.palette, this.color);
+  _Renderer(this.palette, this.color, [this.textBlocks]);
 
   final Palette palette;
   final Color color;
+
+  /// Null when the text is plain [Text]s (the transcript).
+  final _Blocks? textBlocks;
 
   TextStyle get _body => TextStyles.body.copyWith(color: color);
 
@@ -85,7 +128,11 @@ class _Renderer {
   Widget? _block(md.Node node) {
     if (node is md.Text) {
       final text = node.text.trim();
-      return text.isEmpty ? null : Text(text, style: _body);
+      if (text.isEmpty) return null;
+      final blocks = textBlocks;
+      return blocks == null
+          ? Text(text, style: _body)
+          : blocks.block(TextSpan(text: text, style: _body), _plainRich);
     }
     if (node is! md.Element) return null;
     switch (node.tag) {
@@ -109,7 +156,18 @@ class _Renderer {
           TextStyles.label.copyWith(color: color, fontWeight: FontWeight.w600),
         );
       case 'pre':
-        return CodeBlock(_trimTrailingNewline(node.textContent));
+        final code = _trimTrailingNewline(node.textContent);
+        final blocks = textBlocks;
+        return CodeBlock(
+          code,
+          text: blocks?.block(
+            TextSpan(
+              text: code,
+              style: TextStyles.code.copyWith(color: palette.text),
+            ),
+            (span) => Text.rich(span, softWrap: false),
+          ),
+        );
       case 'ul':
       case 'ol':
         return _list(node);
@@ -124,6 +182,7 @@ class _Renderer {
             children: _Renderer(
               palette,
               palette.textMuted,
+              textBlocks,
             ).blocks(node.children ?? const []),
           ),
         );
@@ -248,7 +307,9 @@ class _Renderer {
   Widget _rich(List<md.Node>? nodes, TextStyle style) {
     final spans = <InlineSpan>[];
     _inline(nodes ?? const [], style, spans);
-    return Text.rich(TextSpan(style: style, children: spans));
+    final span = TextSpan(style: style, children: spans);
+    final blocks = textBlocks;
+    return blocks == null ? Text.rich(span) : blocks.block(span, _plainRich);
   }
 
   void _inline(List<md.Node> nodes, TextStyle style, List<InlineSpan> out) {

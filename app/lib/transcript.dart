@@ -9,9 +9,11 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
 import 'controls.dart';
+import 'explorer.dart' show openFile;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
@@ -571,8 +573,38 @@ class _TranscriptViewState extends State<TranscriptView>
   Widget _queuedItem(_Waiting waiting) {
     final palette = Palette.of(context);
     final message = waiting.message;
+    final files = waiting.outgoing?.files ?? const <OutgoingFile>[];
     final (Widget bubble, CrossAxisAlignment side) = switch (message.source) {
-      'person' => (_UserText(message.text), CrossAxisAlignment.end),
+      'person' when files.isNotEmpty => (
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (message.text.isNotEmpty) ...[
+              _UserText(message.text),
+              const SizedBox(height: Space.xs),
+            ],
+            // Each file as it uploads.
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: Space.xs,
+              runSpacing: Space.xs,
+              children: [
+                for (final file in files)
+                  AttachmentChip(
+                    name: file.file.name,
+                    size: file.file.size,
+                    progress: file.done == null ? file.progress : null,
+                  ),
+              ],
+            ),
+          ],
+        ),
+        CrossAxisAlignment.end,
+      ),
+      'person' => (
+        _UserText(message.text, files: message.attachments),
+        CrossAxisAlignment.end,
+      ),
       'agent' => (
         _AgentMessage(
           Event(
@@ -667,13 +699,21 @@ class _TranscriptViewState extends State<TranscriptView>
   /// Takes a message that wasn't sent back to the message box, to change
   /// it; after anything already typed there.
   void _edit(Outgoing outgoing) {
-    final drafts = AppScope.scope(context).drafts;
+    final scope = AppScope.scope(context);
+    final drafts = scope.drafts;
     final draft = drafts.of(outgoing.agentId);
-    drafts.set(
-      outgoing.agentId,
-      draft.trim().isEmpty ? outgoing.text : '$draft\n\n${outgoing.text}',
+    if (outgoing.text.isNotEmpty) {
+      drafts.set(
+        outgoing.agentId,
+        draft.trim().isEmpty ? outgoing.text : '$draft\n\n${outgoing.text}',
+      );
+    }
+    unawaited(
+      scope.backend.attachments.add(outgoing.agentId, [
+        for (final file in outgoing.files) file.file.path,
+      ]),
     );
-    widget.outbox?.remove(outgoing);
+    widget.outbox?.takeBack(outgoing);
   }
 
   @override
@@ -929,6 +969,7 @@ class _EntryViewState extends State<EntryView> {
         _UserText(
           entry.user.text,
           sentFrom: entry.user.hasSentFrom() ? entry.user.sentFrom : null,
+          files: entry.user.attachments,
         ),
         Space.l,
       ),
@@ -995,6 +1036,8 @@ class _EntryViewState extends State<EntryView> {
         ),
         Space.l,
       ),
+      // Shown once the app has its card.
+      Entry_Kind.connectProposal ||
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
     return Padding(
@@ -1042,13 +1085,16 @@ class AgentTints extends InheritedWidget {
 /// The person's message: a bubble on the right in the agent's color, with
 /// a mark under it for the device it was sent from.
 class _UserText extends StatelessWidget {
-  const _UserText(this.text, {this.sentFrom});
+  const _UserText(this.text, {this.sentFrom, this.files = const []});
 
   final String text;
 
   /// Where it was sent from; null when the backend doesn't know (sent
   /// before it kept that), and then nothing shows.
   final SentFrom? sentFrom;
+
+  /// The files sent with it, under the bubble (or on their own).
+  final List<Attachment> files;
 
   @override
   Widget build(BuildContext context) {
@@ -1062,16 +1108,147 @@ class _UserText extends StatelessWidget {
       ),
     );
     final from = sentFrom;
-    if (from == null) return bubble;
+    if (from == null && files.isEmpty) return bubble;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        bubble,
-        Padding(
-          padding: const EdgeInsets.only(right: Space.m, top: 2),
-          child: DeviceMark(from),
-        ),
+        if (text.isNotEmpty) bubble,
+        if (files.isNotEmpty)
+          Padding(
+            padding: EdgeInsets.only(top: text.isEmpty ? 0 : Space.xs),
+            child: SentFiles(files),
+          ),
+        if (from != null)
+          Padding(
+            padding: const EdgeInsets.only(right: Space.m, top: 2),
+            child: DeviceMark(from),
+          ),
       ],
+    );
+  }
+}
+
+/// The files sent with one of the person's messages, at its side: each
+/// picture as a thumbnail, any other file as a chip, both opening in a
+/// viewer beside the conversation.
+class SentFiles extends StatelessWidget {
+  const SentFiles(this.files, {super.key});
+
+  final List<Attachment> files;
+
+  @override
+  Widget build(BuildContext context) => Wrap(
+    alignment: WrapAlignment.end,
+    spacing: Space.xs,
+    runSpacing: Space.xs,
+    children: [
+      for (final file in files)
+        isImageName(file.name)
+            ? _Thumbnail(file)
+            : AttachmentChip(
+                name: file.name,
+                size: file.size.toInt(),
+                onOpen: () => openFile(context, file.path),
+              ),
+    ],
+  );
+}
+
+/// A picture sent with a message, fitted in 240×180 at most, 10px radius
+/// and a hairline; it opens in the image viewer. One too big to fetch here,
+/// or that can't be shown, is a chip instead.
+class _Thumbnail extends StatefulWidget {
+  const _Thumbnail(this.file);
+
+  final Attachment file;
+
+  /// The biggest picture fetched for a thumbnail.
+  static const maxBytes = 8 * 1024 * 1024;
+
+  /// Pictures fetched, by path, the latest last: a conversation scrolled
+  /// back and forth doesn't fetch them again.
+  static final _cache = <String, Uint8List>{};
+  static const _kept = 40;
+
+  @override
+  State<_Thumbnail> createState() => _ThumbnailState();
+}
+
+class _ThumbnailState extends State<_Thumbnail> {
+  Uint8List? _bytes;
+  var _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final file = widget.file;
+    final cached = _Thumbnail._cache.remove(file.path);
+    if (cached != null) {
+      _Thumbnail._cache[file.path] = cached;
+      _bytes = cached;
+    } else if (file.size.toInt() > _Thumbnail.maxBytes) {
+      _failed = true;
+    } else {
+      unawaited(_fetch());
+    }
+  }
+
+  Future<void> _fetch() async {
+    try {
+      final content = await AppScope.of(context)
+          .readFile(widget.file.path, maxBytes: _Thumbnail.maxBytes);
+      if (content.error.isNotEmpty || content.truncated) {
+        throw const RequestFailure('');
+      }
+      final bytes = Uint8List.fromList(content.data);
+      _Thumbnail._cache[widget.file.path] = bytes;
+      while (_Thumbnail._cache.length > _Thumbnail._kept) {
+        _Thumbnail._cache.remove(_Thumbnail._cache.keys.first);
+      }
+      if (mounted) setState(() => _bytes = bytes);
+    } on RequestFailure {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final file = widget.file;
+    void open() => openFile(context, file.path);
+    final chip = AttachmentChip(
+      name: file.name,
+      size: file.size.toInt(),
+      onOpen: open,
+    );
+    if (_failed) return chip;
+    final bytes = _bytes;
+    final ratio = MediaQuery.devicePixelRatioOf(context);
+    return Semantics(
+      image: true,
+      label: file.name,
+      child: Pressable(
+        onTap: open,
+        builder: (context, hovered) => Container(
+          constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
+          decoration: BoxDecoration(
+            color: palette.sidebar,
+            borderRadius: BorderRadius.circular(Radii.panel),
+            border: Border.all(color: palette.hairline),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: bytes == null
+              // On its way: the room it will most likely take.
+              ? const SizedBox(width: 160, height: 120)
+              : Image.memory(
+                  bytes,
+                  cacheWidth: (240 * ratio).round(),
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                  errorBuilder: (context, error, stack) => chip,
+                ),
+        ),
+      ),
     );
   }
 }

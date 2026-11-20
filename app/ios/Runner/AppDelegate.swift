@@ -1,7 +1,9 @@
 import CoreImage
 import Flutter
+import PhotosUI
 import Security
 import UIKit
+import UniformTypeIdentifiers
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -40,6 +42,8 @@ import UIKit
       case "openCameraSettings":
         Camera.openSettings()
         result(nil)
+      case "pickAttachments":
+        Attach.shared.pick(result)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -116,5 +120,120 @@ enum Keychain {
     if SecItemUpdate(query as CFDictionary, update as CFDictionary) == errSecItemNotFound {
       SecItemAdd(query.merging(update) { $1 } as CFDictionary, nil)
     }
+  }
+}
+
+/// Where the person attaches files from (app/lib/attachments.dart): the
+/// system's menu (Choose from Photos, Choose from Files, and Paste image when the
+/// clipboard holds a picture), then its picker. What's chosen is copied
+/// into this app's temporary folder, and the copies' paths answered.
+final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDelegate {
+  static let shared = Attach()
+
+  private var result: FlutterResult?
+
+  func pick(_ result: @escaping FlutterResult) {
+    guard self.result == nil, let presenter = Self.presenter() else { return result([]) }
+    self.result = result
+    let menu = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    menu.addAction(
+      UIAlertAction(title: "Choose from Photos", style: .default) { _ in self.photos(presenter) })
+    menu.addAction(
+      UIAlertAction(title: "Choose from Files", style: .default) { _ in self.files(presenter) })
+    if UIPasteboard.general.hasImages {
+      menu.addAction(UIAlertAction(title: "Paste image", style: .default) { _ in self.paste() })
+    }
+    menu.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in self.finish([]) })
+    presenter.present(menu, animated: true)
+  }
+
+  private func finish(_ paths: [String]) {
+    result?(paths)
+    result = nil
+  }
+
+  private func photos(_ presenter: UIViewController) {
+    var configuration = PHPickerConfiguration()
+    configuration.selectionLimit = 0
+    let picker = PHPickerViewController(configuration: configuration)
+    picker.delegate = self
+    presenter.present(picker, animated: true)
+  }
+
+  func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+    picker.dismiss(animated: true)
+    let group = DispatchGroup()
+    let lock = NSLock()
+    var paths = [Int: String]()
+    for (index, item) in results.enumerated() {
+      let provider = item.itemProvider
+      // JPEG when the photo offers it: agents read it more readily than HEIC.
+      let types = provider.registeredTypeIdentifiers
+      guard
+        let type = types.first(where: { $0 == UTType.jpeg.identifier })
+          ?? types.first(where: { $0 == UTType.png.identifier }) ?? types.first
+      else { continue }
+      let ext = UTType(type)?.preferredFilenameExtension
+      let name = (provider.suggestedName ?? "Photo") + (ext.map { ".\($0)" } ?? "")
+      group.enter()
+      provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+        // The file is gone once this returns, so it's copied now.
+        if let url, let copy = Self.copy(url, as: name) {
+          lock.lock()
+          paths[index] = copy
+          lock.unlock()
+        }
+        group.leave()
+      }
+    }
+    group.notify(queue: .main) { self.finish(paths.keys.sorted().compactMap { paths[$0] }) }
+  }
+
+  private func files(_ presenter: UIViewController) {
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+    picker.allowsMultipleSelection = true
+    picker.delegate = self
+    presenter.present(picker, animated: true)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    // Copies already, made for this app.
+    finish(urls.map(\.path))
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    finish([])
+  }
+
+  private func paste() {
+    guard let png = UIPasteboard.general.image?.pngData(), let folder = Self.folder() else {
+      return finish([])
+    }
+    let file = folder.appendingPathComponent("Pasted image.png")
+    finish((try? png.write(to: file)) == nil ? [] : [file.path])
+  }
+
+  /// A new folder of its own in the temporary folder, so names never clash.
+  private static func folder() -> URL? {
+    let folder = FileManager.default.temporaryDirectory
+      .appendingPathComponent("Attachments").appendingPathComponent(UUID().uuidString)
+    return (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true))
+      == nil ? nil : folder
+  }
+
+  private static func copy(_ url: URL, as name: String) -> String? {
+    guard let folder = folder() else { return nil }
+    let file = folder.appendingPathComponent(name)
+    return (try? FileManager.default.copyItem(at: url, to: file)) == nil ? nil : file.path
+  }
+
+  /// What's on screen, to present the menu and pickers over.
+  private static func presenter() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    var top = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+      ?? scene?.windows.first?.rootViewController
+    while let presented = top?.presentedViewController { top = presented }
+    return top
   }
 }

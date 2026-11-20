@@ -17,6 +17,7 @@
 
 pub(crate) mod agents;
 pub(crate) mod checklist;
+pub(crate) mod comments;
 pub(crate) mod database;
 pub(crate) mod highlight;
 pub(crate) mod memory;
@@ -202,9 +203,10 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 12] = [
+pub(crate) const ALL: [&dyn Extension; 13] = [
     &agents::Agents,
     &checklist::Checklist,
+    &comments::Comments,
     &database::Database,
     &highlight::Highlight,
     &memory::Memory,
@@ -424,7 +426,7 @@ pub(crate) fn of_agent(config: &Config, agent: &AgentConfig) -> Vec<v1::AgentExt
     let mut extensions = Vec::new();
     for unit in units() {
         let manifest = unit.extension.manifest();
-        let mut options = std::collections::HashMap::new();
+        let mut options = std::collections::BTreeMap::new();
         for spec in manifest.options.iter().filter(|_| unit.instance.is_none()) {
             let value = match spec.kind {
                 OptionKind::Switch => v1::OptionValue { on: switch(agent, manifest.id, spec.id), agent_ids: Vec::new() },

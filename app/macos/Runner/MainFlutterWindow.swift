@@ -44,6 +44,8 @@ class MainFlutterWindow: NSWindow {
       case "drag": self?.drag()
       case "zoom": self?.doubleClicked()
       case "pickFolder": return self?.pickFolder(from: call.arguments as? String, result) ?? result(nil)
+      case "pickFiles": return self?.pickFiles(result) ?? result([])
+      case "takeFiles": self?.takesFiles = call.arguments as? Bool ?? false
       default: return result(FlutterMethodNotImplemented)
       }
       result(nil)
@@ -80,6 +82,8 @@ class MainFlutterWindow: NSWindow {
     }
     placeTrafficLights()
 
+    registerForDraggedTypes([.fileURL])
+
     pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) {
       [weak self] event in
       guard let self, Self.isPaste(event) else { return event }
@@ -87,7 +91,7 @@ class MainFlutterWindow: NSWindow {
         // Its key-down was handled here, so Flutter never sees a stray "v".
         return self.pasting ? nil : event
       }
-      self.pasting = self.paste(into: event.window ?? self)
+      self.pasting = self.paste(into: event.window ?? self) || self.pasteFiles()
       return self.pasting ? nil : event
     }
 
@@ -276,6 +280,80 @@ class MainFlutterWindow: NSWindow {
     else { return false }
     client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
     return true
+  }
+
+  // Files dragged onto the window from the Finder go to the message box of
+  // the agent showing (app/lib/attachments.dart), while there is one.
+  private var takesFiles = false
+
+  private func files(in sender: NSDraggingInfo) -> [String] {
+    let urls = sender.draggingPasteboard.readObjects(
+      forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
+    return (urls ?? []).map(\.path)
+  }
+
+  @objc func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    guard takesFiles, !files(in: sender).isEmpty else { return [] }
+    windowChannel?.invokeMethod("filesOver", arguments: true)
+    return .copy
+  }
+
+  @objc func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+    takesFiles && !files(in: sender).isEmpty ? .copy : []
+  }
+
+  @objc func draggingExited(_ sender: NSDraggingInfo?) {
+    windowChannel?.invokeMethod("filesOver", arguments: false)
+  }
+
+  @objc func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    let paths = files(in: sender)
+    guard takesFiles, !paths.isEmpty else {
+      windowChannel?.invokeMethod("filesOver", arguments: false)
+      return false
+    }
+    windowChannel?.invokeMethod("filesDropped", arguments: paths)
+    return true
+  }
+
+  /// Cmd+V with files (copied in the Finder) or a picture on the clipboard
+  /// and no text attaches them, as dropping them would; false when there's
+  /// nothing to attach or no message box takes files.
+  private func pasteFiles() -> Bool {
+    guard takesFiles else { return false }
+    let board = NSPasteboard.general
+    let urls = board.readObjects(
+      forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    var paths = urls.map(\.path)
+    if paths.isEmpty, let image = NSImage(pasteboard: board),
+      let tiff = image.tiffRepresentation,
+      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+    {
+      let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Attachments").appendingPathComponent(UUID().uuidString)
+      let file = folder.appendingPathComponent("Pasted image.png")
+      do {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try png.write(to: file)
+        paths = [file.path]
+      } catch { return false }
+    }
+    guard !paths.isEmpty else { return false }
+    windowChannel?.invokeMethod("filesDropped", arguments: paths)
+    return true
+  }
+
+  /// Asks for files to send in a sheet on this window; answers their
+  /// paths, or none when cancelled.
+  private func pickFiles(_ result: @escaping FlutterResult) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = true
+    panel.prompt = "Attach"
+    panel.beginSheetModal(for: self) { response in
+      result(response == .OK ? panel.urls.map(\.path) : [])
+    }
   }
 
   /// First launch: roomy enough for the sidebar and a readable conversation,

@@ -102,6 +102,32 @@ message ClientMessage {
     CancelPairing cancel_pairing = 68;
     // Earlier entries of a transcript (see Transcript.has_earlier).
     LoadEntries load_entries = 69;
+    // Uploading a file for an agent, in chunks (see StartUpload).
+    StartUpload start_upload = 70;
+    UploadChunk upload_chunk = 71;
+    FinishUpload finish_upload = 72;
+    CancelUpload cancel_upload = 73;
+    // Comments on files (see Thread).
+    ListThreads list_threads = 74;
+    CreateThread create_thread = 75;
+    ReplyThread reply_thread = 76;
+    EditComment edit_comment = 77;
+    DeleteComment delete_comment = 78;
+    SetThreadStatus set_thread_status = 79;
+    ReaddressThread readdress_thread = 80;
+    ReattachThread reattach_thread = 81;
+    SendComments send_comments = 82;
+    // The project whose files this connection shows on their own (the
+    // iPhone's Files page).
+    WatchFiles watch_files = 84;
+    // Connecting a service (Cloudflare, AWS) to the vault: see Connector.
+    StartConnect start_connect = 90;
+    FinishConnect finish_connect = 91;
+    CancelConnect cancel_connect = 92;
+    DismissConnectProposal dismiss_connect_proposal = 93;
+    ListConnectChoices list_connect_choices = 94;
+    DeriveSecret derive_secret = 95;
+    DisconnectService disconnect_service = 96;
   }
 }
 
@@ -144,6 +170,24 @@ message ServerMessage {
     PairingPending pairing_pending = 25;
     // The answer to LoadEntries, to the asker only.
     EntryPage entry_page = 26;
+    // Instead of Workspace, to an app that asked for patches in Hello: what
+    // changed since the last Workspace or WorkspacePatch it was sent.
+    WorkspacePatch workspace_patch = 27;
+    // The answers to StartUpload and UploadChunk, and to FinishUpload, to the
+    // asker only.
+    UploadProgress upload_progress = 28;
+    UploadedFile uploaded_file = 29;
+    // Every thread on a file: the answer to ListThreads, to the asker only,
+    // and to everyone whenever a thread on it changes.
+    ThreadList thread_list = 30;
+    // To everyone, when a file shown in a pane changes.
+    FileChanged file_changed = 31;
+    // The answer to CreateThread, to the asker only: the new thread.
+    Thread thread = 32;
+    // The answer to StartConnect, to the asker only: what to open.
+    ConnectStarted connect_started = 34;
+    // The answer to ListConnectChoices, to the asker only.
+    ConnectChoices connect_choices = 35;
   }
 }
 
@@ -160,6 +204,9 @@ message Hello {
   // (shorter on a phone). Its name the backend knows: the paired device's,
   // or this computer's for its own app. Unspecified from apps before it.
   DeviceKind device_kind = 4;
+  // The app applies WorkspacePatch: after the first whole Workspace, the
+  // backend sends only what changed. Apps before it get whole Workspaces.
+  bool workspace_patches = 5;
 }
 
 enum DeviceKind {
@@ -189,6 +236,10 @@ message Welcome {
   // this machine's own app (its code from <data folder>/remote/local-pairing);
   // empty on the loopback port.
   string device_id = 3;
+  // This Claktory's name and color (see Settings), to show before the first
+  // Workspace.
+  string name = 4;
+  string color = 5;
 }
 
 // Pairs a new device with this Factory. Answered with PairingCode. Refused
@@ -299,7 +350,8 @@ message RemoteAccess {
   // No longer used: empty.
   repeated string addresses = 6;
   repeated PairedDevice devices = 7;
-  // This machine's name, as pairing codes give it ("mac-mini").
+  // This machine's name ("mac-mini"), which pairing codes give until the
+  // Claktory is renamed (Settings.name).
   string machine = 8;
   // This backend's iroh endpoint id, as pairing codes give it (e=).
   string endpoint_id = 9;
@@ -468,6 +520,66 @@ message SendMessage {
   // match it to the queued message and transcript entry it becomes, which
   // carry it (QueuedMessage.client_id, UserText.client_id). Optional.
   string client_id = 3;
+  // Files uploaded for this agent (UploadedFile.attachment, as answered),
+  // which the message carries; with any, `text` may be empty. Each must be in
+  // the agent's uploads folder and still there, or the message is refused.
+  repeated Attachment attachments = 4;
+}
+
+// A file the person attached to a message: uploaded to the agent's uploads
+// folder on the machine Claktory runs on, for the agent to move where it
+// belongs.
+message Attachment {
+  // Where it's stored: <data folder>/agents/<agent id>/uploads/<yyyy-mm-dd>/<name>.
+  string path = 1;
+  // Its name as stored: the file's own, with " 2", " 3"… before the
+  // extension when the day's folder already has one so named.
+  string name = 2;
+  // In bytes.
+  uint64 size = 3;
+  // Its type as the app gave it, such as "image/png"; may be empty.
+  string mime = 4;
+}
+
+// Starts (or resumes) uploading a file for an agent: answered with
+// UploadProgress, saying how much the backend has (0 for a new upload).
+// Then UploadChunk from that offset, each answered with UploadProgress, and
+// FinishUpload, answered with UploadedFile. A connection that drops can
+// resume with the same `upload_id` and file while the backend runs; after a
+// restart of the backend it starts again from 0. Refused (with an error
+// saying why) for a file over 2 GB, an agent that doesn't exist, or a disk
+// without room for it and 1 GB to spare.
+message StartUpload {
+  // Made up by the app, unique for the file being uploaded.
+  string upload_id = 1;
+  string agent_id = 2;
+  // The file's name; only its last part is kept.
+  string name = 3;
+  // Its whole size in bytes.
+  uint64 size = 4;
+  // Its type, such as "image/png"; optional.
+  string mime = 5;
+}
+
+// Part of an upload's file, from `offset`, which must be how much the backend
+// has (UploadProgress.received). At most 1 MiB each.
+message UploadChunk {
+  string upload_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+// The whole file is sent: the backend checks its SHA-256 (hex; optional),
+// stores it and answers with UploadedFile. Refused if any of it is missing
+// or the hash differs, and the upload is gone.
+message FinishUpload {
+  string upload_id = 1;
+  string sha256 = 2;
+}
+
+// Abandons an upload; what the backend had of it is deleted.
+message CancelUpload {
+  string upload_id = 1;
 }
 
 // Stops the agent's current run.
@@ -549,6 +661,11 @@ message UpdateSettings {
   // Sets one provider's or model's cache lifetime: ttl "5m" or "1h"; "" goes
   // back to the default (its provider's, or the provider's own).
   CacheTtl cache_ttl = 25;
+  // This Claktory's name (see Settings); "" goes back to this computer's.
+  optional string name = 26;
+  // This Claktory's color (see Settings), one of the palette; "" goes back to
+  // its default.
+  optional string color = 27;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -644,6 +761,13 @@ message ExpandFolder {
   string folder_id = 4;
   // Or an agent's own checkout (ExplorerRoot.agent_id); folder_id is empty then.
   string agent_id = 5;
+}
+
+// Shows a project's files on this connection (an Explorer for it comes, and
+// again whenever it changes) until another WatchFiles or the connection
+// closes, answered with Ack. An empty project_id watches none.
+message WatchFiles {
+  string project_id = 1;
 }
 
 // Shows the files the project's .factoryignore hides, or hides them again.
@@ -781,6 +905,9 @@ message FileContent {
   // Why it couldn't be read ("No such file: …", "… is a folder", "Can't
   // read …: permission denied"); empty when it was. The rest is empty then.
   string error = 7;
+  // The whole file's SHA-256, in lowercase hex; empty when `truncated`. A
+  // thread made on this content says it in CreateThread.version_sha256.
+  string sha256 = 8;
 }
 
 // Sets an agent's layout (`Agent.layout`) for every device, answered with
@@ -835,6 +962,206 @@ message OpenPanel {
   string extension_id = 1;
   // The agent; empty for the selected one.
   string agent_id = 2;
+}
+
+// ---- Comments ----
+
+// A comment thread on a file, made in a viewer pane by the person or with an
+// agent's comments tools. Threads belong to files, not panes: the same file
+// shows the same threads wherever it's open. Each is addressed to one agent.
+message Thread {
+  // "t-41": unique in this Claktory.
+  string id = 1;
+  // The agent it's addressed to.
+  string agent_id = 2;
+  // The file, absolute.
+  string path = 3;
+  // The space its selectors were made in: "text" (the file's own text, in a
+  // plain view or a file that isn't Markdown), "markdown" (a Markdown file's
+  // formatted view) or "image".
+  string kind = 4;
+  // The file's SHA-256 (hex) that `selectors`, `source` and `rendered` refer
+  // to: ThreadList.version_sha256 while the file exists.
+  string version_sha256 = 5;
+  // Where it is, as W3C Web Annotation selectors (each a JSON object with a
+  // "type"): TextQuoteSelector {exact, prefix, suffix} and
+  // TextPositionSelector {start, end} (UTF-16 code units) in its kind's text
+  // for text files, FragmentSelector {conformsTo: "media-frags", value:
+  // "xywh=percent:x,y,w,h"} for images. Kept up to date as the file changes,
+  // for text files.
+  repeated Selector selectors = 6;
+  ThreadStatus status = 7;
+  AnchorState anchor = 8;
+  // Where it is in the file's text now; unset when DETACHED and for images.
+  TextAnchor source = 9;
+  // The same range in the plain text of a Markdown file's formatted view;
+  // set for Markdown files only (and unset when DETACHED). Find `exact` in
+  // the rendered text, nearest `start`.
+  TextAnchor rendered = 10;
+  // The text it was made on, as quoted then (`exact` of the first TextQuoteSelector):
+  // for "text changed since this comment" and the Detached group.
+  string original_exact = 11;
+  // Oldest first; the first is the one that opened it.
+  repeated ThreadComment comments = 12;
+  int64 created_ms = 13;
+  // When a comment, its status or its address last changed.
+  int64 updated_ms = 14;
+}
+
+message Selector {
+  // One selector, a JSON object with a "type".
+  string json = 1;
+}
+
+enum ThreadStatus {
+  THREAD_STATUS_UNSPECIFIED = 0;
+  THREAD_STATUS_OPEN = 1;
+  THREAD_STATUS_RESOLVED = 2;
+}
+
+enum AnchorState {
+  ANCHOR_STATE_UNSPECIFIED = 0;
+  // On the text it was made on.
+  ANCHOR_STATE_ANCHORED = 1;
+  // Found again, but the text there changed since (see original_exact).
+  ANCHOR_STATE_MOVED = 2;
+  // Not found in the file any more (or the file is gone); kept, never
+  // dropped. ReattachThread puts it on new text.
+  ANCHOR_STATE_DETACHED = 3;
+  // An image thread on a file that changed since: it may still be right.
+  ANCHOR_STATE_OUTDATED = 4;
+}
+
+// A range of text: in a file's own text (Thread.source), or in the plain text
+// of a Markdown file's formatted view (Thread.rendered).
+message TextAnchor {
+  // UTF-16 code units, end exclusive.
+  int32 start = 1;
+  int32 end = 2;
+  // The text in the range, and up to 32 characters before and after it.
+  string exact = 3;
+  string prefix = 4;
+  string suffix = 5;
+  // The file's lines it spans, from 1; 0 in Thread.rendered.
+  int32 first_line = 6;
+  int32 last_line = 7;
+}
+
+message ThreadComment {
+  // "c-97": unique in this Claktory.
+  string id = 1;
+  // The agent who wrote it; empty for the person.
+  string author_agent_id = 2;
+  // Markdown.
+  string body = 3;
+  int64 created_ms = 4;
+  // When the person last edited it; 0 if never.
+  int64 edited_ms = 5;
+  // The person's comment, not sent to the agent yet (SendComments sends it).
+  // Agents never see drafts.
+  bool draft = 6;
+}
+
+// Asks for every thread on a file, open and resolved: answered with
+// ThreadList. Ask when a viewer opens it (and after reconnecting); after
+// that, a ThreadList comes whenever a thread on it changes.
+message ListThreads {
+  // Absolute, or from the home folder.
+  string path = 1;
+}
+
+message ThreadList {
+  // Absolute.
+  string path = 1;
+  // The file's SHA-256 (hex) now, which its text threads' anchors refer to;
+  // empty when it's gone or too big to comment on.
+  string version_sha256 = 2;
+  repeated Thread threads = 3;
+}
+
+// A file shown in an agent's pane changed: read it again.
+message FileChanged {
+  string path = 1;
+  // Its SHA-256 now (hex); empty when it's gone.
+  string sha256 = 2;
+  // The agent whose write_file or edit_file changed it; empty when it was
+  // changed some other way (a command, another app).
+  string by_agent_id = 3;
+}
+
+// The person starts a thread, answered with the new Thread (or an Error whose
+// message can be shown as it is, such as "The text changed; select it
+// again."). It's a draft until sent, unless send_now.
+message CreateThread {
+  // The agent it's addressed to.
+  string agent_id = 1;
+  string path = 2;
+  // "text", "markdown" or "image" (see Thread.kind).
+  string kind = 3;
+  // FileContent.sha256 of the content the selection was made on. When the
+  // file changed since, the thread is put on the same text in the file as it
+  // is now, or refused if it isn't there any more.
+  string version_sha256 = 4;
+  // "text": TextQuoteSelector and TextPositionSelector in the file's text.
+  // "markdown": TextQuoteSelector (and TextPositionSelector, if known) in the
+  // formatted view's plain text. "image": a FragmentSelector.
+  repeated Selector selectors = 5;
+  // The first comment, Markdown; not empty.
+  string body = 6;
+  // Send it to the agent now, alone, rather than as a draft.
+  bool send_now = 7;
+}
+
+// The person replies on a thread, answered with Ack: a draft until sent,
+// unless send_now. Replying reopens a resolved thread.
+message ReplyThread {
+  string thread_id = 1;
+  string body = 2;
+  bool send_now = 3;
+}
+
+// Changes one of the person's comments, answered with Ack. One already sent
+// stays as the agent read it in its conversation; it sees the change the
+// next time it lists the thread.
+message EditComment {
+  string comment_id = 1;
+  string body = 2;
+}
+
+// Deletes one of the person's comments, answered with Ack. A thread left
+// with no comments is deleted with it.
+message DeleteComment {
+  string comment_id = 1;
+}
+
+// Resolves or reopens a thread, answered with Ack.
+message SetThreadStatus {
+  string thread_id = 1;
+  bool resolved = 2;
+}
+
+// Addresses a thread to another agent, answered with Ack. Its drafts go to
+// that agent when sent.
+message ReaddressThread {
+  string thread_id = 1;
+  string agent_id = 2;
+}
+
+// Puts a thread on a new selection (of a DETACHED one, say), answered with
+// Ack; the fields mean what they do in CreateThread.
+message ReattachThread {
+  string thread_id = 1;
+  string kind = 2;
+  string version_sha256 = 3;
+  repeated Selector selectors = 4;
+}
+
+// Sends the person's drafts on a file to the agent they're addressed to, as
+// one message it reads as an event; answered with Ack.
+message SendComments {
+  string agent_id = 1;
+  // Absolute; empty for every file.
+  string path = 2;
 }
 
 // ---- Sign-in ----
@@ -1004,6 +1331,39 @@ message Workspace {
   // How this Claktory is arranged, for the Map: computed here, laid out by
   // the app.
   ClaktoryMap map = 22;
+}
+
+// A Workspace as a change to the last one this app was sent (a Workspace or
+// a WorkspacePatch), so a busy Claktory doesn't resend everything each time
+// one thing changes. The first state after connecting is always a whole
+// Workspace; a patch only ever follows one.
+message WorkspacePatch {
+  // The new Workspace, but with what didn't change left out. Each field
+  // numbered in `kept` is as it was: take it from the last one. Any other
+  // field is as here, empty if it isn't set.
+  //
+  // `agents` is always the whole list, in order. An agent in `kept_agents`
+  // carries only its id: take it from the last one. One in
+  // `kept_agent_fields` carries only what changed (see there). Any other is
+  // whole, as here.
+  Workspace workspace = 1;
+  // Workspace field numbers (e.g. 18 for `changelog`) unchanged since the
+  // last one. Never 2 (`agents`).
+  repeated uint32 kept = 2;
+  // Ids of the agents unchanged since the last one.
+  repeated string kept_agents = 3;
+  // Agents that changed in only some fields (their status, say): in
+  // `workspace.agents` each carries its id and the fields that changed. Take
+  // the fields numbered in `kept` from the last one.
+  repeated KeptFields kept_agent_fields = 4;
+}
+
+// Which of an agent's fields are unchanged since the last Workspace.
+message KeptFields {
+  // The agent's id.
+  string id = 1;
+  // Agent field numbers (e.g. 4 for `prompt`); never 1 (`id`).
+  repeated uint32 kept = 2;
 }
 
 message ChangelogVersion {
@@ -1509,6 +1869,13 @@ message Settings {
   // set (config.json's `prompt_cache`); what isn't listed asks for the
   // provider's default. See Provider.cache_ttl for what applies.
   repeated CacheTtl cache_ttls = 25;
+  // This Claktory's name, the same on every device (config.json's `name`):
+  // this computer's name (as RemoteAccess.machine) until someone renames it.
+  string name = 26;
+  // This Claktory's color, one of the agents' palette (see Agent.color),
+  // the same on every device (config.json's `color`). Until someone picks
+  // one, a color that stays the same for this Claktory, chosen from its key.
+  string color = 27;
 }
 
 // How long a provider's (or one model's) prompt cache is asked to last.
@@ -1894,6 +2261,8 @@ message QueuedMessage {
   SentFrom sent_from = 8;
   // The person's: SendMessage.client_id, as sent; empty without one.
   string client_id = 9;
+  // The person's: the files it carries (see Attachment).
+  repeated Attachment attachments = 10;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -1924,6 +2293,9 @@ message Entry {
     Proposal proposal = 11;
     // An agent asks for a secret (its secrets_request tool): see SecretRequest.
     SecretRequest secret_request = 12;
+    // An agent proposes connecting a service (its
+    // secrets_propose_connection tool): see ConnectProposal.
+    ConnectProposal connect_proposal = 13;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -1990,6 +2362,22 @@ message UserText {
   // SendMessage.client_id, as sent; empty without one, and for messages from
   // before it.
   string client_id = 3;
+  // The files the message carries (see Attachment); `text` may be empty
+  // when it has any.
+  repeated Attachment attachments = 4;
+}
+
+// How much of an upload the backend has, in bytes: where the next
+// UploadChunk starts.
+message UploadProgress {
+  string upload_id = 1;
+  uint64 received = 2;
+}
+
+// An upload finished and stored: attach it to a message (SendMessage).
+message UploadedFile {
+  string upload_id = 1;
+  Attachment attachment = 2;
 }
 
 message AssistantText {
@@ -2058,10 +2446,15 @@ enum NoticeLevel {
   NOTICE_LEVEL_ERROR = 2;
 }
 
-// The focused project's folder as a tree, flattened into the rows to show: a
-// folder's children follow it when it's expanded. Folders come before files,
-// each sorted by name. Sent after the Workspace on connect and whenever the
-// tree changes, including when agents change files.
+// A project's folder as a tree, flattened into the rows to show: a folder's
+// children follow it when it's expanded. Folders come before files, each
+// sorted by name. One is sent for each project whose files are open: the
+// focused project's, those shown in a pane of any agent's layout (a ViewLeaf
+// of kind "files" whose path is the project's id), and the one a connection
+// watches (WatchFiles). Each comes after the Workspace on connect, and again
+// whenever its tree changes, including when agents change files. The focused
+// project's comes last, and again after any other's (for apps that keep only
+// the last one).
 message Explorer {
   string project_id = 1;
   // Whether files .factoryignore hides are shown (as `hidden` rows).
@@ -2132,6 +2525,15 @@ message VaultState {
   // Agents' requests still waiting for the person, oldest first. Each is also
   // an entry in its agent's conversation.
   repeated SecretRequest requests = 5;
+  // The services Claktory can connect (Settings → Secrets → Add), the same
+  // for every Claktory of this version.
+  repeated Connector connectors = 6;
+  // Agents' proposals to connect a service still waiting for the person,
+  // oldest first. Each is also an entry in its agent's conversation.
+  repeated ConnectProposal proposals = 7;
+  // Connections being made, or just ended (for 10 minutes, or until
+  // CancelConnect): every device sees how they go, never a URL or code.
+  repeated ConnectFlow flows = 8;
 }
 
 message SecretInfo {
@@ -2156,6 +2558,12 @@ message SecretInfo {
   // The agent that saved it (a key it made itself); empty when the person
   // added it.
   string owner_agent_id = 12;
+  // Set when it's a connected service (StartConnect): its tokens stay with
+  // the backend, so it has no variables and is given to no one; agents get
+  // secrets made from it (DeriveSecret).
+  SecretConnection connection = 13;
+  // Set when it was made from a connection (DeriveSecret).
+  SecretExport export = 14;
 }
 
 message SecretVariable {
@@ -2581,4 +2989,284 @@ enum MapEdgeKind {
   // From an agent to the folder it works in (the workspace's, a project's
   // or a project folder's node), or to its own database.
   MAP_EDGE_KIND_WRITES = 4;
+}
+
+// ---- Connecting services (one-click secrets; docs/CONNECTORS.md) ----
+//
+// The person connects a service's account (Cloudflare, AWS) by approving
+// Claktory on the service's own site: the app opens the page, catches where
+// the browser comes back and hands it to the backend (StartConnect,
+// FinishConnect), which signs in itself and keeps the tokens in the vault as
+// a connection (SecretInfo.connection). A connection is given to no one:
+// agents get secrets made from it with narrower access (DeriveSecret,
+// SecretInfo.export), given as any other.
+
+// A service Claktory can connect.
+message Connector {
+  // "cloudflare", "aws".
+  string id = 1;
+  string name = 2;
+  // What a connection gives, one sentence.
+  string description = 3;
+  // The access to ask for, one preselected.
+  repeated ConnectorAccess accesses = 4;
+  // What to ask the person before connecting (AWS: the access portal URL
+  // and region), sent in StartConnect.fields.
+  repeated ConnectorField fields = 5;
+  ConnectorFlowKind flow = 6;
+  // BROWSER: where the browser may come back to, "{port}" any port; the app
+  // makes a receiver for one and sends it, port filled in, as
+  // StartConnect.redirect_uri: "http://127.0.0.1:{port}/oauth/cloudflare"
+  // (a loopback listener on a Mac), "com.claktory.app:/oauth/cloudflare"
+  // (ASWebAuthenticationSession; com.claktory.app.dev for Claktory Dev).
+  repeated string redirect_uris = 7;
+  // The variables an agent given a secret made from it gets.
+  repeated string variables = 8;
+  // What the person needs first, one or two sentences; empty if nothing.
+  string setup_note = 9;
+  // Where to read about it; empty if nowhere.
+  string setup_url = 10;
+}
+
+message ConnectorAccess {
+  string id = 1;
+  // "Deploy websites".
+  string label = 2;
+  // What it lets Claktory do, a sentence for the person.
+  string why = 3;
+  // Exactly what's asked of the service: scopes or permissions.
+  repeated string scopes = 4;
+  bool preselected = 5;
+}
+
+message ConnectorField {
+  // The key in StartConnect.fields: "start_url", "region".
+  string id = 1;
+  string label = 2;
+  string placeholder = 3;
+  string hint = 4;
+  bool optional = 5;
+}
+
+enum ConnectorFlowKind {
+  CONNECTOR_FLOW_KIND_UNSPECIFIED = 0;
+  // The app opens the service's page and catches where the browser comes
+  // back (FinishConnect).
+  CONNECTOR_FLOW_KIND_BROWSER = 1;
+  // The app opens a page with a code filled in; the backend asks the service
+  // until the person approves. No FinishConnect.
+  CONNECTOR_FLOW_KIND_DEVICE = 2;
+}
+
+// An agent's proposal to connect a service (secrets_propose_connection),
+// shown in its conversation after the call and at the top of Settings →
+// Secrets while it waits. The person connects it (StartConnect with its id)
+// or dismisses it (DismissConnectProposal); the entry is sent again then.
+// The connection made for it is given to no one, the agent included: an
+// admin agent such as Rivet checks it against the proposal and gives the
+// agent a secret made from it with the least access the work needs.
+message ConnectProposal {
+  string id = 1;
+  // The agent that proposes it.
+  string agent_id = 2;
+  // One of VaultState.connectors.
+  string connector_id = 3;
+  // The ConnectorAccess it asks for; empty for the preselected one.
+  string access_id = 4;
+  // What it's for, in the agent's words.
+  string purpose = 5;
+  // The access it needs, in the agent's words: permissions, and what on
+  // (zones, accounts, roles).
+  string access = 6;
+  // Why it needs it.
+  string reason = 7;
+  ConnectProposalState state = 8;
+  int64 created_ms = 9;
+  // When it was connected or dismissed; 0 while pending.
+  int64 decided_ms = 10;
+  // The person's comment on dismissing; may be empty.
+  string comment = 11;
+  // CONNECTED: the connection made for it.
+  string secret_id = 12;
+  string secret_name = 13;
+}
+
+enum ConnectProposalState {
+  CONNECT_PROPOSAL_STATE_UNSPECIFIED = 0;
+  CONNECT_PROPOSAL_STATE_PENDING = 1;
+  CONNECT_PROPOSAL_STATE_CONNECTED = 2;
+  CONNECT_PROPOSAL_STATE_DISMISSED = 3;
+}
+
+// Starts connecting a service. The flow belongs to the device that asked:
+// only it can finish it, and unpairing it, or a restart of the backend, ends
+// it. The connection is named after the service and account ("Cloudflare
+// (matt@example.com)"); UpdateSecret renames it (name and description only).
+message StartConnect {
+  string connector_id = 1;
+  // One of its accesses; empty for the preselected one.
+  string access_id = 2;
+  // Its fields' values, by ConnectorField.id.
+  map<string, string> fields = 3;
+  // The proposal it answers; empty if none.
+  string proposal_id = 4;
+  // BROWSER: the receiver the app made, one of the connector's
+  // redirect_uris with the port filled in. Empty for DEVICE.
+  string redirect_uri = 5;
+  // A connection to connect again in place (it needs reconnecting, say);
+  // empty for a new one. The account must be the same.
+  string secret_id = 6;
+}
+
+message ConnectStarted {
+  string flow_id = 1;
+  // The page to open: the service's sign-in (BROWSER), or its verification
+  // page with the code filled in (DEVICE).
+  string url = 2;
+  // DEVICE: the code that page shows, for the person to check.
+  string user_code = 3;
+  // When the flow ends if not finished, in ms since 1970.
+  int64 expires_ms = 4;
+}
+
+// Where the browser came back to (BROWSER): the whole URL, as it is, with
+// its code and state or the service's error.
+message FinishConnect {
+  string flow_id = 1;
+  string callback_url = 2;
+}
+
+// Stops a flow, or removes an ended one from VaultState.flows.
+message CancelConnect {
+  string flow_id = 1;
+}
+
+message ConnectFlow {
+  string id = 1;
+  string connector_id = 2;
+  // The device it was started on.
+  string device_name = 3;
+  ConnectFlowState state = 4;
+  // FAILED: why, a sentence for the person.
+  string error = 5;
+  // CONNECTED: the connection (SecretInfo.id).
+  string secret_id = 6;
+  // The proposal it answers; empty if none.
+  string proposal_id = 7;
+  int64 started_ms = 8;
+  int64 expires_ms = 9;
+}
+
+enum ConnectFlowState {
+  CONNECT_FLOW_STATE_UNSPECIFIED = 0;
+  // Waiting for the person, in the browser.
+  CONNECT_FLOW_STATE_WAITING = 1;
+  // Signing in with what the browser brought back.
+  CONNECT_FLOW_STATE_EXCHANGING = 2;
+  // Reading the account and what was granted.
+  CONNECT_FLOW_STATE_CHECKING = 3;
+  CONNECT_FLOW_STATE_CONNECTED = 4;
+  CONNECT_FLOW_STATE_FAILED = 5;
+  CONNECT_FLOW_STATE_EXPIRED = 6;
+  CONNECT_FLOW_STATE_CANCELLED = 7;
+}
+
+message DismissConnectProposal {
+  string proposal_id = 1;
+  string comment = 2;
+}
+
+// A connected service's account, as the service said it was granted.
+message SecretConnection {
+  string connector_id = 1;
+  // Whose: "matt@example.com", "d-1234567890 (us-east-1)".
+  string account = 2;
+  // What it can do, sentences.
+  repeated string access = 3;
+  // Exactly what the service granted.
+  repeated string scopes = 4;
+  // What it reaches: "Cloudflare account Acme", "AWS 123456789012 · ReadOnly".
+  repeated string resources = 5;
+  ConnectionStatus status = 6;
+  // NEEDS_RECONNECT: why, a sentence.
+  string problem = 7;
+  // When it needs connecting again, in ms since 1970; 0 if unknown.
+  int64 expires_ms = 8;
+  // When its tokens were last refreshed or checked.
+  int64 checked_ms = 9;
+  // The proposal it was made for; empty if none.
+  string proposal_id = 10;
+}
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_READY = 1;
+  // The service no longer accepts it: connect again (StartConnect.secret_id).
+  CONNECTION_STATUS_NEEDS_RECONNECT = 2;
+}
+
+// A secret made from a connection, with narrower access.
+message SecretExport {
+  // The connection (SecretInfo.id).
+  string connection_id = 1;
+  // What it can do, sentences.
+  repeated string access = 2;
+  // Exactly: the service's permissions.
+  repeated string permissions = 3;
+  // What on: accounts, zones, roles.
+  repeated string resources = 4;
+  // When it stops working, in ms since 1970; 0 if never. Claktory renews it
+  // before then while the connection lasts.
+  int64 expires_ms = 5;
+  // Each command gets a fresh short-lived credential (AWS).
+  bool per_use = 6;
+}
+
+// What a secret can be made of from a connection (accounts, zones, roles,
+// permissions), and the rules for picking (ConnectChoices.rules).
+message ListConnectChoices {
+  string secret_id = 1;
+}
+
+message ConnectChoices {
+  string secret_id = 1;
+  repeated ConnectChoice choices = 2;
+  // How to pick, a sentence or two for the person: "Pick one account, at
+  // least one permission, and zones of that account (none: all of them)."
+  string rules = 3;
+}
+
+message ConnectChoice {
+  // "account", "zone", "role", "permission".
+  string kind = 1;
+  // What DeriveSecret takes.
+  string id = 2;
+  string label = 3;
+  // The choice it belongs to (a zone's or role's account); empty if none.
+  string parent = 4;
+  // Permissions: what it allows, a sentence.
+  string why = 5;
+}
+
+// Makes a secret from a connection, given to no one yet (GrantSecret).
+message DeriveSecret {
+  // The connection.
+  string secret_id = 1;
+  // The new secret's name and description.
+  string name = 2;
+  string description = 3;
+  // ConnectChoice ids.
+  repeated string permissions = 4;
+  repeated string resources = 5;
+  // When it should stop working, in ms since 1970; 0 for the connector's
+  // default (renewed before then while the connection lasts).
+  int64 expires_ms = 6;
+}
+
+// Removes a connection and the secrets made from it.
+message DisconnectService {
+  string secret_id = 1;
+  // Also revoke it at the service. Tokens made from it are deleted at the
+  // service either way, where it can.
+  bool revoke = 2;
 }

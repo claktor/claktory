@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'extensions.dart' show logTime;
@@ -29,12 +30,14 @@ enum Link {
 class Connection {
   Connection(this.backend, {String? machine})
     : link = _linkOf(backend),
-      machine = machine ?? backend.target?.label;
+      machine =
+          machine ?? (backend.target == null ? null : claktoryName(backend));
 
   final Backend backend;
   final Link link;
 
-  /// The machine it's on, when it's another one; null for this Mac's own.
+  /// The Claktory's name, when it's on another machine; null for this
+  /// Mac's own.
   final String? machine;
 
   static Link _linkOf(Backend backend) {

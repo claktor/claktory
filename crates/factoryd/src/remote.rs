@@ -3,7 +3,8 @@
 //! end encrypted, directly or through a relay that can't read it. Factory
 //! listens on no port for them. Each app connection is one bidirectional
 //! stream on ALPN `claktory/1`, carrying a WebSocket and then the protocol,
-//! as on the loopback port.
+//! as on the loopback port; on `claktory/2`, the same bytes compressed
+//! (`compressed`), for apps that offer it.
 //!
 //! - Each paired device has a token, given once in its pairing code; Factory
 //!   keeps only the token's SHA-256 (`<home>/remote/devices.json`), read
@@ -55,6 +56,11 @@ use crate::transcript::now_ms;
 
 /// The backend's protocol on iroh, the same in the app (app/rust).
 pub const ALPN: &[u8] = b"claktory/1";
+/// The same, compressed (`compressed`): what apps that have it offer first.
+pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
+/// How hard `claktory/2` compresses: zstd's default, fast enough that a
+/// transcript of megabytes costs milliseconds.
+const COMPRESSION: async_compression::Level = async_compression::Level::Default;
 /// How often the tunnel checks whether it should change (a device paired or
 /// unpaired, a code expired, the relays changed) and what it shows.
 const CHECK: Duration = Duration::from_secs(1);
@@ -292,11 +298,12 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
     Ok((token, device))
 }
 
-/// A pairing code: `factory://?t=<token>&name=<this machine>&e=<endpoint
-/// id>`, then `&r=<relay URL>` for each relay and `&a=<ip:port>` for each
-/// address it can be dialled at directly, percent-encoded.
-pub fn pairing_code(token: &str, endpoint_id: &str, relays: &[String], addresses: &[SocketAddr]) -> String {
-    let mut code = format!("factory://?t={token}&name={}&e={endpoint_id}", encode(machine_name()));
+/// A pairing code: `factory://?t=<token>&name=<this Claktory's
+/// name>&e=<endpoint id>&color=<its color>`, then `&r=<relay URL>` for each
+/// relay and `&a=<ip:port>` for each address it can be dialled at directly,
+/// percent-encoded.
+pub fn pairing_code(token: &str, endpoint_id: &str, relays: &[String], addresses: &[SocketAddr], claktory: &Identity) -> String {
+    let mut code = format!("factory://?t={token}&name={}&e={endpoint_id}&color={}", encode(&claktory.name), encode(&claktory.color));
     for relay in relays {
         code.push_str(&format!("&r={}", encode(relay)));
     }
@@ -304,6 +311,27 @@ pub fn pairing_code(token: &str, endpoint_id: &str, relays: &[String], addresses
         code.push_str(&format!("&a={}", encode(&address.to_string())));
     }
     code
+}
+
+/// What a Claktory is called and its color, as devices show it.
+pub struct Identity {
+    pub name: String,
+    pub color: String,
+}
+
+/// This Claktory's identity from config.json, away from the running Factory
+/// (defaults when the file is missing or broken).
+fn identity(home: &Home) -> Identity {
+    let config = std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text).ok()).unwrap_or_default();
+    Identity { name: config.claktory_name(), color: config.claktory_color(key_color(home)).to_owned() }
+}
+
+/// The color a Claktory has until the person picks one: one of the agents'
+/// palette, chosen from its key, so it stays the same and differs between
+/// Claktories without being written anywhere.
+pub(crate) fn key_color(home: &Home) -> &'static str {
+    let index = secret_key(home).map_or(0, |key| usize::from(Sha256::digest(key.public().as_bytes())[0]));
+    crate::config::AGENT_COLORS[index % crate::config::AGENT_COLORS.len()]
 }
 
 /// Pairs a device away from the running Factory (`factoryd pair`): the code
@@ -314,7 +342,7 @@ pub fn pair_offline(home: &Home, name: &str) -> Result<(String, Device), RemoteE
     let endpoint_id = secret_key(home)?.public().to_string();
     let relays = remote_config(home)?.map(|remote| remote.relays).unwrap_or_default();
     let (token, device) = pair(home, name)?;
-    Ok((pairing_code(&token, &endpoint_id, &relays, &[]), device))
+    Ok((pairing_code(&token, &endpoint_id, &relays, &[], &identity(home)), device))
 }
 
 /// Unpairs the device with this id or name; it can't connect any more.
@@ -466,7 +494,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
             token
         }
     };
-    let code = pairing_code(&token, endpoint_id, &[], &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))]);
+    let code = pairing_code(&token, endpoint_id, &[], &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))], &identity(home));
     write_private(&path, format!("{code}\n").as_bytes())?;
     Ok(())
 }
@@ -1109,7 +1137,7 @@ impl Factory {
             }
         }
         let addresses: Vec<SocketAddr> = addr.ip_addrs().filter(|address| !address.ip().is_loopback()).copied().collect();
-        let code = pairing_code(&token, &endpoint.id().to_string(), &relays, &addresses);
+        let code = pairing_code(&token, &endpoint.id().to_string(), &relays, &addresses, &self.identity());
         Ok(v1::PairingCode { code, device_id: device.id })
     }
 
@@ -1356,7 +1384,7 @@ async fn bind(home: &Home, key: SecretKey, wanted: &Wanted, port: u16) -> Result
         let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
         let mut builder = builder
             .secret_key(key.clone())
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec()])
             .hooks(Gate { home: home.clone() })
             .relay_mode(relay_mode)
             .clear_ip_transports()
@@ -1410,12 +1438,19 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
         lock(&strong.remote.links).entry(endpoint_id.clone()).or_default().push((number, connection.clone()));
         number
     };
+    let compress = connection.alpn() == ALPN_COMPRESSED;
+    tracing::info!(endpoint = %endpoint_id, compressed = compress, "tunnel connection opened");
     while let Ok((send, receive)) = connection.accept_bi().await {
         let Some(strong) = factory.upgrade() else { break };
         let address = path_of(&connection).1;
         let peer = Peer { endpoint_id: endpoint_id.clone(), loopback: from_this_machine(address), address };
         tokio::spawn(async move {
-            if let Err(error) = crate::connection::serve_stream(tokio::io::join(receive, send), strong, Some(peer)).await {
+            let served = if compress {
+                crate::connection::serve_stream(compressed(receive, send), strong, Some(peer)).await
+            } else {
+                crate::connection::serve_stream(tokio::io::join(receive, send), strong, Some(peer)).await
+            };
+            if let Err(error) = served {
                 tracing::warn!(%error, "tunnel connection failed");
             }
         });
@@ -1431,6 +1466,18 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
     }
 }
 
+/// A stream on `claktory/2`: the bytes `claktory/1` carries, each way one
+/// zstd stream, flushed whenever what's written is (the WebSocket flushes
+/// after every message), so each message arrives whole at once.
+pub fn compressed<R, W>(read: R, write: W) -> tokio::io::Join<impl tokio::io::AsyncRead, impl tokio::io::AsyncWrite>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
+    tokio::io::join(ZstdDecoder::new(tokio::io::BufReader::new(read)), ZstdEncoder::with_quality(write, COMPRESSION))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1441,10 +1488,24 @@ mod tests {
         assert_eq!(encode("box-1.lan"), "box-1.lan");
         assert_eq!(decode("Mac%20mini%2F2"), "Mac mini/2");
         assert_eq!(decode("100%"), "100%");
-        let code = pairing_code("ab", "id", &["https://relay.example/".into()], &["127.0.0.1:7".parse().unwrap()]);
+        let claktory = Identity { name: "Lee's Mac".into(), color: "teal".into() };
+        let code = pairing_code("ab", "id", &["https://relay.example/".into()], &["127.0.0.1:7".parse().unwrap()], &claktory);
+        assert_eq!(code_values(&code, "name").collect::<Vec<_>>(), ["Lee's Mac"]);
+        assert_eq!(code_values(&code, "color").collect::<Vec<_>>(), ["teal"]);
         assert_eq!(code_values(&code, "r").collect::<Vec<_>>(), ["https://relay.example/"]);
         assert_eq!(code_values(&code, "a").collect::<Vec<_>>(), ["127.0.0.1:7"]);
         assert_eq!(code_values(&code, "t").collect::<Vec<_>>(), ["ab"]);
+    }
+
+    #[test]
+    fn a_claktorys_own_color_comes_from_its_key_and_stays() {
+        let root = std::env::temp_dir().join(format!("factoryd-key-color-{}", std::process::id()));
+        let homes: Vec<Home> = (0..12).map(|n| Home::new(root.join(n.to_string()))).collect();
+        let colors: Vec<&str> = homes.iter().map(key_color).collect();
+        assert!(colors.iter().all(|color| crate::config::AGENT_COLORS.contains(color)));
+        assert_eq!(homes.iter().map(key_color).collect::<Vec<_>>(), colors, "the same key, the same color");
+        assert!(colors.iter().any(|color| *color != colors[0]), "different keys, different colors: {colors:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The example the app checks its side against.

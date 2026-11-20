@@ -73,13 +73,15 @@ void main() {
     expect(find.byType(ProjectSettingsForm), findsNothing);
   });
 
-  testWidgets("on a phone, a long press opens a project's settings", (
+  testWidgets("on a phone, a long press offers a project's settings", (
     tester,
   ) async {
     final harness = Harness(workspace()..selectedAgentId = '');
     await harness.show(tester, size: const Size(390, 844));
     await settle(tester);
     await tester.longPress(find.text('Site'));
+    await settle(tester);
+    await tester.tap(find.text('Project settings'));
     await settle(tester);
     expect(find.byType(ProjectSettingsForm), findsOneWidget);
     expect(find.text('Archive project'), findsOneWidget);

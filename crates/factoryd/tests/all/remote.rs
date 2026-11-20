@@ -76,14 +76,25 @@ async fn new_device() -> Endpoint {
 /// Connects to Factory at the code's addresses; Err with why when it's
 /// turned away (or nothing answers).
 async fn dial(device: &Endpoint, code: &Code, addresses: &[SocketAddr]) -> Result<Connection, String> {
+    dial_offering(device, code, addresses, &[factoryd::remote::ALPN]).await
+}
+
+/// Dials offering the ALPNs given, in order of preference.
+async fn dial_offering(device: &Endpoint, code: &Code, addresses: &[SocketAddr], alpns: &[&[u8]]) -> Result<Connection, String> {
     let mut addr = EndpointAddr::new(code.endpoint);
     for address in addresses {
         addr = addr.with_ip_addr(*address);
     }
-    let connection = tokio::time::timeout(WAIT, device.connect(addr, factoryd::remote::ALPN))
-        .await
-        .map_err(|_| "timed out".to_owned())?
-        .map_err(|error| format!("{error:#}"))?;
+    let options = iroh::endpoint::ConnectOptions::new().with_additional_alpns(alpns[1..].iter().map(|alpn| alpn.to_vec()).collect());
+    let dial = async {
+        device
+            .connect_with_opts(addr, alpns[0], options)
+            .await
+            .map_err(|error| format!("{error:#}"))?
+            .await
+            .map_err(|error| format!("{error:#}"))
+    };
+    let connection = tokio::time::timeout(WAIT, dial).await.map_err(|_| "timed out".to_owned())??;
     // A connection the gate turns away is closed just after the handshake.
     match tokio::time::timeout(Duration::from_millis(300), connection.closed()).await {
         Ok(ConnectionError::ApplicationClosed(close)) => Err(String::from_utf8_lossy(&close.reason).into_owned()),
@@ -115,6 +126,7 @@ async fn hello<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(socket: 
         client_version: "test".into(),
         token: token.into(),
         device_kind: v1::DeviceKind::Phone.into(),
+        workspace_patches: false,
     };
     let message = ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
     socket.send(Message::Binary(message.encode_to_vec().into())).await.expect("send");
@@ -298,11 +310,8 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert!(device.code_expires_ms == 0 && device.last_seen_ms > 0 && !device.last_address.is_empty(), "{device:?}");
     // What the person sends from it says it came from it.
     apply_request(&mut client, &mut view, crate::common::create_agent("", "Ops", "")).await;
-    let message = client_message::Body::SendMessage(v1::SendMessage {
-        agent_id: "ops".into(),
-        text: "From the train".into(),
-        client_id: String::new(),
-    });
+    let message =
+        client_message::Body::SendMessage(v1::SendMessage { agent_id: "ops".into(), text: "From the train".into(), ..Default::default() });
     socket.send(Message::Binary(ClientMessage { id: 2, body: Some(message) }.encode_to_vec().into())).await.expect("send");
     let select = client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "ops".into() });
     apply_request(&mut client, &mut view, select).await;
@@ -459,10 +468,13 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
 
     // Unpairing it turns remote access off; this machine's app stays.
     let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
-    assert!(matches!(ask(&mut socket, 5, unpair).await, Body::Ack(_)));
-    loop {
+    let message = ClientMessage { id: 5, body: Some(unpair) };
+    socket.send(Message::Binary(message.encode_to_vec().into())).await.expect("send");
+    let (mut acked, mut off) = (false, false);
+    while !(acked && off) {
         match next(&mut socket).await.expect("still connected") {
-            Body::Workspace(workspace) if workspace.remote.as_ref().is_some_and(|remote| !remote.on) => break,
+            Body::Ack(_) => acked = true,
+            Body::Workspace(workspace) => off = workspace.remote.as_ref().is_some_and(|remote| !remote.on),
             _ => {}
         }
     }
@@ -562,4 +574,40 @@ async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_th
     let paired = saved.iter().find(|device| device.id == id).expect("still paired");
     assert_eq!((paired.endpoint_id.clone(), paired.pending_endpoint_id.as_str()), (phone.id().to_string(), ""));
     view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == id && device.connected)).await;
+}
+
+/// An app that offers `claktory/2` gets it: the same protocol, compressed
+/// both ways, each message arriving as soon as it's sent. One that offers
+/// only `claktory/1` (every app before it) gets that, as before.
+#[tokio::test]
+async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connects() {
+    let dir = temp_dir();
+    let (_addr, _factory) = start(&dir).await;
+    let local = parse(&local_pairing(&dir).await);
+    let app = new_device().await;
+    let both: &[&[u8]] = &[factoryd::remote::ALPN_COMPRESSED, factoryd::remote::ALPN];
+    let connection = dial_offering(&app, &local, &local.addresses, both).await.expect("let in");
+    assert_eq!(connection.alpn(), factoryd::remote::ALPN_COMPRESSED);
+    let (send, receive) = connection.open_bi().await.expect("stream");
+    let (mut socket, _) =
+        tokio_tungstenite::client_async("ws://factory/", factoryd::remote::compressed(receive, send)).await.expect("websocket");
+    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    let workspace = match next(&mut socket).await {
+        Some(Body::Workspace(workspace)) => workspace,
+        other => panic!("expected the workspace, got {other:?}"),
+    };
+    assert!(workspace.agents.iter().any(|agent| agent.id == "rivet"));
+    // Requests and their answers go both ways, one at a time.
+    for id in 2..5 {
+        assert!(matches!(ask(&mut socket, id, list_home()).await, Body::FolderList(_)));
+    }
+    socket.close(None).await.expect("close");
+
+    // An app from before compression.
+    let old = new_device().await;
+    let connection = dial(&old, &local, &local.addresses).await.expect("let in");
+    assert_eq!(connection.alpn(), factoryd::remote::ALPN);
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    assert!(matches!(ask(&mut socket, 2, list_home()).await, Body::FolderList(_)));
 }

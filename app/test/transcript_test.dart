@@ -10,6 +10,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'outbox_fake.dart';
+
 const windowHeight = 600.0;
 
 Entry user(int seq) => Entry(
@@ -637,13 +639,8 @@ void main() {
 
     /// An outbox whose sends wait for [answers], in order.
     (Outbox, List<Completer<void>>) outbox() {
-      final answers = <Completer<void>>[];
-      final outbox = Outbox((agentId, text, clientId) {
-        final answer = Completer<void>();
-        answers.add(answer);
-        return answer.future;
-      });
-      return (outbox, answers);
+      final backend = FakeOutboxBackend();
+      return (Outbox(backend), backend.answers);
     }
 
     testWidgets('a message sent shows at once, and its queued one takes its '
@@ -791,14 +788,10 @@ void main() {
     ) async {
       final store = transcriptOf(3);
       final queued = QueuedStore();
-      final ids = <String>[];
-      final answers = <Completer<void>>[];
-      final box = Outbox((agentId, text, clientId) {
-        ids.add(clientId);
-        final answer = Completer<void>();
-        answers.add(answer);
-        return answer.future;
-      });
+      final fake = FakeOutboxBackend();
+      final ids = fake.ids;
+      final answers = fake.answers;
+      final box = Outbox(fake);
       await show(tester, store, ValueNotifier(0), queued: queued, outbox: box);
       box
         ..send('a', 'ok')

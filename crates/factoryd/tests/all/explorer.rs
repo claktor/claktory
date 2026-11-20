@@ -104,3 +104,96 @@ async fn a_focused_project_shows_its_folder_live_without_what_factoryignore_hide
     apply_request(&mut other, &mut fresh, focus("")).await;
     assert_eq!((fresh.workspace.focused_project_id.as_str(), fresh.workspace.selected_agent_id.as_str()), ("", "writer"));
 }
+
+fn files_pane(agent: &str, project: &str) -> client_message::Body {
+    let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
+        id: id.into(),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new() })),
+    };
+    let split = v1::ViewSplit {
+        axis: v1::ViewAxis::Row.into(),
+        children: vec![leaf("chat", "chat", ""), leaf("files", "files", project)],
+        weights: vec![],
+    };
+    let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
+    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root: Some(root) })
+}
+
+fn watch(project_id: &str) -> client_message::Body {
+    client_message::Body::WatchFiles(v1::WatchFiles { project_id: project_id.into() })
+}
+
+/// The rows of one project's explorer, as `View::tree` writes them.
+fn rows(view: &View, project: &str) -> Vec<String> {
+    let explorer = view.explorers.get(project).cloned();
+    View { explorer, ..View::default() }.tree()
+}
+
+#[tokio::test]
+async fn a_files_pane_or_a_watching_connection_gets_that_projects_tree_too() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, create_project("Site", Path::new(""))).await;
+    apply_request(&mut client, &mut view, create_project("Blog", Path::new(""))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    let blog = dir.join("home/workspace/blog");
+    std::fs::write(blog.join("post.md"), "").expect("write");
+    apply_request(&mut client, &mut view, focus("site")).await;
+    assert!(!view.explorers.contains_key("blog"), "only the focused project's files are open");
+
+    // A Files pane of Blog in Writer's layout: Blog's tree comes, and Site's
+    // again after it, for apps that keep only the last.
+    apply_request(&mut client, &mut view, files_pane("writer", "blog")).await;
+    view.follow(&mut client, |view| view.explorers.contains_key("blog")).await;
+    assert_eq!(rows(&view, "blog"), [".factoryignore", "post.md"]);
+    view.follow(&mut client, |view| view.explorer.as_ref().is_some_and(|explorer| explorer.project_id == "site")).await;
+
+    // It follows the files, with its own open folders.
+    std::fs::create_dir(blog.join("drafts")).expect("mkdir");
+    std::fs::write(blog.join("drafts/next.md"), "").expect("write");
+    view.follow(&mut client, |view| rows(view, "blog").contains(&"drafts/".to_owned())).await;
+    let open = client_message::Body::ExpandFolder(v1::ExpandFolder {
+        project_id: "blog".into(),
+        path: "drafts".into(),
+        expanded: true,
+        folder_id: String::new(),
+        agent_id: String::new(),
+    });
+    apply_request(&mut client, &mut view, open).await;
+    view.follow(&mut client, |view| rows(view, "blog") == ["drafts/", "  next.md", ".factoryignore", "post.md"]).await;
+    assert!(rows(&view, "site").iter().all(|row| !row.starts_with("  ")), "Site's folders stay as they were");
+
+    // On connect, every open project's tree comes, the focused one's last.
+    let (mut other, _, _) = Client::connect(addr).await;
+    let mut fresh = View::default();
+    fresh.follow(&mut other, |fresh| fresh.explorers.len() == 2).await;
+    assert_eq!(fresh.explorer.as_ref().map(|explorer| explorer.project_id.as_str()), Some("site"));
+
+    // Without the pane, only a connection watching Blog gets it.
+    let plain = client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: None });
+    apply_request(&mut client, &mut view, plain).await;
+    match apply_request(&mut other, &mut fresh, watch("nowhere")).await {
+        Body::Error(error) => assert_eq!(error.code(), ErrorCode::NotFound),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(matches!(apply_request(&mut other, &mut fresh, watch("blog")).await, Body::Ack(_)));
+    std::fs::write(blog.join("about.md"), "").expect("write");
+    fresh.follow(&mut other, |fresh| rows(fresh, "blog").contains(&"about.md".to_owned())).await;
+
+    // Once it stops watching (or leaves), Blog's files aren't open anywhere.
+    drop(other);
+    let closed = async {
+        loop {
+            let (mut probe, _, _) = Client::connect(addr).await;
+            let mut seen = View::default();
+            seen.follow(&mut probe, |seen| seen.explorers.contains_key("site")).await;
+            if !seen.explorers.contains_key("blog") {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), closed).await.expect("Blog's files close when no one shows them");
+}

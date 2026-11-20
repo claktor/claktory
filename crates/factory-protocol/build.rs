@@ -15,6 +15,8 @@ enum BuildError {
 fn main() -> Result<(), BuildError> {
     println!("cargo:rerun-if-changed={SCHEMA_ROOT}");
     let descriptors = protox::compile([SCHEMA], [SCHEMA_ROOT])?;
-    prost_build::Config::new().compile_fds(descriptors)?;
+    // Maps as BTreeMap: the same state always encodes to the same bytes, so
+    // a connection can tell what changed (WorkspacePatch).
+    prost_build::Config::new().btree_map(["."]).compile_fds(descriptors)?;
     Ok(())
 }

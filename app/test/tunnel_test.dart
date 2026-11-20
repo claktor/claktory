@@ -163,7 +163,6 @@ void main() {
         '&a=%5B%3A%3A1%5D%3A4919&a=nowhere',
       )!;
       expect(target.addresses, ['127.0.0.1:4919', '[::1]:4919']);
-      expect(target.named('Office').addresses, target.addresses);
     });
   });
 

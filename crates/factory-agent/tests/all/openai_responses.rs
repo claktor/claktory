@@ -157,6 +157,7 @@ fn fallback_message_ids_skip_messages_without_items() {
             event: None,
             sent_from: None,
             client_id: String::new(),
+            attachments: Vec::new(),
         }),
         foreign(vec![text("Done"), text("Again")]),
     ];

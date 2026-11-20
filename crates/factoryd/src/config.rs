@@ -64,6 +64,15 @@ Set up a team that turns my podcast episodes into blog posts and clips";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// This Claktory's name, the same on every device; unset, this
+    /// computer's (`Config::claktory_name`). Only written once set, so a
+    /// backend from before it can still read the file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// This Claktory's color, one of `AGENT_COLORS`; unset, one chosen from
+    /// its key (`remote::key_color`). Only written once set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
     /// Agents' contexts are summarized when they reach this many tokens.
     #[serde(default = "default_compact_at")]
     pub compact_at_tokens: u64,
@@ -463,6 +472,8 @@ impl Default for Config {
             avatar: Avatar { shape: "hexagon".to_owned(), face: String::new() },
         };
         Config {
+            name: String::new(),
+            color: String::new(),
             compact_at_tokens: DEFAULT_COMPACT_AT,
             default_model: default_model(),
             default_effort: default_effort(),
@@ -526,6 +537,8 @@ pub enum Invalid {
     BadPromptCache(String),
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
+    #[error("name \"{0}\" can't have line breaks or other control characters")]
+    BadName(String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
     BadExtensionSetting { agent: String, setting: String, expected: &'static str },
 }
@@ -535,6 +548,19 @@ impl Config {
         let config: Config = serde_json::from_str(text)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// This Claktory's name: as set, or this computer's.
+    pub fn claktory_name(&self) -> String {
+        match self.name.trim() {
+            "" => crate::remote::machine_name().to_owned(),
+            name => name.to_owned(),
+        }
+    }
+
+    /// This Claktory's color: as set, or `default` (`remote::key_color`).
+    pub fn claktory_color<'a>(&'a self, default: &'a str) -> &'a str {
+        if self.color.is_empty() { default } else { &self.color }
     }
 
     /// The user's name, when it's set.
@@ -598,6 +624,12 @@ impl Config {
                     return Err(Invalid::RelativeFolder { project: project.id.clone(), folder: folder.id.clone() });
                 }
             }
+        }
+        if self.name.chars().any(char::is_control) {
+            return Err(Invalid::BadName(self.name.clone()));
+        }
+        if !self.color.is_empty() && !AGENT_COLORS.contains(&self.color.as_str()) {
+            return Err(Invalid::BadColor(self.color.clone()));
         }
         let mut agent_ids = HashSet::new();
         for agent in &self.agents {

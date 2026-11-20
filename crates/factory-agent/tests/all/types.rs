@@ -135,3 +135,44 @@ fn the_persons_message_reaches_the_model_tagged_with_the_device_it_came_from() {
     // Messages from before it, and events, read as they did.
     assert_eq!(UserMessage::text("hi", 1).for_model(), UserMessage::text("hi", 1));
 }
+
+#[test]
+fn attached_files_reach_the_model_as_tags_after_the_text_and_images_only_when_small() {
+    use factory_agent::types::MAX_IMAGE_BYTES;
+    use factory_agent::{Attachment, UserPart};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let small = dir.path().join("small.PNG");
+    std::fs::write(&small, b"png").expect("write");
+    let attachment = |path: &std::path::Path, mime: &str| Attachment {
+        path: path.display().to_string(),
+        name: path.file_name().expect("name").to_string_lossy().into_owned(),
+        size: 3,
+        mime: mime.into(),
+    };
+    let image = attachment(&small, "");
+    assert_eq!(image.image_type(), Some("image/png"), "by its extension when the app gave no type");
+    assert_eq!(image.image(), Some(UserPart::Image { data: "cG5n".into(), mime_type: "image/png".into() }));
+    let big = dir.path().join("big.jpg");
+    std::fs::write(&big, vec![0u8; usize::try_from(MAX_IMAGE_BYTES).expect("fits") + 1]).expect("write");
+    assert_eq!(attachment(&big, "image/jpeg").image(), None, "too big for the model: by path only");
+    assert_eq!(attachment(&small, "application/pdf").image_type(), None);
+
+    // With no device to name, the tags follow the text; with no text, alone.
+    let notes = Attachment { path: "/up/notes \"v2\".txt".into(), name: "notes \"v2\".txt".into(), size: 5, mime: String::new() };
+    let message = UserMessage { attachments: vec![notes.clone()], ..UserMessage::text("See this", 1) };
+    let seen = serde_json::to_value(&message.for_model().content).unwrap();
+    assert_eq!(
+        seen,
+        json!([
+            {"type": "text", "text": "See this"},
+            {"type": "text", "text": "\n<attachment path=\"/up/notes 'v2'.txt\" name=\"notes 'v2'.txt\" size=\"5\"/>"},
+        ])
+    );
+    let alone = UserMessage { attachments: vec![notes], ..UserMessage::text("", 1) };
+    assert_eq!(
+        serde_json::to_value(&alone.for_model().content).unwrap()[1]["text"],
+        "<attachment path=\"/up/notes 'v2'.txt\" name=\"notes 'v2'.txt\" size=\"5\"/>"
+    );
+    let saved = serde_json::to_string(&Message::User(alone.clone())).unwrap();
+    assert_eq!(serde_json::from_str::<Message>(&saved).unwrap(), Message::User(alone));
+}

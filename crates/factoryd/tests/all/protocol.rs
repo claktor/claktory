@@ -4,7 +4,7 @@ use factory_protocol::v1::{ClientMessage, ErrorCode, Hello, ServerMessage, clien
 use prost::Message as _;
 
 fn hello(id: u64, protocol_version: u32) -> ClientMessage {
-    let hello = Hello { protocol_version, client_version: "test".into(), token: String::new(), device_kind: 0 };
+    let hello = Hello { protocol_version, client_version: "test".into(), token: String::new(), device_kind: 0, workspace_patches: false };
     ClientMessage { id, body: Some(client_message::Body::Hello(hello)) }
 }
 

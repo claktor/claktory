@@ -2,6 +2,7 @@
 //! protocol defined in `proto/factory/v1/factory.proto`.
 
 mod account;
+mod annotations;
 mod app_archive;
 mod arrange;
 pub mod channel;
@@ -20,6 +21,7 @@ mod login;
 mod manual;
 mod map;
 pub mod models;
+mod patch;
 mod proposals;
 pub mod remote;
 mod runner;
@@ -29,6 +31,7 @@ pub mod terminal_qr;
 pub mod transcript;
 mod trees;
 pub mod update;
+mod uploads;
 mod usage;
 pub mod vault;
 

@@ -96,6 +96,13 @@ impl State {
     pub(crate) fn layout(&self, agent: &str) -> Option<v1::ViewNode> {
         self.lock().get(agent).cloned()
     }
+
+    /// The paths of every agent's panes of this kind, each once.
+    pub(crate) fn paths(&self, kind: &str) -> HashSet<String> {
+        let layouts = self.lock();
+        let all = layouts.values().flat_map(leaves);
+        all.filter(|(_, leaf)| leaf.kind == kind && !leaf.path.is_empty()).map(|(_, leaf)| leaf.path.clone()).collect()
+    }
 }
 
 /// `path` with "~" for the home folder.
@@ -214,6 +221,9 @@ pub(crate) fn read_file(path: &str, max_bytes: u64) -> v1::FileContent {
     content.mime = mime.to_owned();
     content.size = metadata.len();
     content.truncated = (data.len() as u64) < metadata.len();
+    if !content.truncated {
+        content.sha256 = crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&data));
+    }
     content.data = data;
     content.modified_ms = metadata
         .modified()

@@ -52,22 +52,19 @@ class WorkspaceStore extends ChangeNotifier {
   }
 }
 
-/// The latest file tree the backend sent for the focused project. Each one
-/// replaces the last; views use it only while its project is the focused one.
+/// The latest file tree the backend sent for each project whose Files are
+/// open (a Files pane, the phone's Files page, or the focused project).
+/// Each replaces the last for its project.
 class ExplorerStore extends ChangeNotifier {
-  Explorer? _explorer;
+  final _explorers = <String, Explorer>{};
 
   void apply(Explorer explorer) {
-    _explorer = explorer;
+    _explorers[explorer.projectId] = explorer;
     notifyListeners();
   }
 
   /// The tree for [projectId], or null until one arrives for it.
-  Explorer? of(String projectId) {
-    final explorer = _explorer;
-    if (explorer == null || explorer.projectId != projectId) return null;
-    return explorer;
-  }
+  Explorer? of(String projectId) => _explorers[projectId];
 }
 
 /// The latest content the backend sent for the open extension panel. Each

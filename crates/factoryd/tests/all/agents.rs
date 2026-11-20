@@ -484,7 +484,7 @@ async fn the_persons_messages_say_which_device_they_came_from_and_their_apps_id_
         .await;
     // Waiting, it says where it came from: this computer's name, as a phone.
     // With the id the app made up for it, so it can match what it showed.
-    let send = v1::SendMessage { agent_id: "builder".into(), text: "on my way".into(), client_id: "c-1".into() };
+    let send = v1::SendMessage { agent_id: "builder".into(), text: "on my way".into(), client_id: "c-1".into(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::SendMessage(send)).await;
     assert_eq!(view.queued.as_ref().expect("the queue").messages[0].client_id, "c-1");
     let waiting = view.queued.as_ref().expect("the queue").messages[0].sent_from.clone().expect("where it came from");

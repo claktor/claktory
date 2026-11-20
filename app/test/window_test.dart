@@ -4,7 +4,7 @@ import 'package:factory_app/scope.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'focus_test.dart' show focusedOn, tree;
+import 'focus_test.dart' show focusedOn;
 import 'harness.dart';
 
 void main() {
@@ -17,14 +17,14 @@ void main() {
         .setMockMethodCallHandler(const MethodChannel('factory/window'), (
           call,
         ) async {
-          calls.add(call.method);
+          // Whether the window takes dropped files isn't moving it.
+          if (call.method != 'takeFiles') calls.add(call.method);
           return null;
         });
   });
 
   Future<Harness> showFocused(WidgetTester tester) async {
     final harness = Harness(focusedOn('p1'));
-    harness.backend.explorer.apply(tree());
     await harness.show(tester);
     await settle(tester);
     return harness;
@@ -32,16 +32,14 @@ void main() {
 
   testWidgets('header bars sit at the top of the window', (tester) async {
     final harness = await showFocused(tester);
-    // The sidebar's band, the extension bar's, the agent's header and the
-    // explorer's header.
+    // The sidebar's band, the extension bar's and the agent's header.
     final bands = find.byType(WindowDrag);
-    expect(bands, findsNWidgets(4));
-    for (var i = 0; i < 4; i++) {
+    expect(bands, findsNWidgets(3));
+    for (var i = 0; i < 3; i++) {
       expect(tester.getTopLeft(bands.at(i)).dy, 0);
     }
     expect(tester.getTopLeft(find.text('Builder').last).dy, lessThan(44));
 
-    // Without the explorer, which leaves the test font too little room.
     await harness.apply(tester, focusedOn(''));
     for (final page in [AppPage.settings, AppPage.marketplace]) {
       harness.page.value = page;
@@ -93,7 +91,7 @@ void main() {
   testWidgets('double-clicking an empty band zooms, a control does not', (
     tester,
   ) async {
-    await showFocused(tester);
+    final harness = await showFocused(tester);
     // The sidebar's band, right of the traffic lights.
     const band = Offset(150, 20);
     await tester.tapAt(band);
@@ -102,10 +100,17 @@ void main() {
     await settle(tester);
     expect(calls, ['zoom']);
 
+    // The update banner's Update, in the content's band.
+    await harness.apply(
+      tester,
+      focusedOn('p1', version: '2026.11.18-1600', latest: '2026.11.18-1700'),
+    );
+    await settle(tester);
     calls.clear();
-    await tester.tap(find.text('Show everything'));
+    final update = tester.getCenter(find.text('Update'));
+    await tester.tapAt(update);
     await tester.pump(const Duration(milliseconds: 100));
-    await tester.tap(find.text('Show everything'));
+    await tester.tapAt(update);
     await settle(tester);
     expect(calls, isEmpty);
   });

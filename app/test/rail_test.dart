@@ -1,7 +1,9 @@
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/drafts.dart';
+import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -114,19 +116,9 @@ void main() {
       expect(claktories.selected.key, _nixos);
       expect(app.backends['']!, same(local), reason: 'still the same one');
 
-      app.connections.rename(nixos, 'Home server');
-      expect(app.connections.nameOf(nixos), 'Home server');
-      expect(app.backends[_nixos]!.target?.label, 'Home server');
-      expect(app.storage.kept.names, {_nixos: 'Home server'});
-      app.connections.rename(null, 'Studio');
-      expect(app.connections.nameOf(null), 'Studio');
-      app.connections.rename(null, '');
-      expect(app.connections.nameOf(null), 'This Mac');
-
       app.connections.forget(nixos);
       expect(claktories.all.map((c) => c.key), ['', _mini]);
       expect(claktories.selected.key, '', reason: "this Mac's instead");
-      expect(app.storage.kept.names, isEmpty);
     });
 
     test('a phone shows another paired one when the one showing goes', () {
@@ -145,16 +137,34 @@ void main() {
       expect(claktories.selected.key, _nixos);
     });
 
-    test('names and the ones showing are kept on the device', () async {
+    test('the ones connected and showing are kept on the device', () async {
       final storage = MemoryConnectionStorage();
-      final connections = Connections(storage)
-        ..use(parsePairingCode(_nixos))
-        ..rename(parsePairingCode(_nixos), 'Home');
-      expect(connections.current?.label, 'Home');
+      Connections(storage).use(parsePairingCode(_nixos));
       final again = await Connections.load(storage);
-      expect(again.current?.label, 'Home');
-      expect(again.saved.single.label, 'Home');
-      expect(again.nameOf(null), 'This Mac');
+      expect(again.current?.code, _nixos);
+      expect(again.saved.single.label, 'nixos');
+    });
+
+    test("a code's name and color show until the Claktory says its own", () {
+      final target = parsePairingCode('$_nixos&color=teal')!;
+      expect(target.color, 'teal');
+      final backend = RecordingBackend(localBackend: false)..connectTo(target);
+      expect(claktoryName(backend), 'nixos');
+      expect(claktoryColorName(backend), 'teal');
+      backend.welcomeName = 'Home';
+      expect(claktoryName(backend), 'Home');
+      backend.workspace.apply(
+        Workspace(
+          settings: Settings(name: 'Studio', color: 'green'),
+        ),
+      );
+      expect(claktoryName(backend), 'Studio');
+      expect(claktoryColorName(backend), 'green');
+      expect(
+        claktoryName(RecordingBackend(localBackend: true)),
+        'This Mac',
+        reason: "this Mac's, before it says",
+      );
     });
 
     test(
@@ -236,42 +246,79 @@ void main() {
     app.backends['']!.connected.value = false;
     app.backends['']!.refused.value = 'unknown device';
     await pumpFrames(tester);
-    expect(
-      _labeled("this Claktory doesn't allow this device"),
-      findsOneWidget,
-    );
+    expect(_labeled("this Claktory doesn't allow this device"), findsOneWidget);
   });
 
-  testWidgets('a right click renames or removes one', (tester) async {
+  testWidgets("a right click renames and recolors one for every device, or "
+      'removes it', (tester) async {
     final app = _App();
     app.connections.use(parsePairingCode(_nixos));
     await app.show(tester);
+    final nixos = app.backends[_nixos]!;
+    nixos.onSend = (message) {
+      if (!message.hasUpdateSettings()) return;
+      final update = message.updateSettings;
+      nixos.workspace.apply(
+        nixos.workspace.workspace.deepCopy()
+          ..settings.name = update.name
+          ..settings.color = update.color,
+      );
+    };
 
     await tester.tap(_labeled('nixos'), buttons: kSecondaryButton);
     await pumpFrames(tester);
     expect(find.text('Name'), findsOneWidget);
+    expect(find.text('Shown on every device connected to it.'), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, 'Home server');
+    await tester.tap(find.bySemanticsLabel('green'));
+    await pumpFrames(tester);
     await tester.tap(find.text('Save'));
     await pumpFrames(tester);
+    expect(
+      nixos.sent.last.updateSettings,
+      UpdateSettings(name: 'Home server', color: 'green'),
+    );
     expect(_labeled('Home server'), findsOneWidget);
     expect(find.text('HS'), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text('HS')).style?.color,
+      agentColor('green'),
+      reason: 'its initials in its color',
+    );
+    expect(app.storage.kept.saved, [_nixos], reason: 'no name kept here');
 
+    // Not connected, it can only be removed.
+    nixos.connected.value = false;
     await tester.tap(_labeled('Home server'), buttons: kSecondaryButton);
     await pumpFrames(tester);
+    expect(
+      find.text('Connect to Home server to change its name or color.'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Remove…'));
     await pumpFrames(tester);
     expect(find.text('Remove Home server?'), findsOneWidget);
-    app.backends[_nixos]!.deviceId = 'phone-1';
+    nixos.connected.value = true;
+    nixos.deviceId = 'phone-1';
     await tester.tap(find.text('Remove'));
     await pumpFrames(tester);
     expect(_labeled('Home server'), findsNothing);
     expect(app.connections.saved, isEmpty);
     expect(app.connections.current, isNull, reason: "this Mac's shows");
     expect(
-      app.backends[_nixos]!.sent.last.unpairDevice.deviceId,
+      nixos.sent.last.unpairDevice.deviceId,
       'phone-1',
       reason: 'it leaves its devices',
     );
+  });
+
+  testWidgets("this Mac's Claktory shows its own name", (tester) async {
+    final app = _App(
+      snapshots: {'': _workspace('Rivet')..settings.name = 'Studio'},
+    );
+    await app.show(tester);
+    expect(_labeled('Studio'), findsOneWidget);
+    expect(_labeled('This Mac'), findsNothing);
   });
 
   testWidgets('"+" adds one by its code', (tester) async {

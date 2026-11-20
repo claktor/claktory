@@ -15,7 +15,6 @@ import 'account.dart';
 import 'name_step.dart';
 import 'phone.dart';
 import 'controls.dart';
-import 'explorer.dart';
 import 'extensions.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -28,7 +27,7 @@ import 'state.dart';
 import 'update.dart';
 
 /// The window: the sidebar on the left, the selected agent in the middle under
-/// the update banner, and the focused project's files on the right. Hosts the
+/// the update banner, and its open extension panel on the right. Hosts the
 /// overlay that menus and dialogs float in.
 class Shell extends StatefulWidget {
   const Shell({super.key, this.rail});
@@ -163,20 +162,14 @@ class _ShellState extends State<Shell> {
                 final scope = AppScope.scope(context);
                 final store = scope.backend.workspace;
                 final workspace = store.workspace;
-                Project? focused;
-                for (final project in workspace.projects) {
-                  if (project.id == workspace.focusedProjectId) {
-                    focused = project;
-                  }
-                }
                 // The extension bar and panel belong to the agent view.
                 final agent = scope.page.value == AppPage.agent
                     ? store.selectedAgent
                     : null;
                 final panel = openPanelOf(workspace, agent);
-                // The right side holds one pane: the open panel, else the
-                // focused project's explorer. The conversation keeps at least
-                // this much room; a narrower window sets the pane aside.
+                // The right side holds the open panel, if any. The
+                // conversation keeps at least this much room; a narrower
+                // window sets the panel aside.
                 const minContent = 440.0;
                 final settings = workspace.settings;
                 final sidebar =
@@ -208,17 +201,13 @@ class _ShellState extends State<Shell> {
                       ),
                   panelRoom,
                 );
-                final Widget? pane = panel != null
-                    ? (panelShown
-                          ? ExtensionPanel(
-                              key: ValueKey('${panel.id}/${agent.id}'),
-                              extension: panel,
-                              agent: agent,
-                              width: panelAt,
-                            )
-                          : null)
-                    : focused != null && room >= explorerWidth
-                    ? ExplorerPane(key: ValueKey(focused.id), project: focused)
+                final Widget? pane = panelShown
+                    ? ExtensionPanel(
+                        key: ValueKey('${panel.id}/${agent.id}'),
+                        extension: panel,
+                        agent: agent,
+                        width: panelAt,
+                      )
                     : null;
                 // Back and forward through the agents followed from messages,
                 // as in a browser: ⌘[ and ⌘], or the mouse's side buttons.

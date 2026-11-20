@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart';
 import 'connection.dart';
 import 'connections.dart';
 import 'controls.dart';
@@ -38,9 +39,9 @@ class Claktory {
   /// Its pairing code; '' for this device's own.
   final String key;
 
-  /// The Claktory on another machine, under the name the person gave it;
-  /// null for this Mac's (on a phone: none yet).
-  RemoteFactory? target;
+  /// The Claktory on another machine; null for this Mac's (on a phone:
+  /// none yet).
+  final RemoteFactory? target;
 
   final Backend backend;
 
@@ -161,10 +162,6 @@ class Claktories extends ChangeNotifier {
           backend: this.open(target),
           drafts: drafts.of(key),
         );
-      } else if (target != null) {
-        // Renamed, perhaps: the same Claktory under its new name.
-        open.target = target;
-        open.backend.relabel(target);
       }
     }
     notifyListeners();
@@ -356,9 +353,6 @@ class ClaktoryRail extends StatelessWidget {
                                 child: _RailTile(
                                   key: ValueKey(claktory.key),
                                   claktory: claktory,
-                                  name: claktories.connections.nameOf(
-                                    claktory.target,
-                                  ),
                                   selected: claktory == selected,
                                   onTap: () => claktories.select(claktory),
                                 ),
@@ -405,13 +399,11 @@ class _RailTile extends StatelessWidget {
   const _RailTile({
     super.key,
     required this.claktory,
-    required this.name,
     required this.selected,
     required this.onTap,
   });
 
   final Claktory claktory;
-  final String name;
   final bool selected;
   final VoidCallback onTap;
 
@@ -422,6 +414,7 @@ class _RailTile extends StatelessWidget {
       listenable: _Glance.of(claktory),
       builder: (context, _) {
         final glance = _Glance(claktory);
+        final name = claktoryName(claktory.backend);
         return SizedBox(
           width: railWidth,
           height: 28,
@@ -504,7 +497,7 @@ class _RailTile extends StatelessWidget {
 }
 
 /// A Claktory's 28px tile: on its own in the rail, and leading its row in
-/// the phone's list.
+/// the phone's list. On a wash of its color, its glyph or initials in it.
 class _Tile extends StatelessWidget {
   const _Tile({
     required this.claktory,
@@ -523,11 +516,10 @@ class _Tile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final own = claktoryColor(claktory.backend);
     final color = !glance.connected
         ? palette.textFaint
-        : selected || hovered
-        ? palette.text
-        : palette.textMuted;
+        : own ?? (selected || hovered ? palette.text : palette.textMuted);
     return SizedBox.square(
       dimension: 28,
       child: Stack(
@@ -537,14 +529,24 @@ class _Tile extends StatelessWidget {
             child: AnimatedContainer(
               duration: Motion.fast,
               decoration: BoxDecoration(
-                color: selected
+                color: own != null
+                    ? own.withValues(
+                        alpha: selected
+                            ? 0.24
+                            : hovered
+                            ? 0.2
+                            : 0.14,
+                      )
+                    : selected
                     ? palette.selected
                     : hovered
                     ? palette.hover
                     : null,
                 borderRadius: BorderRadius.circular(Radii.control),
                 border: Border.all(
-                  color: selected ? const Color(0x00000000) : palette.hairline,
+                  color: selected || own != null
+                      ? const Color(0x00000000)
+                      : palette.hairline,
                 ),
               ),
             ),
@@ -638,8 +640,8 @@ class _LaptopPainter extends CustomPainter {
   bool shouldRepaint(_LaptopPainter old) => old.color != color;
 }
 
-/// A Claktory's own settings on this device: what it's called here, and
-/// removing it.
+/// A Claktory's name and color, the same on every device, and removing
+/// it from this one.
 class ClaktoryForm extends StatefulWidget {
   const ClaktoryForm({super.key, required this.claktory, required this.close});
 
@@ -652,10 +654,14 @@ class ClaktoryForm extends StatefulWidget {
 
 class _ClaktoryFormState extends State<ClaktoryForm> {
   late final Connections _connections = AppScope.scope(context).connections;
+  Backend get _backend => widget.claktory.backend;
   late final _name = TextEditingController(
-    text: _connections.nameOf(widget.claktory.target),
+    text: _backend.workspace.workspace.settings.name,
   );
+  late var _color = claktoryColorName(_backend);
   var _confirmingRemove = false;
+  var _saving = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -663,9 +669,29 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     super.dispose();
   }
 
-  void _save() {
-    _connections.rename(widget.claktory.target, _name.text);
-    widget.close();
+  Future<void> _save() async {
+    final settings = _backend.workspace.workspace.settings;
+    final name = _name.text.trim();
+    final update = UpdateSettings(
+      name: name == settings.name ? null : name,
+      color: _color == settings.color ? null : _color,
+    );
+    if (!update.hasName() && !update.hasColor()) return widget.close();
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await _backend.updateSettings(update);
+      if (mounted) widget.close();
+    } on RequestFailure catch (error) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = error.message;
+        });
+      }
+    }
   }
 
   void _remove(RemoteFactory target) {
@@ -682,14 +708,14 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
   @override
   Widget build(BuildContext context) {
     final target = widget.claktory.target;
-    final name = _connections.nameOf(target);
+    final name = claktoryName(_backend);
     if (_confirmingRemove && target != null) {
       return FormFrame(
         title: 'Remove $name?',
         body:
             'This $thisDeviceKind disconnects from it. Its agents and work '
-            'stay on ${target.label}. To connect again, add this '
-            '$thisDeviceKind on ${target.label} in Settings → Devices.',
+            'stay on $name. To connect again, add this '
+            '$thisDeviceKind on $name in Settings → Devices.',
         fields: const [],
         error: null,
         submitLabel: 'Remove',
@@ -697,33 +723,53 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
         onCancel: () => setState(() => _confirmingRemove = false),
       );
     }
+    final remove = target == null
+        ? null
+        : Button(
+            label: 'Remove…',
+            onPressed: () => setState(() => _confirmingRemove = true),
+          );
+    // Its name and color are its own: they change only while connected.
+    if (!_backend.connected.value) {
+      return FormFrame(
+        title: name,
+        body: 'Connect to $name to change its name or color.',
+        fields: const [],
+        error: null,
+        submitLabel: 'Done',
+        onSubmit: widget.close,
+        onCancel: widget.close,
+        secondary: remove,
+      );
+    }
+    final machine = _backend.workspace.workspace.remote.machine;
     return FormFrame(
       title: name,
       fields: [
         Field(
           label: 'Name',
-          note: target == null
-              ? 'Only this device sees this name.'
-              : 'Only this device sees this name. It runs on ${target.label}.',
+          note: 'Shown on every device connected to it.',
           child: TextField(
             controller: _name,
-            placeholder: target?.label ?? thisMacName,
+            placeholder: machine,
             autofocus: true,
             onSubmitted: (_) => _save(),
           ),
         ),
+        Field(
+          label: 'Color',
+          child: ColorPicker(
+            value: _color,
+            onChanged: (color) => setState(() => _color = color),
+          ),
+        ),
       ],
-      error: null,
+      error: _error,
       submitLabel: 'Save',
-      onSubmit: _save,
+      onSubmit: _saving ? null : _save,
       onCancel: widget.close,
       // On a phone, FormFrame puts it on a line of its own.
-      secondary: target == null
-          ? null
-          : Button(
-              label: 'Remove…',
-              onPressed: () => setState(() => _confirmingRemove = true),
-            ),
+      secondary: remove,
     );
   }
 }
@@ -1033,7 +1079,6 @@ class ClaktoryList extends StatelessWidget {
             _ListRow(
               key: ValueKey(claktory.key),
               claktory: claktory,
-              name: claktories.connections.nameOf(claktory.target),
               selected: claktory == selected,
               onTap: () => onChoose(claktory),
             ),
@@ -1081,13 +1126,11 @@ class _ListRow extends StatelessWidget {
   const _ListRow({
     super.key,
     required this.claktory,
-    required this.name,
     required this.selected,
     required this.onTap,
   });
 
   final Claktory claktory;
-  final String name;
   final bool selected;
   final VoidCallback onTap;
 
@@ -1098,6 +1141,7 @@ class _ListRow extends StatelessWidget {
       listenable: _Glance.of(claktory),
       builder: (context, _) {
         final glance = _Glance(claktory);
+        final name = claktoryName(claktory.backend);
         return Semantics(
           button: true,
           selected: selected,
