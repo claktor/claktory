@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use claktory_account::server::Config;
+use claktory_account::server::{Config, mail};
 
 use crate::support::*;
 
@@ -83,6 +83,26 @@ async fn the_days_email_cap_stops_codes_but_not_notices() {
 
     instance.advance(86_400);
     assert_eq!(instance.start_sign_in(&Claktory::new("198.51.105.11"), "p11@example.com", "Mac").await.status, 200, "a new day");
+}
+
+#[tokio::test]
+async fn a_provider_refusing_to_send_is_told_to_whoever_runs_it_once_a_day() {
+    let config = Config { trust_proxy: true, admins: vec!["ops@example.com".into()], ..Config::default() };
+    let instance = start_with(config).await;
+    let refuse =
+        || mail::MailError::Refused { kind: "not_entitled", text: "The Cloudflare account isn't entitled to Email Sending.".into() };
+    for number in 0..2 {
+        *instance.mail.refuse_next.lock().unwrap() = Some(refuse());
+        let answer = instance.start_sign_in(&Claktory::new(&format!("198.51.107.{}", number + 1)), "p@example.com", "Mac").await;
+        assert_eq!((answer.status, answer.error().as_str()), (503, "email_unavailable"));
+    }
+    let alerts: Vec<_> = instance.mail.sent().into_iter().filter(|mail| mail.to == "ops@example.com").collect();
+    assert_eq!(alerts.len(), 1, "once a day");
+    assert_eq!(alerts[0].subject, "Claktory account service: email refused");
+    assert!(alerts[0].text.contains("isn't entitled to Email Sending"), "{}", alerts[0].text);
+    let conn = rusqlite::Connection::open(&instance.db).unwrap();
+    let report = claktory_account::server::stats::report(&conn, START).unwrap();
+    assert!(report.contains("Emails the mail provider refused, today and yesterday (UTC):\n  not_entitled: 2"), "{report}");
 }
 
 #[tokio::test]

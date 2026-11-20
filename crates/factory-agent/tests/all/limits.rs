@@ -1,5 +1,7 @@
 use factory_agent::clock::parse_iso_ms;
-use factory_agent::limits::{UsageLimit, chatgpt_plan, parse_anthropic, parse_anthropic_plan, parse_codex};
+use factory_agent::limits::{
+    UsageLimit, UsageReset, chatgpt_plan, parse_anthropic, parse_anthropic_plan, parse_anthropic_resets, parse_codex, parse_codex_resets,
+};
 use serde_json::json;
 
 fn limit(id: &str, label: &str, used_percent: f64, resets_at: u64) -> UsageLimit {
@@ -133,6 +135,23 @@ fn without_a_plan_name_anthropic_plans_come_from_the_organization_or_account() {
     assert_eq!(parse_anthropic_plan(&json!({"account": {}, "organization": {"organization_type": "api"}})), "");
 }
 
+/// A plan Claktory doesn't know yet reads as Anthropic names it, never as Max.
+#[test]
+fn an_unknown_anthropic_tier_reads_as_its_tier_says() {
+    let organization = |kind: &str, tier: &str| json!({"organization": {"organization_type": kind, "rate_limit_tier": tier}});
+    assert_eq!(parse_anthropic_plan(&organization("claude_max", "default_claude_ultra")), "Claude Ultra");
+    assert_eq!(parse_anthropic_plan(&organization("claude_max", "default_claude_max_40x")), "Claude Max 40x");
+    assert_eq!(parse_anthropic_plan(&organization("claude_ultra", "")), "Claude Ultra");
+    assert_eq!(parse_anthropic_plan(&organization("claude_ultra", "default_claude_ultra_2x")), "Claude Ultra 2x");
+    let account = json!({"account": {"has_claude_max": true}, "organization": {"rate_limit_tier": "default_claude_ultra"}});
+    assert_eq!(parse_anthropic_plan(&account), "Claude Ultra");
+    // A name that isn't one is passed over, as Claude Code does.
+    let odd = json!({"organization": {"plan_display_name": "<b>Max</b>", "organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}});
+    assert_eq!(parse_anthropic_plan(&odd), "Claude Max 5x");
+    let named = json!({"organization": {"plan_display_name": "Max 20x", "organization_type": "claude_max"}});
+    assert_eq!(parse_anthropic_plan(&named), "Claude Max 20x");
+}
+
 #[test]
 fn chatgpt_plans_are_named_as_chatgpt_names_them() {
     assert_eq!(chatgpt_plan("plus"), "ChatGPT Plus");
@@ -151,4 +170,98 @@ fn a_chatgpt_access_token_carries_its_plan() {
     let token = format!("header.{payload}.signature");
     assert_eq!(factory_agent::providers::openai_codex::oauth::plan_type(&token).as_deref(), Some("pro"));
     assert_eq!(factory_agent::providers::openai_codex::oauth::plan_type("not.a.token"), None);
+}
+
+/// The usage's `cedar_ember` block, as Claude Code 2.1.327 reads it: a Fable
+/// grant usable now, a full one that works only at a limit, a session one
+/// during a cooldown, and a spent one.
+fn cedar_ember() -> serde_json::Value {
+    json!({"cedar_ember": {
+        "eligible": true,
+        "at_limit": false,
+        "exhausted": [],
+        "next_grant_id": "fable_1",
+        "grants": [
+            {"id": "fable_1", "label": "Fable", "resets_total": 3, "resets_left": 2, "ends_at": "2027-03-08T08:00:00Z",
+             "clears": ["five_hour", "seven_day_overage_included"], "paused": false, "usable_now": true,
+             "use_requires_limit": false, "gives_back_weekly": true, "blocking": [], "percent_used": {"seven_day": 80}},
+            {"id": "full_1", "label": "Full", "resets_total": 1, "resets_left": 1, "ends_at": "2026-12-10T22:00:00Z",
+             "clears": ["five_hour", "seven_day"], "paused": false, "usable_now": false, "use_requires_limit": true,
+             "type": "full", "blocking": []},
+            {"id": "spent", "resets_total": 1, "resets_left": 0, "clears": ["five_hour"], "paused": false, "usable_now": false},
+            {"id": "BAD ID", "resets_left": 1, "clears": ["five_hour"], "paused": false, "usable_now": true}
+        ]
+    }})
+}
+
+#[test]
+fn claude_resets_are_read_by_kind_with_what_they_refill_and_why_one_waits() {
+    let resets = parse_anthropic_resets(&cedar_ember());
+    assert_eq!(
+        resets,
+        [
+            UsageReset {
+                id: "fable_1".into(),
+                label: "Fable reset".into(),
+                detail: "Gives back to your weekly limit what Fable used. It also refills your 5-hour limit.".into(),
+                left: 2,
+                total: 3,
+                expires_at: parse_iso_ms("2027-03-08T08:00:00Z").expect("time"),
+                usable: true,
+                unavailable: String::new(),
+                window_ids: vec!["weekly_fable".into(), "weekly".into(), "five_hour".into()],
+            },
+            UsageReset {
+                id: "full_1".into(),
+                label: "Full reset".into(),
+                detail: "Refills all your limits.".into(),
+                left: 1,
+                total: 1,
+                expires_at: parse_iso_ms("2026-12-10T22:00:00Z").expect("time"),
+                usable: false,
+                unavailable: "It works only at a usage limit.".into(),
+                window_ids: vec!["five_hour".into(), "weekly".into()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn claude_resets_say_why_they_wait_and_none_show_for_an_account_not_eligible() {
+    let mut usage = cedar_ember();
+    usage["cedar_ember"]["cooldown_until"] = json!("2026-11-20T15:00:00Z");
+    assert_eq!(parse_anthropic_resets(&usage)[1].unavailable, "A reset was just used on this account. Try again in a minute.");
+    usage["cedar_ember"]["grants"][1]["unavailable_reason"] = json!("blocked_five_hour");
+    assert_eq!(parse_anthropic_resets(&usage)[1].unavailable, "It can't be used while you're at your 5-hour limit.");
+    usage["cedar_ember"]["grants"][1]["paused"] = json!(true);
+    assert_eq!(parse_anthropic_resets(&usage)[1].unavailable, "It's paused for now.");
+
+    usage["cedar_ember"]["eligible"] = json!(false);
+    assert_eq!(parse_anthropic_resets(&usage), []);
+    assert_eq!(parse_anthropic_resets(&json!({"five_hour": {"utilization": 3.0}})), [], "a usage read without the block");
+}
+
+#[test]
+fn chatgpt_resets_are_counted_even_when_their_list_says_less() {
+    let limits = parse_codex(
+        &json!({"rate_limit": {
+            "primary_window": {"used_percent": 50.0, "limit_window_seconds": 18_000},
+            "secondary_window": {"used_percent": 20.0, "limit_window_seconds": 604_800}
+        }}),
+        0,
+    );
+    let unlisted = parse_codex_resets(3, &serde_json::Value::Null, &limits);
+    assert_eq!(unlisted.len(), 1);
+    assert_eq!((unlisted[0].id.as_str(), unlisted[0].label.as_str(), unlisted[0].left), ("", "Full reset", 3), "ChatGPT picks one");
+    assert_eq!(unlisted[0].window_ids, ["weekly", "five_hour"]);
+    assert!(unlisted[0].usable);
+
+    let list = json!({"available_count": 3, "credits": [
+        {"id": "a", "status": "available", "title": "Launch reset", "description": "Resets your Codex limits."}
+    ]});
+    let short = parse_codex_resets(3, &list, &limits);
+    assert_eq!(
+        (short[0].id.as_str(), short[0].label.as_str(), short[0].detail.as_str(), short[0].left),
+        ("a", "Launch reset", "Resets your Codex limits.", 3)
+    );
 }

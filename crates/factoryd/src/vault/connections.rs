@@ -10,7 +10,6 @@
 use factory_protocol::v1::{self, ConnectProposalState, ConnectionStatus};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use super::{Value, Vault, VaultError, aad, crypto};
 use crate::connectors::{Control, ExportMeta};
@@ -160,24 +159,18 @@ impl Vault {
         meta: &ConnectionMeta,
         control: &Control,
     ) -> Result<(String, String), VaultError> {
-        let mut inner = self.lock();
-        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
-        let vault_id = inner.vault_id.clone();
-        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
-        let transaction = db.transaction()?;
-        let name = free_name(&transaction, name)?;
-        let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-        let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, &id, 1, &[])?;
-        let now = now_ms();
-        transaction.execute(
-            "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, meta)
-             VALUES (?1, ?2, '', 1, ?3, '', ?4, ?4, ?5, ?6, ?7)",
-            params![id, name, sealed_dek, now, KIND_CONNECTION, connector, json(meta)?],
-        )?;
-        write_control(&transaction, &vault_id, &vmk, &id, connector, control)?;
-        transaction.commit()?;
-        inner.state = None;
-        Ok((id, name))
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            let name = free_name(transaction, name)?;
+            let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, &[])?;
+            let now = now_ms();
+            transaction.execute(
+                "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, meta)\n             VALUES (?1, ?2, '', 1, ?3, '', ?4, ?4, ?5, ?6, ?7)",
+                params![id, name, sealed_dek, now, KIND_CONNECTION, connector, json(meta)?],
+            )?;
+            write_control(transaction, vault_id, vmk, &id, connector, control)?;
+            Ok((id, name))
+        })
     }
 
     /// A connection (by id or name) with its control, for the broker only.
@@ -217,22 +210,17 @@ impl Vault {
 
     /// Replaces what a connection reaches (and with `control`, its tokens).
     pub(crate) fn set_connection(&self, id: &str, meta: &ConnectionMeta, control: Option<&Control>) -> Result<(), VaultError> {
-        let mut inner = self.lock();
-        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
-        let vault_id = inner.vault_id.clone();
-        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
-        let transaction = db.transaction()?;
-        let connector: String = transaction
-            .query_row("SELECT connector FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_CONNECTION], |row| row.get(0))
-            .optional()?
-            .ok_or_else(|| VaultError::NoSecret(id.to_owned()))?;
-        transaction.execute("UPDATE secrets SET meta = ?2, updated = ?3 WHERE id = ?1", params![id, json(meta)?, now_ms()])?;
-        if let Some(control) = control {
-            write_control(&transaction, &vault_id, &vmk, id, &connector, control)?;
-        }
-        transaction.commit()?;
-        inner.state = None;
-        Ok(())
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            let connector: String = transaction
+                .query_row("SELECT connector FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_CONNECTION], |row| row.get(0))
+                .optional()?
+                .ok_or_else(|| VaultError::NoSecret(id.to_owned()))?;
+            transaction.execute("UPDATE secrets SET meta = ?2, updated = ?3 WHERE id = ?1", params![id, json(meta)?, now_ms()])?;
+            if let Some(control) = control {
+                write_control(transaction, vault_id, vmk, id, &connector, control)?;
+            }
+            Ok(())
+        })
     }
 
     /// Adds a secret made from `connection`, given to no one; returns its id
@@ -246,27 +234,21 @@ impl Vault {
         meta: &ExportMeta,
     ) -> Result<(String, String), VaultError> {
         super::check_values(values)?;
-        let mut inner = self.lock();
-        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
-        let vault_id = inner.vault_id.clone();
-        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
-        let transaction = db.transaction()?;
-        let connector: String = transaction
-            .query_row("SELECT connector FROM secrets WHERE id = ?1 AND kind = ?2", [connection, KIND_CONNECTION], |row| row.get(0))
-            .optional()?
-            .ok_or_else(|| VaultError::NoSecret(connection.to_owned()))?;
-        let name = free_name(&transaction, name)?;
-        let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-        let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, &id, 1, values)?;
-        let now = now_ms();
-        transaction.execute(
-            "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, parent, meta)
-             VALUES (?1, ?2, ?3, 1, ?4, '', ?5, ?5, ?6, ?7, ?8, ?9)",
-            params![id, name, description.trim(), sealed_dek, now, KIND_EXPORT, connector, connection, json(meta)?],
-        )?;
-        transaction.commit()?;
-        inner.state = None;
-        Ok((id, name))
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            let connector: String = transaction
+                .query_row("SELECT connector FROM secrets WHERE id = ?1 AND kind = ?2", [connection, KIND_CONNECTION], |row| row.get(0))
+                .optional()?
+                .ok_or_else(|| VaultError::NoSecret(connection.to_owned()))?;
+            let name = free_name(transaction, name)?;
+            let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values)?;
+            let now = now_ms();
+            transaction.execute(
+                "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, parent, meta)\n             VALUES (?1, ?2, ?3, 1, ?4, '', ?5, ?5, ?6, ?7, ?8, ?9)",
+                params![id, name, description.trim(), sealed_dek, now, KIND_EXPORT, connector, connection, json(meta)?],
+            )?;
+            Ok((id, name))
+        })
     }
 
     /// Renews a secret made from a connection: new values (a new version)
@@ -275,24 +257,20 @@ impl Vault {
         if let Some(values) = values {
             super::check_values(values)?;
         }
-        let mut inner = self.lock();
-        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
-        let vault_id = inner.vault_id.clone();
-        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
-        let transaction = db.transaction()?;
-        let version: u32 = transaction
-            .query_row("SELECT version FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_EXPORT], |row| row.get(0))
-            .optional()?
-            .ok_or_else(|| VaultError::NoSecret(id.to_owned()))?;
-        let now = now_ms();
-        transaction.execute("UPDATE secrets SET meta = ?2, updated = ?3 WHERE id = ?1", params![id, json(meta)?, now])?;
-        if let Some(values) = values {
-            let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, id, version + 1, values)?;
-            transaction.execute("UPDATE secrets SET version = ?2, sealed_dek = ?3 WHERE id = ?1", params![id, version + 1, sealed_dek])?;
-        }
-        transaction.commit()?;
-        inner.state = None;
-        Ok(())
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            let version: u32 = transaction
+                .query_row("SELECT version FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_EXPORT], |row| row.get(0))
+                .optional()?
+                .ok_or_else(|| VaultError::NoSecret(id.to_owned()))?;
+            let now = now_ms();
+            transaction.execute("UPDATE secrets SET meta = ?2, updated = ?3 WHERE id = ?1", params![id, json(meta)?, now])?;
+            if let Some(values) = values {
+                let sealed_dek = Self::write_values(transaction, vault_id, vmk, id, version + 1, values)?;
+                transaction
+                    .execute("UPDATE secrets SET version = ?2, sealed_dek = ?3 WHERE id = ?1", params![id, version + 1, sealed_dek])?;
+            }
+            Ok(())
+        })
     }
 
     fn exports_where(db: &Connection, clause: &str, arg: &str) -> Result<Vec<Export>, VaultError> {
@@ -432,7 +410,7 @@ impl Vault {
 // ---- Proposals ----
 
 const PROPOSAL_COLUMNS: &str =
-    "id, agent, connector, access_id, purpose, access, reason, state, created, decided, comment, secret, secret_name";
+    "id, agent, connector, access_id, purpose, access, reason, state, created, decided, comment, secret, secret_name, statements, region";
 
 fn proposal_state(state: &str) -> ConnectProposalState {
     match state {
@@ -458,6 +436,8 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::ConnectProposal
         comment: row.get(10)?,
         secret_id: row.get(11)?,
         secret_name: row.get(12)?,
+        statements: crate::connectors::aws_stack::stored_statements(&row.get::<_, String>(13)?),
+        region: row.get(14)?,
     })
 }
 
@@ -485,8 +465,8 @@ impl Vault {
         }
         let id = format!("c{}", crypto::hex(&crypto::random::<4>()));
         db.execute(
-            "INSERT INTO connect_proposals (id, agent, connector, access_id, purpose, access, reason, state, created)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+            "INSERT INTO connect_proposals (id, agent, connector, access_id, purpose, access, reason, state, created, statements, region)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10)",
             params![
                 id,
                 proposal.agent_id,
@@ -495,7 +475,9 @@ impl Vault {
                 proposal.purpose,
                 proposal.access,
                 proposal.reason,
-                now_ms()
+                now_ms(),
+                crate::connectors::aws_stack::store_statements(&proposal.statements),
+                proposal.region
             ],
         )?;
         let proposal = db.query_row(&format!("SELECT {PROPOSAL_COLUMNS} FROM connect_proposals WHERE id = ?1"), [&id], proposal_row)?;

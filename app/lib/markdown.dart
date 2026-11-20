@@ -1,4 +1,8 @@
+import 'dart:math' as math;
+
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart'
+    show PointerEnterEventListener, PointerExitEventListener;
 import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -21,7 +25,13 @@ typedef MarkdownTextBlock = Widget Function(
 /// [openLink]). Parsing happens in [build], so a streaming entry re-parses
 /// at most once per frame however many deltas arrive.
 class Markdown extends StatefulWidget {
-  const Markdown(this.text, {super.key, this.color, this.textBlock});
+  const Markdown(
+    this.text, {
+    super.key,
+    this.color,
+    this.textBlock,
+    this.shortLinks = false,
+  });
 
   final String text;
 
@@ -32,58 +42,305 @@ class Markdown extends StatefulWidget {
   /// [MarkdownTextBlock]); null for the plain ones.
   final MarkdownTextBlock? textBlock;
 
+  /// A long bare address shows as its host and "/…" ("dash.cloudflare.com/…"),
+  /// the whole of it in a tip while the pointer's on it. For cards' short
+  /// texts only (a request's description): copied, the text has the short
+  /// form, so never in conversations or viewers.
+  final bool shortLinks;
+
   @override
   State<Markdown> createState() => _MarkdownState();
 }
 
 class _MarkdownState extends State<Markdown> {
-  /// The links' recognizers from the last build; made only for text that
-  /// has links.
-  final _recognizers = <TapGestureRecognizer>[];
+  late final _links = Links(setState);
 
-  void _dropRecognizers() {
-    for (final recognizer in _recognizers) {
-      recognizer.dispose();
+  /// The whole address of a shortened link, while the pointer's on it.
+  final _tip = OverlayPortalController();
+
+  /// The addresses of the links shown short, at the last build.
+  final _shortened = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.shortLinks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _tip.show();
+      });
     }
-    _recognizers.clear();
   }
 
   @override
   void dispose() {
-    _dropRecognizers();
+    _links.dispose();
     super.dispose();
-  }
-
-  GestureRecognizer? _link(String href) {
-    final url = Uri.tryParse(href);
-    if (url == null || !url.hasScheme) return null;
-    if (url.scheme != 'http' && url.scheme != 'https') return null;
-    final recognizer = TapGestureRecognizer()
-      ..onTap = () => openLink(context, url);
-    _recognizers.add(recognizer);
-    return recognizer;
   }
 
   @override
   Widget build(BuildContext context) {
-    _dropRecognizers();
     final nodes = md.Document(
       extensionSet: md.ExtensionSet.gitHubFlavored,
       encodeHtml: false,
     ).parse(widget.text);
     final palette = Palette.of(context);
     final textBlock = widget.textBlock;
+    final color = widget.color;
+    // On a fill (a bubble's white text), links keep the text's color.
+    final onFill =
+        color != null &&
+        color != palette.text &&
+        color != palette.textMuted &&
+        color != palette.textFaint;
+    _links.start();
     final renderer = _Renderer(
       palette,
-      widget.color ?? palette.text,
+      color ?? palette.text,
       textBlock == null ? null : _Blocks(textBlock),
-      _link,
+      (href) {
+        final url = Uri.tryParse(href);
+        if (url == null || !url.hasScheme) return null;
+        if (url.scheme != 'http' && url.scheme != 'https') return null;
+        return _links.next(
+          href,
+          () => openLink(context, url),
+          onFill ? color : palette.link,
+        );
+      },
+      widget.shortLinks ? (_shortened..clear()) : null,
     );
-    return Column(
+    final blocks = renderer.blocks(nodes);
+    _links.finish();
+    final column = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: renderer.blocks(nodes),
+      children: blocks,
+    );
+    if (!widget.shortLinks) return column;
+    return OverlayPortal(
+      controller: _tip,
+      overlayChildBuilder: _buildTip,
+      child: column,
     );
   }
+
+  /// The hovered short link's whole address, below the pointer (above it
+  /// near the bottom), like a [HoverCard]'s card: after a moment, so it
+  /// doesn't flash as the pointer passes by.
+  Widget _buildTip(BuildContext context) {
+    final href = _links.hoveredKey;
+    final at = _links.hoveredAt;
+    final overlay = Overlay.maybeOf(context)?.context.findRenderObject();
+    if (href == null ||
+        at == null ||
+        !_shortened.contains(href) ||
+        overlay is! RenderBox ||
+        !overlay.hasSize) {
+      return const SizedBox.shrink();
+    }
+    final palette = Palette.of(context);
+    return IgnorePointer(
+      child: CustomSingleChildLayout(
+        delegate: _TipLayout(overlay.globalToLocal(at)),
+        child: TweenAnimationBuilder<double>(
+          key: ValueKey(href),
+          tween: Tween(begin: 0, end: 1),
+          duration: const Duration(milliseconds: 300) + Motion.fast,
+          curve: const Interval(0.7, 1, curve: Curves.easeOut),
+          builder: (context, t, child) => Opacity(opacity: t, child: child),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 320),
+            padding: const EdgeInsets.all(Space.m),
+            decoration: BoxDecoration(
+              color: palette.sidebar,
+              borderRadius: BorderRadius.circular(Radii.panel),
+              border: Border.all(color: palette.hairline),
+              boxShadow: floatingShadow,
+            ),
+            child: Text(
+              href,
+              style: TextStyles.body.copyWith(color: palette.text),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A tip's place: just below [pointer], or above it where there's no room
+/// below, kept inside the window.
+class _TipLayout extends SingleChildLayoutDelegate {
+  _TipLayout(this.pointer);
+
+  final Offset pointer;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    const margin = Space.s;
+    const below = 18.0;
+    var top = pointer.dy + below;
+    if (top + childSize.height > size.height - margin) {
+      top = pointer.dy - Space.s - childSize.height;
+    }
+    final left = pointer.dx.clamp(
+      margin,
+      math.max(margin, size.width - margin - childSize.width).toDouble(),
+    );
+    return Offset(left, math.max(margin, top));
+  }
+
+  @override
+  bool shouldRelayout(_TipLayout old) => old.pointer != pointer;
+}
+
+/// How a long bare address shows short: "dash.cloudflare.com/…" for
+/// `https://dash.cloudflare.com/profile/api-tokens`; null when [text] isn't
+/// the address itself, or is short enough to show whole.
+String? shortAddress(String text, String href) {
+  if (text.length <= 30) return null;
+  final bare =
+      text == href ||
+      'http://$text' == href ||
+      'https://$text' == href ||
+      '$text/' == href;
+  if (!bare) return null;
+  final url = Uri.tryParse(href);
+  if (url == null || url.host.isEmpty) return null;
+  final host = url.host.startsWith('www.') ? url.host.substring(4) : url.host;
+  final more =
+      (url.path.isNotEmpty && url.path != '/') ||
+      url.hasQuery ||
+      url.hasFragment;
+  return more ? '$host/…' : host;
+}
+
+/// How a link in rendered text looks and what its text carries: the
+/// recognizer that opens it and the pointer's comings and goings.
+@immutable
+class LinkLook {
+  const LinkLook({
+    required this.recognizer,
+    required this.style,
+    required this.onEnter,
+    required this.onExit,
+  });
+
+  final GestureRecognizer recognizer;
+  final TextStyle style;
+  final PointerEnterEventListener onEnter;
+  final PointerExitEventListener onExit;
+}
+
+/// The web links in one piece of text, in the order they're built: in the
+/// `link` color, underlined faintly, the underline full while the pointer
+/// is on one, and the link dimmed while it's pressed. Each keeps its
+/// recognizer and pointer callbacks across builds: hovering or pressing one
+/// rebuilds the text, and a new recognizer would lose the tap, new
+/// callbacks a new hover.
+class Links {
+  Links(this._rebuild);
+
+  final void Function(VoidCallback change) _rebuild;
+  var _disposed = false;
+
+  /// The pointer can leave a link after its text is gone.
+  void _setState(VoidCallback change) {
+    if (!_disposed) _rebuild(change);
+  }
+
+  final _made = <_Link>[];
+  var _next = 0;
+  int? _hovered;
+  Offset? _hoveredAt;
+  int? _pressed;
+
+  /// The address of the link the pointer's on, if any.
+  String? get hoveredKey {
+    final index = _hovered;
+    return index == null || index >= _made.length ? null : _made[index].key;
+  }
+
+  /// Where the pointer came onto it, in global coordinates.
+  Offset? get hoveredAt => _hovered == null ? null : _hoveredAt;
+
+  /// Before a build.
+  void start() => _next = 0;
+
+  /// After a build: links it no longer has go.
+  void finish() {
+    while (_made.length > _next) {
+      _made.removeLast().recognizer.dispose();
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    _next = 0;
+    finish();
+  }
+
+  /// The next link in the text, to [key] (its address), opening with
+  /// [open], in [color].
+  LinkLook next(String key, VoidCallback open, Color color) {
+    final index = _next++;
+    if (index >= _made.length || _made[index].key != key) {
+      final made = _Link(
+        key,
+        TapGestureRecognizer(),
+        (event) {
+          _setState(() {
+            _hovered = index;
+            _hoveredAt = event.position;
+          });
+        },
+        (_) {
+          if (_hovered == index) _setState(() => _hovered = null);
+        },
+      );
+      if (index < _made.length) {
+        _made[index].recognizer.dispose();
+        _made[index] = made;
+      } else {
+        _made.add(made);
+      }
+    }
+    final made = _made[index];
+    made.recognizer
+      ..onTapDown = ((_) => _setState(() => _pressed = index))
+      ..onTapCancel = (() => _setState(() => _pressed = null))
+      ..onTap = () {
+        _setState(() => _pressed = null);
+        open();
+      };
+    final pressed = _pressed == index;
+    final hovered = _hovered == index;
+    final shown = pressed ? color.withValues(alpha: 0.7) : color;
+    return LinkLook(
+      recognizer: made.recognizer,
+      style: TextStyle(
+        color: shown,
+        decoration: TextDecoration.underline,
+        decorationColor: hovered || pressed
+            ? shown
+            : color.withValues(alpha: 0.4),
+      ),
+      onEnter: made.onEnter,
+      onExit: made.onExit,
+    );
+  }
+}
+
+class _Link {
+  _Link(this.key, this.recognizer, this.onEnter, this.onExit);
+
+  final String key;
+  final TapGestureRecognizer recognizer;
+  final PointerEnterEventListener onEnter;
+  final PointerExitEventListener onExit;
 }
 
 /// A fenced code block: Geist Mono on a panel, scrolling sideways rather
@@ -182,24 +439,18 @@ class _LinkedCode extends StatefulWidget {
 }
 
 class _LinkedCodeState extends State<_LinkedCode> {
-  final _recognizers = <TapGestureRecognizer>[];
-
-  void _dropRecognizers() {
-    for (final recognizer in _recognizers) {
-      recognizer.dispose();
-    }
-    _recognizers.clear();
-  }
+  late final _links = Links(setState);
 
   @override
   void dispose() {
-    _dropRecognizers();
+    _links.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    _dropRecognizers();
+    _links.start();
+    final palette = Palette.of(context);
     final code = widget.code;
     final spans = <InlineSpan>[];
     var at = 0;
@@ -210,23 +461,25 @@ class _LinkedCodeState extends State<_LinkedCode> {
       if (match.start > at) {
         spans.add(TextSpan(text: code.substring(at, match.start)));
       }
-      final recognizer = TapGestureRecognizer()
-        ..onTap = () => openLink(context, url);
-      _recognizers.add(recognizer);
+      final look = _links.next(
+        address,
+        () => openLink(context, url),
+        palette.link,
+      );
       spans.add(
         TextSpan(
           text: address,
-          recognizer: recognizer,
+          recognizer: look.recognizer,
           mouseCursor: SystemMouseCursors.click,
-          style: TextStyle(
-            decoration: TextDecoration.underline,
-            decorationColor: Palette.of(context).textFaint,
-          ),
+          onEnter: look.onEnter,
+          onExit: look.onExit,
+          style: look.style,
         ),
       );
       at = match.start + address.length;
     }
     if (at < code.length) spans.add(TextSpan(text: code.substring(at)));
+    _links.finish();
     return Text.rich(
       TextSpan(style: widget.style, children: spans),
       softWrap: false,
@@ -248,32 +501,45 @@ class _Blocks {
 
 Widget _plainRich(TextSpan span) => Text.rich(span);
 
-/// [span] and the spans in it opening [recognizer]'s link when clicked.
-InlineSpan _linked(InlineSpan span, GestureRecognizer recognizer) {
+/// [span] and the spans in it opening [look]'s link when clicked, and
+/// telling it when the pointer's on them.
+InlineSpan _linked(InlineSpan span, LinkLook look) {
   if (span is! TextSpan) return span;
   return TextSpan(
     text: span.text,
     style: span.style,
     children: span.children == null
         ? null
-        : [for (final child in span.children!) _linked(child, recognizer)],
-    recognizer: span.recognizer ?? recognizer,
+        : [for (final child in span.children!) _linked(child, look)],
+    recognizer: span.recognizer ?? look.recognizer,
     mouseCursor: SystemMouseCursors.click,
+    onEnter: look.onEnter,
+    onExit: look.onExit,
     semanticsLabel: span.semanticsLabel,
   );
 }
 
 class _Renderer {
-  _Renderer(this.palette, this.color, [this.textBlocks, this.link]);
+  _Renderer(
+    this.palette,
+    this.color, [
+    this.textBlocks,
+    this.link,
+    this.shortened,
+  ]);
 
   final Palette palette;
   final Color color;
 
-  /// What a click on a link to `href` does; null where links don't open.
-  final GestureRecognizer? Function(String href)? link;
+  /// How a link to `href` looks and opens; null where links don't open.
+  final LinkLook? Function(String href)? link;
 
   /// Null when the text is plain [Text]s (the transcript).
   final _Blocks? textBlocks;
+
+  /// Where a long bare address shows short ([Markdown.shortLinks]), the
+  /// addresses shown so; null where they show whole.
+  final Set<String>? shortened;
 
   TextStyle get _body => TextStyles.body.copyWith(color: color);
 
@@ -347,6 +613,7 @@ class _Renderer {
               palette.textMuted,
               textBlocks,
               link,
+              shortened,
             ).blocks(node.children ?? const []),
           ),
         );
@@ -514,21 +781,31 @@ class _Renderer {
           final checked = node.attributes['checked'] != null;
           out.add(TextSpan(text: checked ? '☑ ' : '☐ '));
         case 'a':
-          final nested = <InlineSpan>[];
+          var nested = <InlineSpan>[];
           _inline(children, style, nested);
-          final recognizer = link?.call(node.attributes['href'] ?? '');
+          final href = node.attributes['href'] ?? '';
+          final look = link?.call(href);
+          final short = look == null || shortened == null
+              ? null
+              : shortAddress(node.textContent, href);
+          if (short != null) {
+            nested = [TextSpan(text: short)];
+            shortened!.add(href);
+          }
           out.add(
             TextSpan(
-              style: inner,
+              style: look?.style ?? inner,
               // A click lands on the text's own span, so each piece of the
               // link's text carries the recognizer.
-              children: recognizer == null
+              children: look == null
                   ? nested
-                  : [for (final span in nested) _linked(span, recognizer)],
-              recognizer: recognizer,
-              mouseCursor: recognizer == null
+                  : [for (final span in nested) _linked(span, look)],
+              recognizer: look?.recognizer,
+              mouseCursor: look == null
                   ? MouseCursor.defer
                   : SystemMouseCursors.click,
+              onEnter: look?.onEnter,
+              onExit: look?.onExit,
             ),
           );
         default:

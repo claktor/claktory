@@ -1558,6 +1558,17 @@ class _Footer extends StatelessWidget {
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'network', name: 'Map', color: color),
               ),
+              const SizedBox(width: Space.xs),
+              GlyphButton(
+                label: 'Usage',
+                active: AppScope.pageShown(context, AppPage.usage),
+                onTap: () => AppScope.togglePage(context, AppPage.usage),
+                glyph: (color) => ExtensionGlyph(
+                  icon: 'chart-column',
+                  name: 'Usage',
+                  color: color,
+                ),
+              ),
             ],
           ),
           // How it's connected, always in sight: which Claktory this is,

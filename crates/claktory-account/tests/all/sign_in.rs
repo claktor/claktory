@@ -27,7 +27,7 @@ async fn a_claktory_signs_in_with_an_emailed_code_and_gets_its_share() {
     let mail = instance.mail.sent();
     assert_eq!(mail.len(), 1, "only the code");
     assert_eq!(mail[0].to, "matt@example.com");
-    assert_eq!(mail[0].from, "Claktory <signin@auth.claktory.com>");
+    assert_eq!(mail[0].from, "Claktory <code@auth.claktory.com>");
     let code = instance.last_code("matt@example.com");
     assert!(code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()), "{code}");
     assert!(mail[0].text.contains(&format!("\n\n{code}\n\nIt works for 15 minutes.")));

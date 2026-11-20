@@ -49,6 +49,7 @@ impl Instance {
             k_share: zeroize::Zeroizing::new(self.secrets.0),
             signing_key: ed25519_dalek::SigningKey::from_bytes(&self.secrets.1),
             resend_api_key: None,
+            cloudflare_api_token: None,
             relay_bearer: None,
         };
         let ahead = self.ahead.clone();

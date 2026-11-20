@@ -29,8 +29,8 @@ VaultState _vault(Backend backend) => backend.workspace.workspace.vault;
 String _agentName(Backend backend, String id) =>
     backend.workspace.agent(id)?.name ?? id;
 
-/// Settings → Secrets: agents' requests waiting for the person, the
-/// secrets with what's given to whom, and adding them. The backend keeps
+/// Settings → Secrets: the secrets with what's given to whom, and adding
+/// them (agents' requests show only in their conversations). The backend keeps
 /// them encrypted from the start; there's nothing to set up or unlock.
 class SecretsSettings extends StatelessWidget {
   const SecretsSettings({super.key});
@@ -54,13 +54,6 @@ class SecretsSettings extends StatelessWidget {
               ),
               const SizedBox(height: Space.l),
             ],
-            // Asked for in conversations the person may not be watching:
-            // the same cards, decided here as there. A decided one leaves.
-            for (final request in vault.requests)
-              Padding(
-                padding: const EdgeInsets.only(bottom: Space.l),
-                child: SecretRequestCard(request, key: ValueKey(request.id)),
-              ),
             // Agents' proposals to connect a service, the same way.
             for (final proposal in vault.proposals)
               Padding(
@@ -1591,6 +1584,250 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
   }
 }
 
+/// The Secrets extension's panel beside an agent: the secrets it has, from
+/// the vault the backend sends with the workspace (the extension has no
+/// view of its own), each with what it's for, its variables and when it
+/// was given, to take back; and giving it another.
+class AgentSecretsPanel extends StatelessWidget {
+  const AgentSecretsPanel({super.key, required this.agentId, this.now});
+
+  final String agentId;
+
+  /// What "now" is for ages; the clock's time unless given.
+  final DateTime? now;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final palette = Palette.of(context);
+        final vault = _vault(backend);
+        final agent = backend.workspace.agent(agentId);
+        final given = [
+          for (final secret in vault.secrets)
+            for (final grant in secret.grants)
+              if (grant.agentId == agentId) (secret: secret, grant: grant),
+        ];
+        final others = [
+          for (final secret in vault.secrets)
+            if (!secret.hasConnection() &&
+                !secret.grants.any((grant) => grant.agentId == agentId))
+              secret,
+        ];
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(
+            Space.l,
+            Space.m,
+            Space.l,
+            Space.l,
+          ),
+          children: [
+            if (vault.exists && !vault.unlocked) ...[
+              Text(
+                "Secrets are locked. Agents can't use them until you unlock "
+                'them in Settings → Secrets.',
+                style: TextStyles.caption.copyWith(color: palette.signal),
+              ),
+              const SizedBox(height: Space.m),
+            ],
+            if (given.isEmpty)
+              Text(
+                '${agent?.name ?? agentId} has no secrets yet.',
+                style: TextStyles.body.copyWith(color: palette.textFaint),
+              )
+            else
+              for (final (:secret, :grant) in given)
+                _GivenSecret(
+                  key: ValueKey(secret.id),
+                  secret: secret,
+                  grant: grant,
+                  now: now ?? DateTime.now(),
+                ),
+            if (agent != null && others.isNotEmpty) ...[
+              const SizedBox(height: Space.s),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Button(
+                  label: 'Give a secret…',
+                  onPressed: () => showModal(
+                    context,
+                    (context, close) => _SecretPicker(
+                      title: 'Give a secret to ${agent.name}',
+                      secrets: others,
+                      pick: (secret) {
+                        close();
+                        fireAndLog(backend.grantSecret(secret.id, agent.id));
+                      },
+                      close: close,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: Space.l),
+            Text(
+              '${agent?.name ?? agentId} uses them without ever seeing their '
+              'values.',
+              style: TextStyles.caption.copyWith(color: palette.textFaint),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// One secret an agent has, in its Secrets panel: its name, what it's for,
+/// its variables, when it was given and last used by the agent, and Take
+/// back.
+class _GivenSecret extends StatelessWidget {
+  const _GivenSecret({
+    super.key,
+    required this.secret,
+    required this.grant,
+    required this.now,
+  });
+
+  final SecretInfo secret;
+  final SecretGrant grant;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final tasks = grant.runningTasks;
+    final when = [
+      if (grant.grantedMs > 0)
+        'Given ${formatAge(grant.grantedMs.toInt(), now)}',
+      if (secret.lastUsedBy == grant.agentId && secret.lastUsedMs > 0)
+        'Last used ${formatAge(secret.lastUsedMs.toInt(), now)}',
+      if (tasks > 0) 'Used by $tasks running ${tasks == 1 ? 'task' : 'tasks'}',
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.m),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  secret.name,
+                  style: TextStyles.label.copyWith(color: palette.text),
+                ),
+                if (secret.description.isNotEmpty)
+                  Text(
+                    secret.description,
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textMuted,
+                    ),
+                  ),
+                if (secret.variables.isNotEmpty)
+                  Text(
+                    secret.variables
+                        .map((variable) => variable.name)
+                        .join(', '),
+                    style: TextStyles.code.copyWith(
+                      fontSize: 11,
+                      color: palette.textMuted,
+                    ),
+                  ),
+                if (when.isNotEmpty)
+                  Text(
+                    when,
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textFaint,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Button(
+            label: 'Take back',
+            onPressed: () => showModal(
+              context,
+              (context, close) =>
+                  TakeBackForm(secret: secret, grant: grant, close: close),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Picks one of [secrets].
+class _SecretPicker extends StatelessWidget {
+  const _SecretPicker({
+    required this.title,
+    required this.secrets,
+    required this.pick,
+    required this.close,
+  });
+
+  final String title;
+  final List<SecretInfo> secrets;
+  final ValueChanged<SecretInfo> pick;
+  final VoidCallback close;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return FormFrame(
+      title: title,
+      fields: [
+        for (final secret in secrets)
+          Unselectable(
+            child: Semantics(
+              button: true,
+              label: secret.name,
+              child: Pressable(
+                onTap: () => pick(secret),
+                builder: (context, hovered) => Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Space.s,
+                    vertical: Space.xs + 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: hovered ? palette.hover : null,
+                    borderRadius: BorderRadius.circular(Radii.control),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        secret.name,
+                        style: TextStyles.body.copyWith(color: palette.text),
+                      ),
+                      if (secret.description.isNotEmpty)
+                        Text(
+                          secret.description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyles.caption.copyWith(
+                            color: palette.textFaint,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: Space.l),
+      ],
+      error: null,
+      submitLabel: 'Choose',
+      onSubmit: null,
+      onCancel: close,
+    );
+  }
+}
+
 /// Words too common in secrets' names to say two are the same.
 const _commonWords = {
   'api',
@@ -1764,7 +2001,8 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     final name = agent?.name ?? request.agentId;
     final pending =
         request.state != SecretRequestState.SECRET_REQUEST_STATE_GRANTED &&
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
+        request.state != SecretRequestState.SECRET_REQUEST_STATE_DISMISSED &&
+        request.state != SecretRequestState.SECRET_REQUEST_STATE_EXPIRED;
     final description = _names
         ? [
                 for (final secret in secrets)
@@ -1812,14 +2050,15 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           ),
           if (description.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
-            Text(
-              description,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
-            ),
+            Markdown(description, color: palette.textMuted, shortLinks: true),
           ],
           if (request.reason.isNotEmpty) ...[
             const SizedBox(height: Space.s),
-            Markdown(request.reason, color: pending ? null : palette.textMuted),
+            Markdown(
+              request.reason,
+              color: pending ? null : palette.textMuted,
+              shortLinks: true,
+            ),
           ],
           const SizedBox(height: Space.m),
           if (pending)
@@ -1987,6 +2226,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   List<Widget> _decided(Palette palette, Color color, String agent) {
     final dismissed =
         request.state == SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
+    // Left unanswered too long: the agent was told and can ask again.
+    final expired =
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_EXPIRED;
     final decided = request.decidedMs.toInt();
     final given = request.givenSecretName.isNotEmpty
         ? request.givenSecretName
@@ -1996,9 +2238,13 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         TextSpan(
           children: [
             TextSpan(
-              text: dismissed ? 'Dismissed' : 'Gave $given to $agent',
+              text: expired
+                  ? 'Expired'
+                  : dismissed
+                  ? 'Dismissed'
+                  : 'Gave $given to $agent',
               style: TextStyle(
-                color: dismissed ? palette.textMuted : color,
+                color: dismissed || expired ? palette.textMuted : color,
                 fontWeight: FontWeight.w500,
               ),
             ),

@@ -106,7 +106,7 @@ void main() {
     );
     await backend.showAllFiles(watched.id, true);
     await until(
-      'Show everything',
+      'Show hidden files',
       () => backend.explorer.of(watched.id)!.showAll,
     );
     expect(

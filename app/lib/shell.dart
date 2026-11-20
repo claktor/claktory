@@ -25,6 +25,7 @@ import 'settings_view.dart';
 import 'sidebar.dart';
 import 'state.dart';
 import 'update.dart';
+import 'usage_view.dart';
 
 /// The window: the sidebar on the left, the selected agent in the middle under
 /// the update banner, and its open extension panel on the right. Hosts the
@@ -387,6 +388,8 @@ class _Content extends StatelessWidget {
             return const ChangelogView();
           case AppPage.map:
             return const MapView();
+          case AppPage.usage:
+            return const UsageView();
           case AppPage.agent:
         }
         final store = backend.workspace;

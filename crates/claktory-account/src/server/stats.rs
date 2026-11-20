@@ -133,6 +133,15 @@ pub fn report(conn: &Connection, now: i64) -> rusqlite::Result<String> {
         )?,
     );
     section(&mut out, "Sign-ins per day, last 30", rows(conn, "SELECT day, count FROM sign_ins ORDER BY day DESC LIMIT 30", &[])?);
+    section(
+        &mut out,
+        "Emails the mail provider refused, today and yesterday (UTC)",
+        rows(
+            conn,
+            "SELECT substr(key, 14), sum(count) FROM limits WHERE key LIKE 'mail-refused:%' AND window >= ?1 GROUP BY key ORDER BY key",
+            &[&(now - now.rem_euclid(86_400) - 86_400)],
+        )?,
+    );
     Ok(out)
 }
 

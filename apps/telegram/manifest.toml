@@ -1,0 +1,49 @@
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+world = "claktory:app@1"
+publisher = "claktory"
+description = "Message your agents from Telegram, and let them message you."
+icon = "send"
+hosts = ["api.telegram.org"]
+storage_mb = 5
+memory_mb = 32
+
+# What the agents granted it read in their instructions.
+instructions = """
+Telegram is how the person reaches you when they're away from Claktory: a bot \
+they message, and that messages them. Their messages to it arrive as events \
+from Telegram. Answer one with telegram_send, briefly, as you'd text: they're \
+reading on a phone. Message them unprompted only when it's worth a \
+notification. telegram_history shows the recent messages both ways.
+"""
+
+[[secrets]]
+name = "bot_token"
+label = "Bot token"
+description = "Make a bot with @BotFather in Telegram (send it /newbot), then paste the token it gives you."
+
+[[scopes]]
+id = "send"
+label = "Send you Telegram messages"
+tools = ["telegram_send"]
+
+[[scopes]]
+id = "read"
+label = "Read your messages to the bot"
+tools = ["telegram_history"]
+
+[[events]]
+kind = "message"
+scope = "read"
+label = "A message you send the bot"
+
+[[tools]]
+name = "telegram_send"
+description = "Send the person a message on Telegram. Markdown works (bold, italic, code, code blocks, links); a long message is split. Fails until they've linked the bot to their Telegram."
+parameters = { type = "object", required = ["text"], properties = { text = { type = "string", description = "The message, in Markdown." } } }
+
+[[tools]]
+name = "telegram_history"
+description = "The recent messages between the person and the bot, both ways, oldest first, with times in UTC."
+parameters = { type = "object", properties = { limit = { type = "integer", description = "How many, newest last; 20 if left out, at most 200." } } }

@@ -7,6 +7,7 @@ import 'package:factory_app/secrets.dart';
 import 'package:factory_app/update.dart';
 import 'package:factory_app/web_auth.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -62,6 +63,13 @@ final _aws = Connector(
   setupNote: 'Your AWS needs IAM Identity Center with permission sets.',
 );
 
+/// Cloudflare as Matt wants it: make a token on its page, paste it back.
+final _pasteCloudflare = _cloudflare.deepCopy()
+  ..flow = ConnectorFlowKind.CONNECTOR_FLOW_KIND_PASTE
+  ..redirectUris.clear()
+  ..tokenUrl =
+      'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=x';
+
 final _connection = SecretInfo(
   id: 'c1',
   name: 'Cloudflare (matt@example.com)',
@@ -93,6 +101,7 @@ Workspace _workspace({
   List<SecretInfo> secrets = const [],
   List<ConnectProposal> proposals = const [],
   List<ConnectFlow> flows = const [],
+  Connector? cloudflare,
 }) => Workspace(
   agents: [
     Agent(id: 'june', name: 'June', color: 'pink', modelAvailable: true),
@@ -104,7 +113,7 @@ Workspace _workspace({
     exists: true,
     unlocked: true,
     secrets: secrets,
-    connectors: [_cloudflare, _aws],
+    connectors: [cloudflare ?? _cloudflare, _aws],
     proposals: proposals,
     flows: flows,
   ),
@@ -117,10 +126,12 @@ void _flow(
   String error = '',
   List<SecretInfo> secrets = const [],
   List<ConnectProposal> proposals = const [],
+  Connector? cloudflare,
 }) => harness.backend.workspace.apply(
   _workspace(
     secrets: secrets,
     proposals: proposals,
+    cloudflare: cloudflare,
     flows: [
       ConnectFlow(
         id: 'flow-1',
@@ -465,6 +476,150 @@ void main() {
     expect(find.text('Check that the page shows WXYZ-1234.'), findsOneWidget);
   });
 
+  testWidgets('pasting a token: the page that makes it opens, the token goes '
+      'to the backend once and leaves the field; a refused one asks for '
+      'another', (tester) async {
+    final harness = Harness(_workspace(cloudflare: _pasteCloudflare));
+    harness.backend.connectStarted = ConnectStarted(
+      flowId: 'flow-1',
+      url: _pasteCloudflare.tokenUrl,
+    );
+    void flow(ConnectFlowState state, {String error = ''}) => _flow(
+      harness,
+      state,
+      error: error,
+      cloudflare: _pasteCloudflare,
+      secrets: state == ConnectFlowState.CONNECT_FLOW_STATE_CONNECTED
+          ? [_connection]
+          : const [],
+    );
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect a service…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloudflare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    flow(ConnectFlowState.CONNECT_FLOW_STATE_WAITING);
+    await tester.pump();
+
+    final start = _sent(
+      harness,
+      (m) => m.hasStartConnect() ? m.startConnect : null,
+    ).single;
+    expect(start.redirectUri, isEmpty);
+    expect(receivers, isEmpty, reason: 'nothing comes back by itself');
+    expect(opened.single.toString(), _pasteCloudflare.tokenUrl);
+    expect(
+      find.textContaining("Make a token on Cloudflare's page"),
+      findsOneWidget,
+    );
+
+    // Nothing pasted yet.
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    expect(find.text('Paste the token to connect.'), findsOneWidget);
+    expect(_sent(harness, (m) => m.hasFinishConnect() ? m : null), isEmpty);
+
+    await tester.enterText(find.byType(EditableText).last, ' cf-token-1 ');
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    final finish = _sent(
+      harness,
+      (m) => m.hasFinishConnect() ? m.finishConnect : null,
+    ).single;
+    expect(finish.flowId, 'flow-1');
+    expect(finish.token, 'cf-token-1');
+    expect(finish.callbackUrl, isEmpty);
+    expect(find.text('Checking the token with Cloudflare…'), findsOneWidget);
+
+    flow(ConnectFlowState.CONNECT_FLOW_STATE_EXCHANGING);
+    await tester.pump();
+    expect(find.text('Checking the token with Cloudflare…'), findsOneWidget);
+    expect(find.byType(EditableText), findsNothing);
+
+    // Refused: the same flow waits for another, saying why.
+    flow(
+      ConnectFlowState.CONNECT_FLOW_STATE_WAITING,
+      error: "Cloudflare didn't accept this token: it can't edit DNS.",
+    );
+    await tester.pump();
+    expect(
+      find.text("Cloudflare didn't accept this token: it can't edit DNS."),
+      findsOneWidget,
+    );
+    final field = tester.widget<EditableText>(find.byType(EditableText).last);
+    expect(field.controller.text, isEmpty, reason: 'never kept or shown');
+    expect(field.obscureText, isTrue);
+
+    await tester.enterText(find.byType(EditableText).last, 'cf-token-2');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(
+      _sent(
+        harness,
+        (m) => m.hasFinishConnect() ? m.finishConnect : null,
+      ).last.token,
+      'cf-token-2',
+    );
+    flow(ConnectFlowState.CONNECT_FLOW_STATE_CONNECTED);
+    await tester.pump();
+    expect(
+      find.text('Connected Cloudflare as Cloudflare (matt@example.com).'),
+      findsOneWidget,
+    );
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  testWidgets("pasting from an agent's proposal card, and another device's "
+      'refusal', (tester) async {
+    final harness = Harness(
+      _workspace(proposals: [_proposal()], cloudflare: _pasteCloudflare),
+    );
+    harness.backend.connectStarted = ConnectStarted(
+      flowId: 'flow-1',
+      url: _pasteCloudflare.tokenUrl,
+    );
+    await _show(tester, harness, const SecretsSettings());
+    await tester.tap(find.text('Connect Cloudflare'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      _sent(
+        harness,
+        (m) => m.hasStartConnect() ? m.startConnect : null,
+      ).single.proposalId,
+      'p1',
+    );
+    expect(opened.single.toString(), _pasteCloudflare.tokenUrl);
+    expect(find.text('Open the page again'), findsOneWidget);
+    await tester.tap(find.text('Open the page again'));
+    await tester.pump();
+    expect(opened, hasLength(2));
+
+    harness.backend.refuse = 'Only the device that started this can finish it.';
+    await tester.enterText(find.byType(EditableText).first, 'cf-token');
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.text('Only the device that started this can finish it.'),
+      findsOneWidget,
+    );
+    final field = tester.widget<EditableText>(find.byType(EditableText).first);
+    expect(field.controller.text, isEmpty);
+
+    harness.backend.refuse = null;
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      _sent(harness, (m) => m.hasCancelConnect() ? m : null),
+      hasLength(1),
+    );
+  });
+
   testWidgets("an agent's proposal: what for, the access, why; Connect "
       'answers it, Dismiss tells it why', (tester) async {
     final harness = Harness(_workspace(proposals: [_proposal()]));
@@ -524,6 +679,80 @@ void main() {
     );
     expect(find.text('Connect Cloudflare'), findsNothing);
     expect(find.text('Dismiss'), findsNothing);
+  });
+
+  testWidgets("an AWS proposal shows its region, and its exact statements "
+      'once opened, conditions in words', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      ConnectProposalCard(
+        _proposal()
+          ..region = 'eu-central-1'
+          ..statements.addAll([
+            PolicyStatement(
+              actions: ['ec2:DescribeImages', 'ec2:DescribeInstances'],
+              resources: ['*'],
+              condition:
+                  '{"StringEquals":{"aws:RequestedRegion":"eu-central-1"}}',
+            ),
+            PolicyStatement(
+              actions: ['ec2:RunInstances'],
+              resources: ['arn:aws:ec2:eu-central-1:*:instance/*'],
+              condition:
+                  '{"StringEquals":{"aws:RequestTag/claktory:service":'
+                  '"account"},"StringEqualsIfExists":{"ec2:InstanceType":'
+                  '["t3.small","t3a.small"]}}',
+            ),
+            PolicyStatement(
+              actions: ['ec2:CreateSecurityGroup'],
+              resources: ['arn:aws:ec2:eu-central-1:*:vpc/*'],
+            ),
+          ]),
+      ),
+    );
+    expect(find.text('Region'), findsOneWidget);
+    expect(find.text('eu-central-1'), findsOneWidget);
+    // Folded until asked for.
+    expect(find.textContaining('ec2:RunInstances'), findsNothing);
+    await tester.tap(find.text('Show exact permissions (3 rules)'));
+    await tester.pump();
+    expect(find.text('Allows'), findsNWidgets(3));
+    expect(
+      find.text('ec2:DescribeImages\nec2:DescribeInstances'),
+      findsOneWidget,
+    );
+    expect(find.text('* (all resources)'), findsOneWidget);
+    expect(find.text('arn:aws:ec2:eu-central-1:*:instance/*'), findsOneWidget);
+    expect(find.text('aws:RequestedRegion is eu-central-1'), findsOneWidget);
+    expect(
+      find.text(
+        'aws:RequestTag/claktory:service is account\n'
+        'ec2:InstanceType is t3.small or t3a.small (if the request has it)',
+      ),
+      findsOneWidget,
+    );
+    // No condition, no "Only when".
+    expect(find.text('Only when'), findsNWidgets(2));
+    await tester.tap(find.text('Hide exact permissions'));
+    await tester.pump();
+    expect(find.text('Allows'), findsNothing);
+  });
+
+  test('a condition with operators of its own reads as its JSON', () {
+    expect(conditionLines(''), isNull);
+    expect(conditionLines('{"Bool":{"aws:SecureTransport":"true"}}'), [
+      'aws:SecureTransport is true',
+    ]);
+    expect(
+      conditionLines('{"ForAnyValue:StringEquals":{"aws:TagKeys":["a","b"]}}'),
+      [
+        '{\n  "ForAnyValue:StringEquals": {\n    "aws:TagKeys": [\n'
+            '      "a",\n      "b"\n    ]\n  }\n}',
+      ],
+    );
+    expect(conditionLines('not json'), ['not json']);
   });
 
   testWidgets('a connection in the list: its service, account and access, '

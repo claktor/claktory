@@ -6,6 +6,19 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.9
+Released 2026-11-20 15:04 UTC.
+- Added: Give agents their own Cloudflare access, with only what their work needs. Connect Cloudflare in Settings → Secrets, or when an agent suggests it: make a token on the page Claktory opens, then paste it back. No agent gets anything until you or Rivet give it a secret made from the connection.
+- Added: See where your tokens go: the Usage button at the bottom of the sidebar shows how many each agent, provider, model and account used today, over 7 or 30 days, or all time, with a chart and your subscription limits.
+- Added: Use your Claude or ChatGPT usage resets right from Claktory: hover a provider's circle at the bottom of the sidebar to see how many you have left and use one. A dot on the circle tells you when you're close to a limit a reset can refill.
+- Added: Make the whole app bigger or smaller, as in a browser: press ⌘+ or ⌘−, and ⌘0 for actual size, or set Zoom in Settings → Display. Each device keeps its own.
+- Added: An agent can suggest you talk to another agent that's better placed to help. Its suggestion's Talk to button opens that agent's conversation with a message ready for you to change and send.
+- Changed: An agent's request for a secret now shows only in its conversation. Left unanswered for 12 hours, or while the agent moves on to other work, it expires, and the agent can ask again if it still needs it.
+- Changed: Links now stand out in blue, in conversations, files, a command's output and an agent's requests alike, so you can spot them at a glance.
+- Changed: In Files, Show everything is now Show hidden files, which says what it does.
+- Fixed: The Secrets panel beside an agent was empty. It now lists the secrets the agent has, with Give a secret… and Take back. The panels of other extensions with nothing of their own to show now say what the extension does and how it's set, instead of being blank.
+- Fixed: Your Claude or ChatGPT plan could show the wrong name (Max for Claude Ultra, say), or the old plan after you upgraded. It now shows the name the provider gives it, and changes soon after you upgrade, without signing in again.
+
 ## v0.1.8
 Released 2026-11-20 12:28 UTC.
 - Added: Watch an agent's videos beside its conversation and comment on a moment or a stretch: click Comment above the video, then click or drag along the timeline. Drag across the frame too to point at part of it.

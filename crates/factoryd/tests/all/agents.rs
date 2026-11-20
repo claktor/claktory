@@ -529,9 +529,11 @@ async fn the_persons_messages_say_which_device_they_came_from_and_their_apps_id_
 }
 
 /// The Rivet prompt the version before placeholders shipped: today's with
-/// "the person" where it says {{user}}.
+/// "the person" where it says {{user}}, and without what came after (its
+/// line on connected services).
 fn last_shipped_rivet_prompt(current: &str) -> String {
-    current.replace("{{user}}", "the person").replace("{{User}}", "The person")
+    let before: Vec<&str> = current.lines().filter(|line| !line.starts_with("- A connected service")).collect();
+    before.join("\n").replace("{{user}}", "the person").replace("{{User}}", "The person")
 }
 
 #[tokio::test]

@@ -40,7 +40,7 @@ class FilesPane extends StatelessWidget {
                   project: project,
                   explorer: explorer,
                   // A narrow pane keeps only the check, named on hover.
-                  compact: constraints.maxWidth < 300,
+                  compact: constraints.maxWidth < 320,
                 ),
             ],
             body: ColoredBox(
@@ -108,7 +108,7 @@ bool filesShown(BuildContext context, String projectId) {
 }
 
 /// Shows the files .factoryignore hides, or hides them again: a check and
-/// "Show everything", in a Files pane's header.
+/// "Show hidden files", in a Files pane's header.
 class ShowEverything extends StatelessWidget {
   const ShowEverything({
     super.key,
@@ -127,7 +127,7 @@ class ShowEverything extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    const label = 'Show everything';
+    const label = 'Show hidden files';
     final toggle = Semantics(
       button: true,
       checked: explorer.showAll,

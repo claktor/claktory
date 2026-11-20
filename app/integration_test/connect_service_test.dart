@@ -40,6 +40,35 @@ import 'phone_test.dart' show hold, waitFor;
 
 const _code2 = String.fromEnvironment('PAIRING_CODE_2');
 
+/// This phone's own code, for a Simulator that isn't paired yet.
+const _code = String.fromEnvironment('PAIRING_CODE');
+
+/// Opens the app, pairing it with [_code] first when nothing is paired.
+Future<void> _open(WidgetTester tester) async {
+  await app.main();
+  await tester.pump(const Duration(seconds: 1));
+  if (find.text('Connect to your Claktory').evaluate().isNotEmpty) {
+    expect(_code, isNotEmpty, reason: 'pass --dart-define=PAIRING_CODE=…');
+    for (var i = 0; i < 50; i++) {
+      if (find.byType(EditableText).evaluate().isNotEmpty) break;
+      if (find.text('Paste code instead').evaluate().isNotEmpty) {
+        await tester.tap(find.text('Paste code instead'));
+      }
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    await tester.enterText(find.byType(EditableText), _code);
+    await tester.pump();
+    await tester.tap(find.text('Connect'));
+  }
+}
+
+/// The token the stand-in's token page "makes" (PASTE): any other is
+/// refused.
+const _pasted = String.fromEnvironment(
+  'PASTED_TOKEN',
+  defaultValue: 'cf-pasted-0123456789abcdef',
+);
+
 /// Holds the screen still at each step, for screenshots.
 const _shots = bool.fromEnvironment('SHOTS');
 const _helper = 'Cleo';
@@ -82,7 +111,7 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('connecting Cloudflare, end to end', (tester) async {
-    await app.main();
+    await _open(tester);
     await waitFor(
       tester,
       find.byType(Sidebar),
@@ -157,8 +186,14 @@ void main() {
     expect(proposal.connectorId, 'cloudflare');
 
     // 2. Connect, from the card in its conversation.
+    final pastes =
+        cloudflare.flow == ConnectorFlowKind.CONNECTOR_FLOW_KIND_PASTE;
+    final pages = <Uri>[];
     connectInSheet = false;
-    openConnectPage = _browse;
+    openConnectPage = (url) async {
+      pages.add(url);
+      return _browse(url);
+    };
     await tester.tap(find.text(_helper).first);
     final card = find.byType(ConnectProposalCard);
     await waitFor(tester, card, timeout: const Duration(seconds: 30));
@@ -166,6 +201,35 @@ void main() {
     final connect = find.descendant(of: card, matching: find.text('Connect'));
     await tester.ensureVisible(connect.first);
     await tester.tap(connect.first);
+    if (pastes) {
+      // The page that makes the token opens; the token is pasted back,
+      // a wrong one first.
+      final field = find.descendant(
+        of: card,
+        matching: find.byType(EditableText),
+      );
+      await waitFor(tester, field, timeout: const Duration(seconds: 30));
+      expect(pages.single.toString(), cloudflare.tokenUrl);
+      // ignore: avoid_print
+      print('the token page: ${pages.single}');
+      await tester.enterText(field.first, 'not-a-cloudflare-token');
+      await tester.tap(connect.first);
+      await waitFor(
+        tester,
+        find.textContaining("didn't accept"),
+        timeout: const Duration(seconds: 30),
+      );
+      // ignore: avoid_print
+      print(
+        'a wrong token: '
+        '${vault().flows.map((f) => '${f.state} ${f.error}').join(', ')}',
+      );
+      await hold(tester, seconds: _shots ? 6 : 1);
+      expect(tester.widget<EditableText>(field.first).controller.text, isEmpty);
+      await tester.enterText(field.first, _pasted);
+      await hold(tester, seconds: _shots ? 4 : 0);
+      await tester.tap(connect.first);
+    }
     await until(
       'connected',
       () => vault().secrets.any(
@@ -284,14 +348,17 @@ void main() {
     final started = await backend.startConnect(
       StartConnect(
         connectorId: 'cloudflare',
-        redirectUri: 'http://127.0.0.1:5999/oauth/cloudflare',
+        redirectUri: pastes ? '' : 'http://127.0.0.1:5999/oauth/cloudflare',
       ),
     );
     Object? refused;
     try {
       await other.finishConnect(
         started.flowId,
-        'http://127.0.0.1:5999/oauth/cloudflare?code=good-code&state=x',
+        pastes
+            ? ''
+            : 'http://127.0.0.1:5999/oauth/cloudflare?code=good-code&state=x',
+        token: pastes ? _pasted : '',
       );
     } on RequestFailure catch (failure) {
       refused = failure;
@@ -306,6 +373,10 @@ void main() {
     connectSheet = _sheet;
     final again = ConnectRun.of(other, 'secret:${connection.id}');
     await again.start(cloudflare, secretId: connection.id);
+    if (pastes) {
+      again.token.text = _pasted;
+      await again.sendToken();
+    }
     await until(
       'connected again',
       () =>
@@ -341,7 +412,7 @@ void main() {
   testWidgets('connecting AWS through its device flow, from Settings', (
     tester,
   ) async {
-    await app.main();
+    await _open(tester);
     await waitFor(
       tester,
       find.byType(Sidebar),

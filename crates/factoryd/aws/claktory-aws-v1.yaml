@@ -1,0 +1,609 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Claktory: lets your agents do only what the rules below allow, in this
+  account. Creates a user that can do nothing but take on one role; that
+  role, with exactly those rules; and a small function that sets up the role
+  and gives Claktory the user's key, encrypted so only your Claktory can read
+  it. Delete this stack to take Claktory's access away. (claktory-aws-v1)
+
+# The contract with Claktory's backend (crates/factoryd/src/connectors/): the
+# parameters below; the receipt in Outputs, "claktory-aws-v1." and a compact
+# JWE (RSA-OAEP-256, A256GCM) sealed to PublicKeyJwk; the broker user's one
+# inline policy claktory-broker and the role's one inline policy
+# claktory-capability, one statement (Sid StatementN) per slot in use. The
+# backend checks what this stack made against what was proposed before it
+# keeps anything. Tests: node --test crates/factoryd/aws/seal-test.js
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: "What your agents may do. Each rule allows its actions on its resources, and only when its condition holds."}
+        Parameters:
+          - Actions1
+          - Resources1
+          - Condition1
+          - Actions2
+          - Resources2
+          - Condition2
+          - Actions3
+          - Resources3
+          - Condition3
+          - Actions4
+          - Resources4
+          - Condition4
+          - Actions5
+          - Resources5
+          - Condition5
+          - Actions6
+          - Resources6
+          - Condition6
+          - Actions7
+          - Resources7
+          - Condition7
+          - Actions8
+          - Resources8
+          - Condition8
+          - Actions9
+          - Resources9
+          - Condition9
+          - Actions10
+          - Resources10
+          - Condition10
+      - Label: {default: "From your Claktory (leave these as they are)"}
+        Parameters: [FlowId, ProposalHash, PublicKeyJwk]
+    ParameterLabels:
+      Actions1: {default: "Rule 1: actions"}
+      Resources1: {default: "Rule 1: resources"}
+      Condition1: {default: "Rule 1: condition"}
+      Actions2: {default: "Rule 2: actions"}
+      Resources2: {default: "Rule 2: resources"}
+      Condition2: {default: "Rule 2: condition"}
+      Actions3: {default: "Rule 3: actions"}
+      Resources3: {default: "Rule 3: resources"}
+      Condition3: {default: "Rule 3: condition"}
+      Actions4: {default: "Rule 4: actions"}
+      Resources4: {default: "Rule 4: resources"}
+      Condition4: {default: "Rule 4: condition"}
+      Actions5: {default: "Rule 5: actions"}
+      Resources5: {default: "Rule 5: resources"}
+      Condition5: {default: "Rule 5: condition"}
+      Actions6: {default: "Rule 6: actions"}
+      Resources6: {default: "Rule 6: resources"}
+      Condition6: {default: "Rule 6: condition"}
+      Actions7: {default: "Rule 7: actions"}
+      Resources7: {default: "Rule 7: resources"}
+      Condition7: {default: "Rule 7: condition"}
+      Actions8: {default: "Rule 8: actions"}
+      Resources8: {default: "Rule 8: resources"}
+      Condition8: {default: "Rule 8: condition"}
+      Actions9: {default: "Rule 9: actions"}
+      Resources9: {default: "Rule 9: resources"}
+      Condition9: {default: "Rule 9: condition"}
+      Actions10: {default: "Rule 10: actions"}
+      Resources10: {default: "Rule 10: resources"}
+      Condition10: {default: "Rule 10: condition"}
+      FlowId: {default: "Connection request"}
+      ProposalHash: {default: "Fingerprint of the rules"}
+      PublicKeyJwk: {default: "Your Claktory's one-time key"}
+
+Parameters:
+  FlowId:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_-]{22,64}$"
+    Description: The connection request in your Claktory that this stack answers.
+  ProposalHash:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{64}$"
+    Description: A fingerprint (SHA-256) of the rules your Claktory asked for, so it can check that nothing changed.
+  PublicKeyJwk:
+    Type: String
+    MinLength: 500
+    MaxLength: 1000
+    Description: The public half of a key your Claktory made for this request only. The user's key is encrypted with it, so only your Claktory can read it.
+  Actions1:
+    Type: CommaDelimitedList
+    Description: What rule 1 allows, such as ec2:RunInstances. Rule 1 is required.
+  Resources1:
+    Type: CommaDelimitedList
+    Description: The resources (ARNs) rule 1's actions may act on. * means all resources.
+  Condition1:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 1 applies, as an IAM condition in JSON. Empty means always.
+  Actions2:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 2 allows, such as ec2:RunInstances.
+  Resources2:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 2's actions may act on. * means all resources.
+  Condition2:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 2 applies, as an IAM condition in JSON. Empty means always.
+  Actions3:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 3 allows, such as ec2:RunInstances.
+  Resources3:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 3's actions may act on. * means all resources.
+  Condition3:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 3 applies, as an IAM condition in JSON. Empty means always.
+  Actions4:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 4 allows, such as ec2:RunInstances.
+  Resources4:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 4's actions may act on. * means all resources.
+  Condition4:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 4 applies, as an IAM condition in JSON. Empty means always.
+  Actions5:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 5 allows, such as ec2:RunInstances.
+  Resources5:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 5's actions may act on. * means all resources.
+  Condition5:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 5 applies, as an IAM condition in JSON. Empty means always.
+  Actions6:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 6 allows, such as ec2:RunInstances.
+  Resources6:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 6's actions may act on. * means all resources.
+  Condition6:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 6 applies, as an IAM condition in JSON. Empty means always.
+  Actions7:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 7 allows, such as ec2:RunInstances.
+  Resources7:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 7's actions may act on. * means all resources.
+  Condition7:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 7 applies, as an IAM condition in JSON. Empty means always.
+  Actions8:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 8 allows, such as ec2:RunInstances.
+  Resources8:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 8's actions may act on. * means all resources.
+  Condition8:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 8 applies, as an IAM condition in JSON. Empty means always.
+  Actions9:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 9 allows, such as ec2:RunInstances.
+  Resources9:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 9's actions may act on. * means all resources.
+  Condition9:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 9 applies, as an IAM condition in JSON. Empty means always.
+  Actions10:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: What rule 10 allows, such as ec2:RunInstances.
+  Resources10:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The resources (ARNs) rule 10's actions may act on. * means all resources.
+  Condition10:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: When rule 10 applies, as an IAM condition in JSON. Empty means always.
+
+Resources:
+  # The user Claktory keeps the key of. It can take on CapabilityRole and
+  # read its own and the role's policies, so Claktory can check them;
+  # nothing else.
+  BrokerUser:
+    Type: AWS::IAM::User
+    Properties:
+      Path: /claktory/
+
+  BrokerPolicy:
+    Type: AWS::IAM::UserPolicy
+    Properties:
+      UserName: !Ref BrokerUser
+      PolicyName: claktory-broker
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TakeOnTheRole
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt CapabilityRole.Arn
+          - Sid: ReadItsOwnPolicies
+            Effect: Allow
+            Action:
+              - iam:GetUser
+              - iam:ListUserPolicies
+              - iam:GetUserPolicy
+              - iam:ListAttachedUserPolicies
+              - iam:ListGroupsForUser
+            Resource: !GetAtt BrokerUser.Arn
+          - Sid: ReadTheRolesPolicies
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:ListRolePolicies
+              - iam:GetRolePolicy
+              - iam:ListAttachedRolePolicies
+            Resource: !GetAtt CapabilityRole.Arn
+
+  # What agents may do, in sessions only the broker user can start: the
+  # statements, which CapabilityPolicy writes as its one inline policy.
+  CapabilityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /claktory/
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt BrokerUser.Arn
+            Action: sts:AssumeRole
+
+  ClaktoryLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+
+  # The function may only write the role's one policy and make and delete
+  # the broker user's keys.
+  ClaktoryFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /claktory/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: claktory-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                Resource: !GetAtt CapabilityRole.Arn
+              - Effect: Allow
+                Action:
+                  - iam:CreateAccessKey
+                  - iam:DeleteAccessKey
+                Resource: !GetAtt BrokerUser.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ClaktoryLogs.Arn
+
+  ClaktoryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt ClaktoryFunctionRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      LoggingConfig:
+        LogGroup: !Ref ClaktoryLogs
+      Code:
+        ZipFile: |
+          // Two jobs, both for this stack only. CapabilityPolicy: writes the
+          // capability role's one inline policy from the statement slots, refusing
+          // any slot it can't write exactly as proposed. Seal: makes the broker
+          // user's access key and gives it to Claktory only sealed, a compact JWE
+          // (RSA-OAEP-256, A256GCM) to the one-time public key Claktory passed. It
+          // never logs the event (its response URL) or anything of the key.
+          'use strict';
+          const crypto = require('crypto');
+          const {
+            IAMClient,
+            CreateAccessKeyCommand,
+            DeleteAccessKeyCommand,
+            PutRolePolicyCommand,
+            DeleteRolePolicyCommand,
+          } = require('@aws-sdk/client-iam');
+
+          const PREFIX = 'claktory-aws-v1.';
+          const POLICY = 'claktory-capability';
+          const KEY_ID = /^AKIA[A-Z0-9]{12,124}$/;
+          // IAM's limit for a role's inline policies, without whitespace.
+          const POLICY_LIMIT = 10240;
+
+          const b64u = (bytes) => Buffer.from(bytes).toString('base64url');
+
+          class Refused extends Error {
+            constructor(message) {
+              super(message);
+              this.name = 'Refused';
+            }
+          }
+
+          // A slot's list as CloudFormation passes a CommaDelimitedList: [""] when
+          // it's empty. Entries are trimmed; an empty one is refused.
+          function entries(list, what, slot) {
+            const values = (Array.isArray(list) ? list : [list]).map((value) => String(value ?? '').trim());
+            if (values.length === 1 && values[0] === '') return [];
+            if (values.some((value) => value === '')) throw new Refused(`Rule ${slot} has an empty entry in its ${what}.`);
+            return values;
+          }
+
+          // The policy the slots make: one statement per slot in use, in order, with
+          // nothing added. Refused, rather than broadened or guessed, when a slot
+          // can't be written exactly.
+          function capabilityPolicy(slots) {
+            const statements = [];
+            (slots || []).forEach((slot, index) => {
+              const n = index + 1;
+              const actions = entries(slot.Actions, 'actions', n);
+              const resources = entries(slot.Resources, 'resources', n);
+              const conditionText = String(slot.Condition ?? '').trim();
+              if (actions.length === 0 && resources.length === 0 && conditionText === '') return;
+              if (actions.length === 0) throw new Refused(`Rule ${n} has resources or a condition but no actions.`);
+              if (resources.length === 0) throw new Refused(`Rule ${n} has actions but no resources.`);
+              if (actions.includes('*')) throw new Refused(`Rule ${n} can't allow every action.`);
+              const statement = { Sid: `Statement${n}`, Effect: 'Allow', Action: actions, Resource: resources };
+              if (conditionText !== '') {
+                let condition;
+                try {
+                  condition = JSON.parse(conditionText);
+                } catch {
+                  throw new Refused(`Rule ${n}'s condition isn't JSON.`);
+                }
+                const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+                const operators = isObject(condition) ? Object.values(condition) : [];
+                if (operators.length === 0 || !operators.every((keys) => isObject(keys) && Object.keys(keys).length > 0)) {
+                  throw new Refused(`Rule ${n}'s condition isn't a JSON object of operators and keys.`);
+                }
+                statement.Condition = condition;
+              }
+              statements.push(statement);
+            });
+            if (statements.length === 0 || statements[0].Sid !== 'Statement1') throw new Refused('Rule 1 needs actions and resources.');
+            const document = JSON.stringify({ Version: '2012-10-17', Statement: statements });
+            if (document.length > POLICY_LIMIT) {
+              throw new Refused(`The rules are longer than IAM allows (${document.length} of ${POLICY_LIMIT} characters).`);
+            }
+            return document;
+          }
+
+          // The one-time key, refused unless it's a 3072-bit RSA key for
+          // RSA-OAEP-256 with a kid.
+          function publicKey(jwkText) {
+            let jwk;
+            try {
+              jwk = JSON.parse(jwkText);
+            } catch {
+              throw new Refused('PublicKeyJwk is not JSON.');
+            }
+            const fits = jwk && jwk.kty === 'RSA' && jwk.e === 'AQAB' && typeof jwk.n === 'string'
+              && Buffer.from(jwk.n, 'base64url').length === 384
+              && (jwk.alg === undefined || jwk.alg === 'RSA-OAEP-256')
+              && (jwk.use === undefined || jwk.use === 'enc')
+              && typeof jwk.kid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(jwk.kid);
+            if (!fits) throw new Refused('PublicKeyJwk is not a 3072-bit RSA-OAEP-256 key with a kid.');
+            return { kid: jwk.kid, key: crypto.createPublicKey({ key: { kty: 'RSA', n: jwk.n, e: jwk.e }, format: 'jwk' }) };
+          }
+
+          // The receipt: "claktory-aws-v1." and the payload as a compact JWE, its
+          // header (with the kid and the flow) authenticated.
+          function seal(jwkText, flow, payload) {
+            const { kid, key } = publicKey(jwkText);
+            const header = b64u(JSON.stringify({ alg: 'RSA-OAEP-256', enc: 'A256GCM', kid, typ: 'claktory-aws-v1', flow }));
+            const cek = crypto.randomBytes(32);
+            const iv = crypto.randomBytes(12);
+            const wrapped = crypto.publicEncrypt({ key, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, cek);
+            const cipher = crypto.createCipheriv('aes-256-gcm', cek, iv);
+            cipher.setAAD(Buffer.from(header, 'ascii'));
+            const sealed = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+            return PREFIX + [header, b64u(wrapped), b64u(iv), b64u(sealed), b64u(cipher.getAuthTag())].join('.');
+          }
+
+          // Tells CloudFormation how it went, at the URL it gave.
+          function respond(event, status, physicalId, data, reason) {
+            const body = JSON.stringify({
+              Status: status,
+              Reason: reason || 'See the function log',
+              PhysicalResourceId: physicalId,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              Data: data || {},
+            });
+            const url = new URL(event.ResponseURL);
+            const transport = require(url.protocol === 'http:' ? 'http' : 'https');
+            return new Promise((resolve, reject) => {
+              const headers = { 'content-type': '', 'content-length': Buffer.byteLength(body) };
+              const request = transport.request(url, { method: 'PUT', headers }, (response) => {
+                response.resume();
+                response.on('end', resolve);
+              });
+              request.on('error', reject);
+              request.end(body);
+            });
+          }
+
+          // Runs an IAM command; one whose subject is already gone is done.
+          async function unlessGone(iam, command) {
+            try {
+              await iam.send(command);
+            } catch (error) {
+              if (error.name !== 'NoSuchEntityException' && error.name !== 'NoSuchEntity') throw error;
+            }
+          }
+
+          // The capability role's policy: written on Create and Update (the same
+          // physical id, so CloudFormation never deletes it in between), deleted
+          // with the stack, so the role can go too.
+          async function policy(iam, event, properties) {
+            if (event.RequestType === 'Delete') {
+              await unlessGone(iam, new DeleteRolePolicyCommand({ RoleName: properties.RoleName, PolicyName: POLICY }));
+              return {};
+            }
+            const document = capabilityPolicy(properties.Slots);
+            await iam.send(new PutRolePolicyCommand({ RoleName: properties.RoleName, PolicyName: POLICY, PolicyDocument: document }));
+            return {};
+          }
+
+          // The broker user's key: a new one on Create, and on Update for a new
+          // request (CloudFormation's Delete of the old physical id removes the old
+          // key); deleted with the stack. Its physical id is the key's id.
+          async function key(iam, event, properties, physicalId) {
+            if (event.RequestType === 'Delete') {
+              if (physicalId !== 'no-key') {
+                await unlessGone(iam, new DeleteAccessKeyCommand({ UserName: properties.UserName, AccessKeyId: physicalId }));
+              }
+              return { physicalId };
+            }
+            publicKey(properties.PublicKeyJwk);
+            const made = await iam.send(new CreateAccessKeyCommand({ UserName: properties.UserName }));
+            const accessKey = made.AccessKey;
+            try {
+              const receipt = seal(properties.PublicKeyJwk, properties.FlowId, {
+                v: 1,
+                flow: properties.FlowId,
+                proposal: properties.ProposalHash,
+                account: properties.AccountId,
+                region: properties.Region,
+                stack: event.StackId,
+                user_arn: properties.UserArn,
+                role_arn: properties.RoleArn,
+                access_key_id: accessKey.AccessKeyId,
+                secret_access_key: accessKey.SecretAccessKey,
+                issued_at: new Date().toISOString(),
+              });
+              return { physicalId: accessKey.AccessKeyId, data: { Receipt: receipt } };
+            } catch (error) {
+              await unlessGone(iam, new DeleteAccessKeyCommand({ UserName: properties.UserName, AccessKeyId: accessKey.AccessKeyId }));
+              throw error;
+            }
+          }
+
+          exports.handler = async (event) => {
+            const properties = event.ResourceProperties || {};
+            const iam = new IAMClient({});
+            const isPolicy = properties.Part === 'policy';
+            const given = event.PhysicalResourceId || '';
+            const physicalId = isPolicy ? POLICY : KEY_ID.test(given) ? given : 'no-key';
+            console.log(`${event.RequestType} ${event.LogicalResourceId}`);
+            try {
+              const done = isPolicy ? await policy(iam, event, properties) : await key(iam, event, properties, physicalId);
+              await respond(event, 'SUCCESS', done.physicalId || physicalId, done.data);
+              console.log(`done: ${done.physicalId || physicalId}`);
+            } catch (error) {
+              const reason = error.name === 'Refused' ? error.message : `${error.name || 'Error'}: ${String(error.message || '').slice(0, 300)}`;
+              console.log(`failed: ${reason}`);
+              await respond(event, 'FAILED', physicalId, {}, reason);
+            }
+          };
+
+          exports.seal = seal;
+          exports.capabilityPolicy = capabilityPolicy;
+
+  # The role's policy, from the statements; refused when one can't be
+  # written exactly.
+  CapabilityPolicy:
+    Type: Custom::ClaktoryCapabilityPolicy
+    Properties:
+      ServiceToken: !GetAtt ClaktoryFunction.Arn
+      Part: policy
+      RoleName: !Ref CapabilityRole
+      Slots:
+        - Actions: !Ref Actions1
+          Resources: !Ref Resources1
+          Condition: !Ref Condition1
+        - Actions: !Ref Actions2
+          Resources: !Ref Resources2
+          Condition: !Ref Condition2
+        - Actions: !Ref Actions3
+          Resources: !Ref Resources3
+          Condition: !Ref Condition3
+        - Actions: !Ref Actions4
+          Resources: !Ref Resources4
+          Condition: !Ref Condition4
+        - Actions: !Ref Actions5
+          Resources: !Ref Resources5
+          Condition: !Ref Condition5
+        - Actions: !Ref Actions6
+          Resources: !Ref Resources6
+          Condition: !Ref Condition6
+        - Actions: !Ref Actions7
+          Resources: !Ref Resources7
+          Condition: !Ref Condition7
+        - Actions: !Ref Actions8
+          Resources: !Ref Resources8
+          Condition: !Ref Condition8
+        - Actions: !Ref Actions9
+          Resources: !Ref Resources9
+          Condition: !Ref Condition9
+        - Actions: !Ref Actions10
+          Resources: !Ref Resources10
+          Condition: !Ref Condition10
+
+  # The key, made once everything it can do is in place, and deleted with
+  # the stack.
+  Seal:
+    Type: Custom::ClaktorySeal
+    DependsOn: [BrokerPolicy, CapabilityPolicy]
+    Properties:
+      ServiceToken: !GetAtt ClaktoryFunction.Arn
+      Part: key
+      UserName: !Ref BrokerUser
+      UserArn: !GetAtt BrokerUser.Arn
+      RoleArn: !GetAtt CapabilityRole.Arn
+      FlowId: !Ref FlowId
+      ProposalHash: !Ref ProposalHash
+      PublicKeyJwk: !Ref PublicKeyJwk
+      AccountId: !Ref AWS::AccountId
+      Region: !Ref AWS::Region
+
+Outputs:
+  Receipt:
+    Description: Copy this and paste it into Claktory. Only your Claktory can read it.
+    Value: !GetAtt Seal.Receipt

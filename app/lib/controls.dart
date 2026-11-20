@@ -911,6 +911,7 @@ class HoverCard extends StatefulWidget {
     this.beside = false,
     this.end = false,
     this.holdToShow = false,
+    this.interactive = false,
   });
 
   final WidgetBuilder card;
@@ -920,6 +921,12 @@ class HoverCard extends StatefulWidget {
   /// Right-aligned with [child] instead, for one near a right edge.
   final bool end;
   final bool holdToShow;
+
+  /// The card takes clicks (it has buttons): it stays open while the
+  /// pointer is over [child] or the card, and closes a moment after it
+  /// leaves both. With [holdToShow], a long press opens it until a tap
+  /// elsewhere.
+  final bool interactive;
 
   @override
   State<HoverCard> createState() => _HoverCardState();
@@ -932,21 +939,38 @@ class _HoverCardState extends State<HoverCard> {
   /// Waits a moment, so the card doesn't flash while the pointer passes by.
   Timer? _wait;
 
+  /// An interactive card's moment to be reached after the pointer leaves
+  /// [HoverCard.child].
+  Timer? _closing;
+
   @override
   void dispose() {
     _wait?.cancel();
+    _closing?.cancel();
     super.dispose();
   }
 
   void _enter(PointerEnterEvent _) {
+    _closing?.cancel();
+    if (_portal.isShowing) return;
     _wait?.cancel();
     _wait = Timer(const Duration(milliseconds: 300), _portal.show);
   }
 
-  void _exit(PointerExitEvent _) => _hide();
+  void _exit(PointerExitEvent _) {
+    if (!widget.interactive) return _hide();
+    _wait?.cancel();
+    _closeSoon();
+  }
+
+  void _closeSoon() {
+    _closing?.cancel();
+    _closing = Timer(const Duration(milliseconds: 200), _hide);
+  }
 
   void _hide() {
     _wait?.cancel();
+    _closing?.cancel();
     if (_portal.isShowing) _portal.hide();
   }
 
@@ -978,8 +1002,8 @@ class _HoverCardState extends State<HoverCard> {
                 : widget.end
                 ? Alignment.bottomRight
                 : Alignment.bottomLeft,
-            child: IgnorePointer(
-              child: TweenAnimationBuilder<double>(
+            child: _cardInput(
+              TweenAnimationBuilder<double>(
                 tween: Tween(begin: 0, end: 1),
                 duration: Motion.fast,
                 curve: Curves.easeOut,
@@ -1003,22 +1027,43 @@ class _HoverCardState extends State<HoverCard> {
             ),
           ),
         ),
-        child: MouseRegion(
-          onEnter: _enter,
-          onExit: _exit,
-          child: widget.holdToShow
-              ? GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onLongPressStart: (_) => _portal.show(),
-                  onLongPressEnd: (_) => _hide(),
-                  onLongPressCancel: _hide,
-                  child: widget.child,
-                )
-              : widget.child,
+        child: _held(
+          MouseRegion(
+            onEnter: _enter,
+            onExit: _exit,
+            child: widget.holdToShow
+                ? GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onLongPressStart: (_) => _portal.show(),
+                    onLongPressEnd: widget.interactive ? null : (_) => _hide(),
+                    onLongPressCancel: widget.interactive ? null : _hide,
+                    child: widget.child,
+                  )
+                : widget.child,
+          ),
         ),
       ),
     );
   }
+
+  /// The card as it takes the pointer: not at all, or (interactive) staying
+  /// open while it's over it.
+  Widget _cardInput(Widget card) {
+    if (!widget.interactive) return IgnorePointer(child: card);
+    return _held(
+      MouseRegion(
+        onEnter: (_) => _closing?.cancel(),
+        onExit: (_) => _closeSoon(),
+        child: card,
+      ),
+    );
+  }
+
+  /// A held-open interactive card and its trigger: a tap outside both
+  /// closes it.
+  Widget _held(Widget child) => widget.interactive && widget.holdToShow
+      ? TapRegion(groupId: this, onTapOutside: (_) => _hide(), child: child)
+      : child;
 }
 
 class Dot extends StatelessWidget {
@@ -1928,6 +1973,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'play': _drawPlay,
   'pause': _drawPause,
   'film': _drawFilm,
+  'chart-column': _drawChartColumn,
 };
 
 final _drawEllipsis = _paths(const [
@@ -1966,6 +2012,13 @@ final _drawMonitor = _paths(const [
 final _drawMessageSquare = _paths(const [
   'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202'
       'A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z',
+]);
+
+final _drawChartColumn = _paths(const [
+  'M3 3v16a2 2 0 0 0 2 2h16',
+  'M18 17V9',
+  'M13 17V5',
+  'M8 17v-3',
 ]);
 
 final _drawPlay = _paths(const [

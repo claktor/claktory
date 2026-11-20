@@ -323,6 +323,14 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     };
     view.follow(&mut client, |view| from(view).is_some()).await;
     assert_eq!(from(&view), Some(v1::SentFrom { device_name: "Phone".into(), kind: v1::DeviceKind::Phone.into() }));
+    // Its zoom is its own, and goes when it's unpaired.
+    let zoom = client_message::Body::SetZoom(v1::SetZoom { zoom: 0.8 });
+    socket.send(Message::Binary(ClientMessage { id: 3, body: Some(zoom) }.encode_to_vec().into())).await.expect("send");
+    let zooms = |view: &View| view.workspace.settings.clone().expect("settings").zoom;
+    view.follow(&mut client, |view| !zooms(view).is_empty()).await;
+    assert_eq!(zooms(&view), [("phone".to_owned(), 0.8)].into());
+    apply_request(&mut client, &mut view, client_message::Body::SetZoom(v1::SetZoom { zoom: 1.5 })).await;
+    assert_eq!(zooms(&view), [("local".to_owned(), 1.5), ("phone".to_owned(), 0.8)].into());
 
     // Another key is turned away right after the handshake, before any of
     // Factory's protocol: the code is used, and nothing else is waiting.
@@ -354,6 +362,8 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     }
     // The last device gone, remote access is off again.
     view.follow(&mut client, |view| !remote(view).on && remote(view).devices.is_empty()).await;
+    view.follow(&mut client, |view| !zooms(view).contains_key("phone")).await;
+    assert_eq!(zooms(&view), [("local".to_owned(), 1.5)].into());
     let unknown = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
     assert!(matches!(apply_request(&mut client, &mut view, unknown).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
 }

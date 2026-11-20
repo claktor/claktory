@@ -25,7 +25,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::protocol::{self, ErrorBody};
-pub use mail::{Mail, Mailer};
+pub use mail::{Mail, MailError, Mailer};
 pub use secrets::Secrets;
 
 /// The time, in unix seconds; tests set their own.
@@ -46,7 +46,7 @@ const IP_PER_MINUTE: u32 = 30;
 pub struct Config {
     /// Where the account page is, as emails write it.
     pub account_page: String,
-    /// The domain emails come from: signin@ and notices@ it.
+    /// The domain emails come from: code@ and notices@ it.
     pub mail_domain: String,
     /// Behind a proxy (Caddy): the client's IP is the last of
     /// X-Forwarded-For, and cookies are Secure.
@@ -120,20 +120,36 @@ impl Service {
     /// Sends an email, counting it toward the day's cap and telling the
     /// admin once 80% of it is used. `capped` mail (sign-in codes) isn't
     /// sent at the cap.
-    async fn send(&self, mail: &Mail, capped: bool) -> Result<(), String> {
+    async fn send(&self, mail: &Mail, capped: bool) -> Result<(), MailError> {
         let now = self.now();
         let cap = self.config.email_daily_cap;
         let sent = {
             let conn = self.db();
-            if capped && db::today(&conn, "mail-day", now).map_err(|error| error.to_string())? >= cap {
+            let failed = |error: rusqlite::Error| MailError::NotSent(error.to_string());
+            if capped && db::today(&conn, "mail-day", now).map_err(failed)? >= cap {
                 tracing::warn!("the day's email cap ({cap}) is reached: no sign-in code sent");
-                return Err("the day's email cap is reached".to_owned());
+                return Err(MailError::NotSent("the day's email cap is reached".to_owned()));
             }
-            db::count_today(&conn, "mail-day", now).map_err(|error| error.to_string())?
+            db::count_today(&conn, "mail-day", now).map_err(failed)?
         };
         let result = self.mailer.send(mail).await;
-        if let Err(error) = &result {
-            tracing::error!("email not sent: {error}");
+        match &result {
+            Ok(()) => {}
+            Err(MailError::NotSent(error)) => tracing::error!("email not sent: {error}"),
+            Err(MailError::Refused { kind, text }) => {
+                tracing::error!("email not sent: the mail provider refused ({kind}): {text}");
+                // Counted for the usage report, and told to whoever runs it
+                // once a day (it may not arrive: the log has it too).
+                let first = db::count_today(&self.db(), &format!("mail-refused:{kind}"), now).is_ok_and(|count| count == 1);
+                if first {
+                    for admin in &self.config.admins {
+                        let alert = mail::refused_alert_mail(&self.config.mail_domain, admin, text);
+                        if let Err(error) = self.mailer.send(&alert).await {
+                            tracing::error!("the alert that email is refused wasn't sent either: {error}");
+                        }
+                    }
+                }
+            }
         }
         if sent == cap.saturating_mul(4).div_ceil(5) {
             tracing::warn!("{sent} of the day's {cap} emails are used");

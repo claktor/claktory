@@ -309,8 +309,11 @@ FinishConnect(flow_id, url)      →  same device D? state matches? not
 - **Picking an export's makings.** ConnectChoices.rules says it in words,
   and DeriveSecret's refusal says what's wrong. Cloudflare: exactly one
   account, at least one permission, zones of that account (none: the whole
-  account). AWS: exactly one role (its parent is its account), no
-  permissions (the role's permission set is the access).
+  account). AWS IAM Identity Center: exactly one role (its parent is its
+  account), no permissions (the role's permission set is the access). AWS
+  (stack): none for the whole role, or permissions and resources each
+  covered by one of its statements (wildcards matched), sent as the
+  session's policy.
 
 ## The vault
 
@@ -391,7 +394,8 @@ timing and the events; recipes do only what's particular to the service.
 | | Connection (broker-only control) | Connection meta (shown) | Export variables | Export meta |
 |---|---|---|---|---|
 | Cloudflare | access token, refresh token, expiry, granted scopes | user's email if userinfo answers (else the account names), accounts (id, name), scopes | `CLOUDFLARE_API_TOKEN` (an account-owned token minted for it, 30 days, extended 7 days before), `CLOUDFLARE_ACCOUNT_ID` | account, permission groups and zones (ids and names, the policy as given, to rebuild it), expiry, the minted token's id |
-| AWS | region, portal (start URL), the OIDC registration (client id, secret, its expiry, about 90 days), access token, refresh token, expiry | portal, region, accounts and their roles | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION` (fresh, cached until 2 min before they expire) | account id and name, role name, per use |
+| AWS (stack) | the broker user's key, account, region, stack, user and role ARNs, the statements checked | account and region, one line per statement, resources | the same five, a 15-minute AssumeRole session renewed 5 min before it ends | the session policy (empty for the whole role), the session's name |
+| AWS IAM Identity Center | region, portal (start URL), the OIDC registration (client id, secret, its expiry, about 90 days), access token, refresh token, expiry | portal, region, accounts and their roles | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION` (fresh, cached until 2 min before they expire) | account id and name, role name, per use |
 
 ## Proposals and events (mine)
 
@@ -429,9 +433,13 @@ it). `secrets_grant` refuses a connection. `secrets_list` shows kinds.
   zone read; the permissions minted tokens may carry). Private is enough for
   Matt's own accounts; public later needs claktory.com's TXT verification.
   We need back only the client id (public).
-- **AWS**: nothing to register. His AWS needs IAM Identity Center on, his
-  user in it, and permission sets assigned (narrow ones for agents); he
-  enters the access portal URL and region when connecting.
+- **AWS** (stack): the template, `crates/factoryd/aws/claktory-aws-v1.yaml`,
+  published once where quick-create reads it (an S3 URL, `TEMPLATE_URL` in
+  aws_stack.rs). Nothing to register.
+- **AWS IAM Identity Center** (`aws-sso`, dev only): nothing to register.
+  His AWS needs IAM Identity Center on, his user in it, and permission sets
+  assigned (narrow ones for agents); he enters the access portal URL and
+  region when connecting.
 - **Testing**: once the Cloudflare client exists, one real connect from
   Claktory Dev (Mac loopback and iPhone scheme) to check the loopback port
   and refresh behaviour.
@@ -441,61 +449,58 @@ it). `secrets_grant` refuses a connection. `secrets_list` shows kinds.
 Resend, GitHub, Hetzner's guided import, Apps, MCP, the claimed HTTPS
 callback (auth.claktory.com), a flow surviving a backend restart.
 
-## The manual, with the first service
+## AWS through a stack (`aws`, aws_stack.rs; Omar's)
 
-Until a service is offered (Cloudflare waits for its client id, AWS for a
-try against a real account: `SHIPPED` in aws.rs), nothing about connecting
-shows (the option, the tool, its prompt section, Rivet's tools, the app's
-Connect a service…), so the manual says nothing of it. The dev Claktory
-has AWS with `FACTORY_AWS_ENABLED=1` (AWS itself) or `FACTORY_AWS_BASE`
-(a stand-in), and Cloudflare with `FACTORY_CLOUDFLARE_CLIENT_ID` and
-`FACTORY_CLOUDFLARE_BASE`. When one ships, add
-back, under `## Secrets` in the core (naming only the services offered):
+Iris's fewer-clicks-connect.md §2; the template is Sam's.
 
-```
-- {{user}} can also **connect a service** (Cloudflare, AWS) by approving Claktory on its own site; the vault keeps the connection, which no agent ever gets. An agent is given a secret made from it with only the access its work needs, and uses it as any other.
-```
+- **Proposal.** For `aws`, `secrets_propose_connection` takes `region` and
+  `statements` (up to 10 Allow statements: `actions`, `resources` as ARNs
+  with `*` for the account, or `*`; `condition`, IAM's Condition block as
+  JSON), required and checked as the template takes them. They're kept with
+  the proposal (`ConnectProposal.statements`, `region`), shown on its card
+  and listed in Rivet's event. AWS connects only for a proposal.
+- **Start (PASTE).** `start_paste` makes a one-time RSA-3072 key (aws-lc-rs)
+  and answers with AWS's quick-create page:
+  `https://<region>.console.aws.amazon.com/cloudformation/home?region=<region>#/stacks/create/review?templateURL=…&stackName=Claktory-<proposal>-<4 hex>&param_FlowId&param_PublicKeyJwk&param_ProposalHash&param_ActionsN&param_ResourcesN&param_ConditionN`.
+  The private key stays in the flow only (a restart ends it: delete that
+  stack and connect again). ProposalHash is the SHA-256 of
+  `{"v":1,"region","statements":[{"actions","resources","condition"}]}`,
+  keys sorted, no spaces.
+- **The stack** makes a broker user that can only assume the capability
+  role and read its own and the role's policies, the role (trusting only
+  that user) with exactly the statements as its one inline policy, and
+  outputs only `Receipt`: `claktory-aws-v1.` + a compact JWE (RSA-OAEP-256,
+  A256GCM; protected header `{alg, enc, kid, typ: "claktory-aws-v1", flow}`)
+  of `{v, flow, proposal, account, region, stack, user_arn, role_arn,
+  access_key_id, secret_access_key, issued_at}`.
+- **Paste.** The receipt opens only with the flow's key, header and flow;
+  its proposal hash and region must match. Then, with its own key (SigV4):
+  GetCallerIdentity is the user; the user's policies allow nothing but the
+  above, nothing is attached, no group; the role trusts only the user, has
+  nothing attached and its policies equal the statements (in any order or
+  spelling IAM keeps them). Anything else is refused, naming what, with
+  "Delete the stack … then connect again"; the flow waits for another paste.
+- **Secrets** are 15-minute AssumeRole sessions narrowed by a session
+  policy to what's asked; the role's conditions always apply. Cancelling
+  (revoke) can't delete the stack: it says where to delete it.
+- **Dev.** `FACTORY_AWS_ENABLED=1` with `FACTORY_AWS_TEMPLATE_URL` (an S3
+  URL of the template) against AWS itself; `FACTORY_AWS_BASE` makes a
+  stand-in play STS and IAM.
 
-as the last part of the `ext-secrets` note's item (the AWS sentence only
-with AWS, and the examples only of the services offered):
+## The manual
 
-```
-  - **Connecting services.** With the option **Can suggest connecting services** (`connect`, off unless turned on), an agent also gets `secrets_propose_connection`: `service` (a connector's id or name, such as `cloudflare` or `aws`), `purpose`, `access` (which permissions, on which zones, accounts or roles), `reason`, and optionally `access_id`. One suggestion per agent and service waits at a time; it shows in its conversation and at the top of Settings → Secrets, where {{user}} connects it or dismisses it. Connecting opens the service's page on {{user}}'s device (any paired device works, over the tunnel too); the device hands where the browser came back to to the backend, which signs in itself and keeps the tokens in the vault, never as variables: a connection is given to no one, and `secrets_grant` refuses it. When one is made for a suggestion, the agent is told it has nothing yet, and every admin agent with Secrets is told what was asked and what the connection reaches, to make a secret from it with only the access the work needs and give that. Secrets made from a connection (a Cloudflare token for some zones, an AWS account and role) are renewed before a command gets them when they're due; one the service no longer accepts shows **Needs reconnecting**. **AWS** connects through IAM Identity Center: {{user}} gives the access portal URL and its region, and approves the code on AWS's page. A secret made from it is one role in one account (its permission set is all its access), as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` and `AWS_DEFAULT_REGION`: short-lived credentials, fetched again 2 minutes before they expire (the region isn't hidden in output). Disconnecting removes the connection and every secret made from it (their tokens at the service too, where it can), and can also revoke it at the service.
-```
-
-in the `app-secrets` note: its summary gains ", connecting services" after
-".env files"; its item on agents' requests gains, at its end,
-
-```
-Agents' suggestions to connect a service show there too, as in their conversations: what it's for, what it needs and why, then **Connect <service>** (with the access to allow and anything the service needs first) or **Dismiss**, with an optional reason. Connecting gives the agent nothing: Rivet, or {{user}}, gives it a secret made from the connection.
-```
-
-then, right after that item, **Connect a service…**, and after the item on what each secret shows, what a connection shows:
-
-```
-- **Connect a service…**: choose a service (such as AWS or Cloudflare), the access to allow and what it needs first (AWS: the access portal URL and region), then **Connect**. Its page opens on the device {{user}} is at, the backend's machine or another one: in the browser on a Mac, which comes back to the app by itself; in a sign-in sheet on iPhone; for AWS, a page with a code to check. The app shows how it's going, or why it failed, with **Try again**. Claktory keeps what it gets in the vault as a connection; nobody has it.
-```
-
-```
-- A connection shows its service and account, what it can do and reach, and has no values: it's never given to an agent. **Make a secret from it…** makes a narrower secret to give like any other (on Cloudflare an account, any of its zones and what it may do; on AWS a role), which Claktory renews before it expires (on AWS, a new key 2 minutes before the last one expires); it says which connection it was made from. **Connect again** signs in again in its place, keeping the secrets made from it and who has them; **Edit…** renames it; **Disconnect…** removes it and the secrets made from it, and cancels it at the service too unless turned off.
-```
-
-With AWS, `docs/CHANGELOG.md` gains under `## Unreleased` (Hana's words):
-
-```
-- Added: Connect AWS in Settings → Secrets, then give an agent one role in one account and nothing more. You sign in through IAM Identity Center with your access portal URL and region. The agent's short-lived keys renew by themselves, and your sign-in never goes to any agent.
-```
-
-and, in the `ext-secrets` note, after `secrets_revoke`'s sentence (Sam's tools, shown to
-admin agents only once a service is offered):
-
-```
-Once Claktory connects a service, admin agents also get `secrets_inspect` (`secret`: what a secret is and reaches, never a value; for a connection its account, status, access, scopes, resources, the suggestion it was connected for and the secrets made from it with who has each; for a secret made from one its connection, access, permissions, resources, expiry and who has it), `secrets_choices` (`secret`, a connection: its accounts, zones, roles and permissions with the ids to pick, and how to pick) and `secrets_derive` (`secret`, `name`, `description`, `permissions` and `resources` from the choices, `days`, or the service's default: Cloudflare's tokens last 30 days and are extended while they're used): a secret with only that access, given to no one until `secrets_grant` gives it. `secrets_list` says which secrets are connections and what each export was made from.
-```
-
-Rivet's default prompt (crates/factoryd/src/rivet-prompt.md) then gains, after
-its secrets item, with the new SHA-256 in `SHIPPED_RIVET_PROMPTS`:
-
-```
-- A connected service (such as Cloudflare or AWS) is never given to an agent. When {{user}} connects one for an agent's suggestion, compare what the agent asked for with what the connection reaches (secrets_inspect), make a secret from it with only the access that work needs (secrets_choices, then secrets_derive), give that to the agent with secrets_grant, and tell it what it got.
-```
+Cloudflare ships (a pasted token: `SHIPPED` in cloudflare.rs), and with it
+the manual tells of connecting: the core line under `## Secrets`, the
+`ext-secrets` note's **Connecting services** item and Rivet's tools
+(`secrets_inspect`, `secrets_choices`, `secrets_derive`), the `app-secrets`
+note's **Connect a service…** and what a connection shows, and Rivet's
+default prompt's line on connected services (its hash in
+`SHIPPED_RIVET_PROMPTS`). They name only the services offered: when AWS
+ships (`SHIPPED` in aws_stack.rs), add it to each of them (the core's
+"(Cloudflare)", the examples of `service` and of secrets made from a
+connection, how AWS connects and what a secret made from it sets, "such as
+Cloudflare" in Rivet's line, with the new hash), and its changelog line. Until
+then the dev Claktory has AWS with `FACTORY_AWS_ENABLED=1` (AWS itself; the
+stack's needs `FACTORY_AWS_TEMPLATE_URL` too) or `FACTORY_AWS_BASE` (a
+stand-in); Cloudflare with `FACTORY_CLOUDFLARE_BASE`
+(a stand-in) or, with an OAuth client, `FACTORY_CLOUDFLARE_CLIENT_ID`.

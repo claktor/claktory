@@ -70,6 +70,10 @@ const MAX_RECIPIENTS: usize = 20;
 const MAP: &str =
     "Who can message whom, one line per agent: whom it messages, and by whom it's messaged. `agent` (an id or name) shows just that agent.";
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
+const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a card in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
+/// The prompt's line on suggesting a talk. `{person}`: the user's name, or
+/// "the person".
+const SUGGEST_PROMPT: &str = "When {person} should give another agent something or settle something with it directly (secrets it will ask them for, a decision that's theirs), rather than you passing it on, suggest it with agents_suggest_talk: they get a button that opens that agent with your message drafted for them.\n";
 /// `{person}`: the user's name, or "the person".
 const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; {person} approves or dismisses it, and you're told which.\n";
 
@@ -220,6 +224,7 @@ impl Extension for Agents {
         } else {
             let names: Vec<String> = others.iter().map(|other| named(config, agent, other)).collect();
             let _ = writeln!(text, "You can message: {}.", names.join(", "));
+            text.push_str(&SUGGEST_PROMPT.replace("{person}", config.person()));
         }
         if sees_map(agent) {
             text.push_str(
@@ -233,7 +238,7 @@ impl Extension for Agents {
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
-        let mut tools = vec![send_tool(factory, agent), status_tool(factory, agent)];
+        let mut tools = vec![send_tool(factory, agent), status_tool(factory, agent), suggest_tool(factory, agent)];
         let (map, propose) = match factory.lock().config.agent(agent) {
             Some(me) => (sees_map(me), !crate::proposals::is_admin(me)),
             None => (false, false),
@@ -341,6 +346,13 @@ enum To {
 }
 
 #[derive(Deserialize)]
+struct SuggestArgs {
+    agent: String,
+    message: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
 struct StatusArgs {
     #[serde(default)]
     agent: Option<String>,
@@ -399,6 +411,52 @@ fn status_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
             Ok(ToolResult::text(lines, json!({})))
         }),
     )
+}
+
+fn suggest_tool(factory: &Arc<Factory>, proposer: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "required": ["agent", "message", "reason"],
+        "properties": {
+            "agent": {"type": "string"},
+            "message": {"type": "string", "minLength": 1},
+            "reason": {"type": "string", "minLength": 1},
+        },
+        "additionalProperties": false,
+    });
+    super::tool(
+        "agents_suggest_talk",
+        "Suggest talking to an agent",
+        SUGGEST,
+        parameters,
+        super::typed_handler(factory, proposer, |factory, proposer, args: SuggestArgs| suggest(factory, proposer, args)),
+    )
+}
+
+/// Shows the person a card suggesting they talk to another agent, with a
+/// message drafted for them; nothing is sent. Its details: the agent
+/// (`agent_id`, `agent_name`, `agent_role`), `message` and `reason`.
+fn suggest(factory: &Factory, proposer: &str, args: SuggestArgs) -> Result<ToolResult, String> {
+    let (message, reason) = (args.message.trim().to_owned(), args.reason.trim().to_owned());
+    if message.is_empty() {
+        return Err("Write the message they'd send in `message`.".to_owned());
+    }
+    if reason.is_empty() {
+        return Err("Say in `reason` why they should talk to it.".to_owned());
+    }
+    let inner = factory.lock();
+    let config = &inner.config;
+    let Some(from) = config.agent(proposer) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let agent = resolve(config, from, &args.agent)?;
+    let said = format!(
+        "Suggested. {} sees a card with a button that opens {}'s conversation with your message drafted; nothing is sent until they send it.",
+        config.person_capitalized(),
+        agent.name
+    );
+    Ok(ToolResult::text(
+        said,
+        json!({"agent_id": agent.id, "agent_name": agent.name, "agent_role": agent.role, "message": message, "reason": reason}),
+    ))
 }
 
 /// The agent `from` can message called `to` (an id or a name), or why not.

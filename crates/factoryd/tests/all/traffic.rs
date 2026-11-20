@@ -138,7 +138,7 @@ impl Models for Busy {
         Box::pin(async { Ok(()) })
     }
 
-    fn usage<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    fn usage<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
         Box::pin(async { Ok(None) })
     }
 

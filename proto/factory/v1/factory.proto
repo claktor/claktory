@@ -129,6 +129,12 @@ message ClientMessage {
     ListConnectChoices list_connect_choices = 94;
     DeriveSecret derive_secret = 95;
     DisconnectService disconnect_service = 96;
+    SetZoom set_zoom = 97;
+    // The person uses one of an account's usage resets (see UsageReset).
+    UseUsageReset use_usage_reset = 98;
+    // The usage breakdown for a time range, on demand; answered with
+    // UsageReport.
+    LoadUsage load_usage = 99;
   }
 }
 
@@ -189,6 +195,10 @@ message ServerMessage {
     ConnectStarted connect_started = 34;
     // The answer to ListConnectChoices, to the asker only.
     ConnectChoices connect_choices = 35;
+    // The answer to UseUsageReset, to the asker only.
+    UsageResetAnswer usage_reset_answer = 36;
+    // The answer to LoadUsage, to the asker only.
+    UsageReport usage_report = 37;
   }
 }
 
@@ -1272,9 +1282,35 @@ message UpdateAccount {
   // gets requests again, as if topped up.
   bool retry = 4;
 }
+
+// Uses one of an account's usage resets (`ProviderUsage.resets`), only ever
+// at the person's word. Answered with UsageResetAnswer, then the account's
+// usage is read again and reaches everyone with Workspace. An Error when the
+// account or the reset isn't there (any more) or a reset is already being
+// used on the account.
+message UseUsageReset {
+  string provider_id = 1;
+  string account_id = 2;
+  // `UsageReset.id`.
+  string reset_id = 3;
+}
+
 // ---- Server → client ----
 
 message Ack {}
+
+message UsageResetAnswer {
+  // A limit was reset.
+  bool reset = 1;
+  // What happened, a sentence or two to show as is: "Your 5-hour limit is
+  // reset. 1 five-hour reset left.", or why nothing was used. A failure on
+  // the way is an answer too, since the reset may have gone through.
+  string message = 2;
+  // Where the person can use the reset on the provider's own site, when it
+  // refused Claktory's request or couldn't be reached
+  // ("https://clau.de/reset"); empty otherwise.
+  string fallback_url = 3;
+}
 
 message Error {
   ErrorCode code = 1;
@@ -1924,6 +1960,13 @@ message Settings {
   // the same on every device (config.json's `color`). Until someone picks
   // one, a color that stays the same for this Claktory, chosen from its key.
   string color = 27;
+  // How much each device zooms the whole app (config.json's `display.zoom`),
+  // by device id as Welcome.device_id gives it: "local" for this machine's
+  // own app, which a connection on the loopback port without a token (an
+  // empty Welcome.device_id) also counts as. 1.0 is actual size, which a
+  // device not listed has; 0.5 to 2.0. Each device's own, since each has its
+  // own screen; set with SetZoom.
+  map<string, double> zoom = 28;
 }
 
 // How long a provider's (or one model's) prompt cache is asked to last.
@@ -2008,6 +2051,38 @@ message ProviderUsage {
   // Why the latest read failed; empty when it worked. `windows` and `updated`
   // then still hold the last good read, if there was one.
   string error = 3;
+  // The usage resets the account has left, read with its usage (kept from
+  // the last good read, like `windows`); empty when it has none or the
+  // provider offers none. Only the person uses one, with UseUsageReset.
+  repeated UsageReset resets = 4;
+}
+
+// Some of an account's usage resets, all of one kind: each refills some of
+// its limits now, once.
+message UsageReset {
+  // The provider's id for it, given back in `UseUsageReset.reset_id`; may be
+  // empty (the provider then picks one of the account's resets).
+  string id = 1;
+  // What it is, shown as is: "Fable reset", "5-hour reset", "Weekly reset",
+  // "Full reset"; ChatGPT's own title for it, or else "Full reset".
+  string label = 2;
+  // What using it does, a sentence: "Refills your 5-hour limit."
+  string detail = 3;
+  // How many of these are left: 1 or more (spent ones aren't listed).
+  uint32 left = 4;
+  // How many it came with; 0 when the provider doesn't say.
+  uint32 total = 5;
+  // When the first of them expires, in ms since 1970; 0 when they don't.
+  int64 expires_at = 6;
+  // The provider says it can be used now. The person may still try one that
+  // isn't: the provider's answer says what happened.
+  bool usable = 7;
+  // Why it can't be used now, a sentence ("It works only at a usage
+  // limit."); empty when `usable`.
+  string unavailable = 8;
+  // The `UsageWindow` ids it refills ("five_hour", "weekly",
+  // "weekly_fable"…); empty when the provider doesn't say.
+  repeated string window_ids = 9;
 }
 
 // One usage limit, such as the weekly or the 5-hour one.
@@ -2845,7 +2920,7 @@ message SecretRequest {
   // Why it needs it, in the agent's words.
   string reason = 6;
   SecretRequestState state = 7;
-  // When it was decided, in ms since 1970; 0 while pending.
+  // When it was decided, or expired, in ms since 1970; 0 while pending.
   int64 decided_ms = 8;
   // The person's comment; may be empty.
   string comment = 9;
@@ -2865,6 +2940,9 @@ enum SecretRequestState {
   SECRET_REQUEST_STATE_PENDING = 1;
   SECRET_REQUEST_STATE_GRANTED = 2;
   SECRET_REQUEST_STATE_DISMISSED = 3;
+  // Left unanswered too long (12 hours, or 10 of the agent's runs): it can't
+  // be answered any more, and the agent was told. decided_ms says when.
+  SECRET_REQUEST_STATE_EXPIRED = 4;
 }
 
 // This Claktory's account at claktory.com, or at the service in
@@ -3074,6 +3152,9 @@ message Connector {
   string setup_note = 9;
   // Where to read about it; empty if nowhere.
   string setup_url = 10;
+  // PASTE: the service's page that makes the token, with what it needs
+  // filled in, as ConnectStarted.url also gives it.
+  string token_url = 11;
 }
 
 message ConnectorAccess {
@@ -3104,6 +3185,10 @@ enum ConnectorFlowKind {
   // The app opens a page with a code filled in; the backend asks the service
   // until the person approves. No FinishConnect.
   CONNECTOR_FLOW_KIND_DEVICE = 2;
+  // The app opens the service's page that makes a token (ConnectStarted.url)
+  // and asks the person to paste the token it shows, sent in
+  // FinishConnect.token. The app never shows it again nor keeps it.
+  CONNECTOR_FLOW_KIND_PASTE = 3;
 }
 
 // An agent's proposal to connect a service (secrets_propose_connection),
@@ -3137,6 +3222,26 @@ message ConnectProposal {
   // CONNECTED: the connection made for it.
   string secret_id = 12;
   string secret_name = 13;
+  // The exact permissions it asks for, where the service takes them (AWS):
+  // each an Allow statement. The connection is made with exactly these, and
+  // the backend refuses one that reaches more. Empty for the others.
+  repeated PolicyStatement statements = 14;
+  // AWS: the region it's for ("eu-central-1"); empty for the others.
+  string region = 15;
+}
+
+// One Allow statement of a permissions policy (AWS IAM): the actions, on the
+// resources, under the condition.
+message PolicyStatement {
+  // "ec2:RunInstances", "s3:GetObject"; wildcards as IAM takes them
+  // ("ec2:Describe*").
+  repeated string actions = 1;
+  // ARNs, or "*" (for actions that take no resource).
+  repeated string resources = 2;
+  // IAM's Condition block as compact JSON, such as
+  // {"StringEquals":{"aws:RequestedRegion":"eu-central-1"}}; empty for
+  // none. Shown to the person as it is.
+  string condition = 3;
 }
 
 enum ConnectProposalState {
@@ -3168,8 +3273,9 @@ message StartConnect {
 
 message ConnectStarted {
   string flow_id = 1;
-  // The page to open: the service's sign-in (BROWSER), or its verification
-  // page with the code filled in (DEVICE).
+  // The page to open: the service's sign-in (BROWSER), its verification
+  // page with the code filled in (DEVICE), or its page that makes a token
+  // (PASTE).
   string url = 2;
   // DEVICE: the code that page shows, for the person to check.
   string user_code = 3;
@@ -3178,10 +3284,15 @@ message ConnectStarted {
 }
 
 // Where the browser came back to (BROWSER): the whole URL, as it is, with
-// its code and state or the service's error.
+// its code and state or the service's error. Or the token the person
+// pasted (PASTE). Only the device that started the flow can finish it.
 message FinishConnect {
   string flow_id = 1;
   string callback_url = 2;
+  // PASTE: the token, as pasted. The backend checks it with the service
+  // before keeping it; one the service doesn't accept leaves the flow
+  // WAITING with ConnectFlow.error saying why, to paste another.
+  string token = 3;
 }
 
 // Stops a flow, or removes an ended one from VaultState.flows.
@@ -3195,7 +3306,8 @@ message ConnectFlow {
   // The device it was started on.
   string device_name = 3;
   ConnectFlowState state = 4;
-  // FAILED: why, a sentence for the person.
+  // FAILED: why, a sentence for the person. WAITING (PASTE): why the token
+  // pasted last didn't work; empty before one is.
   string error = 5;
   // CONNECTED: the connection (SecretInfo.id).
   string secret_id = 6;
@@ -3207,9 +3319,11 @@ message ConnectFlow {
 
 enum ConnectFlowState {
   CONNECT_FLOW_STATE_UNSPECIFIED = 0;
-  // Waiting for the person, in the browser.
+  // Waiting for the person, in the browser (PASTE: for the token; `error`
+  // says why the last one pasted didn't work).
   CONNECT_FLOW_STATE_WAITING = 1;
-  // Signing in with what the browser brought back.
+  // Signing in with what the browser brought back (PASTE: checking the
+  // token with the service).
   CONNECT_FLOW_STATE_EXCHANGING = 2;
   // Reading the account and what was granted.
   CONNECT_FLOW_STATE_CHECKING = 3;
@@ -3311,10 +3425,82 @@ message DeriveSecret {
   int64 expires_ms = 6;
 }
 
+// Sets how much this device zooms the whole app (Settings.zoom): the
+// device this connection is, never another. 1.0, or 0, is actual size;
+// otherwise 0.5 to 2.0 (finite), or it's refused. Answered with Ack.
+message SetZoom {
+  double zoom = 1;
+}
+
 // Removes a connection and the secrets made from it.
 message DisconnectService {
   string secret_id = 1;
   // Also revoke it at the service. Tokens made from it are deleted at the
   // service either way, where it can.
   bool revoke = 2;
+}
+
+// ---- Usage ----
+
+// Asks for the tokens agents' model calls used in a time range, by provider,
+// model, account and agent, for the Usage pane: not in the Workspace, asked
+// again to refresh. Calls are counted per UTC hour, so the range's ends are
+// rounded down to whole hours.
+message LoadUsage {
+  // From, in ms since 1970; 0 for since the first call counted.
+  int64 since_ms = 1;
+  // To, exclusive; 0 for now.
+  int64 until_ms = 2;
+  // The series' step: a whole number of hours, such as 3600000 or 86400000;
+  // 0 for no series. At most 5,000 buckets.
+  int64 bucket_ms = 3;
+  // Where the person's days start (minutes east of UTC), for day buckets.
+  int32 utc_offset_minutes = 4;
+}
+
+message UsageReport {
+  // The range as applied: for all time, the first counted call's hour.
+  int64 since_ms = 1;
+  int64 until_ms = 2;
+  // One per provider × model × account × agent with any use in the range;
+  // every grouping of them adds up.
+  repeated UsageRow rows = 3;
+  // Every bucket of the range, empty ones too, oldest first.
+  repeated UsageBucket series = 4;
+  // When counting by agent (and account) began: earlier use has agent_id and
+  // account_id ""; 0 if nothing's been counted by agent yet.
+  int64 agents_since_ms = 5;
+}
+
+message UsageRow {
+  // "anthropic".
+  string provider_id = 1;
+  // "claude-opus-4-5", as the provider named it.
+  string model = 2;
+  // The provider account that answered (Account.id); "" when unknown.
+  string account_id = 3;
+  // Its label as Settings shows it (an email, a key's name); "" when unknown
+  // or signed out.
+  string account_label = 4;
+  // "" for calls from before agents were counted.
+  string agent_id = 5;
+  // The agent's name at its latest counted call, so a deleted one still
+  // reads right.
+  string agent_name = 6;
+  UsageTokens tokens = 7;
+  // Model calls.
+  uint64 requests = 8;
+}
+
+message UsageTokens {
+  uint64 input = 1;
+  uint64 output = 2;
+  uint64 cache_read = 3;
+  uint64 cache_write = 4;
+}
+
+message UsageBucket {
+  int64 start_ms = 1;
+  // All providers together.
+  UsageTokens tokens = 2;
 }

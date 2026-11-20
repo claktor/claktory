@@ -24,7 +24,7 @@ use crate::types::{
 };
 use crate::usage::calculate_cost;
 
-pub(crate) const CLAUDE_CODE_VERSION: &str = "2.1.283";
+pub(crate) const CLAUDE_CODE_VERSION: &str = "2.1.327";
 const CLAUDE_CODE_TOOLS: [&str; 17] = [
     "Read",
     "Write",
@@ -82,6 +82,7 @@ pub fn provider() -> Provider {
     provider.limits = Some(crate::limits::anthropic);
     provider.plan = Some(crate::limits::anthropic_plan);
     provider.identity = Some(crate::limits::anthropic_identity);
+    provider.reset = Some(crate::limits::anthropic_reset);
     provider
 }
 

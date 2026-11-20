@@ -11,6 +11,7 @@ import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/update.dart';
+import 'package:factory_app/zoom.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
@@ -478,6 +479,19 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(setHighlights: SetHighlights(on: on)));
 
   @override
+  Future<void> setZoom(double zoom) =>
+      _record(ClientMessage(setZoom: SetZoom(zoom: zoom)));
+
+  /// What [useUsageReset] answers.
+  var usageResetAnswer = UsageResetAnswer(reset: true, message: 'Reset.');
+
+  @override
+  Future<UsageResetAnswer> useUsageReset(UseUsageReset use) async {
+    await _record(ClientMessage(useUsageReset: use));
+    return usageResetAnswer;
+  }
+
+  @override
   Future<void> runCommand(String agentId, String name, String args) => _record(
     ClientMessage(
       runCommand: RunCommand(agentId: agentId, name: name, args: args),
@@ -692,9 +706,17 @@ class RecordingBackend extends Backend {
   }
 
   @override
-  Future<void> finishConnect(String flowId, String callbackUrl) => _record(
+  Future<void> finishConnect(
+    String flowId,
+    String callbackUrl, {
+    String token = '',
+  }) => _record(
     ClientMessage(
-      finishConnect: FinishConnect(flowId: flowId, callbackUrl: callbackUrl),
+      finishConnect: FinishConnect(
+        flowId: flowId,
+        callbackUrl: callbackUrl,
+        token: token,
+      ),
     ),
   );
 
@@ -714,6 +736,15 @@ class RecordingBackend extends Backend {
       ),
     ),
   );
+
+  /// What [loadUsage] answers (Priya's usage_view_test).
+  var usageReport = UsageReport();
+
+  @override
+  Future<UsageReport> loadUsage(LoadUsage ask) async {
+    await _record(ClientMessage(loadUsage: ask));
+    return usageReport;
+  }
 
   /// What [listConnectChoices] answers.
   var connectChoices = ConnectChoices();
@@ -894,7 +925,7 @@ class Harness {
           history: history,
           connections: connections,
           camera: camera,
-          child: const Shell(),
+          child: const AppZoom(child: Shell()),
         ),
       ),
     );

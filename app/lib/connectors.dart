@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
@@ -90,6 +91,28 @@ class ConnectRun extends ChangeNotifier {
   ConnectReceiver? _receiver;
   var _generation = 0;
 
+  /// PASTE: the token being pasted, cleared as soon as it's sent; never
+  /// kept anywhere else on this device.
+  final token = TextEditingController();
+
+  /// PASTE: sending the token, until the backend has it.
+  var sending = false;
+
+  /// PASTE: why the token couldn't be sent, or that none was pasted.
+  String? tokenError;
+
+  /// The service makes a token on its page for the person to paste.
+  bool get pastes =>
+      connector?.flow == ConnectorFlowKind.CONNECTOR_FLOW_KIND_PASTE;
+
+  /// PASTE: waiting for the person to paste a token.
+  bool get waitingForToken =>
+      pastes &&
+      started != null &&
+      error == null &&
+      !sending &&
+      state == ConnectFlowState.CONNECT_FLOW_STATE_WAITING;
+
   /// The flow as the backend tells every device.
   ConnectFlow? get flow {
     final id = started?.flowId;
@@ -132,6 +155,9 @@ class ConnectRun extends ChangeNotifier {
     this.connector = connector;
     starting = true;
     error = null;
+    sending = false;
+    tokenError = null;
+    token.clear();
     notifyListeners();
     final browser =
         connector.flow == ConnectorFlowKind.CONNECTOR_FLOW_KIND_BROWSER;
@@ -178,7 +204,10 @@ class ConnectRun extends ChangeNotifier {
       if (_receiver != null) _backend.workspace.addListener(_flowChanged);
       notifyListeners();
       final page = Uri.parse(started.url);
-      if (sheet) {
+      if (connector.flow == ConnectorFlowKind.CONNECTOR_FLOW_KIND_PASTE) {
+        // The token comes back by hand, in [sendToken].
+        await openConnectPage(page);
+      } else if (sheet) {
         final back = await connectSheet(page, connectScheme);
         if (generation != _generation) return;
         if (back == null) return await cancel();
@@ -222,10 +251,55 @@ class ConnectRun extends ChangeNotifier {
     unawaited(receiver?.close());
   }
 
+  /// PASTE: sends the pasted token to the backend, which checks it with
+  /// the service; the field is emptied at once either way.
+  Future<void> sendToken() async {
+    final flowId = started?.flowId;
+    final value = token.text.trim();
+    token.clear();
+    if (flowId == null || sending) return;
+    if (value.isEmpty) {
+      tokenError = 'Paste the token to connect.';
+      notifyListeners();
+      return;
+    }
+    final generation = _generation;
+    sending = true;
+    tokenError = null;
+    notifyListeners();
+    try {
+      await _backend.finishConnect(flowId, '', token: value);
+      // The flow moves on (checking the token) just after the answer:
+      // the field stays away until it has.
+      await _nextChange().timeout(const Duration(seconds: 2), onTimeout: () {});
+    } on RequestFailure catch (failure) {
+      if (generation == _generation) tokenError = failure.message;
+    }
+    if (generation != _generation) return;
+    sending = false;
+    notifyListeners();
+  }
+
+  Future<void> _nextChange() {
+    final changed = Completer<void>();
+    final workspace = _backend.workspace;
+    void listener() {
+      workspace.removeListener(listener);
+      if (!changed.isCompleted) changed.complete();
+    }
+
+    workspace.addListener(listener);
+    return changed.future.whenComplete(
+      () => workspace.removeListener(listener),
+    );
+  }
+
   /// Opens the service's page again, for a browser tab closed too soon.
   Future<void> openAgain() async {
     final url = started?.url;
-    if (url != null && !connectInSheet) await openConnectPage(Uri.parse(url));
+    if (url != null && (!connectInSheet || pastes)) {
+      await openConnectPage(Uri.parse(url));
+    }
   }
 
   /// Stops connecting, and forgets it.
@@ -236,6 +310,9 @@ class ConnectRun extends ChangeNotifier {
     starting = false;
     started = null;
     error = null;
+    sending = false;
+    tokenError = null;
+    token.clear();
     notifyListeners();
     if (flowId != null) await _quietly(_backend.cancelConnect(flowId));
   }
@@ -274,7 +351,8 @@ class ConnectProgress extends StatelessWidget {
   final ConnectRun run;
   final VoidCallback onRetry;
 
-  /// Shows Cancel while it runs (a form has its own).
+  /// Shows Cancel while it runs, and Connect while waiting for a pasted
+  /// token (a form has its own).
   final bool cancellable;
 
   @override
@@ -297,6 +375,7 @@ class ConnectProgress extends StatelessWidget {
     String? detail;
     var tone = palette.textMuted;
     var live = false;
+    Widget? input;
     final actions = <Widget>[];
     if (run.error != null) {
       line = run.error!;
@@ -330,11 +409,56 @@ class ConnectProgress extends StatelessWidget {
           line = 'Cancelled.';
           actions.add(Button(label: 'Try again', onPressed: onRetry));
         case ConnectFlowState.CONNECT_FLOW_STATE_EXCHANGING:
-          line = 'Finishing…';
+          line = run.pastes ? 'Checking the token with $name…' : 'Finishing…';
           live = true;
         case ConnectFlowState.CONNECT_FLOW_STATE_CHECKING:
           line = 'Checking what $name allowed…';
           live = true;
+        case _ when run.pastes:
+          if (run.sending) {
+            line = 'Checking the token with $name…';
+            live = true;
+            break;
+          }
+          // The setup note says what to choose on the service's page.
+          final setup = run.connector?.setupNote ?? '';
+          line = setup.isEmpty
+              ? "Make a token on $name's page, then paste it here. Claktory "
+                    'keeps it with your secrets and never shows it again.'
+              : 'Paste the token here. Claktory keeps it with your secrets '
+                    'and never shows it again.';
+          if (setup.isNotEmpty) detail = setup;
+          final why = run.tokenError ?? flow?.error ?? '';
+          input = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: run.token,
+                placeholder: 'Paste token',
+                obscureText: true,
+                autofocus: true,
+                onSubmitted: (_) => run.sendToken(),
+              ),
+              if (why.isNotEmpty) ...[
+                const SizedBox(height: Space.xs),
+                Text(
+                  why,
+                  style: TextStyles.caption.copyWith(color: palette.danger),
+                ),
+              ],
+            ],
+          );
+          if (cancellable) {
+            actions.add(
+              Button(label: 'Connect', primary: true, onPressed: run.sendToken),
+            );
+          }
+          actions.add(
+            Button(label: 'Open the page again', onPressed: run.openAgain),
+          );
+          if (cancellable) {
+            actions.add(Button(label: 'Cancel', onPressed: run.cancel));
+          }
         default:
           live = true;
           line = connectInSheet && !device
@@ -376,6 +500,7 @@ class ConnectProgress extends StatelessWidget {
             style: TextStyles.caption.copyWith(color: palette.textFaint),
           ),
         ],
+        if (input != null) ...[const SizedBox(height: Space.s), input],
         if (actions.isNotEmpty) ...[
           const SizedBox(height: Space.s),
           Wrap(spacing: Space.s, runSpacing: Space.s, children: actions),
@@ -640,11 +765,13 @@ class _ConnectServiceFormState extends State<ConnectServiceForm> {
               : null,
           submitLabel: connected
               ? 'Done'
-              : showing
+              : showing && !_run.waitingForToken
               ? 'Connecting…'
               : 'Connect',
           onSubmit: connected
               ? _done
+              : _run.waitingForToken
+              ? _run.sendToken
               : showing
               ? null
               : _connect,
@@ -852,11 +979,10 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
           ),
           if (proposal.purpose.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
-            Text(
+            Markdown(
               proposal.purpose,
-              style: TextStyles.body.copyWith(
-                color: pending ? palette.text : palette.textMuted,
-              ),
+              color: pending ? palette.text : palette.textMuted,
+              shortLinks: true,
             ),
           ],
           if (proposal.access.isNotEmpty) ...[
@@ -868,14 +994,37 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
                 fontWeight: FontWeight.w500,
               ),
             ),
-            Text(
+            Markdown(
               proposal.access,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              color: palette.textMuted,
+              shortLinks: true,
             ),
+          ],
+          if (proposal.region.isNotEmpty) ...[
+            const SizedBox(height: Space.s),
+            Text(
+              'Region',
+              style: TextStyles.caption.copyWith(
+                color: palette.textFaint,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Text(
+              proposal.region,
+              style: TextStyles.code.copyWith(color: palette.textMuted),
+            ),
+          ],
+          if (proposal.statements.isNotEmpty) ...[
+            const SizedBox(height: Space.s),
+            PolicyStatements(proposal.statements),
           ],
           if (proposal.reason.isNotEmpty) ...[
             const SizedBox(height: Space.s),
-            Markdown(proposal.reason, color: palette.textMuted),
+            Markdown(
+              proposal.reason,
+              color: palette.textMuted,
+              shortLinks: true,
+            ),
           ],
           const SizedBox(height: Space.m),
           if (pending)
@@ -1843,3 +1992,178 @@ class _Checks extends StatelessWidget {
     );
   }
 }
+
+/// The exact permissions a proposal asks for (AWS's policy statements, all
+/// Allow), folded under one line until opened: each statement in a panel,
+/// its actions, what they're on, and when, in words where the condition's
+/// operators are the usual ones and as its JSON where they aren't.
+class PolicyStatements extends StatefulWidget {
+  const PolicyStatements(this.statements, {super.key});
+
+  final List<PolicyStatement> statements;
+
+  @override
+  State<PolicyStatements> createState() => _PolicyStatementsState();
+}
+
+class _PolicyStatementsState extends State<PolicyStatements> {
+  var _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final count = widget.statements.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Pressable(
+            onTap: () => setState(() => _open = !_open),
+            builder: (context, hovered) => Text(
+              _open
+                  ? 'Hide exact permissions'
+                  : count == 1
+                  ? 'Show exact permissions (1 rule)'
+                  : 'Show exact permissions ($count rules)',
+              style: TextStyles.caption.copyWith(
+                color: hovered ? palette.text : palette.textMuted,
+              ),
+            ),
+          ),
+        ),
+        if (_open)
+          for (final statement in widget.statements) ...[
+            const SizedBox(height: Space.xs),
+            _Statement(statement),
+          ],
+      ],
+    );
+  }
+}
+
+class _Statement extends StatelessWidget {
+  const _Statement(this.statement);
+
+  final PolicyStatement statement;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    Widget label(String text) => Padding(
+      padding: const EdgeInsets.only(top: Space.xs),
+      child: Text(
+        text,
+        style: TextStyles.caption.copyWith(
+          color: palette.textFaint,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+    Widget lines(Iterable<String> lines, Color color) => Text(
+      lines.join('\n'),
+      style: TextStyles.code.copyWith(fontSize: 12, color: color),
+    );
+    final condition = conditionLines(statement.condition);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.m,
+        vertical: Space.s,
+      ),
+      decoration: BoxDecoration(
+        color: palette.sidebar,
+        borderRadius: BorderRadius.circular(Radii.control),
+        border: Border.all(color: palette.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Allows',
+            style: TextStyles.caption.copyWith(
+              color: palette.textFaint,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          lines(statement.actions, palette.text),
+          if (statement.resources.isNotEmpty) ...[
+            label('On'),
+            lines(
+              statement.resources.map(
+                (r) => r == '*' ? '* (all resources)' : r,
+              ),
+              palette.textMuted,
+            ),
+          ],
+          if (condition != null) ...[
+            label('Only when'),
+            lines(condition, palette.textMuted),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// An IAM Condition block (compact JSON) as lines to read: one per key,
+/// "aws:RequestedRegion is eu-central-1", in words for the usual operators,
+/// the JSON itself, indented, for anything else; null when there's none.
+@visibleForTesting
+List<String>? conditionLines(String condition) {
+  if (condition.trim().isEmpty) return null;
+  Object? parsed;
+  try {
+    parsed = jsonDecode(condition);
+  } on FormatException {
+    return [condition];
+  }
+  String raw() => const JsonEncoder.withIndent('  ').convert(parsed);
+  if (parsed is! Map<String, dynamic> || parsed.isEmpty) return [raw()];
+  final out = <String>[];
+  for (final MapEntry(key: operator, value: keys) in parsed.entries) {
+    var name = operator;
+    final ifExists = name.endsWith('IfExists');
+    if (ifExists) name = name.substring(0, name.length - 'IfExists'.length);
+    final words = _conditionWords[name];
+    if (words == null || keys is! Map<String, dynamic> || keys.isEmpty) {
+      return [raw()];
+    }
+    for (final MapEntry(key: key, value: value) in keys.entries) {
+      final values = [
+        for (final v in value is List ? value : [value]) '$v',
+      ];
+      if (values.isEmpty) return [raw()];
+      final list = values.length == 1
+          ? values.single
+          : '${values.sublist(0, values.length - 1).join(', ')} or '
+                '${values.last}';
+      out.add('$key $words $list${ifExists ? ' (if the request has it)' : ''}');
+    }
+  }
+  return out;
+}
+
+const _conditionWords = {
+  'StringEquals': 'is',
+  'StringEqualsIgnoreCase': 'is (any case)',
+  'StringNotEquals': "isn't",
+  'StringLike': 'matches',
+  'StringNotLike': "doesn't match",
+  'ArnEquals': 'is',
+  'ArnLike': 'matches',
+  'ArnNotEquals': "isn't",
+  'ArnNotLike': "doesn't match",
+  'NumericEquals': 'is',
+  'NumericNotEquals': "isn't",
+  'NumericLessThan': 'is less than',
+  'NumericLessThanEquals': 'is at most',
+  'NumericGreaterThan': 'is more than',
+  'NumericGreaterThanEquals': 'is at least',
+  'DateLessThan': 'is before',
+  'DateLessThanEquals': 'is at or before',
+  'DateGreaterThan': 'is after',
+  'DateGreaterThanEquals': 'is at or after',
+  'Bool': 'is',
+  'IpAddress': 'is in',
+  'NotIpAddress': "isn't in",
+};

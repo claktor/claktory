@@ -21,14 +21,35 @@ pub struct Mail {
     pub html: String,
 }
 
-pub type Sending<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+pub type Sending<'a> = Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>>;
 
-/// What sends email: Resend, a folder, or memory in tests.
+/// Why an email wasn't sent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MailError {
+    /// The provider won't send for the service at all until whoever runs it
+    /// acts: its plan, its domain, its token, its rate. `kind` names it
+    /// (`not_entitled`, `sending_disabled`, `throttled`…), for the alert;
+    /// `text` says what to do.
+    Refused { kind: &'static str, text: String },
+    /// This one email wasn't sent: its address is suppressed or bounced, or
+    /// the provider failed.
+    NotSent(String),
+}
+
+impl std::fmt::Display for MailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MailError::Refused { text, .. } | MailError::NotSent(text) => f.write_str(text),
+        }
+    }
+}
+
+/// What sends email: Cloudflare, Resend, a folder, or memory in tests.
 pub trait Mailer: Send + Sync {
     fn send<'a>(&'a self, mail: &'a Mail) -> Sending<'a>;
 }
 
-/// The code that signs in, from Claktory, from `signin@<domain>`.
+/// The code that signs in, from Claktory, from `code@<domain>`.
 pub fn code_mail(domain: &str, to: &str, code: &str) -> Mail {
     let text = format!(
         "Your code to sign in to Claktory:\n\n{code}\n\nIt works for 15 minutes.\n\nIf you didn't ask for it, ignore this email. No one can sign in without the code.\n"
@@ -39,7 +60,7 @@ pub fn code_mail(domain: &str, to: &str, code: &str) -> Mail {
          <p>It works for 15 minutes.</p>\
          <p>If you didn't ask for it, ignore this email. No one can sign in without the code.</p>"
     ));
-    Mail { from: format!("Claktory <signin@{domain}>"), to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
+    Mail { from: format!("Claktory <code@{domain}>"), to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
 }
 
 /// A Claktory got its share after a restart: so its owner learns if anyone
@@ -63,6 +84,21 @@ pub fn unlock_mail(domain: &str, to: &str, name: &str, when: i64, ip: &str, acco
          Then change the keys kept in its secrets at each service they're for.</p>"
     ));
     Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
+}
+
+/// To whoever runs the service: the mail provider refused to send. It may
+/// not arrive (the provider refuses this one too), so the log says it as
+/// well.
+pub fn refused_alert_mail(domain: &str, to: &str, why: &str) -> Mail {
+    let text = format!("The account service's mail provider refused to send email, so sign-in codes aren't going out.\n\n{why}\n");
+    let html = page(&format!("<p>{}</p>", escape(&text).replace("\n\n", "</p><p>")));
+    Mail {
+        from: format!("Claktory <notices@{domain}>"),
+        to: to.to_owned(),
+        subject: "Claktory account service: email refused".to_owned(),
+        text,
+        html,
+    }
 }
 
 /// To whoever runs the service: today's email is nearly used up.
@@ -134,14 +170,140 @@ impl Mailer for Resend {
     fn send<'a>(&'a self, mail: &'a Mail) -> Sending<'a> {
         Box::pin(async move {
             let body = json!({"from": mail.from, "to": [mail.to], "subject": mail.subject, "text": mail.text, "html": mail.html});
-            let response =
-                self.client.post(&self.url).bearer_auth(&self.key).json(&body).send().await.map_err(|error| format!("Resend: {error}"))?;
+            let response = self
+                .client
+                .post(&self.url)
+                .bearer_auth(&self.key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| MailError::NotSent(format!("Resend: {error}")))?;
             let status = response.status();
             if status.is_success() {
                 return Ok(());
             }
             let answer: String = response.text().await.unwrap_or_default().chars().take(300).collect();
-            Err(format!("Resend: {status}: {answer}"))
+            let text = format!("Resend: {status}: {answer}");
+            Err(match status.as_u16() {
+                401 | 403 => MailError::Refused { kind: "unauthorized", text: format!("{text}. Check the Resend API key.") },
+                429 => MailError::Refused { kind: "throttled", text },
+                _ => MailError::NotSent(text),
+            })
+        })
+    }
+}
+
+/// Sends through Cloudflare Email Service's REST API, from a domain
+/// onboarded for Email Sending in the account, with an API token that has
+/// Email Sending: Edit.
+pub struct Cloudflare {
+    token: String,
+    url: String,
+    client: reqwest::Client,
+}
+
+impl Cloudflare {
+    pub fn new(token: String, account: &str) -> Cloudflare {
+        Cloudflare::with_base(token, account, "https://api.cloudflare.com/client/v4")
+    }
+
+    /// For a stand-in of Cloudflare's API, in tests.
+    pub fn with_base(token: String, account: &str, base: &str) -> Cloudflare {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().expect("an HTTP client");
+        let url = format!("{}/accounts/{account}/email/sending/send", base.trim_end_matches('/'));
+        Cloudflare { token, url, client }
+    }
+}
+
+/// "Claktory <code@…>" as Cloudflare takes it: `{"address", "name"}`.
+fn address(text: &str) -> serde_json::Value {
+    match text.rsplit_once('<') {
+        Some((name, rest)) if rest.ends_with('>') => {
+            let address = &rest[..rest.len() - 1];
+            match name.trim() {
+                "" => json!(address),
+                name => json!({"address": address, "name": name}),
+            }
+        }
+        _ => json!(text),
+    }
+}
+
+/// What Cloudflare's refusal means, by its error code: the problems whoever
+/// runs the service must fix, and what to do.
+fn cloudflare_refusal(code: i64, message: &str) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        10105 => {
+            ("not_entitled", "The Cloudflare account isn't entitled to Email Sending: it needs the Workers Paid plan to email anyone.")
+        }
+        10203 => (
+            "sending_disabled",
+            "Sending is turned off for the domain or the account: turn it on in Cloudflare under Email Service → Email Sending.",
+        ),
+        10207 => ("account_suspended", "Cloudflare paused Email Sending for the account: its Email Sending page says why."),
+        10101 | 10103 => (
+            "unauthorized",
+            "Cloudflare refused the API token: make a new one with Email Sending: Edit and set it with the deploy kit's cloudflare-token command.",
+        ),
+        10102 => ("forbidden", "The API token can't send email: give it Email Sending: Edit on the account."),
+        10000 => (
+            "not_found",
+            "Cloudflare doesn't know that account, or its domain isn't onboarded for Email Sending: check --cloudflare-account.",
+        ),
+        10004 => ("throttled", "Cloudflare is limiting how fast the service sends: codes go again once it lets them."),
+        _ if message.ends_with("not_entitled") => ("not_entitled", "The Cloudflare account isn't entitled to Email Sending."),
+        _ if message.ends_with("sending_disabled") => ("sending_disabled", "Sending is turned off for the domain or the account."),
+        _ if message.ends_with("throttled") => ("throttled", "Cloudflare is limiting how fast the service sends."),
+        _ => return None,
+    })
+}
+
+impl Mailer for Cloudflare {
+    fn send<'a>(&'a self, mail: &'a Mail) -> Sending<'a> {
+        Box::pin(async move {
+            let body = json!({
+                "from": address(&mail.from),
+                "to": mail.to,
+                "subject": mail.subject,
+                "text": mail.text,
+                "html": mail.html,
+            });
+            let response = self
+                .client
+                .post(&self.url)
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| MailError::NotSent(format!("Cloudflare: {error}")))?;
+            let status = response.status();
+            let answer = response.text().await.unwrap_or_default();
+            let value: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
+            let short: String = answer.chars().take(300).collect();
+            if status.is_success() && value["success"] != json!(false) {
+                // Dropped (on the suppression list) or bounced at once: not sent.
+                let result = &value["result"];
+                for (list, why) in [("suppressed_recipients", "is on Cloudflare's suppression list"), ("permanent_bounces", "bounced")] {
+                    let listed = result[list].as_array().is_some_and(|addresses| {
+                        addresses.iter().any(|address| address.as_str().is_some_and(|address| address.eq_ignore_ascii_case(&mail.to)))
+                    });
+                    if listed {
+                        return Err(MailError::NotSent(format!("Cloudflare: {} {why}", mail.to)));
+                    }
+                }
+                return Ok(());
+            }
+            let error = &value["errors"][0];
+            let code = error["code"].as_i64().unwrap_or_default();
+            let message = error["message"].as_str().unwrap_or_default();
+            let text = format!("Cloudflare: {status}: {}", if message.is_empty() { short.as_str() } else { message });
+            if let Some((kind, what)) = cloudflare_refusal(code, message) {
+                return Err(MailError::Refused { kind, text: format!("{what} ({text})") });
+            }
+            if status.as_u16() == 429 {
+                return Err(MailError::Refused { kind: "throttled", text });
+            }
+            Err(MailError::NotSent(text))
         })
     }
 }
@@ -167,18 +329,20 @@ impl Mailer for Folder {
             let stamp = jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S");
             let path = self.dir.join(format!("{stamp}-{}-{number}.eml", std::process::id()));
             let text = format!("From: {}\nTo: {}\nSubject: {}\n\n{}", mail.from, mail.to, mail.subject, mail.text);
-            tokio::fs::write(&path, text).await.map_err(|error| format!("can't write {}: {error}", path.display()))?;
+            tokio::fs::write(&path, text).await.map_err(|error| MailError::NotSent(format!("can't write {}: {error}", path.display())))?;
             tracing::info!("mail written to {}", path.display());
             Ok(())
         })
     }
 }
 
-/// Keeps what it sends, for tests; `fail` makes it fail as a provider can.
+/// Keeps what it sends, for tests; `fail` makes it fail as a provider can,
+/// and `refuse_next` refuses the next email only.
 #[derive(Default)]
 pub struct Memory {
     pub sent: Mutex<Vec<Mail>>,
     pub fail: AtomicBool,
+    pub refuse_next: Mutex<Option<MailError>>,
 }
 
 impl Memory {
@@ -190,8 +354,11 @@ impl Memory {
 impl Mailer for Memory {
     fn send<'a>(&'a self, mail: &'a Mail) -> Sending<'a> {
         Box::pin(async move {
+            if let Some(error) = self.refuse_next.lock().expect("mail").take() {
+                return Err(error);
+            }
             if self.fail.load(Ordering::Relaxed) {
-                return Err("the provider failed".to_owned());
+                return Err(MailError::NotSent("the provider failed".to_owned()));
             }
             self.sent.lock().expect("mail").push(mail.clone());
             Ok(())
@@ -206,7 +373,7 @@ mod tests {
     #[test]
     fn the_emails_read_as_written() {
         let mail = code_mail("auth.claktory.com", "matt@example.com", "482913");
-        assert_eq!(mail.from, "Claktory <signin@auth.claktory.com>");
+        assert_eq!(mail.from, "Claktory <code@auth.claktory.com>");
         assert_eq!(mail.subject, "Your Claktory code: 482913");
         assert!(mail.text.starts_with("Your code to sign in to Claktory:\n\n482913\n\nIt works for 15 minutes.\n\n"));
 

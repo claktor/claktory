@@ -6,12 +6,14 @@ import 'characters/character.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'database.dart';
+import 'extension_about.dart';
 import 'highlights.dart';
 import 'identity.dart';
 import 'memory.dart';
 import 'messaging.dart';
 import 'monitors.dart';
 import 'resources.dart';
+import 'secrets.dart' show AgentSecretsPanel;
 import 'tasks.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -208,6 +210,13 @@ class ExtensionPanel extends StatelessWidget {
 
   Widget _body(BuildContext context, ExtensionView? view) {
     final palette = Palette.of(context);
+    // Secrets has no view: the vault the workspace carries says what the
+    // agent has.
+    if (extension.id == 'secrets') return AgentSecretsPanel(agentId: agent.id);
+    // Others with no view of their own say what they do.
+    if (!hasExtensionView(extension)) {
+      return ExtensionAbout(extension: extension, agentId: agent.id);
+    }
     // Until the backend sends the view, there's nothing true to show.
     if (view == null) return const SizedBox.shrink();
     switch (view.whichBody()) {

@@ -104,6 +104,8 @@ pub struct Provider {
     pub plan: Option<crate::limits::PlanFn>,
     /// Reads who a subscription sign-in is, to tell its accounts apart; None when the provider can't say.
     pub identity: Option<crate::limits::IdentityFn>,
+    /// Uses one of a subscription sign-in's usage resets; None when the provider has none.
+    pub reset: Option<crate::limits::ResetFn>,
 }
 
 fn api_key(auth: impl ApiKeyAuth + 'static) -> Option<Arc<dyn ApiKeyAuth>> {
@@ -134,6 +136,7 @@ impl Provider {
             limits: None,
             plan: None,
             identity: None,
+            reset: None,
         }
     }
 }

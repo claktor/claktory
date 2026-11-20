@@ -38,6 +38,8 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "807640ce610ae87fd1a51f72b439d93cef8fbf6e814eace0b3a76ba9e46e21f0",
     // {{user}} for "the person".
     "7d935762bff903785cbbc4d3b57f605b213ddbd4628b6074fa641978c4c88bb7",
+    // Connected services.
+    "d36d20a71ddcb3df22e8bc47fcd49b3e3e663af41041aef7167b6514924507c8",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -205,6 +207,7 @@ impl UserConfig {
 
 /// The widths the person dragged the sidebar and the right panel to, in
 /// logical pixels; 0 for the app's default. The app keeps them in its range.
+/// And how much each device zooms the app.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DisplayConfig {
@@ -212,7 +215,17 @@ pub struct DisplayConfig {
     pub sidebar_width: f64,
     #[serde(skip_serializing_if = "is_zero")]
     pub panel_width: f64,
+    /// Each device's zoom by its id ("local" for this machine's own app),
+    /// `ZOOM_MIN` to `ZOOM_MAX`; actual size (1) isn't written. Written only
+    /// once someone zooms, so an untouched file stays readable by a backend
+    /// from before it.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub zoom: BTreeMap<String, f64>,
 }
+
+/// How far a device can zoom the app out and in.
+pub const ZOOM_MIN: f64 = 0.5;
+pub const ZOOM_MAX: f64 = 2.0;
 
 impl DisplayConfig {
     fn is_default(&self) -> bool {
@@ -223,6 +236,11 @@ impl DisplayConfig {
         for (name, value) in [("sidebar_width", self.sidebar_width), ("panel_width", self.panel_width)] {
             if !value.is_finite() || value < 0.0 {
                 return Err(Invalid::BadDisplay(format!("{name} must be a width of 0 or more")));
+            }
+        }
+        for (device, zoom) in &self.zoom {
+            if !(ZOOM_MIN..=ZOOM_MAX).contains(zoom) {
+                return Err(Invalid::BadDisplay(format!("zoom.{device} must be from {ZOOM_MIN} to {ZOOM_MAX}")));
             }
         }
         Ok(())

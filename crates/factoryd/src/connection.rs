@@ -193,7 +193,10 @@ pub(crate) async fn serve_stream<S: Stream>(
         Some(connected) => connected.device.id.clone(),
         None => format!("connection-{}", crate::connectors::random_id()),
     };
-    let connection = Connection { remote, device: name, sent_from, binding, workspace_patches, files };
+    // Whose zoom it sets: a loopback connection without a token is this
+    // machine's own app too.
+    let zoom_device = device.as_ref().map_or_else(|| crate::remote::LOCAL_DEVICE.to_owned(), |connected| connected.device.id.clone());
+    let connection = Connection { remote, device: name, sent_from, binding, zoom_device, workspace_patches, files };
     session(&mut socket, &factory, connection, device.as_ref().map(|connected| connected.closed.clone())).await?;
     tracing::info!("client disconnected");
     Ok(())
@@ -211,6 +214,9 @@ struct Connection {
     /// or this one connection's when it has no device (the loopback port
     /// before this computer's app paired).
     binding: String,
+    /// Whose zoom SetZoom sets: the paired device's id, "local" for this
+    /// machine's own app and the loopback port.
+    zoom_device: String,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
     /// The project whose files it shows on their own (WatchFiles).
@@ -371,6 +377,7 @@ async fn handle(
         }
         Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
         Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
+        Some(Request::SetZoom(request)) => factory.set_zoom(&connection.zoom_device, request.zoom).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
         // A remote device's app is on another machine: its path means nothing here.
         Some(Request::InstallUpdate(request)) => factory.install_update(if remote { "" } else { &request.app_path }).await,
@@ -440,6 +447,12 @@ async fn handle(
         Some(Request::FetchApp(request)) => {
             return match factory.fetch_app(&request.version, request.offset).await {
                 Ok(chunk) => Body::AppChunk(chunk),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::LoadUsage(request)) => {
+            return match factory.load_usage(&request) {
+                Ok(report) => Body::UsageReport(report),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
@@ -559,6 +572,12 @@ async fn handle(
         }
         Some(Request::DeriveSecret(request)) => factory.derive_secret(&request, "").await.map(|_| ()),
         Some(Request::DisconnectService(request)) => factory.disconnect_service(&request.secret_id, request.revoke).await,
+        Some(Request::UseUsageReset(request)) => {
+            return match factory.use_usage_reset(&request.provider_id, &request.account_id, &request.reset_id).await {
+                Ok(answer) => Body::UsageResetAnswer(answer),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
         None => return error(ErrorCode::UnknownMessage, "unknown message"),
     };
     match result {

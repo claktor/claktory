@@ -59,8 +59,12 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
                 }
                 let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
                 let account = header("authorization").trim_start_matches("Bearer sk-ant-oat01-").to_owned();
-                recorded.lock().expect("lock").push((path.clone(), account.clone()));
-                let (status, extra, content_type, body) = answer(&path, &account, resets_at_seconds);
+                let claimed = {
+                    let mut recorded = recorded.lock().expect("lock");
+                    recorded.push((path.clone(), account.clone()));
+                    recorded.iter().any(|(path, _)| path.ends_with("/reset_rate_limits"))
+                };
+                let (status, extra, content_type, body) = answer(&path, &account, resets_at_seconds, claimed);
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n",
                     body.len()
@@ -76,19 +80,38 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
     (base_url, seen)
 }
 
-/// Account "a" is over its limit; "b" answers "hi". Each has its own usage
-/// and plan, and says who it is.
-fn answer(path: &str, account: &str, resets_at_seconds: u64) -> (u16, String, &'static str, String) {
+/// Account "a" is over its limit, with a full reset to use; "b" answers
+/// "hi". Each has its own usage and plan, and says who it is. Once the reset
+/// is `claimed`, a has no limit reached and no reset left.
+fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool) -> (u16, String, &'static str, String) {
     let json = |body: Value| (200, String::new(), "application/json", body.to_string());
-    if path.ends_with("/api/oauth/usage") {
-        let used = if account == "a" { 100.0 } else { 12.0 };
-        return json(json!({"five_hour": {"utilization": used, "resets_at": "2031-01-01T05:00:00Z"}}));
+    if path == "/api/oauth/usage?cedar_ember=1&skip_spend=1" {
+        let used = if account == "b" {
+            12.0
+        } else if claimed {
+            0.0
+        } else {
+            100.0
+        };
+        let grants = if account == "a" && !claimed {
+            json!([{"id": "full_1", "resets_total": 1, "resets_left": 1, "ends_at": "2031-01-10T22:00:00Z",
+                    "clears": ["five_hour", "seven_day"], "type": "full", "paused": false, "usable_now": true}])
+        } else {
+            json!([])
+        };
+        return json(json!({
+            "five_hour": {"utilization": used, "resets_at": "2031-01-01T05:00:00Z"},
+            "cedar_ember": {"eligible": true, "at_limit": account == "a" && !claimed, "grants": grants},
+        }));
+    }
+    if path == "/api/organizations/org-a/reset_rate_limits" {
+        return json(json!({"result": "reset", "resets_left": 0, "cleared": ["five_hour", "seven_day"]}));
     }
     if path.ends_with("/api/oauth/profile") {
         let tier = if account == "a" { "default_claude_max_20x" } else { "default_claude_max_5x" };
         return json(json!({
             "account": {"uuid": format!("uuid-{account}"), "email": format!("{account}@x.com")},
-            "organization": {"organization_type": "claude_max", "rate_limit_tier": tier},
+            "organization": {"uuid": format!("org-{account}"), "organization_type": "claude_max", "rate_limit_tier": tier},
         }));
     }
     if account == "a" {
@@ -188,6 +211,12 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     let requests: Vec<String> =
         seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/v1/messages")).map(|(_, account)| account.clone()).collect();
     assert_eq!(requests, ["a", "b"]);
+    // The Usage pane counts the answer as the account's that gave it.
+    let load = Request::LoadUsage(v1::LoadUsage::default());
+    let Body::UsageReport(report) = apply_request(&mut client, &mut view, load).await else { panic!("expected a usage report") };
+    let rows: Vec<_> =
+        report.rows.iter().map(|row| (row.agent_id.as_str(), row.account_id.as_str(), row.account_label.as_str(), row.requests)).collect();
+    assert_eq!(rows, [("builder", "b", "b@x.com", 1)]);
 
     // The first is skipped until its reset; requests go to the second.
     view.follow(&mut client, |view| claude(view).accounts[1].in_use).await;
@@ -225,4 +254,73 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     assert!(matches!(apply_request(&mut client, &mut view, all).await, Body::Ack(_)));
     view.follow(&mut client, |view| claude(view).accounts.is_empty()).await;
     assert_eq!(claude(&view).signed_in_with, "");
+}
+
+/// An account's usage resets show with its usage; the person uses one, gets
+/// Anthropic's answer in a sentence, and the account's usage is read again
+/// at once. A reset used, or an account that isn't there, is refused.
+#[tokio::test]
+async fn the_person_uses_a_usage_reset_and_the_usage_is_read_again() {
+    let dir = temp_dir();
+    let (base_url, seen) = anthropic(now_ms() / 1000 + 3 * 3600).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry(&dir, &base_url))).await.expect("open");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(factoryd::serve(listener, factory.clone()));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+
+    let usage = |view: &View, account: usize| claude(view).accounts.get(account).and_then(|account| account.usage.clone());
+    view.follow(&mut client, |view| usage(view, 0).is_some_and(|usage| !usage.resets.is_empty())).await;
+    let resets = usage(&view, 0).expect("usage").resets;
+    assert_eq!(
+        resets,
+        [v1::UsageReset {
+            id: "full_1".into(),
+            label: "Full reset".into(),
+            detail: "Refills all your limits.".into(),
+            left: 1,
+            total: 1,
+            expires_at: i64::try_from(factory_agent::clock::parse_iso_ms("2031-01-10T22:00:00Z").expect("time")).expect("ms"),
+            usable: true,
+            unavailable: String::new(),
+            window_ids: vec!["five_hour".into(), "weekly".into()],
+        }]
+    );
+    view.follow(&mut client, |view| usage(view, 1).is_some()).await;
+    assert_eq!(usage(&view, 1).expect("b's usage").resets, [], "b has none");
+
+    let use_it = |account: &str| {
+        Request::UseUsageReset(v1::UseUsageReset { provider_id: "anthropic".into(), account_id: account.into(), reset_id: "full_1".into() })
+    };
+    match apply_request(&mut client, &mut view, use_it("a")).await {
+        Body::UsageResetAnswer(answer) => assert_eq!(
+            answer,
+            v1::UsageResetAnswer {
+                reset: true,
+                message: "Your limits are reset. No full resets left.".into(),
+                fallback_url: String::new()
+            }
+        ),
+        other => panic!("expected an answer, got {other:?}"),
+    }
+    let claims: Vec<String> = seen
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|(path, _)| path.ends_with("/reset_rate_limits"))
+        .map(|(path, account)| format!("{account} {path}"))
+        .collect();
+    assert_eq!(claims, ["a /api/organizations/org-a/reset_rate_limits"]);
+    view.follow(&mut client, |view| usage(view, 0).is_some_and(|usage| usage.resets.is_empty() && usage.windows[0].used_percent == 0.0))
+        .await;
+
+    // Used, it's gone: nothing is sent again.
+    for (account, code) in [("a", ErrorCode::NotFound), ("zz", ErrorCode::NotFound)] {
+        match apply_request(&mut client, &mut view, use_it(account)).await {
+            Body::Error(error) => assert_eq!(error.code(), code, "{account}: {}", error.message),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+    assert_eq!(seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/reset_rate_limits")).count(), 1);
 }

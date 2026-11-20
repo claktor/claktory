@@ -186,6 +186,9 @@ void main() {
     expect(find.text('Weekly'), findsOneWidget);
     await mouse.moveTo(Offset.zero);
     await tester.pump();
+    // A moment to reach the card's buttons first.
+    expect(find.text('Weekly'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('Weekly'), findsNothing);
   });
 

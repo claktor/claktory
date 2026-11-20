@@ -555,7 +555,7 @@ void main() {
       ),
     );
     await harness.show(tester);
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     bool selected(String label) => tester
         .widgetList<Semantics>(labeled(label))
@@ -582,7 +582,7 @@ void main() {
     expect(update.hasName(), isFalse);
 
     // Back to automatic: an empty choice.
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     await tester.ensureVisible(labeled('Automatic').first);
     await tester.tap(labeled('Automatic').first);
@@ -597,7 +597,7 @@ void main() {
   testWidgets('settings preview the character in each mood', (tester) async {
     final harness = Harness(workspace(agents: [builder(working: false)]));
     await harness.show(tester);
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     final preview = find.byWidgetPredicate(
       (w) => w is AgentCharacter && w.size == 80,

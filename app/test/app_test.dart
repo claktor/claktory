@@ -154,7 +154,7 @@ void main() {
     await showApp(tester, workspace());
 
     expect(find.text('Builder'), findsWidgets);
-    expect(find.text('Opus 5.5 · high'), findsOneWidget);
+    expect(find.text('Opus 5.5 · High'), findsOneWidget);
     expect(find.text('123k / 400k'), findsOneWidget);
     expect(find.text('Working'), findsOneWidget);
     // Working, a brighter stretch runs along the header's line too.
@@ -197,7 +197,7 @@ void main() {
     harness.backend.appliesLayouts = true;
 
     expect(find.text('No model available'), findsOneWidget);
-    expect(find.text('Opus 5.5 · high'), findsNothing);
+    expect(find.text('Opus 5.5 · High'), findsNothing);
     expect(
       find.text("No model available, so Builder can't run."),
       findsOneWidget,
@@ -332,7 +332,7 @@ void main() {
   testWidgets('agent settings move, change model, and delete', (tester) async {
     final harness = await showApp(tester, workspace());
 
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     expect(find.text('Prompt'), findsOneWidget);
 
@@ -353,7 +353,7 @@ void main() {
     expect(update.projectId, '');
     expect(update.hasName(), isFalse);
 
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     await tester.tap(find.text('Delete agent…'));
     await settle(tester);
@@ -576,7 +576,7 @@ void main() {
       tester,
       workspace(agents: [builder(working: false)]),
     );
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     expect(find.textContaining('separate lines'), findsOneWidget);
     final field = find.descendant(
@@ -601,7 +601,7 @@ void main() {
       tester,
       workspace(agents: [builder(working: false)..placeholder = 'Old hint']),
     );
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     expect(find.text('Message box hint'), findsOneWidget);
     final field = find.descendant(
@@ -618,7 +618,7 @@ void main() {
     expect(harness.last.updateAgent.placeholder, 'What should Builder build?');
     expect(harness.last.updateAgent.hasName(), isFalse);
 
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     await tester.enterText(field, '');
     await tester.pump();

@@ -1,6 +1,7 @@
-//! How much of a subscription's usage limits is used, and which plan it is:
-//! Claude Pro/Max through Anthropic's OAuth usage and profile endpoints,
-//! ChatGPT through Codex's usage endpoint and its sign-in's token.
+//! How much of a subscription's usage limits is used, which usage resets it
+//! has left, and which plan it is: Claude Pro/Max through Anthropic's OAuth
+//! usage and profile endpoints, ChatGPT through Codex's usage endpoint and
+//! its sign-in's token. And using one of those resets, at the person's word.
 
 use std::time::Duration;
 
@@ -29,8 +30,56 @@ pub struct UsageLimit {
     pub resets_at: u64,
 }
 
-/// Reads a provider's limits with its signed-in credential, against its base url.
-pub type LimitsFn = fn(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Vec<UsageLimit>, Error>>;
+/// Some of a subscription's usage resets, all of one kind: each refills some
+/// of its limits now, once.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageReset {
+    /// The provider's id for it; empty lets the provider pick one.
+    pub id: String,
+    /// "Fable reset", "5-hour reset", "Weekly reset", "Full reset", or the
+    /// provider's own title.
+    pub label: String,
+    /// What using it does: "Refills your 5-hour limit."
+    pub detail: String,
+    /// How many are left, 1 or more.
+    pub left: u32,
+    /// How many it came with; 0 when the provider doesn't say.
+    pub total: u32,
+    /// When the first of them expires, in ms since 1970; 0 when they don't.
+    pub expires_at: u64,
+    /// The provider says it can be used now.
+    pub usable: bool,
+    /// Why it can't be used now; empty when `usable`.
+    pub unavailable: String,
+    /// The `UsageLimit` ids it refills.
+    pub window_ids: Vec<String>,
+}
+
+/// A subscription's usage: its limits and the resets it has left.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccountUsage {
+    pub limits: Vec<UsageLimit>,
+    pub resets: Vec<UsageReset>,
+}
+
+/// What came of using a reset.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResetAnswer {
+    /// A limit was reset.
+    pub reset: bool,
+    /// What happened, to show as is.
+    pub message: String,
+    /// Where the person can use it on the provider's site instead, when the
+    /// provider refused Claktory or couldn't be reached; empty otherwise.
+    pub fallback_url: String,
+}
+
+/// Reads a provider's limits and resets with its signed-in credential, against its base url.
+pub type LimitsFn = fn(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>>;
+
+/// Uses one of a subscription's resets (as its last usage read listed it).
+/// Only ever at the person's word: it can't be undone.
+pub type ResetFn = fn(base_url: String, auth: RequestAuth, reset: UsageReset) -> BoxFuture<'static, Result<ResetAnswer, Error>>;
 
 /// Reads which plan a subscription sign-in has, such as "Claude Max 20x" or
 /// "ChatGPT Pro"; empty when the provider doesn't say.
@@ -78,24 +127,97 @@ fn slug(name: &str) -> String {
     slug.trim_end_matches('_').to_owned()
 }
 
+/// What an error answer says: its `error.message`, `error`, `detail` or
+/// `message`, or else its status's name.
+fn error_message(status: reqwest::StatusCode, text: &str) -> String {
+    let parsed: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    parsed["error"]["message"]
+        .as_str()
+        .or_else(|| parsed["error"].as_str())
+        .or_else(|| parsed["detail"].as_str())
+        .or_else(|| parsed["message"].as_str())
+        .or(status.canonical_reason())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// `what` names the request in errors: "Anthropic usage", "Anthropic plan".
 async fn get_json(what: &str, request: reqwest::RequestBuilder) -> Result<Value, Error> {
     let response = request.timeout(TIMEOUT).send().await.map_err(|error| Error::Other(format!("{what}: {error}")))?;
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        let message = parsed["error"]["message"]
-            .as_str()
-            .or_else(|| parsed["error"].as_str())
-            .or_else(|| parsed["detail"].as_str())
-            .or_else(|| parsed["message"].as_str())
-            .or(status.canonical_reason())
-            .unwrap_or_default();
-        return Err(Error::Other(format!("{what}: HTTP {}: {message}", status.as_u16())));
+        return Err(Error::Other(format!("{what}: HTTP {}: {}", status.as_u16(), error_message(status, &text))));
     }
     serde_json::from_str(&text).map_err(|error| Error::Other(format!("{what}: unreadable answer: {error}")))
 }
+
+/// How a request to use a reset ended.
+#[derive(Debug)]
+enum Posted {
+    /// The provider answered it; `true` when it took a second try, so an
+    /// answer that it was already used may be the first try's doing.
+    Answer(Value, bool),
+    /// The provider refused it: its status and what it said.
+    Refused(u16, String),
+    /// No answer: it may or may not have gone through.
+    Lost(String),
+}
+
+/// How long a request to use a reset may take, as Claude Code allows.
+const RESET_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Sends a request to use a reset; one that gets no answer is sent once
+/// more, the same, idempotency id and all.
+async fn post_reset(request: reqwest::RequestBuilder) -> Posted {
+    let mut lost = String::new();
+    for again in [false, true] {
+        let Some(attempt) = request.try_clone() else { return Posted::Lost("the request can't be sent".into()) };
+        let response = match attempt.timeout(RESET_TIMEOUT).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                lost = error.to_string();
+                continue;
+            }
+        };
+        let status = response.status();
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(error) => {
+                lost = error.to_string();
+                continue;
+            }
+        };
+        if !status.is_success() {
+            return Posted::Refused(status.as_u16(), error_message(status, &text));
+        }
+        return match serde_json::from_str(&text) {
+            Ok(answer) => Posted::Answer(answer, again),
+            Err(error) => Posted::Lost(format!("unreadable answer: {error}")),
+        };
+    }
+    Posted::Lost(lost)
+}
+
+/// "1 five-hour reset left", "2 Fable resets left", "No full resets left".
+fn resets_left(left: u64, noun: &str) -> String {
+    match left {
+        0 => format!("No {noun}s left."),
+        1 => format!("1 {noun} left."),
+        _ => format!("{left} {noun}s left."),
+    }
+}
+
+fn answer(reset: bool, message: impl Into<String>) -> ResetAnswer {
+    ResetAnswer { reset, message: message.into(), fallback_url: String::new() }
+}
+
+fn refused(message: impl Into<String>, fallback_url: &str) -> ResetAnswer {
+    ResetAnswer { reset: false, message: message.into(), fallback_url: fallback_url.to_owned() }
+}
+
+/// When no answer came back.
+const UNCONFIRMED: &str = "Couldn't confirm that the reset went through. Claktory is reading your usage again; if you're still at the limit in a minute, try again.";
 
 // Anthropic (Claude Pro/Max).
 
@@ -107,6 +229,12 @@ const ANTHROPIC_WINDOWS: [(&str, &str, &str); 5] = [
     ("seven_day_oauth_apps", "weekly_oauth_apps", "Weekly (OAuth apps)"),
 ];
 
+/// Claude Code's own user agent: Anthropic tells which app is asking by it
+/// (and `x-app`), and offers usage resets only to Claude Code.
+fn claude_code_agent() -> String {
+    format!("claude-cli/{} (external, cli)", crate::providers::anthropic::CLAUDE_CODE_VERSION)
+}
+
 /// GETs one of Anthropic's OAuth account endpoints, `/api/oauth/<path>`.
 async fn anthropic_get(what: &str, path: &str, base_url: &str, auth: RequestAuth) -> Result<Value, Error> {
     let token = auth.api_key.ok_or_else(|| Error::Other(format!("{what}: not signed in")))?;
@@ -114,12 +242,289 @@ async fn anthropic_get(what: &str, path: &str, base_url: &str, auth: RequestAuth
         .get(format!("{}/api/oauth/{path}", base_url.trim_end_matches('/')))
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
-        .header("user-agent", format!("claude-cli/{}", crate::providers::anthropic::CLAUDE_CODE_VERSION));
+        // As Claude Code asks: never a copy kept from before a change of plan.
+        .header("cache-control", "no-cache")
+        .header("user-agent", claude_code_agent())
+        .header("x-app", "cli");
     get_json(what, request).await
 }
 
-pub fn anthropic(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Vec<UsageLimit>, Error>> {
-    Box::pin(async move { Ok(parse_anthropic(&anthropic_get("Anthropic usage", "usage", &base_url, auth).await?)) })
+/// The usage, read as Claude Code reads it for its resets ("cedar ember"):
+/// with them, and without the spend it doesn't show.
+pub fn anthropic(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>> {
+    Box::pin(async move {
+        let usage = anthropic_get("Anthropic usage", "usage?cedar_ember=1&skip_spend=1", &base_url, auth).await?;
+        Ok(AccountUsage { limits: parse_anthropic(&usage), resets: parse_anthropic_resets(&usage) })
+    })
+}
+
+/// Where Claude's resets can be used on claude.ai.
+const CLAUDE_RESETS: &str = "https://clau.de/reset";
+
+/// A Claude reset's kind, as Claude Code tells them apart: one that gives
+/// back what Fable used; else its `type`; else by what it clears.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ResetKind {
+    Session,
+    Weekly,
+    Fable,
+    Full,
+}
+
+impl ResetKind {
+    fn of(grant: &Value, clears: &[String]) -> ResetKind {
+        if grant["gives_back_weekly"].as_bool() == Some(true) {
+            return ResetKind::Fable;
+        }
+        match grant["type"].as_str() {
+            Some("session") => ResetKind::Session,
+            Some("weekly") => ResetKind::Weekly,
+            Some("full") => ResetKind::Full,
+            _ => {
+                let session = clears.iter().any(|window| window == "five_hour");
+                let other = clears.iter().any(|window| window != "five_hour");
+                match (session, other) {
+                    (true, false) => ResetKind::Session,
+                    (false, true) => ResetKind::Weekly,
+                    _ => ResetKind::Full,
+                }
+            }
+        }
+    }
+
+    fn by_label(label: &str) -> ResetKind {
+        match label {
+            "5-hour reset" => ResetKind::Session,
+            "Weekly reset" => ResetKind::Weekly,
+            "Fable reset" => ResetKind::Fable,
+            _ => ResetKind::Full,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ResetKind::Session => "5-hour reset",
+            ResetKind::Weekly => "Weekly reset",
+            ResetKind::Fable => "Fable reset",
+            ResetKind::Full => "Full reset",
+        }
+    }
+
+    /// How a count of them reads: "2 five-hour resets".
+    fn noun(self) -> &'static str {
+        match self {
+            ResetKind::Session => "five-hour reset",
+            ResetKind::Weekly => "weekly reset",
+            ResetKind::Fable => "Fable reset",
+            ResetKind::Full => "full reset",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            ResetKind::Session => "Refills your 5-hour limit.",
+            ResetKind::Weekly => "Refills your weekly limits.",
+            ResetKind::Fable => "Gives back to your weekly limit what Fable used.",
+            ResetKind::Full => "Refills all your limits.",
+        }
+    }
+
+    fn done(self) -> &'static str {
+        match self {
+            ResetKind::Session => "Your 5-hour limit is reset.",
+            ResetKind::Weekly => "Your weekly limits are reset.",
+            ResetKind::Fable => "What Fable used is back in your weekly limit.",
+            ResetKind::Full => "Your limits are reset.",
+        }
+    }
+}
+
+/// A list of strings in a JSON value; empty when it isn't one.
+fn strings(value: &Value) -> Vec<String> {
+    value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
+}
+
+/// The `UsageLimit` id of one of Anthropic's windows in `clears`.
+fn anthropic_window(key: &str) -> Option<&'static str> {
+    match key {
+        // Fable's weekly limit.
+        "seven_day_overage_included" => Some("weekly_fable"),
+        _ => ANTHROPIC_WINDOWS.iter().find(|(window, ..)| *window == key).map(|(_, id, _)| *id),
+    }
+}
+
+/// Why a grant can't be used now, as Claude Code tells it: what Anthropic
+/// says, else a reset used a moment ago, a limit it can't be used at, a
+/// limit it doesn't refill, or that it works only at a limit.
+fn grant_unavailable(status: &Value, grant: &Value, clears: &[String], fable: bool) -> &'static str {
+    if grant["paused"].as_bool() == Some(true) {
+        return "It's paused for now.";
+    }
+    let blocking = strings(&grant["blocking"]);
+    let reason = grant["unavailable_reason"].as_str().map(str::to_owned).unwrap_or_else(|| {
+        let exhausted = strings(&status["exhausted"]);
+        let clears_it = |window: &String| clears.contains(window) || (fable && window == "seven_day");
+        if !status["cooldown_until"].is_null() {
+            "cooldown".into()
+        } else if let Some(window) = blocking.first() {
+            match window.as_str() {
+                "five_hour" => "blocked_five_hour".into(),
+                "seven_day" => "blocked_seven_day".into(),
+                "seven_day_opus" => "blocked_opus".into(),
+                "seven_day_sonnet" => "blocked_sonnet".into(),
+                _ => "blocked_other".into(),
+            }
+        } else if status["at_limit"].as_bool() == Some(true) && !exhausted.iter().any(clears_it) {
+            "cannot_clear".into()
+        } else if grant["use_requires_limit"].as_bool() != Some(false) {
+            "needs_limit".into()
+        } else {
+            String::new()
+        }
+    });
+    match reason.as_str() {
+        "cooldown" => "A reset was just used on this account. Try again in a minute.",
+        "blocked_five_hour" => "It can't be used while you're at your 5-hour limit.",
+        "blocked_seven_day" => "It can't be used while you're at your weekly limit.",
+        "blocked_opus" => "It can't be used while you're at your weekly Opus limit.",
+        "blocked_sonnet" => "It can't be used while you're at your weekly Sonnet limit.",
+        "blocked_other" => "It can't be used while you're at one of your other limits.",
+        "cannot_clear" => "It doesn't refill the limit you're at.",
+        "needs_limit" => "It works only at a usage limit.",
+        _ => "Anthropic says it can't be used right now.",
+    }
+}
+
+/// The resets in the usage's `cedar_ember` block: each grant with resets
+/// left, none when the account isn't eligible. Claude Code's own reading.
+pub fn parse_anthropic_resets(usage: &Value) -> Vec<UsageReset> {
+    let status = &usage["cedar_ember"];
+    if status["eligible"].as_bool() != Some(true) {
+        return Vec::new();
+    }
+    let mut resets = Vec::new();
+    for grant in status["grants"].as_array().into_iter().flatten() {
+        let Some(id) = grant["id"].as_str().filter(|id| grant_id(id)) else { continue };
+        let left = grant["resets_left"].as_u64().unwrap_or(0);
+        if left == 0 {
+            continue;
+        }
+        let clears = strings(&grant["clears"]);
+        let kind = ResetKind::of(grant, &clears);
+        let mut window_ids: Vec<String> = Vec::new();
+        let fable = kind == ResetKind::Fable;
+        let given_back = if fable { vec!["weekly_fable", "weekly"] } else { Vec::new() };
+        for id in given_back.into_iter().chain(clears.iter().filter_map(|window| anthropic_window(window))) {
+            if !window_ids.iter().any(|known| known == id) {
+                window_ids.push(id.to_owned());
+            }
+        }
+        let usable = grant["usable_now"].as_bool() == Some(true) && grant["paused"].as_bool() != Some(true);
+        resets.push(UsageReset {
+            id: id.to_owned(),
+            label: kind.label().to_owned(),
+            detail: if fable && clears.iter().any(|window| window == "five_hour") {
+                format!("{} It also refills your 5-hour limit.", kind.detail())
+            } else {
+                kind.detail().to_owned()
+            },
+            left: u32::try_from(left).unwrap_or(u32::MAX),
+            total: grant["resets_total"].as_u64().and_then(|total| u32::try_from(total).ok()).unwrap_or(0),
+            expires_at: grant["ends_at"].as_str().and_then(parse_iso_ms).unwrap_or(0),
+            usable,
+            unavailable: if usable { String::new() } else { grant_unavailable(status, grant, &clears, fable).to_owned() },
+            window_ids,
+        });
+    }
+    resets
+}
+
+/// A grant id as Anthropic takes it: `[a-z0-9_-]{1,40}`.
+fn grant_id(id: &str) -> bool {
+    (1..=40).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
+}
+
+/// Uses one of a Claude account's resets: Claude Code's claim, for the
+/// account's organization, once (sent again only when no answer came, with
+/// the same request id, so it's never used twice).
+pub fn anthropic_reset(base_url: String, auth: RequestAuth, reset: UsageReset) -> BoxFuture<'static, Result<ResetAnswer, Error>> {
+    Box::pin(async move {
+        if !grant_id(&reset.id) {
+            return Ok(answer(false, "That reset isn't one Anthropic offers. Nothing was used."));
+        }
+        let profile = anthropic_get("Anthropic account", "profile", &base_url, auth.clone()).await?;
+        let Some(organization) = profile["organization"]["uuid"].as_str().filter(|uuid| !uuid.is_empty()) else {
+            return Ok(refused("Anthropic didn't say which organization this account is in. Nothing was used.", CLAUDE_RESETS));
+        };
+        let token = auth.api_key.ok_or_else(|| Error::Other("Anthropic reset: not signed in".into()))?;
+        let url = format!("{}/api/organizations/{organization}/reset_rate_limits", base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "program": "cedar_ember",
+            "grant_id": reset.id,
+            "request_id": uuid::Uuid::new_v4().simple().to_string(),
+        });
+        let request = client()
+            .post(url)
+            .bearer_auth(token)
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("user-agent", claude_code_agent())
+            .header("x-app", "cli")
+            .json(&body);
+        let posted = post_reset(request).await;
+        Ok(anthropic_reset_answer(&reset, posted))
+    })
+}
+
+/// What Anthropic's answer to a claim means for the person.
+fn anthropic_reset_answer(reset: &UsageReset, posted: Posted) -> ResetAnswer {
+    let kind = ResetKind::by_label(&reset.label);
+    let (claim, again) = match posted {
+        Posted::Answer(claim, again) => (claim, again),
+        Posted::Refused(429, _) => {
+            return answer(false, "Anthropic is getting too many requests right now. Nothing was used; try again in a moment.");
+        }
+        Posted::Refused(401 | 403, _) => {
+            return refused(
+                "Anthropic didn't accept Claktory's request to use a reset. Nothing was used; you can use it on claude.ai.",
+                CLAUDE_RESETS,
+            );
+        }
+        Posted::Refused(status, message) => {
+            let message = message.trim_end_matches('.');
+            return refused(
+                format!("Anthropic couldn't use the reset ({status}: {message}). Nothing was used; you can use it on claude.ai."),
+                CLAUDE_RESETS,
+            );
+        }
+        Posted::Lost(error) => {
+            tracing::warn!(%error, "no answer to a Claude reset");
+            return refused(UNCONFIRMED, CLAUDE_RESETS);
+        }
+    };
+    let left = claim["resets_left"].as_u64();
+    let left_line = |left: u64| resets_left(left, kind.noun());
+    match claim["result"].as_str().unwrap_or("unavailable") {
+        "reset" => {
+            let left = left.unwrap_or(u64::from(reset.left.saturating_sub(1)));
+            answer(true, format!("{} {}", kind.done(), left_line(left)))
+        }
+        // A second try finds what the first one did.
+        "already_used" if again => answer(true, format!("{} {}", kind.done(), left_line(left.unwrap_or(0)))),
+        "already_used" => {
+            let left = left.map(|left| format!(" {}", left_line(left))).unwrap_or_default();
+            answer(false, format!("That reset was already used, so nothing changed.{left}"))
+        }
+        "not_limited" => answer(false, "You're not at a limit this reset refills, so nothing was used."),
+        "cooldown" => answer(false, "Another reset was just used on this account. This one wasn't; try again in a minute."),
+        "ineligible" => refused(
+            "Anthropic says this reset isn't available to Claktory now. Nothing was used; you can use it on claude.ai.",
+            CLAUDE_RESETS,
+        ),
+        _ => refused(
+            "Anthropic couldn't use the reset right now. Nothing was used; try again in a moment, or use it on claude.ai.",
+            CLAUDE_RESETS,
+        ),
+    }
 }
 
 pub fn anthropic_plan(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<String, Error>> {
@@ -139,29 +544,56 @@ pub fn parse_anthropic_identity(profile: &Value) -> Identity {
     Identity { key: text("uuid").or_else(|| label.clone()).unwrap_or_default(), label: label.unwrap_or_default() }
 }
 
-/// The plan in Anthropic's OAuth profile: the organization's
-/// `plan_display_name` ("Max" -> "Claude Max"), or else its
-/// `organization_type` ("claude_max", with the 5x or 20x of its
-/// `rate_limit_tier`), or else the account's `has_claude_max`/`has_claude_pro`.
+/// The plan in Anthropic's OAuth profile, as Anthropic names it: the
+/// organization's `plan_display_name` ("Ultra" -> "Claude Ultra"), as
+/// Claude Code shows it; or else its `rate_limit_tier`, which names the plan
+/// ("default_claude_max_20x" -> "Claude Max 20x"); or else its
+/// `organization_type` ("claude_team" -> "Claude Team"), and last the
+/// account's `has_claude_max`/`has_claude_pro`. Never a plan it didn't name:
+/// a tier Claktory doesn't know reads as the tier says, not as Max.
 pub fn parse_anthropic_plan(profile: &Value) -> String {
     let organization = &profile["organization"];
-    if let Some(name) = organization["plan_display_name"].as_str().map(str::trim).filter(|name| !name.is_empty()) {
+    if let Some(name) = organization["plan_display_name"].as_str().map(str::trim).filter(|name| plan_name(name)) {
         return if name.starts_with("Claude") { name.to_owned() } else { format!("Claude {name}") };
     }
-    let max = || {
-        let tier = organization["rate_limit_tier"].as_str().unwrap_or_default();
-        match tier.rsplit('_').next() {
-            Some(multiple @ ("5x" | "20x")) => format!("Claude Max {multiple}"),
-            _ => "Claude Max".to_owned(),
-        }
-    };
-    match organization["organization_type"].as_str() {
-        Some("claude_max") => max(),
-        Some(kind) if kind.starts_with("claude_") => title(kind),
-        _ if profile["account"]["has_claude_max"].as_bool() == Some(true) => max(),
+    let tier = tier_plan(organization["rate_limit_tier"].as_str().unwrap_or_default());
+    match organization["organization_type"].as_str().unwrap_or_default() {
+        "claude_max" => tier.unwrap_or_else(|| "Claude Max".to_owned()),
+        kind if kind.starts_with("claude_") => tier.unwrap_or_else(|| title(kind)),
+        _ if profile["account"]["has_claude_max"].as_bool() == Some(true) => tier.unwrap_or_else(|| "Claude Max".to_owned()),
         _ if profile["account"]["has_claude_pro"].as_bool() == Some(true) => "Claude Pro".to_owned(),
         _ => String::new(),
     }
+}
+
+/// Whether Anthropic's `plan_display_name` is a name to show, by the rule
+/// Claude Code checks it with: letters, digits, spaces and . + -, at most 40,
+/// starting with a letter or digit.
+fn plan_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters.next().is_some_and(char::is_alphanumeric)
+        && name.chars().count() <= 40
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '+' | '-'))
+        && !name.ends_with([' ', '.', '-'])
+}
+
+/// The plan a subscription's `rate_limit_tier` names: "default_claude_max_20x"
+/// -> "Claude Max 20x", "default_claude_ultra" -> "Claude Ultra". None for a
+/// tier that names no plan (Pro's "default_claude_ai", or none).
+fn tier_plan(tier: &str) -> Option<String> {
+    let plan = tier.trim().strip_prefix("default_").unwrap_or(tier.trim());
+    if !plan.starts_with("claude_") || matches!(plan, "claude_ai" | "claude_zero") {
+        return None;
+    }
+    let words: Vec<String> = plan
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            // "20x" stays as it is.
+            if word.trim_end_matches('x').chars().all(|c| c.is_ascii_digit()) { word.to_owned() } else { title(word) }
+        })
+        .collect();
+    (words.len() > 1).then(|| words.join(" "))
 }
 
 /// `seven_day`, `five_hour` and the per-model weekly windows, each
@@ -196,36 +628,182 @@ pub fn parse_anthropic(usage: &Value) -> Vec<UsageLimit> {
 
 // OpenAI Codex (ChatGPT Plus/Pro).
 
-/// GETs Codex's usage endpoint.
-async fn codex_usage(what: &str, base_url: &str, auth: RequestAuth) -> Result<Value, Error> {
-    let token = auth.api_key.ok_or_else(|| Error::Other(format!("{what}: not signed in")))?;
-    let account = crate::providers::openai_codex::oauth::account_id(&token)
+/// A request to one of Codex's account endpoints (`path` after
+/// `/wham/` on ChatGPT's backend, `/api/codex/` elsewhere), as Codex's own
+/// client sends it.
+fn codex_request(
+    what: &str,
+    method: reqwest::Method,
+    path: &str,
+    base_url: &str,
+    auth: &RequestAuth,
+) -> Result<reqwest::RequestBuilder, Error> {
+    let token = auth.api_key.as_deref().ok_or_else(|| Error::Other(format!("{what}: not signed in")))?;
+    let account = crate::providers::openai_codex::oauth::account_id(token)
         .ok_or_else(|| Error::Other(format!("{what}: the sign-in has no ChatGPT account")))?;
     let base = base_url.trim_end_matches('/');
-    // Codex's own client: ChatGPT's backend serves it at /wham/usage.
-    let url = if base.contains("/backend-api") { format!("{base}/wham/usage") } else { format!("{base}/api/codex/usage") };
-    let request = client()
-        .get(url)
+    let url = if base.contains("/backend-api") { format!("{base}/wham/{path}") } else { format!("{base}/api/codex/{path}") };
+    Ok(client()
+        .request(method, url)
         .bearer_auth(token)
         .header("chatgpt-account-id", account)
         .header("originator", "pi")
-        .header("User-Agent", user_agent());
-    get_json(what, request).await
+        .header("cache-control", "no-cache")
+        .header("User-Agent", user_agent()))
 }
 
-pub fn codex(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Vec<UsageLimit>, Error>> {
-    Box::pin(async move { Ok(parse_codex(&codex_usage("OpenAI Codex usage", &base_url, auth).await?, now_ms())) })
+/// GETs Codex's usage endpoint.
+async fn codex_usage(what: &str, base_url: &str, auth: RequestAuth) -> Result<Value, Error> {
+    get_json(what, codex_request(what, reqwest::Method::GET, "usage", base_url, &auth)?).await
 }
 
-/// The plan in the access token's `chatgpt_plan_type` claim; when the token
-/// has none, the `plan_type` of Codex's usage endpoint.
+/// Where ChatGPT's usage and resets show on its site.
+const CHATGPT_USAGE: &str = "https://chatgpt.com/codex/settings/usage";
+
+/// The usage, with the resets it counts (`rate_limit_reset_credits`), told
+/// apart by their list when it has any.
+pub fn codex(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>> {
+    Box::pin(async move {
+        let usage = codex_usage("OpenAI Codex usage", &base_url, auth.clone()).await?;
+        let limits = parse_codex(&usage, now_ms());
+        let available = usage["rate_limit_reset_credits"]["available_count"].as_u64().unwrap_or(0);
+        if available == 0 {
+            return Ok(AccountUsage { limits, resets: Vec::new() });
+        }
+        let what = "OpenAI Codex resets";
+        let list = match codex_request(what, reqwest::Method::GET, "rate-limit-reset-credits", &base_url, &auth) {
+            Ok(request) => get_json(what, request).await,
+            Err(error) => Err(error),
+        };
+        let list = list.unwrap_or_else(|error| {
+            // The count alone still says how many there are.
+            tracing::warn!(%error, "could not list ChatGPT's resets");
+            Value::Null
+        });
+        let resets = parse_codex_resets(available, &list, &limits);
+        Ok(AccountUsage { limits, resets })
+    })
+}
+
+/// ChatGPT's resets: the `available_count` from the usage, told apart by
+/// the list's `available` credits (`{id, title, description, expires_at}`),
+/// one entry per title and description, with the id of the one that
+/// expires first. Each refills the account's own limits (not a model's).
+pub fn parse_codex_resets(available: u64, list: &Value, limits: &[UsageLimit]) -> Vec<UsageReset> {
+    let window_ids: Vec<String> = limits.iter().filter(|limit| !limit.label.contains('(')).map(|limit| limit.id.clone()).collect();
+    let text = |credit: &Value, key: &str, otherwise: &str| {
+        credit[key].as_str().map(str::trim).filter(|text| !text.is_empty()).unwrap_or(otherwise).to_owned()
+    };
+    let mut credits: Vec<&Value> = list["credits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|credit| credit["status"].as_str() == Some("available") && credit["id"].as_str().is_some_and(|id| !id.is_empty()))
+        .collect();
+    credits.sort_by_key(|credit| credit["expires_at"].as_str().and_then(parse_iso_ms).unwrap_or(u64::MAX));
+    let mut resets: Vec<UsageReset> = Vec::new();
+    for credit in credits {
+        let label = text(credit, "title", "Full reset");
+        let detail = text(credit, "description", "Refills your current usage limits.");
+        if let Some(known) = resets.iter_mut().find(|known| known.label == label && known.detail == detail) {
+            known.left += 1;
+            continue;
+        }
+        resets.push(UsageReset {
+            id: credit["id"].as_str().unwrap_or_default().to_owned(),
+            label,
+            detail,
+            left: 1,
+            total: 0,
+            expires_at: credit["expires_at"].as_str().and_then(parse_iso_ms).unwrap_or(0),
+            // Only ChatGPT knows: it takes one once a limit is mostly used.
+            usable: true,
+            unavailable: String::new(),
+            window_ids: window_ids.clone(),
+        });
+    }
+    let listed: u64 = resets.iter().map(|reset| u64::from(reset.left)).sum();
+    let available = u32::try_from(available).unwrap_or(u32::MAX);
+    match resets.as_mut_slice() {
+        // None listed: ChatGPT picks one.
+        [] => resets.push(UsageReset {
+            label: "Full reset".into(),
+            detail: "Refills your current usage limits.".into(),
+            left: available,
+            usable: true,
+            window_ids,
+            ..UsageReset::default()
+        }),
+        // The list may stop short of them all.
+        [only] if listed < u64::from(available) => only.left = available,
+        _ => {}
+    }
+    resets
+}
+
+/// Uses one of a ChatGPT account's resets (the one given, or else one
+/// ChatGPT picks), sent again only when no answer came, with the same
+/// redeem id, so it's never used twice.
+pub fn codex_reset(base_url: String, auth: RequestAuth, reset: UsageReset) -> BoxFuture<'static, Result<ResetAnswer, Error>> {
+    Box::pin(async move {
+        let what = "OpenAI Codex reset";
+        let request = codex_request(what, reqwest::Method::POST, "rate-limit-reset-credits/consume", &base_url, &auth)?;
+        let mut body = serde_json::json!({ "redeem_request_id": uuid::Uuid::new_v4().to_string() });
+        if !reset.id.is_empty() {
+            body["credit_id"] = Value::String(reset.id.clone());
+        }
+        let posted = post_reset(request.json(&body)).await;
+        Ok(codex_reset_answer(posted))
+    })
+}
+
+/// What ChatGPT's answer to a reset means for the person.
+fn codex_reset_answer(posted: Posted) -> ResetAnswer {
+    let (consumed, again) = match posted {
+        Posted::Answer(consumed, again) => (consumed, again),
+        Posted::Refused(429, _) => {
+            return answer(false, "ChatGPT is getting too many requests right now. Nothing was used; try again in a moment.");
+        }
+        Posted::Refused(status, message) => {
+            let message = message.trim_end_matches('.');
+            return refused(
+                format!("ChatGPT couldn't use the reset ({status}: {message}). Nothing was used; you can use it on chatgpt.com."),
+                CHATGPT_USAGE,
+            );
+        }
+        Posted::Lost(error) => {
+            tracing::warn!(%error, "no answer to a ChatGPT reset");
+            return refused(UNCONFIRMED, CHATGPT_USAGE);
+        }
+    };
+    match consumed["code"].as_str().unwrap_or_default() {
+        "reset" => answer(true, "Your usage limits are reset."),
+        // A second try finds what the first one did.
+        "already_redeemed" if again => answer(true, "Your usage limits are reset."),
+        "already_redeemed" => answer(false, "That reset was already used, so nothing changed."),
+        "nothing_to_reset" => {
+            answer(false, "Your usage doesn't need a reset yet: ChatGPT takes one once most of a limit is used. Nothing was used.")
+        }
+        "no_credit" => answer(false, "This account has no resets left. Nothing was used."),
+        _ => refused(
+            "ChatGPT couldn't use the reset right now. Nothing was used; try again in a moment, or use it on chatgpt.com.",
+            CHATGPT_USAGE,
+        ),
+    }
+}
+
+/// The plan as Codex's usage endpoint says it now (`plan_type`), so an
+/// upgrade shows without signing in again; when it can't say, the access
+/// token's `chatgpt_plan_type` claim, from when the token was issued.
 pub fn codex_plan(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<String, Error>> {
     Box::pin(async move {
-        if let Some(plan) = auth.api_key.as_deref().and_then(crate::providers::openai_codex::oauth::plan_type) {
-            return Ok(chatgpt_plan(&plan));
-        }
-        let usage = codex_usage("OpenAI Codex plan", &base_url, auth).await?;
-        Ok(usage["plan_type"].as_str().map(chatgpt_plan).unwrap_or_default())
+        let claimed = auth.api_key.as_deref().and_then(crate::providers::openai_codex::oauth::plan_type).map(|plan| chatgpt_plan(&plan));
+        let live = match codex_usage("OpenAI Codex plan", &base_url, auth).await {
+            Ok(usage) => usage["plan_type"].as_str().map(chatgpt_plan).filter(|plan| !plan.is_empty()),
+            Err(error) if claimed.is_none() => return Err(error),
+            Err(_) => None,
+        };
+        Ok(live.or(claimed).unwrap_or_default())
     })
 }
 

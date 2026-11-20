@@ -1175,6 +1175,12 @@ impl Factory {
         self.close_device(&removed.id, &removed.endpoint_id);
         self.cancel_device_flows(&removed.id);
         self.refresh_remote();
+        // Its zoom goes with it.
+        if self.lock().config.display.zoom.contains_key(&removed.id)
+            && let Err(error) = self.set_zoom(&removed.id, 1.0).await
+        {
+            tracing::warn!(%error, device = %removed.id, "could not forget an unpaired device's zoom");
+        }
         Ok(())
     }
 

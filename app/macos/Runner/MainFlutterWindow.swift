@@ -49,10 +49,20 @@ class MainFlutterWindow: NSWindow {
       case "pickFolder": return self?.pickFolder(from: call.arguments as? String, result) ?? result(nil)
       case "pickFiles": return self?.pickFiles(result) ?? result([])
       case "takeFiles": self?.takesFiles = call.arguments as? Bool ?? false
+      case "band":
+        // The app's zoom scales its top band (app/lib/zoom.dart).
+        if let height = call.arguments as? Double, height > 0 {
+          self?.bandHeight = CGFloat(height)
+          self?.placeTrafficLights()
+        }
       default: return result(FlutterMethodNotImplemented)
       }
       result(nil)
     }
+
+    // The View menu's zoom items, done by the app (app/lib/zoom.dart).
+    menuChannel = FlutterMethodChannel(
+      name: "factory/menu", binaryMessenger: flutterViewController.engine.binaryMessenger)
 
     deviceChannel = FlutterMethodChannel(
       name: "factory/device", binaryMessenger: flutterViewController.engine.binaryMessenger)
@@ -111,8 +121,9 @@ class MainFlutterWindow: NSWindow {
   }
 
   /// Height of the band at the top of the window: the sidebar's top row and
-  /// the views' header bars (`titleBarHeight` in app/lib/identity.dart).
-  private static let bandHeight: CGFloat = 44
+  /// the views' header bars (`titleBarHeight` in app/lib/identity.dart),
+  /// scaled by the app's zoom.
+  private var bandHeight: CGFloat = 44
   /// Where the close button sits from the window's left edge, and the gap
   /// from one traffic light to the next.
   private static let trafficLightsLeft: CGFloat = 16
@@ -126,8 +137,8 @@ class MainFlutterWindow: NSWindow {
       let container = close.superview?.superview
     else { return }
     var frame = container.frame
-    frame.size.height = Self.bandHeight
-    frame.origin.y = self.frame.height - Self.bandHeight
+    frame.size.height = bandHeight
+    frame.origin.y = self.frame.height - bandHeight
     container.frame = frame
     let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
     for (index, type) in buttons.enumerated() {
@@ -135,9 +146,43 @@ class MainFlutterWindow: NSWindow {
       button.setFrameOrigin(
         NSPoint(
           x: Self.trafficLightsLeft + CGFloat(index) * Self.trafficLightsSpacing,
-          y: (Self.bandHeight - button.frame.height) / 2))
+          y: (bandHeight - button.frame.height) / 2))
     }
   }
+
+  private var menuChannel: FlutterMethodChannel?
+
+  /// Actual Size, Zoom In and Zoom Out at the top of the View menu, as in
+  /// Safari (added by AppDelegate once the menu is loaded). The app's own keys (app/lib/zoom.dart) get ⌘+, ⌘− and ⌘0
+  /// first; these items are how the menu shows them, and take the keys when
+  /// nothing in the window has focus.
+  static func addZoomItems() {
+    guard
+      let view = NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "View" })?.submenu,
+      view.item(withTitle: "Zoom In") == nil
+    else { return }
+    let items: [(String, Selector, String, Bool)] = [
+      ("Actual Size", #selector(actualSize(_:)), "0", false),
+      ("Zoom In", #selector(zoomIn(_:)), "+", false),
+      // ⌘= zooms in too, without Shift, as in browsers.
+      ("Zoom In", #selector(zoomIn(_:)), "=", true),
+      ("Zoom Out", #selector(zoomOut(_:)), "-", false),
+    ]
+    for (index, (title, action, key, hidden)) in items.enumerated() {
+      let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+      item.keyEquivalentModifierMask = .command
+      if hidden {
+        item.isHidden = true
+        item.allowsKeyEquivalentWhenHidden = true
+      }
+      view.insertItem(item, at: index)
+    }
+    view.insertItem(.separator(), at: items.count)
+  }
+
+  @objc func actualSize(_ sender: Any?) { menuChannel?.invokeMethod("actualSize", arguments: nil) }
+  @objc func zoomIn(_ sender: Any?) { menuChannel?.invokeMethod("zoomIn", arguments: nil) }
+  @objc func zoomOut(_ sender: Any?) { menuChannel?.invokeMethod("zoomOut", arguments: nil) }
 
   // Unsent drafts in the agents' message boxes, by agent id (app/lib/drafts.dart),
   // in this app's user defaults on this device: the person's decision, the one

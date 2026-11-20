@@ -17,6 +17,7 @@ import 'pane_chrome.dart';
 import 'map.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
+import 'usage_view.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
 /// and viewers").
@@ -38,6 +39,7 @@ const pageKinds = {
   AppPage.marketplace: 'marketplace',
   AppPage.changelog: 'changelog',
   AppPage.map: 'map',
+  AppPage.usage: 'usage',
 };
 
 /// The page a leaf of [kind] shows, or null for a file's viewer or the
@@ -340,6 +342,7 @@ class _PaneLayoutState extends State<PaneLayout> {
               AppPage.changelog => const _PagePane(child: ChangelogView()),
               // A canvas pans by itself: no sideways scroll around it.
               AppPage.map => const InPane(child: MapView()),
+              AppPage.usage => const _PagePane(child: UsageView()),
               _ when leaf.kind == filesKind => FilesPane(
                 projectId: leaf.path,
                 paneId: node.id,
@@ -562,6 +565,7 @@ String paneTitle(ViewLeaf leaf) {
     AppPage.marketplace => 'Marketplace',
     AppPage.changelog => "What's new",
     AppPage.map => 'Map',
+    AppPage.usage => 'Usage',
     _ => viewerTitle(leaf),
   };
 }
@@ -588,6 +592,12 @@ Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
     AppPage.map => ExtensionGlyph(
       icon: 'network',
       name: 'Map',
+      color: color,
+      size: 14,
+    ),
+    AppPage.usage => ExtensionGlyph(
+      icon: 'chart-column',
+      name: 'Usage',
       color: color,
       size: 14,
     ),

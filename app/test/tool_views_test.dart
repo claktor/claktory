@@ -199,7 +199,7 @@ void main() {
           },
         ),
       ]);
-      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Sam')), findsWidgets);
       expect(inTranscript(find.text('Lena')), findsOneWidget);
       expect(find.text('Sent'), findsOneWidget);
       expect(
@@ -251,7 +251,7 @@ void main() {
           'text': 'Hi',
         }, state: ToolCallState.TOOL_CALL_STATE_RUNNING),
       ]);
-      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Sam')), findsWidgets);
       expect(inTranscript(find.text('Omar')), findsOneWidget);
     });
 
@@ -262,7 +262,7 @@ void main() {
           'text': 'Hi',
         }, state: ToolCallState.TOOL_CALL_STATE_RUNNING),
       ]);
-      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Sam')), findsWidgets);
       expect(inTranscript(find.text('Omar')), findsOneWidget);
     });
 
@@ -338,6 +338,129 @@ void main() {
     ]);
     expect(find.text('Proposed a message to'), findsOneWidget);
     expect(tester.widget<ToolAgent>(find.byType(ToolAgent)).id, 'rivet');
+  });
+
+  group('agents_suggest_talk', () {
+    final talk = {
+      'agent': 'Sam',
+      'message': 'Please set up the **Cloudflare** token for the site.\n\nIt needs DNS edit.',
+      'reason': 'Sam keeps the deploy secrets and can ask you for the token.',
+    };
+
+    testWidgets("why, the draft, and Talk to Sam: opens Sam's conversation "
+        'with the message in its box, not sent, once', (tester) async {
+      final harness = await showing(tester, [
+        call(
+          'agents_suggest_talk',
+          talk,
+          output: 'Suggested.',
+          details: {
+            'agent_id': 'builder',
+            'agent_name': 'Sam',
+            'agent_role': 'Backend',
+            'message': talk['message'],
+            'reason': talk['reason'],
+          },
+        ),
+      ]);
+      expect(find.text('Suggests you talk to'), findsOneWidget);
+      expect(inTranscript(find.text('Sam')), findsWidgets);
+      expect(
+        find.text(
+          'Sam keeps the deploy secrets and can ask you for the token.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Please set up the'), findsOneWidget);
+      expect(find.text('agents_suggest_talk'), findsNothing);
+
+      await tester.tap(find.text('Talk to Sam'));
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'builder');
+      expect(harness.drafts.of('builder'), talk['message']);
+      expect(
+        harness.backend.sent.where((m) => m.hasSendMessage()),
+        isEmpty,
+        reason: 'never sent',
+      );
+
+      // Again: opens it, without a second copy.
+      harness.backend.workspace.apply(
+        harness.backend.workspace.workspace.deepCopy()..selectedAgentId = 'a1',
+      );
+      await settle(tester);
+      await tester.tap(find.text('Talk to Sam'));
+      await settle(tester);
+      expect(harness.drafts.of('builder'), talk['message']);
+    });
+
+    testWidgets("a draft already there keeps it, the message after it", (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      harness.drafts.set('builder', 'About the site:');
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'a1',
+          entries: [
+            call(
+              'agents_suggest_talk',
+              talk,
+              details: {
+                'agent_id': 'builder',
+                'agent_name': 'Sam',
+                'message': talk['message'],
+                'reason': talk['reason'],
+              },
+            ),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      await tester.tap(find.text('Talk to Sam'));
+      await settle(tester);
+      expect(
+        harness.drafts.of('builder'),
+        'About the site:\n${talk['message']}',
+      );
+    });
+
+    testWidgets('without details the name is matched; a deleted agent says '
+        'so', (tester) async {
+      await showing(tester, [
+        call('agents_suggest_talk', {...talk, 'agent': 'sam'}, seq: 1),
+        call(
+          'agents_suggest_talk',
+          {...talk, 'agent': 'Arjun'},
+          seq: 2,
+          details: {
+            'agent_id': 'devops',
+            'agent_name': 'Arjun',
+            'message': talk['message'],
+            'reason': talk['reason'],
+          },
+        ),
+      ]);
+      expect(find.text('Talk to Sam'), findsOneWidget);
+      expect(find.text('Arjun was deleted.'), findsOneWidget);
+      expect(find.text('Talk to Arjun'), findsNothing);
+    });
+
+    testWidgets('a refused suggestion shows why, with no button', (
+      tester,
+    ) async {
+      await showing(tester, [
+        call(
+          'agents_suggest_talk',
+          {...talk, 'agent': 'Nobody'},
+          output: 'No agent named "Nobody". You can message: Sam, Lena.',
+          state: ToolCallState.TOOL_CALL_STATE_FAILED,
+        ),
+      ]);
+      expect(find.textContaining('No agent named'), findsOneWidget);
+      expect(find.textContaining('Talk to'), findsNothing);
+    });
   });
 
   group('checklist', () {
@@ -864,7 +987,7 @@ void main() {
         }),
       ]);
       expect(find.text('Gave AWS'), findsOneWidget);
-      expect(inTranscript(find.text('Sam')), findsOneWidget);
+      expect(inTranscript(find.text('Sam')), findsWidgets);
       expect(find.text('nobody'), findsOneWidget);
     });
 

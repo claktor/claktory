@@ -18,6 +18,7 @@ import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'selection.dart' show Unselectable;
 import 'state.dart';
 import 'transcript.dart' show AgentTints;
 
@@ -161,6 +162,14 @@ final Map<String, ToolView> toolViews = {
   'propose_to_rivet': ToolView(
     icon: 'send',
     line: (context, call) => _ProposeLine(call),
+  ),
+  'agents_suggest_talk': ToolView(
+    icon: 'message-square',
+    line: (context, call) => _SuggestTalkLine(call),
+    body: (context, call) =>
+        _suggestTalk(call).message.isEmpty && _suggestTalk(call).reason.isEmpty
+        ? null
+        : TalkCard(call),
   ),
   'checklist_add': ToolView(
     icon: 'list-checks',
@@ -941,6 +950,170 @@ class _ProposeLine extends StatelessWidget {
   }
 }
 
+/// Whom an agents_suggest_talk call suggests the person talk to, and what
+/// to say: from its details, else its input.
+typedef _SuggestTalk = ({
+  String id,
+  String name,
+  String message,
+  String reason,
+});
+
+_SuggestTalk _suggestTalk(ToolCallInfo call) {
+  final details = call.details;
+  return (
+    id: _string(details['agent_id']),
+    name: _string(details['agent_name']).ifEmpty(call.argument('agent') ?? ''),
+    message: _string(details['message'])
+        .ifEmpty(call.argument('message') ?? '')
+        .trim(),
+    reason: _string(details['reason'])
+        .ifEmpty(call.argument('reason') ?? '')
+        .trim(),
+  );
+}
+
+class _SuggestTalkLine extends StatelessWidget {
+  const _SuggestTalkLine(this.call);
+
+  final ToolCallInfo call;
+
+  @override
+  Widget build(BuildContext context) {
+    final talk = _suggestTalk(call);
+    return Row(
+      children: [
+        const ToolLine('Suggests you talk to'),
+        const SizedBox(width: Space.s),
+        Flexible(
+          child: talk.id.isEmpty
+              ? ToolLine('', subject: talk.name)
+              : ToolAgent(id: talk.id, name: talk.name, role: ''),
+        ),
+      ],
+    );
+  }
+}
+
+/// An agent's suggestion that the person talk to another agent: why, the
+/// message it drafted, and "Talk to Arjun", in that agent's color, which
+/// opens its conversation with the message in its message box, not sent.
+class TalkCard extends StatelessWidget {
+  const TalkCard(this.call, {super.key});
+
+  final ToolCallInfo call;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final talk = _suggestTalk(call);
+    final tints = AgentTints.of(context);
+    // Without details, the name as written, matched as agents_send matches.
+    final agent =
+        tints?.agents[talk.id] ??
+        (talk.id.isNotEmpty
+            ? null
+            : tints?.agents.values
+                  .where(
+                    (a) =>
+                        a.id == talk.name ||
+                        a.name.toLowerCase() == talk.name.toLowerCase(),
+                  )
+                  .firstOrNull);
+    final open = tints?.open;
+    final name = agent?.name ?? talk.name;
+    final rows = <Widget>[
+      if (talk.reason.isNotEmpty)
+        Text(talk.reason, style: TextStyles.body.copyWith(color: palette.text)),
+      if (talk.message.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        FirstLine(talk.message),
+      ],
+    ];
+    if (call.done) {
+      rows.add(const SizedBox(height: Space.s));
+      if (agent == null || open == null) {
+        rows.add(
+          _Faint(
+            talk.id.isEmpty
+                ? "Claktory can't find $name."
+                : '$name was deleted.',
+            color: palette.textFaint,
+          ),
+        );
+      } else {
+        rows.add(
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _TalkButton(
+              agent: agent,
+              onTap: () {
+                final drafts = AppScope.scope(context).drafts;
+                // Once: a second click only opens it.
+                if (!drafts.of(agent.id).contains(talk.message)) {
+                  drafts.compose(agent.id, talk.message);
+                }
+                open(agent.id);
+              },
+            ),
+          ),
+        );
+      }
+    }
+    return _rows(rows);
+  }
+}
+
+/// "Talk to Arjun": the agent's resting character and its name on a tint
+/// of its color, stronger while hovered.
+class _TalkButton extends StatelessWidget {
+  const _TalkButton({required this.agent, required this.onTap});
+
+  final Agent agent;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final color = agentColor(agent.color);
+    final label = 'Talk to ${agent.name}';
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      child: Unselectable(
+        child: Pressable(
+          onTap: onTap,
+          builder: (context, hovered) => AnimatedContainer(
+            duration: Motion.fast,
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: Space.m),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: hovered ? 0.28 : 0.16),
+              border: Border.all(color: color.withValues(alpha: 0.5)),
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AgentCharacter(agent: agent, size: 14),
+                const SizedBox(width: Space.s),
+                Text(
+                  label,
+                  style: TextStyles.label.copyWith(
+                    color: palette.text,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Checklist.
 
@@ -1564,7 +1737,7 @@ Widget? _webSearchBody(BuildContext context, ToolCallInfo call) {
           trailing: _Trailing(_host(_string(hit['url']))),
           child: _Link(
             text: _string(hit['title']).ifEmpty(_string(hit['url'])),
-            color: palette.text,
+            color: palette.link,
             onTap: () {
               final url = Uri.tryParse(_string(hit['url']));
               if (url != null) openLink(context, url);
@@ -1601,6 +1774,7 @@ class _FetchLine extends StatelessWidget {
         Flexible(
           child: _Link(
             text: title.ifEmpty(url),
+            color: link == null || !link.hasScheme ? null : palette.link,
             onTap: link == null || !link.hasScheme
                 ? null
                 : () => openLink(context, link),

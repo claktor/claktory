@@ -70,13 +70,14 @@ never change what a field means.
 ```json
 {"email": "…", "claktory_id": "…", "name": "Mac mini", "backend_key": b64, "version": "v0.1.9", "platform": "macos-arm64"}
 ```
-Emails a 6-digit code (it works for 15 minutes, 5 tries). Answers the same
-whether or not the account exists:
-`200 {"request_id": "…", "expires_in": 900}`.
+Emails a 6-digit code (it works for 15 minutes, 5 tries), from
+`code@<mail domain>` (`code@auth.claktory.com`). Answers the same whether or
+not the account exists: `200 {"request_id": "…", "expires_in": 900}`.
 Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`
 (per email 5 an hour and 20 a day, per IP 30 sign-ins a day),
 `503 email_unavailable` (the day's email cap is reached, or the mail
-provider failed).
+provider didn't send it: it failed or refused, or the address is on its
+suppression list or bounced).
 
 ### `POST /v1/sign-in/verify`
 ```json
@@ -185,7 +186,11 @@ model in the last 30); **Remove** a Claktory (what `revoked` means above);
 **Delete account** (its Claktories' usage stays only in anonymous totals);
 **Download my data** (JSON, everything kept about the account). Whoever runs
 the service (`--admin-email`) also gets **Usage counts** at `/account/admin`,
-the same report as `claktory-account stats`.
+the same report as `claktory-account stats`, including the emails the mail
+provider refused today and yesterday, by why. The first refusal of a kind
+each day (the account isn't entitled to send, sending is turned off, the
+token is refused, the sending is throttled…) is also emailed to them, and
+logged.
 
 ## Error codes
 

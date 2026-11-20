@@ -36,6 +36,7 @@ mod trees;
 pub mod update;
 mod uploads;
 mod usage;
+mod usage_report;
 pub mod vault;
 
 pub use connection::{ConnectionError, serve};

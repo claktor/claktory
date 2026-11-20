@@ -58,7 +58,19 @@ pub trait Models: Send + Sync {
     /// Reads how much of its usage limits an account (`provider.accounts`'
     /// id; empty: the provider's first) signed in with a subscription has
     /// used; None when it isn't signed in that way.
-    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    /// Its usage resets come with it; `updated` and `error` are left unset.
+    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Uses one of an account's usage resets, as its last usage read listed
+    /// it, at the person's word: it can't be undone. A limit reset gives the
+    /// account requests again at once. None when the account has no resets.
+    fn use_reset<'a>(
+        &'a self,
+        _provider: &'a str,
+        _account: &'a str,
+        _reset: v1::UsageReset,
+    ) -> BoxFuture<'a, Result<Option<v1::UsageResetAnswer>, Error>> {
         Box::pin(async { Ok(None) })
     }
     /// Reads which plan an account signed in with a subscription has, such
@@ -217,11 +229,11 @@ impl Models for Registry {
         Box::pin(Registry::update_account(self, provider, account, label, retry))
     }
 
-    fn usage<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    fn usage<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
         Box::pin(async move {
-            let Some(limits) = self.account_usage(provider, account_arg(account)).await? else { return Ok(None) };
+            let Some(usage) = self.account_usage(provider, account_arg(account)).await? else { return Ok(None) };
             let mut windows = Vec::new();
-            for limit in limits {
+            for limit in usage.limits {
                 windows.push(v1::UsageWindow {
                     id: limit.id,
                     label: limit.label,
@@ -229,7 +241,48 @@ impl Models for Registry {
                     resets_at: i64::try_from(limit.resets_at).unwrap_or(0),
                 });
             }
-            Ok(Some(windows))
+            let mut resets = Vec::new();
+            for reset in usage.resets {
+                resets.push(v1::UsageReset {
+                    id: reset.id,
+                    label: reset.label,
+                    detail: reset.detail,
+                    left: reset.left,
+                    total: reset.total,
+                    expires_at: i64::try_from(reset.expires_at).unwrap_or(0),
+                    usable: reset.usable,
+                    unavailable: reset.unavailable,
+                    window_ids: reset.window_ids,
+                });
+            }
+            Ok(Some(v1::ProviderUsage { windows, resets, ..v1::ProviderUsage::default() }))
+        })
+    }
+
+    fn use_reset<'a>(
+        &'a self,
+        provider: &'a str,
+        account: &'a str,
+        reset: v1::UsageReset,
+    ) -> BoxFuture<'a, Result<Option<v1::UsageResetAnswer>, Error>> {
+        Box::pin(async move {
+            let reset = factory_agent::limits::UsageReset {
+                id: reset.id,
+                label: reset.label,
+                detail: reset.detail,
+                left: reset.left,
+                total: reset.total,
+                expires_at: u64::try_from(reset.expires_at).unwrap_or(0),
+                usable: reset.usable,
+                unavailable: reset.unavailable,
+                window_ids: reset.window_ids,
+            };
+            let answer = Registry::use_reset(self, provider, account_arg(account), reset).await?;
+            Ok(answer.map(|answer| v1::UsageResetAnswer {
+                reset: answer.reset,
+                message: answer.message,
+                fallback_url: answer.fallback_url,
+            }))
         })
     }
 

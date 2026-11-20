@@ -49,6 +49,7 @@ impl Factory {
             Ok(None) => {}
             Err(error) => tracing::error!(run, %error, "could not record the end of a run"),
         }
+        crate::vault::requests::run_ended();
         true
     }
 

@@ -84,6 +84,22 @@ impl Demo {
         }
     }
 
+    fn paste() -> Demo {
+        Demo {
+            spec: Spec {
+                id: "pasty".into(),
+                name: "Pasty".into(),
+                description: "Your Pasty account.".into(),
+                accesses: vec![AccessSpec { id: "all".into(), label: "All".into(), preselected: true, ..AccessSpec::default() }],
+                flow: FlowKind::Paste,
+                token_url: "https://pasty.example/tokens".into(),
+                variables: vec!["PASTY_TOKEN".into()],
+                ..Spec::default()
+            },
+            ..Demo::default()
+        }
+    }
+
     fn tokens(&self) -> Control {
         let n = self.minted.fetch_add(1, Ordering::SeqCst);
         Control::from_value(
@@ -120,11 +136,12 @@ impl Recipe for Demo {
 
     fn authorize_url(&self, start: &Start<'_>) -> Result<String, Problem> {
         Ok(format!(
-            "https://demo.example/authorize?scope={}&state={}&code_challenge={}&redirect_uri={}",
+            "https://demo.example/authorize?scope={}&state={}&code_challenge={}&redirect_uri={}&purpose={}",
             start.access.scopes.join("+"),
             start.state,
             start.challenge,
-            start.redirect_uri
+            start.redirect_uri,
+            start.proposal.map(|proposal| proposal.purpose.as_str()).unwrap_or_default()
         ))
     }
 
@@ -162,6 +179,31 @@ impl Recipe for Demo {
         Box::pin(async move {
             assert!(pending.as_str().contains("dc-1"));
             if self.polls.fetch_add(1, Ordering::SeqCst) == 0 { Ok(Poll::Pending) } else { Ok(Poll::Done(self.tokens())) }
+        })
+    }
+
+    fn start_paste<'a>(&'a self, _http: &'a Http, start: &'a Start<'a>) -> BoxFuture<'a, Result<(String, Control), Problem>> {
+        Box::pin(async move {
+            // A page of its own for each flow, and what it needs to check the token.
+            let url = format!("{}?flow={}", self.spec.token_url, start.flow);
+            Ok((url, Control::from_value(&json!({"flow": start.flow, "state": start.state.to_string()}))))
+        })
+    }
+
+    fn paste<'a>(
+        &'a self,
+        _http: &'a Http,
+        start: &'a Start<'a>,
+        pending: &'a Control,
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<Control, Problem>> {
+        Box::pin(async move {
+            let kept: serde_json::Value = pending.parse()?;
+            assert_eq!((kept["flow"].as_str(), kept["state"].as_str()), (Some(start.flow), Some(start.state)));
+            match token {
+                "good-token" => Ok(self.tokens()),
+                _ => Err(Problem::Refused("Pasty didn't accept that token.".into())),
+            }
         })
     }
 
@@ -340,12 +382,15 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
     let Body::ConnectStarted(started) = started else { panic!("expected a start, got {started:?}") };
     assert_eq!(query(&started.url, "redirect_uri"), redirect);
     assert_eq!(query(&started.url, "scope"), "dns:edit tokens:write");
+    assert_eq!(query(&started.url, "purpose"), "Deploy acme.com", "the recipe sees the suggestion it answers");
     let state = query(&started.url, "state");
     view.follow(&mut client, |view| flow(view, &started.flow_id).is_some_and(|flow| flow.state() == ConnectFlowState::Waiting)).await;
     assert!(!format!("{:?}", vault(&view).flows).contains(&state), "no device sees the state but the one that started it");
 
     // Another device can't finish it; a wrong state or address is refused.
-    let finish = |url: String| Request::FinishConnect(v1::FinishConnect { flow_id: started.flow_id.clone(), callback_url: url });
+    let finish = |url: String| {
+        Request::FinishConnect(v1::FinishConnect { flow_id: started.flow_id.clone(), callback_url: url, token: String::new() })
+    };
     let (mut other, other_workspace, _) = Client::connect(addr).await;
     let mut other_view = View { workspace: other_workspace, ..View::default() };
     let elsewhere = apply_request(&mut other, &mut other_view, finish(format!("{redirect}?code=good-code&state={state}"))).await;
@@ -483,4 +528,28 @@ async fn a_device_flow_connects_by_itself_and_a_connection_the_service_drops_is_
     view.follow(&mut client, |view| flow(view, &third.flow_id).is_none()).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(vault(&view).secrets.len(), 1, "a cancelled flow connects nothing");
+}
+
+#[tokio::test]
+async fn a_pasted_token_is_checked_with_what_the_flow_kept_when_it_started() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    factory.set_vault_passphrase_cost("argon2id m=1024 t=1 p=1");
+    factory.add_connector(Arc::new(Demo::paste()), &[]);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let start = Request::StartConnect(v1::StartConnect { connector_id: "pasty".into(), ..Default::default() });
+    let started = apply_request(&mut client, &mut view, start).await;
+    let Body::ConnectStarted(started) = started else { panic!("expected a start, got {started:?}") };
+    // The recipe's own page for this flow.
+    assert_eq!(started.url, format!("https://pasty.example/tokens?flow={}", started.flow_id));
+    let paste = |token: &str| {
+        Request::FinishConnect(v1::FinishConnect { flow_id: started.flow_id.clone(), callback_url: String::new(), token: token.into() })
+    };
+    ok(&mut client, &mut view, paste("wrong-token")).await;
+    view.follow(&mut client, |view| flow(view, &started.flow_id).is_some_and(|flow| flow.error == "Pasty didn't accept that token.")).await;
+    assert_eq!(flow(&view, &started.flow_id).map(|flow| flow.state()), Some(ConnectFlowState::Waiting));
+    ok(&mut client, &mut view, paste("good-token")).await;
+    view.follow(&mut client, |view| flow(view, &started.flow_id).is_some_and(|flow| flow.state() == ConnectFlowState::Connected)).await;
+    assert_eq!(vault(&view).secrets[0].name, "Pasty (matt@example.com)");
 }

@@ -370,3 +370,118 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     factory.deliver_event(agent, text, event);
     Ok(())
 }
+
+/// A request left waiting this long expires.
+const EXPIRE_AFTER_MS: i64 = 12 * 60 * 60 * 1000;
+/// Or once the agent has finished this many runs since it asked.
+const EXPIRE_AFTER_RUNS: i64 = 10;
+/// How often waiting requests are checked, besides whenever a run ends.
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wakes the check: a run ended, so a request may have waited its runs.
+static RUN_ENDED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// A run ended: waiting requests are checked.
+pub(crate) fn run_ended() {
+    RUN_ENDED.notify_one();
+}
+
+/// Why a request made at `created` has expired at `now`, after `runs` of
+/// its agent's runs ended since; None while it may wait.
+fn why_expired(created: i64, now: i64, runs: i64) -> Option<&'static str> {
+    if now - created >= EXPIRE_AFTER_MS {
+        Some("it waited 12 hours")
+    } else if runs >= EXPIRE_AFTER_RUNS {
+        Some("10 of your runs ended")
+    } else {
+        None
+    }
+}
+
+/// Checks waiting requests every minute and whenever a run ends.
+pub(crate) async fn monitor(factory: std::sync::Weak<Factory>) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(CHECK_EVERY) => {}
+            () = RUN_ENDED.notified() => {}
+        }
+        let Some(factory) = factory.upgrade() else { return };
+        expire_requests(&factory);
+    }
+}
+
+/// Expires the requests that have waited too long: each shows Expired in its
+/// conversation, and its agent is told, so it can ask again.
+pub(crate) fn expire_requests(factory: &Arc<Factory>) {
+    let waiting = match factory.vault.waiting_requests() {
+        Ok(waiting) => waiting,
+        Err(error) => {
+            tracing::debug!(%error, "could not read the secret requests waiting");
+            return;
+        }
+    };
+    let now = crate::transcript::now_ms();
+    for (asked, created) in waiting {
+        let runs = factory
+            .store
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE agent = ?1 AND started > ?2 AND ended IS NOT NULL",
+                rusqlite::params![asked.agent_id, created],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let Some(why) = why_expired(created, now, runs) else { continue };
+        let expired = match factory.vault.expire_request(&asked.agent_id, &asked.id) {
+            Ok(Some(expired)) => expired,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, request = %asked.id, "could not expire a secret request");
+                continue;
+            }
+        };
+        tracing::info!(request = %asked.id, agent = %asked.agent_id, why, "a secret request expired");
+        factory.vault_changed();
+        let agent = asked.agent_id.as_str();
+        {
+            let mut inner = factory.lock();
+            let entry = inner
+                .agents
+                .get_mut(agent)
+                .and_then(|runtime| runtime.transcript.as_mut())
+                .and_then(|transcript| transcript.set_secret_request(expired));
+            if let Some(entry) = entry {
+                factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+            }
+        }
+        if factory.lock().config.agent(agent).is_none() {
+            continue;
+        }
+        let summary = format!("Your request for {} expired", asked.secret_name);
+        let text = format!(
+            "{summary}: {why} without an answer, so it can't be answered any more. If you still need it, ask again with secrets_request.\n\nYou asked because: {}",
+            asked.reason
+        );
+        let event = factory_agent::Event {
+            source: factory_agent::EventSource::Host,
+            from: "Claktory".to_owned(),
+            id: String::new(),
+            summary: format!("{summary}."),
+            transient: false,
+        };
+        factory.deliver_event(agent, text, event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_expire_after_12_hours_or_10_runs() {
+        let hour = 3_600_000;
+        assert_eq!(why_expired(0, 11 * hour, 9), None);
+        assert_eq!(why_expired(0, 12 * hour, 0), Some("it waited 12 hours"));
+        assert_eq!(why_expired(0, hour, 10), Some("10 of your runs ended"));
+    }
+}

@@ -402,6 +402,17 @@ fn requests(view: &View) -> Vec<String> {
     describe(&view.entries).into_iter().filter(|line| line.starts_with("secret request")).collect()
 }
 
+/// The requests waiting in the selected agent's conversation, oldest first.
+fn waiting(view: &View) -> Vec<v1::SecretRequest> {
+    view.entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(Kind::SecretRequest(request)) if request.state() == v1::SecretRequestState::Pending => Some(request.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn decide(agent: &str, id: &str, approve: bool, entries: Vec<v1::SecretEntry>, comment: &str) -> v1::DecideSecretRequest {
     v1::DecideSecretRequest {
         agent_id: agent.into(),
@@ -433,8 +444,9 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     assert_eq!(asked, "Asked for Cloudflare token; the person will give it to you or dismiss the request, and you'll be told.");
     let prompt = system_prompt.lock().expect("lock").clone();
     assert!(prompt.contains("secrets_request") && !prompt.contains("Cloudflare (sets"), "{prompt}");
-    let pending = vault(&view.workspace).requests;
+    let pending = waiting(&view);
     assert_eq!(pending.len(), 1);
+    assert!(vault(&view.workspace).requests.is_empty(), "requests show only in the conversation");
     let first = pending[0].clone();
     assert_eq!((first.secret_id.as_str(), first.secret_name.as_str()), ("", "Cloudflare token"));
     let wanted = first.new_secret.clone().expect("what it needs");
@@ -448,7 +460,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     let guessed = call(&mut client, &mut view, "builder", "secrets_request", r#"{"secret":"Stripe","reason":"Deploys."}"#).await;
     assert_eq!(guessed.replace("Stripe", "Cloudflare"), named);
     assert!(named.starts_with("Asked for Cloudflare;"), "{named}");
-    for request in vault(&view.workspace).requests.into_iter().filter(|request| request.id != first.id) {
+    for request in waiting(&view).into_iter().filter(|request| request.id != first.id) {
         apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &request.id, false, Vec::new(), ""))).await;
     }
 
@@ -471,7 +483,6 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     });
     let decided = decided.expect("the entry");
     assert_eq!((decided.given_secret_id.as_str(), decided.given_secret_name.as_str()), (cloudflare.as_str(), "Cloudflare"));
-    assert!(vault(&view.workspace).requests.is_empty());
     let output =
         call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo $CLOUDFLARE_API_TOKEN","secrets":["Cloudflare"]}"#).await;
     assert!(output.starts_with("[secret Cloudflare/CLOUDFLARE_API_TOKEN]"), "{output}");
@@ -480,7 +491,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     let new =
         r#"{"name":"Mail","description":"Mail for the site.","variables":[{"name":"RESEND_API_KEY"}],"reason":"To send sign-up mail."}"#;
     call(&mut client, &mut view, "builder", "secrets_request", new).await;
-    let request = vault(&view.workspace).requests[0].clone();
+    let request = waiting(&view).pop().expect("the request");
     let add_new = v1::DecideSecretRequest {
         name: "Resend".into(),
         ..decide("builder", &request.id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], "")
@@ -492,7 +503,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     // Dismissed, with a comment it reads.
     let other = r#"{"name":"Stripe","description":"Payments.","reason":"Payments."}"#;
     call(&mut client, &mut view, "builder", "secrets_request", other).await;
-    let id = vault(&view.workspace).requests[0].id.clone();
+    let id = waiting(&view).pop().expect("the request").id;
     apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &id, false, Vec::new(), "Not yet."))).await;
     view.follow(&mut client, |view| {
         events(view).iter().any(|line| line.contains("dismissed your request for Stripe")) && idle(view, "builder")
@@ -515,4 +526,102 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     let states: Vec<String> = requests(&view).iter().map(|line| line.split(' ').nth(3).unwrap_or_default().to_owned()).collect();
     assert_eq!(states, ["(Granted):", "(Dismissed):", "(Dismissed):", "(Granted):", "(Dismissed):"]);
+}
+
+#[tokio::test]
+async fn a_request_left_unanswered_expires_and_the_agent_is_told() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let need = r#"{"name":"Stripe","description":"Payments.","variables":[{"name":"STRIPE_KEY"}],"reason":"To take payments."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", need).await;
+    let asked = waiting(&view).pop().expect("the request");
+
+    // Nine more runs: still waiting. The tenth: expired, and the agent is told.
+    for run in 1..=10 {
+        let before = view.entries.len();
+        apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+        view.follow(&mut client, |view| view.entries.len() > before + 1 && idle(view, "builder")).await;
+        if run == 9 {
+            assert_eq!(waiting(&view).len(), 1, "waiting after 9 runs");
+        }
+    }
+    let told = "event from Claktory: Your request for Stripe expired.";
+    view.follow(&mut client, |view| events(view).iter().any(|line| line == told) && idle(view, "builder")).await;
+    assert_eq!(requests(&view), [format!("secret request {} (Expired): To take payments.", asked.id)]);
+    let late = client.request(Request::DecideSecretRequest(decide("builder", &asked.id, false, Vec::new(), ""))).await;
+    assert_eq!(failure(&late.body).1, "This request expired.");
+}
+
+/// Matt's bug: an agent's Secrets panel shows its grants from the vault's
+/// state, so every way of giving a secret has to land there, under the
+/// agent's id, and stay after a restart.
+#[tokio::test]
+async fn every_way_of_giving_a_secret_shows_in_the_agents_grants() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Ops", &dir.join("ops"))).await;
+    // Named unlike its id, as Arjun (devops) is.
+    apply_request(&mut client, &mut view, create_agent("ops", "Devops", "")).await;
+    let renamed = v1::UpdateAgent { agent_id: "devops".into(), name: Some("Arjun".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::UpdateAgent(renamed)).await;
+    let rivet = v1::UpdateAgent {
+        agent_id: "rivet".into(),
+        model: Some(crate::common::MODEL.into()),
+        effort: Some("off".into()),
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, Request::UpdateAgent(rivet)).await;
+    let store = add(&mut client, "App Store Connect", "ASC_KEY", "asc-0123456789abcdef").await;
+    add(&mut client, "Hetzner", "HCLOUD_TOKEN", "hz-0123456789abcdef").await;
+    let dns = add(&mut client, "CF_CLAKTORY_DNS", "CLOUDFLARE_API_TOKEN", TOKEN).await;
+    let given = |view: &View| -> Vec<String> {
+        let mut names: Vec<String> = vault(&view.workspace)
+            .secrets
+            .into_iter()
+            .filter(|secret| secret.grants.iter().any(|grant| grant.agent_id == "devops"))
+            .map(|secret| secret.name)
+            .collect();
+        names.sort();
+        names
+    };
+
+    // From Settings → Secrets.
+    apply_request(&mut client, &mut view, Request::GrantSecret(v1::GrantSecret { id: store, agent_id: "devops".into(), proof: None }))
+        .await;
+    assert_eq!(given(&view), ["App Store Connect"]);
+    // By Rivet, by name.
+    let said = call(&mut client, &mut view, "rivet", "secrets_grant", r#"{"secret":"Hetzner","agents":["Arjun"]}"#).await;
+    assert_eq!(said, "Gave Hetzner to Arjun (devops).");
+    view.follow(&mut client, |view| given(view).len() == 2).await;
+    // By deciding its request, with one the vault has, and with a new one.
+    for need in [
+        r#"{"name":"DNS","description":"DNS edit","variables":[{"name":"CLOUDFLARE_API_TOKEN"}],"reason":"Deploys."}"#,
+        r#"{"name":"Mail","description":"Mail","variables":[{"name":"RESEND_API_KEY"}],"reason":"Mail."}"#,
+    ] {
+        call(&mut client, &mut view, "devops", "secrets_request", need).await;
+    }
+    let asked = waiting(&view);
+    let existing = v1::DecideSecretRequest { secret_id: dns, ..decide("devops", &asked[0].id, true, Vec::new(), "") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(existing)).await;
+    let new = v1::DecideSecretRequest {
+        name: "Resend".into(),
+        ..decide("devops", &asked[1].id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], "")
+    };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(new)).await;
+    view.follow(&mut client, |view| given(view).len() == 4).await;
+    assert_eq!(given(&view), ["App Store Connect", "CF_CLAKTORY_DNS", "Hetzner", "Resend"]);
+    drop(client);
+    drop(factory);
+
+    // Days later, after a restart: still there.
+    let (addr, _factory) = start(&dir).await;
+    let (_client, workspace, _) = Client::connect(addr).await;
+    let view = View { workspace, ..View::default() };
+    assert_eq!(given(&view), ["App Store Connect", "CF_CLAKTORY_DNS", "Hetzner", "Resend"]);
 }

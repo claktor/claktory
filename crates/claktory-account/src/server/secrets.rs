@@ -18,9 +18,14 @@ struct File {
     k_share: String,
     /// The service's Ed25519 key: 32 bytes, base64url.
     signing_key: String,
-    /// Resend's API key; empty sends no email (see `--mail-dir`).
+    /// Resend's API key; empty sends no email through Resend.
     #[serde(default)]
     resend_api_key: String,
+    /// A Cloudflare API token with Email Sending: Edit; empty sends no
+    /// email through Cloudflare. Left out of a file without one, so an
+    /// older service reads it still.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    cloudflare_api_token: String,
     /// What relays send to read the allowlist; empty turns it off.
     #[serde(default)]
     relay_bearer: String,
@@ -30,6 +35,7 @@ pub struct Secrets {
     pub k_share: Zeroizing<[u8; 32]>,
     pub signing_key: SigningKey,
     pub resend_api_key: Option<String>,
+    pub cloudflare_api_token: Option<String>,
     pub relay_bearer: Option<String>,
 }
 
@@ -40,6 +46,7 @@ impl Secrets {
             k_share: random_32(),
             signing_key: SigningKey::from_bytes(&random_32()),
             resend_api_key: None,
+            cloudflare_api_token: None,
             relay_bearer: Some(b64(*random_32())),
         }
     }
@@ -64,6 +71,7 @@ impl Secrets {
             k_share,
             signing_key: SigningKey::from_bytes(&signing_key),
             resend_api_key: some(&file.resend_api_key),
+            cloudflare_api_token: some(&file.cloudflare_api_token),
             relay_bearer: some(&file.relay_bearer),
         })
     }
@@ -76,6 +84,7 @@ impl Secrets {
             k_share: b64(*secrets.k_share),
             signing_key: b64(secrets.signing_key.to_bytes()),
             resend_api_key: String::new(),
+            cloudflare_api_token: String::new(),
             relay_bearer: secrets.relay_bearer.clone().unwrap_or_default(),
         });
         let text = Zeroizing::new(serde_json::to_string_pretty(&*file).map_err(|error| error.to_string())? + "\n");
@@ -87,13 +96,23 @@ impl Secrets {
 impl Secrets {
     /// Puts a Resend API key in a secrets file, keeping the rest as it is.
     pub fn set_resend_key(path: &Path, key: &str) -> Result<(), String> {
+        Secrets::set_key(path, key, |file| &mut file.resend_api_key)
+    }
+
+    /// Puts a Cloudflare API token (Email Sending: Edit) in a secrets file,
+    /// keeping the rest as it is.
+    pub fn set_cloudflare_token(path: &Path, token: &str) -> Result<(), String> {
+        Secrets::set_key(path, token, |file| &mut file.cloudflare_api_token)
+    }
+
+    fn set_key(path: &Path, key: &str, field: impl FnOnce(&mut File) -> &mut String) -> Result<(), String> {
         if key.is_empty() || key.chars().any(|character| character.is_whitespace() || character.is_control()) {
             return Err("that isn't an API key".to_owned());
         }
         Secrets::load(path)?;
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|error| format!("can't read {}: {error}", path.display()))?);
         let mut file: File = serde_json::from_str(&text).map_err(|error| format!("{} isn't a secrets file: {error}", path.display()))?;
-        file.resend_api_key = key.to_owned();
+        *field(&mut file) = key.to_owned();
         let file = Zeroizing::new(file);
         let text = Zeroizing::new(serde_json::to_string_pretty(&*file).map_err(|error| error.to_string())? + "\n");
         let partial = path.with_extension("partial");
@@ -118,6 +137,7 @@ impl zeroize::Zeroize for File {
         self.k_share.zeroize();
         self.signing_key.zeroize();
         self.resend_api_key.zeroize();
+        self.cloudflare_api_token.zeroize();
         self.relay_bearer.zeroize();
     }
 }

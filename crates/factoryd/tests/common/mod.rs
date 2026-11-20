@@ -248,14 +248,15 @@ impl Models for Scripted {
         Box::pin(async { Ok(()) })
     }
 
-    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<Vec<v1::UsageWindow>>, Error>> {
+    fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
         let subscribed = self.current() == Some(ACCOUNT);
         Box::pin(async move {
-            Ok(subscribed.then(|| {
-                vec![
+            Ok(subscribed.then(|| v1::ProviderUsage {
+                windows: vec![
                     v1::UsageWindow { id: "weekly".into(), label: "Weekly".into(), used_percent: 40.0, resets_at: 1_795_554_000_000 },
                     v1::UsageWindow { id: "five_hour".into(), label: "5-hour".into(), used_percent: 2.5, resets_at: 0 },
-                ]
+                ],
+                ..v1::ProviderUsage::default()
             }))
         })
     }

@@ -74,9 +74,9 @@ async fn malformed_frame_is_reported_and_the_connection_survives() {
 async fn message_from_a_newer_client_is_answered_not_fatal() {
     let (addr, _factory) = start(&temp_dir()).await;
     let (mut client, _, _) = Client::connect(addr).await;
-    // A request in field 99, which this server doesn't know: it decodes to an empty body.
+    // A request in field 999, which this server doesn't know: it decodes to an empty body.
     let mut bytes = ClientMessage { id: 9, body: None }.encode_to_vec();
-    prost::encoding::encode_key(99, prost::encoding::WireType::LengthDelimited, &mut bytes);
+    prost::encoding::encode_key(999, prost::encoding::WireType::LengthDelimited, &mut bytes);
     prost::encoding::encode_varint(0, &mut bytes);
     client.send_bytes(bytes).await;
     let reply = client.receive().await;

@@ -26,7 +26,7 @@ pub(crate) const OPTION: &str = "connect";
 /// The longest purpose, access or reason an agent may give.
 const MAX_TEXT: usize = 2000;
 
-const DESCRIPTION: &str = "Propose that the person connect a service to Claktory, such as Cloudflare or AWS. service: its id or name; purpose: what it's for; access: the access the work needs (which permissions, on which zones, accounts or roles); reason: why you need it. The person connects it on the service's own site, or dismisses the proposal, and you're told. Connecting gives you nothing yet: an admin agent then gives you a secret made from the connection, with only the access the work needs.";
+const DESCRIPTION: &str = "Propose that the person connect a service to Claktory, such as Cloudflare or AWS. service: its id or name; purpose: what it's for; access: the access the work needs (which permissions, on which zones, accounts or roles); reason: why you need it. For AWS also give region and statements: the exact IAM Allow statements the work needs, at most 10, each with actions (\"ec2:RunInstances\"), resources (ARNs with * for the account, or *) and an optional condition (IAM's Condition block as a JSON string); the connection gets exactly those and nothing more. The person connects it on the service's own site, or dismisses the proposal, and you're told. Connecting gives you nothing yet: an admin agent then gives you a secret made from the connection, with only the access the work needs.";
 
 /// The proposing tool, for an agent with the option on.
 pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
@@ -44,6 +44,20 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
             "access": {"type": "string"},
             "reason": {"type": "string"},
             "access_id": {"type": "string"},
+            "region": {"type": "string"},
+            "statements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["actions", "resources"],
+                    "properties": {
+                        "actions": {"type": "array", "items": {"type": "string"}},
+                        "resources": {"type": "array", "items": {"type": "string"}},
+                        "condition": {"type": "string"},
+                    },
+                    "additionalProperties": false,
+                },
+            },
         },
         "additionalProperties": false,
     });
@@ -64,6 +78,18 @@ struct ProposeArgs {
     reason: String,
     #[serde(default)]
     access_id: String,
+    #[serde(default)]
+    region: String,
+    #[serde(default)]
+    statements: Vec<StatementArg>,
+}
+
+#[derive(Deserialize)]
+struct StatementArg {
+    actions: Vec<String>,
+    resources: Vec<String>,
+    #[serde(default)]
+    condition: String,
 }
 
 fn check(field: &str, text: &str) -> Result<String, String> {
@@ -100,6 +126,7 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
         let ids: Vec<&str> = connector.accesses.iter().map(|access| access.id.as_str()).collect();
         return Err(format!("{} has no access \"{access_id}\"; its accesses: {}.", connector.name, ids.join(", ")));
     }
+    let (statements, region) = exact_access(&connector.id, &connector.name, &args)?;
     let proposal = v1::ConnectProposal {
         agent_id: agent.to_owned(),
         connector_id: connector.id.clone(),
@@ -107,6 +134,8 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
         purpose: check("purpose", &args.purpose)?,
         access: check("access", &args.access)?,
         reason: check("reason", &args.reason)?,
+        statements,
+        region,
         ..Default::default()
     };
     let proposal = factory.vault.propose(&proposal).map_err(|error| error.to_string())?;
@@ -117,6 +146,32 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
         connector.name
     );
     Ok(ToolResult::text(said, details(&proposal)))
+}
+
+/// The exact statements and region a proposal gives, checked: required for
+/// a service that takes them (AWS), refused for the others.
+fn exact_access(connector: &str, name: &str, args: &ProposeArgs) -> Result<(Vec<v1::PolicyStatement>, String), String> {
+    let given: Vec<v1::PolicyStatement> = args
+        .statements
+        .iter()
+        .map(|statement| v1::PolicyStatement {
+            actions: statement.actions.clone(),
+            resources: statement.resources.clone(),
+            condition: statement.condition.clone(),
+        })
+        .collect();
+    if connector != super::aws_stack::ID {
+        if !given.is_empty() || !args.region.trim().is_empty() {
+            return Err(format!("{name} takes no statements or region: say the access in access."));
+        }
+        return Ok((Vec::new(), String::new()));
+    }
+    if args.region.trim().is_empty() {
+        return Err(format!("Give the region the work is in, such as eu-central-1: {name} is connected for one region."));
+    }
+    let region = super::aws::region(&args.region).map_err(|problem| problem.text().to_owned())?;
+    let statements = super::aws_stack::read_statements(&given)?;
+    Ok((statements.iter().map(super::aws_stack::Statement::to_proto).collect(), region))
 }
 
 /// What a proposing call's result's details hold: the proposal as made.
@@ -130,6 +185,8 @@ fn details(proposal: &v1::ConnectProposal) -> serde_json::Value {
         "access": proposal.access,
         "reason": proposal.reason,
         "created_ms": proposal.created_ms,
+        "statements": super::aws_stack::store_statements(&proposal.statements),
+        "region": proposal.region,
     })
 }
 
@@ -151,6 +208,8 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
         reason: text("reason"),
         state: ConnectProposalState::Pending.into(),
         created_ms: details.get("created_ms").and_then(serde_json::Value::as_i64).unwrap_or_default(),
+        statements: super::aws_stack::stored_statements(&text("statements")),
+        region: text("region"),
         ..Default::default()
     })
 }
@@ -244,10 +303,17 @@ pub(crate) fn connected(factory: &Arc<Factory>, proposal_id: &str, secret_id: &s
     factory.deliver_event(&proposal.agent_id, text, host_event(summary));
 
     let list = |items: &[String]| if items.is_empty() { "nothing listed".to_owned() } else { items.join("; ") };
+    let exact = if proposal.statements.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> =
+            proposal.statements.iter().map(|statement| format!("\n  - {}", super::aws_stack::describe(statement))).collect();
+        format!("\n- Exact permissions asked, in {}:{}", proposal.region, lines.concat())
+    };
     let summary = format!("{person} connected {} for {proposer}'s proposal: give it the least that does the job.", spec.name);
     let text = format!(
         "{person} connected {}{account} for {proposer}'s proposal, as {secret_name}. No agent has it.\n\n\
-         The proposal:\n- Purpose: {}\n- Access asked: {}\n- Reason: {}\n\n\
+         The proposal:\n- Purpose: {}\n- Access asked: {}{exact}\n- Reason: {}\n\n\
          What the connection reaches:\n- Access: {}\n- Scopes: {}\n- Resources: {}\n\n\
          Compare the two. Make a secret from {secret_name} with only the access the proposal's work needs, give that to {proposer}, and tell it what it got. Never give the connection itself. If it asks for more than the work needs, give the narrower thing or ask {person} first.",
         spec.name,

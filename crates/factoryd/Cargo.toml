@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 # The tunnel's compressed streams (`claktory/2`, remote.rs): zstd, as the app's.
 async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
+# AWS connections' receipts (connectors/aws_stack.rs): RSA-OAEP and AES-GCM;
+# already linked through rustls.
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 base64 = "0.23"
 bytes = "1.12.2"

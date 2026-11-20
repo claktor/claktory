@@ -14,6 +14,7 @@ class Palette {
     required this.textFaint,
     required this.signal,
     required this.danger,
+    required this.link,
   });
 
   final Color canvas;
@@ -24,6 +25,10 @@ class Palette {
   final Color textFaint;
   final Color signal;
   final Color danger;
+
+  /// Web links in what agents write and in tool output, so they stand out
+  /// from the text around them.
+  final Color link;
 
   /// Hover and selection tints derive from `text` so they work on any surface.
   Color get hover => text.withValues(alpha: 0.05);
@@ -38,6 +43,7 @@ class Palette {
     textFaint: Color(0xFF71717A),
     signal: Color(0xFFFF5B1F),
     danger: Color(0xFFFF5C7A),
+    link: Color(0xFF6AA8FF),
   );
 
   static const _light = Palette._(
@@ -49,6 +55,7 @@ class Palette {
     textFaint: Color(0xFF8B8B94),
     signal: Color(0xFFE5480F),
     danger: Color(0xFFC8193C),
+    link: Color(0xFF1F5FD1),
   );
 
   static Palette of(BuildContext context) =>

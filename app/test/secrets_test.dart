@@ -328,7 +328,7 @@ void main() {
     final harness = Harness(w);
     await harness.show(tester);
     await settle(tester);
-    await tester.tap(find.text('Opus 5.5 · high'));
+    await tester.tap(find.text('Opus 5.5 · High'));
     await settle(tester);
     // Even with the extension off.
     expect(find.text('Has ASC_KEY_ID and CLAKTORY_TEAM_ID.'), findsOneWidget);
@@ -344,6 +344,122 @@ void main() {
       tester.getTopLeft(find.text('Stripe')).dy,
       lessThan(tester.getTopLeft(find.text('Extensions')).dy),
     );
+  });
+
+  testWidgets("the Secrets panel beside an agent lists what it has, however "
+      'it was given', (tester) async {
+    // Rivet's secrets_grant, a decided request and Settings → Secrets all
+    // make the same grant in the vault the workspace carries.
+    final w = workspace(agents: [builder(working: false)])
+      ..extensions.add(
+        Extension(
+          id: 'secrets',
+          name: 'Secrets',
+          description: 'Asks you for secrets it needs.',
+        ),
+      )
+      ..vault = VaultState(
+        exists: true,
+        unlocked: true,
+        secrets: [
+          for (final name in ['CF_CLAKTORY_DNS', 'HETZNER', 'ASC_KEY_ID'])
+            SecretInfo(
+              id: name,
+              name: name,
+              grants: [SecretGrant(agentId: 'a1')],
+              variables: [SecretVariable(name: '${name}_TOKEN')],
+            ),
+          SecretInfo(id: 'other', name: 'Stripe'),
+        ],
+      );
+    w.agents.single
+      ..extensions.add(AgentExtension(id: 'secrets', enabled: true))
+      ..openPanel = 'secrets';
+    final harness = Harness(w);
+    await harness.show(tester);
+    await settle(tester);
+    // No view comes for it: the panel isn't left blank.
+    for (final name in ['CF_CLAKTORY_DNS', 'HETZNER', 'ASC_KEY_ID']) {
+      expect(find.text(name), findsOneWidget, reason: name);
+      expect(find.text('${name}_TOKEN'), findsOneWidget, reason: name);
+    }
+    expect(find.text('Stripe'), findsNothing);
+    expect(find.text('Give a secret…'), findsOneWidget);
+  });
+
+  testWidgets('the Secrets panel: when each was given, Take back, and giving '
+      'another', (tester) async {
+    final now = DateTime(2026, 11, 20, 12);
+    final given = Int64(
+      now.subtract(const Duration(days: 2)).millisecondsSinceEpoch,
+    );
+    final used = Int64(
+      now.subtract(const Duration(hours: 3)).millisecondsSinceEpoch,
+    );
+    final harness = Harness(
+      _workspace(
+        secrets: [
+          _aws(
+              grants: [
+                SecretGrant(agentId: 'mike', grantedMs: given),
+                SecretGrant(agentId: 'june', grantedMs: given, runningTasks: 1),
+              ],
+            )
+            ..lastUsedBy = 'june'
+            ..lastUsedMs = used,
+          SecretInfo(id: 's2', name: 'Stripe', description: 'Test mode'),
+        ],
+      ),
+    );
+    await _show(
+      tester,
+      harness,
+      SizedBox(
+        height: 800,
+        child: AgentSecretsPanel(agentId: 'june', now: now),
+      ),
+    );
+    expect(find.text('AWS'), findsOneWidget);
+    expect(find.text("Matt's deploy account, eu-west-1"), findsOneWidget);
+    expect(
+      find.text('AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'Given 2 days ago · Last used 3 h ago · Used by 1 running task',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Stripe'), findsNothing);
+
+    await tester.tap(find.text('Take back'));
+    await pumpFrames(tester);
+    expect(find.text('Take back AWS from June?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await pumpFrames(tester);
+
+    await tester.tap(find.text('Give a secret…'));
+    await pumpFrames(tester);
+    expect(find.text('Give a secret to June'), findsOneWidget);
+    expect(find.text('Test mode'), findsOneWidget);
+    await tester.tap(_labeled('Stripe'));
+    await pumpFrames(tester);
+    final grant = _sent(harness, (m) => m.hasGrantSecret()).single.grantSecret;
+    expect(grant.id, 's2');
+    expect(grant.agentId, 'june');
+  });
+
+  testWidgets('the Secrets panel of an agent with none', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      const SizedBox(height: 800, child: AgentSecretsPanel(agentId: 'june')),
+    );
+    expect(find.text('June has no secrets yet.'), findsOneWidget);
+    expect(find.text('AWS'), findsNothing);
+    expect(find.text('Give a secret…'), findsOneWidget);
   });
 
   testWidgets('no secrets: agent settings say where to add them', (
@@ -565,6 +681,63 @@ void main() {
     expect(find.text('“Use the test account.”'), findsOneWidget);
   });
 
+  testWidgets("a request's description shows its links as conversations do, "
+      'a long address as its host', (tester) async {
+    const page = 'https://dash.cloudflare.com/profile/api-tokens';
+    final harness = Harness(_workspace(secrets: []));
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        resend()
+          ..newSecret.description =
+              'A token from $page, see [the guide](https://a.test/guide).',
+      ),
+    );
+    final shown = [
+      for (final text in tester.widgetList<RichText>(find.byType(RichText)))
+        text.text.toPlainText(),
+    ];
+    expect(
+      shown,
+      contains('A token from dash.cloudflare.com/…, see the guide.'),
+    );
+    expect(shown.where((text) => text.contains(page)), isEmpty);
+  });
+
+  testWidgets('an expired request says so and takes no answer', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        resend()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_EXPIRED
+          ..decidedMs = Int64(
+            DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
+          ),
+      ),
+    );
+    expect(
+      find.textContaining('Expired · ', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('Dismiss'), findsNothing);
+    expect(find.textContaining('Give'), findsNothing);
+    expect(find.text('Choose one'), findsNothing);
+  });
+
+  testWidgets('a decision on a request that just expired shows why', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, SecretRequestCard(resend()));
+    harness.backend.refuse = 'This request expired.';
+    await tester.tap(find.text('Dismiss'));
+    await pumpFrames(tester);
+    expect(find.text('This request expired.'), findsOneWidget);
+  });
+
   testWidgets("an old request for a secret there is: Give AWS to June", (
     tester,
   ) async {
@@ -591,9 +764,8 @@ void main() {
     expect(decided.secretId, isEmpty);
   });
 
-  testWidgets('requests waiting show at the top of Settings → Secrets', (
-    tester,
-  ) async {
+  testWidgets("requests waiting don't show in Settings → Secrets, only in "
+      'their conversations', (tester) async {
     final workspace = _workspace();
     workspace.vault.requests.add(
       SecretRequest(
@@ -607,23 +779,7 @@ void main() {
     );
     final harness = Harness(workspace);
     await _show(tester, harness, const SecretsSettings());
-    expect(find.text('June asks for AWS'), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('June asks for AWS')).dy,
-      lessThan(tester.getTopLeft(find.text('Add a secret…')).dy),
-    );
-    await tester.tap(find.text('Give AWS to June'));
-    await pumpFrames(tester);
-    final decided = _sent(
-      harness,
-      (m) => m.hasDecideSecretRequest(),
-    ).single.decideSecretRequest;
-    expect(decided.requestId, 'r3');
-    expect(decided.approve, isTrue);
-
-    // Decided, the backend no longer lists it.
-    harness.backend.workspace.apply(_workspace());
-    await pumpFrames(tester);
+    expect(find.text('Add a secret…'), findsOneWidget);
     expect(find.text('June asks for AWS'), findsNothing);
   });
 

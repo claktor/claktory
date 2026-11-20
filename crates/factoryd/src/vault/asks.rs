@@ -2,11 +2,12 @@
 //! which secrets the vault holds: it describes what it needs (a name, what
 //! it's for, the variables it expects, never values) and why, and is
 //! answered the same whether or not the vault has such a secret. Each
-//! request shows in the agent's conversation after the call, and in the
-//! vault's state while it waits; the person gives one of the vault's
-//! secrets, adds a new one from the description, or dismisses it
-//! (`requests::decide_request`), and the agent is told only what it got.
-//! Requests from before named an existing secret (`secret`).
+//! request shows in the agent's conversation after the call, where the
+//! person gives one of the vault's secrets, adds a new one from the
+//! description, or dismisses it (`requests::decide_request`), and the agent
+//! is told only what it got. One left waiting expires
+//! (`requests::expire_requests`). Requests from before named an existing
+//! secret (`secret`).
 
 use factory_protocol::v1::{self, SecretRequestState};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -41,6 +42,7 @@ fn state_of(state: &str) -> SecretRequestState {
     match state {
         "granted" => SecretRequestState::Granted,
         "dismissed" => SecretRequestState::Dismissed,
+        "expired" => SecretRequestState::Expired,
         _ => SecretRequestState::Pending,
     }
 }
@@ -128,10 +130,11 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
     })
 }
 
-/// The requests waiting for the person, oldest first.
-pub(super) fn pending(db: &Connection) -> Result<Vec<v1::SecretRequest>, VaultError> {
-    let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
-    let requests = statement.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+/// The requests waiting for the person, oldest first, each with when it
+/// was made (ms since 1970).
+fn pending(db: &Connection) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
+    let mut statement = db.prepare(&format!("SELECT {COLUMNS}, created FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
+    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(11)?)))?.collect::<Result<Vec<_>, _>>()?;
     Ok(requests)
 }
 
@@ -204,6 +207,7 @@ impl Vault {
             .optional()?;
         match found {
             None => Err(VaultError::NoRequest(id.to_owned())),
+            Some(request) if request.state() == SecretRequestState::Expired => Err(VaultError::Invalid("This request expired.".to_owned())),
             Some(request) if request.state() != SecretRequestState::Pending => {
                 Err(VaultError::Invalid("This request was decided already.".to_owned()))
             }
@@ -235,6 +239,31 @@ impl Vault {
         let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
         inner.state = None;
         Ok(request)
+    }
+
+    /// The requests waiting for the person, oldest first, each with when it
+    /// was made; none while there's no vault.
+    pub(crate) fn waiting_requests(&self) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(Vec::new()) };
+        pending(db)
+    }
+
+    /// Marks `agent`'s request `id` expired, if it's still waiting; returns
+    /// it as it is now, or None if it was decided meanwhile.
+    pub(crate) fn expire_request(&self, agent: &str, id: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let changed = db.execute(
+            "UPDATE requests SET state = 'expired', decided = ?3 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![id, agent, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(Some(request))
     }
 
     /// Every request of `agent`'s, to show its conversation as it is.

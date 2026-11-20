@@ -250,8 +250,12 @@ async fn bash(client: &mut Client, view: &mut View, agent: &str, args: &str) -> 
 /// Connects (or, with `secret_id`, connects again) and waits until it is.
 async fn connect(client: &mut Client, view: &mut View, secret_id: &str) {
     let fields = [("start_url", " d-1234567890 "), ("region", "us-east-1")].map(|(key, value)| (key.to_owned(), value.to_owned())).into();
-    let start =
-        Request::StartConnect(v1::StartConnect { connector_id: "aws".into(), fields, secret_id: secret_id.into(), ..Default::default() });
+    let start = Request::StartConnect(v1::StartConnect {
+        connector_id: "aws-sso".into(),
+        fields,
+        secret_id: secret_id.into(),
+        ..Default::default()
+    });
     let started = client.request(start).await;
     let Body::ConnectStarted(started) = started.body else { panic!("expected a start, got {:?}", started.body) };
     assert_eq!(
@@ -276,7 +280,7 @@ async fn aws_connects_with_the_device_flow_and_a_role_s_credentials_are_kept_the
     factory.add_connector(Arc::new(factoryd::connectors::aws::Aws::new()), &[("aws.oidc", &base), ("aws.portal", &base)]);
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    let aws = vault(&view).connectors.into_iter().find(|connector| connector.id == "aws").expect("AWS is offered");
+    let aws = vault(&view).connectors.into_iter().find(|connector| connector.id == "aws-sso").expect("AWS is offered");
     assert_eq!(aws.flow(), v1::ConnectorFlowKind::Device);
     assert_eq!(aws.fields.iter().map(|field| field.id.as_str()).collect::<Vec<_>>(), ["start_url", "region"]);
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
@@ -285,14 +289,15 @@ async fn aws_connects_with_the_device_flow_and_a_role_s_credentials_are_kept_the
     // A region that isn't one is refused before anything is sent.
     let fields =
         [("start_url", "d-1234567890"), ("region", "evil.example/x")].map(|(key, value)| (key.to_owned(), value.to_owned())).into();
-    let bad = client.request(Request::StartConnect(v1::StartConnect { connector_id: "aws".into(), fields, ..Default::default() })).await;
+    let bad =
+        client.request(Request::StartConnect(v1::StartConnect { connector_id: "aws-sso".into(), fields, ..Default::default() })).await;
     assert_eq!(failure(&bad.body), "\"evil.example/x\" isn't an AWS region, such as us-east-1.");
 
     // Connected by the device flow: registered, approved on the second poll.
     connect(&mut client, &mut view, "").await;
     assert_eq!((center.registrations.load(Ordering::SeqCst), center.polls.load(Ordering::SeqCst)), (1, 2));
     let connection = vault(&view).secrets.into_iter().find(|secret| secret.connection.is_some()).expect("a connection");
-    assert_eq!(connection.name, "AWS (d-1234567890 in us-east-1)");
+    assert_eq!(connection.name, "AWS IAM Identity Center (d-1234567890 in us-east-1)");
     let info = connection.connection.clone().expect("connection");
     assert_eq!(
         info.resources,
@@ -385,7 +390,10 @@ async fn aws_connects_with_the_device_flow_and_a_role_s_credentials_are_kept_the
     let choices =
         apply_request(&mut client, &mut view, Request::ListConnectChoices(v1::ListConnectChoices { secret_id: connection.id.clone() }))
             .await;
-    assert_eq!(failure(&choices), "AWS (d-1234567890 in us-east-1) needs to be connected again. AWS no longer accepts its sign-in.");
+    assert_eq!(
+        failure(&choices),
+        "AWS IAM Identity Center (d-1234567890 in us-east-1) needs to be connected again. AWS no longer accepts its sign-in."
+    );
     view.follow(&mut client, |view| status(view, &connection.id) == Some(ConnectionStatus::NeedsReconnect)).await;
 
     // Connected again in place, with the client registered before: the secret made stays.

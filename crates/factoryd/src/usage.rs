@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use factory_protocol::v1;
 
-use crate::factory::Factory;
+use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
 
 /// How often the schedule is checked; checking costs nothing.
@@ -39,6 +39,30 @@ pub(crate) struct Tracked {
     failed: bool,
     /// The earliest reset after the last read; 0 when none is known.
     next_reset: i64,
+}
+
+/// An account a usage reset is being used on, until dropped.
+struct Using<'a> {
+    factory: &'a Factory,
+    key: AccountKey,
+}
+
+impl<'a> Using<'a> {
+    /// None when one is already being used on it.
+    fn start(factory: &'a Factory, key: &AccountKey) -> Option<Using<'a>> {
+        factory
+            .resetting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone())
+            .then(|| Using { factory, key: key.clone() })
+    }
+}
+
+impl Drop for Using<'_> {
+    fn drop(&mut self) {
+        self.factory.resetting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.key);
+    }
 }
 
 /// Whether to read the provider's usage now.
@@ -146,9 +170,9 @@ impl Factory {
                 let (result, plan) = tokio::join!(self.models.usage(&id, &account), self.models.plan(&id, &account));
                 named |= provider.accounts.iter().any(|known| known.id == account && known.label.is_empty());
                 match plan {
-                    // A plan once read stays until a read names another.
-                    Ok(plan) if !plan.is_empty() => self.set_plan(&key, Some(plan)),
-                    Ok(_) => {}
+                    // As the provider says it now: a new plan after an upgrade,
+                    // none when it names none. A read that fails keeps the last.
+                    Ok(plan) => self.set_plan(&key, Some(plan).filter(|plan| !plan.is_empty())),
                     Err(error) => tracing::warn!(provider = %id, %account, %error, "could not read the plan"),
                 }
                 let now = now_ms();
@@ -160,19 +184,15 @@ impl Factory {
                         self.set_usage(&key, None);
                         self.set_plan(&key, None);
                     }
-                    Ok(Some(windows)) => {
+                    Ok(Some(usage)) => {
                         entry.failed = false;
-                        let resets = windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
+                        let resets = usage.windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
                         entry.next_reset = resets.min().unwrap_or(0);
-                        self.set_usage(&key, Some(v1::ProviderUsage { windows, updated: now, error: String::new() }));
+                        self.set_usage(&key, Some(v1::ProviderUsage { updated: now, error: String::new(), ..usage }));
                     }
                     Err(error) => {
-                        tracing::warn!(provider = %id, %account, %error, "could not read usage");
                         entry.failed = true;
-                        // Keep showing the last good read, with why it's not newer.
-                        let mut usage = self.lock().usage.get(&key).cloned().unwrap_or_default();
-                        usage.error = error.to_string();
-                        self.set_usage(&key, Some(usage));
+                        self.usage_failed(&key, &error);
                     }
                 }
             }
@@ -181,6 +201,59 @@ impl Factory {
         if named {
             self.refresh_models().await;
         }
+    }
+
+    /// Keeps showing an account's last good read, with why it's not newer.
+    fn usage_failed(&self, key: &AccountKey, error: &factory_agent::Error) {
+        tracing::warn!(provider = %key.0, account = %key.1, %error, "could not read usage");
+        let mut usage = self.lock().usage.get(key).cloned().unwrap_or_default();
+        usage.error = error.to_string();
+        self.set_usage(key, Some(usage));
+    }
+
+    /// Uses one of an account's usage resets, as its last usage read listed
+    /// it (`ProviderUsage.resets`), and reads its usage again. Only the
+    /// person does this, from the app: it can't be undone, so nothing in
+    /// Claktory does it by itself. One at a time per account. The provider's
+    /// answer, or a failure on the way, comes back as a sentence.
+    pub async fn use_usage_reset(&self, provider_id: &str, account_id: &str, reset_id: &str) -> Result<v1::UsageResetAnswer, RequestError> {
+        self.known_account(provider_id, account_id)?;
+        let key = (provider_id.to_owned(), account_id.to_owned());
+        let listed = self.lock().usage.get(&key).and_then(|usage| usage.resets.iter().find(|reset| reset.id == reset_id).cloned());
+        let Some(reset) = listed else {
+            return Err(RequestError::NoReset("That reset isn't available any more.".into()));
+        };
+        let Some(_using) = Using::start(self, &key) else {
+            return Err(RequestError::Reset("A reset is already being used on this account.".into()));
+        };
+        tracing::info!(provider = provider_id, account = account_id, reset = %reset.label, "using a usage reset, as the person asked");
+        let answered = self.models.use_reset(provider_id, account_id, reset).await;
+        let answer = match answered {
+            Ok(Some(answer)) => answer,
+            Ok(None) => return Err(RequestError::NoReset("This account has no usage resets.".into())),
+            Err(error) => {
+                tracing::warn!(provider = provider_id, account = account_id, %error, "could not use a usage reset");
+                let error = error.to_string();
+                let error = error.trim_end_matches('.');
+                v1::UsageResetAnswer {
+                    reset: false,
+                    message: format!("Couldn't use the reset: {error}. Nothing was used."),
+                    ..v1::UsageResetAnswer::default()
+                }
+            }
+        };
+        tracing::info!(provider = provider_id, account = account_id, reset = answer.reset, message = %answer.message, "usage reset answered");
+        // What it changed, whatever it said: the limits, the resets left and
+        // whether requests go to the account.
+        match self.models.usage(provider_id, account_id).await {
+            Ok(Some(usage)) => self.set_usage(&key, Some(v1::ProviderUsage { updated: now_ms(), error: String::new(), ..usage })),
+            Ok(None) => {}
+            Err(error) => self.usage_failed(&key, &error),
+        }
+        if answer.reset {
+            self.refresh_models().await;
+        }
+        Ok(answer)
     }
 
     /// Forgets the usage and plan of all of a provider's accounts.
@@ -197,11 +270,20 @@ impl Factory {
     /// Records an account's usage and tells clients if it changed.
     fn set_usage(&self, key: &AccountKey, usage: Option<v1::ProviderUsage>) {
         let mut inner = self.lock();
+        let resets = |usage: Option<&v1::ProviderUsage>| {
+            let resets = usage.map(|usage| usage.resets.iter().map(|reset| format!("{} ×{}", reset.label, reset.left)));
+            resets.into_iter().flatten().collect::<Vec<_>>().join(", ")
+        };
+        let before = resets(inner.usage.get(key));
         let changed = match usage {
             Some(usage) => inner.usage.insert(key.clone(), usage.clone()).as_ref() != Some(&usage),
             None => inner.usage.remove(key).is_some(),
         };
         if changed {
+            let after = resets(inner.usage.get(key));
+            if after != before {
+                tracing::info!(provider = %key.0, account = %key.1, resets = %after, "usage resets");
+            }
             self.broadcast_workspace(&inner);
         }
     }
@@ -209,11 +291,12 @@ impl Factory {
     /// Records an account's plan and tells clients if it changed.
     fn set_plan(&self, key: &AccountKey, plan: Option<String>) {
         let mut inner = self.lock();
-        let changed = match plan {
-            Some(plan) => inner.plans.insert(key.clone(), plan.clone()).as_ref() != Some(&plan),
+        let changed = match &plan {
+            Some(plan) => inner.plans.insert(key.clone(), plan.clone()).as_ref() != Some(plan),
             None => inner.plans.remove(key).is_some(),
         };
         if changed {
+            tracing::info!(provider = %key.0, account = %key.1, plan = plan.as_deref().unwrap_or(""), "subscription plan");
             self.broadcast_workspace(&inner);
         }
     }

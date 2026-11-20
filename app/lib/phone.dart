@@ -25,6 +25,7 @@ import 'settings_view.dart';
 import 'sidebar.dart';
 import 'pane_chrome.dart';
 import 'viewers/registry.dart';
+import 'usage_view.dart';
 
 /// The app at a phone's size (docs/IDENTITY.md, "Phone"): the sidebar is
 /// the first screen, an agent's conversation is pushed over it with a back
@@ -146,6 +147,8 @@ class _PhoneShellState extends State<PhoneShell> {
                 return screen(const ChangelogView());
               case AppPage.map:
                 return screen(const MapView());
+              case AppPage.usage:
+                return screen(const UsageView());
               case AppPage.agent:
             }
             final workspace = backend.workspace.workspace;
@@ -452,7 +455,7 @@ class _SheetRow extends StatelessWidget {
 }
 
 /// A project's Files as a page pushed over the list: a bar with a back
-/// button, "Files", the project's name and Show everything, then its tree.
+/// button, "Files", the project's name and Show hidden files, then its tree.
 /// A file opens as a page over it.
 class _FilesScreen extends StatelessWidget {
   const _FilesScreen({

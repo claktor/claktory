@@ -157,7 +157,7 @@ class _Header extends StatelessWidget {
     final details = agent.modelAvailable
         ? [
             model == null ? agent.model : modelLabel(model),
-            if (agent.effort.isNotEmpty) agent.effort,
+            if (agent.effort.isNotEmpty) effortLabel(agent.effort),
           ].join(' · ')
         : 'No model available';
     final color = agentColor(agent.color);

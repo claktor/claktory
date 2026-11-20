@@ -62,9 +62,16 @@ fn old_share_releases_and_their_ips_are_forgotten() {
 /// A stand-in for Resend's API: answers one request with `status`, and
 /// hands back what it was sent.
 async fn fake_resend(status: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    let (base, handle) = fake(status, "{}").await;
+    (format!("{base}/emails"), handle)
+}
+
+/// A stand-in for a mail provider's API, at the URL it gives: answers one
+/// request with `status` and `body`, and hands back what it was sent.
+async fn fake(status: &'static str, body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/emails", listener.local_addr().unwrap());
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let handle = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
@@ -83,7 +90,7 @@ async fn fake_resend(status: &'static str) -> (String, tokio::task::JoinHandle<S
                 }
             }
         }
-        let answer = format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
+        let answer = format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
         stream.write_all(answer.as_bytes()).await.unwrap();
         String::from_utf8_lossy(&request).to_string()
     });
@@ -101,7 +108,7 @@ async fn resend_gets_the_whole_email_with_the_key() {
     let (head, body) = request.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("POST /emails ") && head.to_ascii_lowercase().contains("authorization: bearer re_key"), "{head}");
     let body: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(body["from"], "Claktory <signin@auth.claktory.com>");
+    assert_eq!(body["from"], "Claktory <code@auth.claktory.com>");
     assert_eq!(body["to"], serde_json::json!(["matt@example.com"]));
     assert_eq!(body["subject"], "Your Claktory code: 482913");
     assert_eq!(body["text"], email.text.as_str());
@@ -109,7 +116,66 @@ async fn resend_gets_the_whole_email_with_the_key() {
 
     let (url, _) = fake_resend("422 Unprocessable Entity").await;
     let error = mail::Resend::with_url("re_key".into(), url).send(&email).await.expect_err("refused");
-    assert!(error.contains("422"), "{error}");
+    assert!(matches!(&error, mail::MailError::NotSent(text) if text.contains("422")), "{error}");
+    let (url, _) = fake_resend("429 Too Many Requests").await;
+    let error = mail::Resend::with_url("re_key".into(), url).send(&email).await.expect_err("refused");
+    assert!(matches!(error, mail::MailError::Refused { kind: "throttled", .. }), "{error}");
+}
+
+#[tokio::test]
+async fn cloudflare_gets_the_whole_email_with_the_token_and_its_refusals_are_told_apart() {
+    use claktory_account::server::{Mailer, mail};
+    let email = mail::code_mail("auth.claktory.com", "matt@example.com", "482913");
+    let sent = r#"{"success": true, "errors": [], "messages": [], "result": {"message_id": "<m@auth.claktory.com>", "delivered": ["matt@example.com"], "permanent_bounces": [], "queued": [], "suppressed_recipients": []}}"#;
+    let (base, request) = fake("200 OK", sent).await;
+    mail::Cloudflare::with_base("cf-token".into(), "acc", &format!("{base}/client/v4")).send(&email).await.expect("sent");
+    let request = request.await.unwrap();
+    let (head, body) = request.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("POST /client/v4/accounts/acc/email/sending/send "), "{head}");
+    assert!(head.to_ascii_lowercase().contains("authorization: bearer cf-token"), "{head}");
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(body["from"], serde_json::json!({"address": "code@auth.claktory.com", "name": "Claktory"}));
+    assert_eq!(body["to"], "matt@example.com");
+    assert_eq!(body["subject"], "Your Claktory code: 482913");
+    assert_eq!(body["text"], email.text.as_str());
+    assert_eq!(body["html"], email.html.as_str());
+
+    let email = &email;
+    let send = |status: &'static str, answer: &'static str| async move {
+        let (base, _) = fake(status, answer).await;
+        mail::Cloudflare::with_base("cf-token".into(), "acc", &format!("{base}/client/v4")).send(email).await
+    };
+    // Dropped as suppressed, or bounced: not sent.
+    let dropped = r#"{"success": true, "errors": [], "result": {"delivered": [], "permanent_bounces": [], "queued": [], "suppressed_recipients": ["Matt@Example.com"]}}"#;
+    let error = send("200 OK", dropped).await.expect_err("suppressed");
+    assert!(matches!(&error, mail::MailError::NotSent(text) if text.contains("suppression list")), "{error}");
+    let refused =
+        r#"{"success": false, "errors": [{"code": 10001, "message": "email.sending.error.recipient_suppressed"}], "result": null}"#;
+    assert!(matches!(send("400 Bad Request", refused).await, Err(mail::MailError::NotSent(_))));
+    // The account's problems are told apart, for the log and the alert.
+    for (status, code, message, kind) in [
+        ("403 Forbidden", 10105, "email.sending.error.authentication.not_entitled", "not_entitled"),
+        ("403 Forbidden", 10203, "email.sending.error.email.sending_disabled", "sending_disabled"),
+        ("403 Forbidden", 10207, "email.sending.error.email.account_suspended", "account_suspended"),
+        ("401 Unauthorized", 10101, "email.sending.error.authentication.unauthorized", "unauthorized"),
+        ("403 Forbidden", 10102, "email.sending.error.authentication.forbidden", "forbidden"),
+        ("429 Too Many Requests", 10004, "email.sending.error.throttled", "throttled"),
+    ] {
+        let answer: &'static str = Box::leak(
+            serde_json::json!({"success": false, "errors": [{"code": code, "message": message}], "result": null})
+                .to_string()
+                .into_boxed_str(),
+        );
+        match send(status, answer).await {
+            Err(mail::MailError::Refused { kind: said, text }) => {
+                assert_eq!(said, kind);
+                assert!(text.contains(message), "{text}");
+            }
+            other => panic!("{kind}: {other:?}"),
+        }
+    }
+    let broken = r#"{"success": false, "errors": [{"code": 10002, "message": "email.sending.error.internal_server"}], "result": null}"#;
+    assert!(matches!(send("500 Internal Server Error", broken).await, Err(mail::MailError::NotSent(_))));
 }
 
 #[tokio::test]

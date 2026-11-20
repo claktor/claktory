@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds Factory's backend for Linux: one static binary (musl), which runs on
+# Builds Factory's backend (or another of its binaries: the account service,
+# claktory-account) for Linux: one static binary (musl), which runs on
 # any distribution, x86_64 or aarch64. It builds in a container, with podman or
 # docker, so this Mac needs no Linux toolchain. The container is this machine's
 # own architecture and cross-compiles for the other with zig (cargo-zigbuild),
@@ -7,7 +8,9 @@
 # FACTORY_UPDATE_URL are stamped in as for the Mac build. scripts/publish.sh
 # runs it for each release.
 #
-#   scripts/build-linux.sh ARCH OUT    ARCH: x86_64 or aarch64; OUT: the binary to write
+#   scripts/build-linux.sh ARCH OUT [PACKAGE]
+#       ARCH: x86_64 or aarch64; OUT: the binary to write; PACKAGE: factoryd
+#       (the default) or claktory-account
 #
 #   FACTORY_CONTAINER=docker   the container engine (podman unless it's missing)
 #   FACTORY_LINUX_JOBS=N       parallel jobs (2: more can run a small VM out of memory)
@@ -17,12 +20,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ARCH="${1:-}" OUT="${2:-}"
+ARCH="${1:-}" OUT="${2:-}" PACKAGE="${3:-factoryd}"
+usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-account]" >&2; exit 2; }
 case "$ARCH" in
   x86_64 | aarch64) ;;
-  *) echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2 ;;
+  *) usage ;;
 esac
-[[ -n "$OUT" ]] || { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT" >&2; exit 2; }
+[[ -n "$OUT" ]] || usage
+case "$PACKAGE" in
+  factoryd | claktory-account) ;;
+  *) usage ;;
+esac
 
 ENGINE="${FACTORY_CONTAINER:-}"
 if [[ -z "$ENGINE" ]]; then
@@ -63,13 +71,18 @@ IMAGE="docker.io/library/rust:1-alpine"
     # the same volume would otherwise get those stale crates linked in.
     tar --exclude=./target --exclude=./app --exclude=./.git -cf - . | tar -xmf - -C /work
     cd /work
-    cargo zigbuild --release --locked -p factoryd --target "$3" -j "$1"
-    file="/target/$3/release/factoryd"
+    cargo zigbuild --release --locked -p "$4" --target "$3" -j "$1"
+    file="/target/$3/release/$4"
     # Static, or it would need the libraries of the distribution it was built on.
-    if ! file "$file" | grep -Eq "statically linked|static-pie linked"; then echo "factoryd isn'"'"'t static" >&2; exit 1; fi
-    # And it runs, when it can here: an unknown command answers with the usage.
-    if [ "$3" = "$(uname -m)-unknown-linux-musl" ]; then "$file" not-a-command 2>&1 | grep -q usage; fi
+    if ! file "$file" | grep -Eq "statically linked|static-pie linked"; then echo "$4 isn'"'"'t static" >&2; exit 1; fi
+    # And it runs, when it can here: it answers with its usage.
+    if [ "$3" = "$(uname -m)-unknown-linux-musl" ]; then
+      case "$4" in
+        factoryd) "$file" not-a-command 2>&1 | grep -q usage ;;
+        *) "$file" help 2>&1 | grep -q Usage: ;;
+      esac
+    fi
     cp "$file" "/out/.$2.partial"
-  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")" "$TARGET"
+  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")" "$TARGET" "$PACKAGE"
 mv -f "$OUT_DIR/.$(basename "$OUT").partial" "$OUT"
 echo "built $OUT ($ARCH)"

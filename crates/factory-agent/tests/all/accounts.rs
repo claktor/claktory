@@ -12,7 +12,7 @@ use factory_agent::auth::{AuthEvent, AuthFuture, AuthInteraction, AuthPrompt, En
 use factory_agent::clock::now_ms;
 use factory_agent::credentials::{Credential, FileCredentialStore};
 use factory_agent::errors::Error;
-use factory_agent::limits::Identity;
+use factory_agent::limits::{Identity, ResetAnswer, UsageReset};
 use factory_agent::providers::models::{AccountNote, Notes, Registry, default_providers};
 use factory_agent::providers::{Provider, catalog};
 use factory_agent::stream::{LlmContext, StreamOptions, Transport};
@@ -23,11 +23,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// A request the mock server got: its path and bearer token.
+/// A request the mock server got: its path (with its query), bearer token
+/// and body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Seen {
     path: String,
     token: String,
+    body: String,
 }
 
 /// An answer: status, headers, content type and body.
@@ -103,7 +105,8 @@ async fn mock(route: Route) -> Mock {
                     .map(|value| value.trim_start_matches("Bearer ").to_owned())
                     .or_else(|| header("x-api-key"))
                     .unwrap_or_default();
-                let seen = Seen { path, token };
+                let body = String::from_utf8_lossy(&raw[(head_end + 4).min(raw.len())..]).into_owned();
+                let seen = Seen { path, token, body };
                 recorded.lock().push(seen.clone());
                 let answer = route(&seen);
                 let mut response = format!(
@@ -393,7 +396,7 @@ async fn without_a_reset_in_the_answer_the_usage_says_when() {
     let file = dir.path().join("auth.json");
     let weekly = "2031-01-07T10:00:00Z";
     let server = mock(Arc::new(move |seen| {
-        if seen.path.ends_with("/api/oauth/usage") {
+        if seen.path.starts_with("/api/oauth/usage") {
             return json_answer(
                 200,
                 Vec::new(),
@@ -416,10 +419,13 @@ async fn without_a_reset_in_the_answer_the_usage_says_when() {
     let (notes, _) = recorder();
 
     assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
-    assert_eq!(server.tokens("/api/oauth/usage"), [claude_token("a")]);
+    assert_eq!(server.tokens(USAGE), [claude_token("a")]);
     let accounts = registry.accounts("anthropic").await.expect("accounts");
     assert_eq!(accounts[0].exhausted_until, factory_agent::clock::parse_iso_ms(weekly).expect("time"), "the full window's reset");
 }
+
+/// Anthropic's usage, read with its resets.
+const USAGE: &str = "/api/oauth/usage?cedar_ember=1&skip_spend=1";
 
 /// A Codex access token: unsigned, with the claims Codex reads.
 fn codex_token(user: &str) -> String {
@@ -619,6 +625,7 @@ fn pasted_registry(file: &std::path::Path) -> Registry {
         limits: None,
         plan: None,
         identity: Some(who),
+        reset: None,
     };
     Registry::with_providers(FileCredentialStore::new(file.to_path_buf()), no_env(), vec![provider])
 }
@@ -795,4 +802,164 @@ async fn keys_are_added_beside_the_others_and_the_environments_comes_last() {
     registry.move_account("anthropic", &accounts[2].id, 0).await.expect("second key first");
     let labels: Vec<String> = registry.accounts("anthropic").await.expect("accounts").into_iter().map(|account| account.label).collect();
     assert_eq!(labels, ["sk-…2222", "a@x.com", "sk-…1111", "ANTHROPIC_API_KEY"]);
+}
+
+/// An upgraded ChatGPT plan shows at the next read, as Codex says it now,
+/// though the token from the sign-in still claims the old one; the claim
+/// stands in only while Codex can't say.
+#[tokio::test]
+async fn a_chatgpt_plan_is_read_as_codex_says_it_now() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let answering = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let up = answering.clone();
+    let server = mock(Arc::new(move |seen| {
+        assert!(seen.path.ends_with("/api/codex/usage"), "{}", seen.path);
+        if up.load(std::sync::atomic::Ordering::SeqCst) {
+            json_answer(200, Vec::new(), json!({"plan_type": "prolite", "rate_limit": null}))
+        } else {
+            json_answer(503, Vec::new(), json!({"error": "unavailable"}))
+        }
+    }))
+    .await;
+    store_accounts(&file, "openai-codex", vec![account("a", "a@x.com", &codex_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    assert_eq!(registry.account_plan("openai-codex", Some("a")).await.expect("plan").as_deref(), Some("ChatGPT Prolite"));
+    answering.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(registry.account_plan("openai-codex", Some("a")).await.expect("plan").as_deref(), Some("ChatGPT Pro"), "the token's claim");
+}
+
+fn reset(id: &str, label: &str, left: u32) -> UsageReset {
+    UsageReset { id: id.into(), label: label.into(), left, usable: true, ..UsageReset::default() }
+}
+
+/// The JSON body of the requests to `path`.
+fn bodies(server: &Mock, path: &str) -> Vec<Value> {
+    server.seen.lock().iter().filter(|seen| seen.path == path).map(|seen| serde_json::from_str(&seen.body).expect("a JSON body")).collect()
+}
+
+/// Using a Claude reset claims it as Claude Code does, for the account's
+/// organization, and the account at its limit gets requests again at once.
+#[tokio::test]
+async fn a_claude_reset_is_claimed_for_its_organization_and_the_account_gets_requests_again() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 3600;
+    let server = mock(Arc::new(move |seen| match seen.path.as_str() {
+        "/api/oauth/profile" => json_answer(200, Vec::new(), json!({"organization": {"uuid": "org-1"}})),
+        "/api/organizations/org-1/reset_rate_limits" => {
+            json_answer(200, Vec::new(), json!({"result": "reset", "resets_left": 1, "cleared": ["five_hour"]}))
+        }
+        _ if seen.token == claude_token("a") => claude_limit(resets),
+        _ => claude_reply(),
+    }))
+    .await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a")), account("b", "b@x.com", &claude_token("b"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert!(registry.accounts("anthropic").await.expect("accounts")[0].exhausted_until > 0, "a is at its limit");
+
+    let answer =
+        registry.use_reset("anthropic", Some("a"), reset("grant_1", "5-hour reset", 2)).await.expect("used").expect("a subscription");
+    assert_eq!(
+        answer,
+        ResetAnswer { reset: true, message: "Your 5-hour limit is reset. 1 five-hour reset left.".into(), fallback_url: String::new() }
+    );
+    let claims = bodies(&server, "/api/organizations/org-1/reset_rate_limits");
+    assert_eq!(claims.len(), 1);
+    assert_eq!((claims[0]["program"].as_str(), claims[0]["grant_id"].as_str()), (Some("cedar_ember"), Some("grant_1")));
+    let request_id = claims[0]["request_id"].as_str().expect("a request id");
+    assert!(request_id.len() == 32 && request_id.bytes().all(|byte| byte.is_ascii_hexdigit()), "{request_id}");
+    assert_eq!(server.tokens("/reset_rate_limits"), [claude_token("a")]);
+    assert_eq!(registry.accounts("anthropic").await.expect("accounts")[0].exhausted_until, 0, "requests go to it again");
+}
+
+/// A claim Anthropic refuses, or one it answers without a reset, uses
+/// nothing and leaves the account as it was; a refusal of Claktory points
+/// to claude.ai.
+#[tokio::test]
+async fn a_claude_reset_anthropic_refuses_uses_nothing_and_points_to_claude_ai() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let answers = Arc::new(Mutex::new(vec![
+        json!({"result": "not_limited", "reason": "not_limited"}),
+        json!({"result": "ineligible", "reason": "surface"}),
+    ]));
+    let next = answers.clone();
+    let server = mock(Arc::new(move |seen| match seen.path.as_str() {
+        "/api/oauth/profile" => json_answer(200, Vec::new(), json!({"organization": {"uuid": "org-1"}})),
+        _ => match next.lock().pop() {
+            Some(answer) => json_answer(200, Vec::new(), answer),
+            None => json_answer(403, Vec::new(), json!({"error": {"message": "Forbidden"}})),
+        },
+    }))
+    .await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let use_one = || registry.use_reset("anthropic", Some("a"), reset("grant_1", "Fable reset", 1));
+
+    let ineligible = use_one().await.expect("used").expect("a subscription");
+    assert!(!ineligible.reset);
+    assert_eq!(ineligible.fallback_url, "https://clau.de/reset");
+    let not_limited = use_one().await.expect("used").expect("a subscription");
+    assert_eq!(
+        not_limited,
+        ResetAnswer {
+            reset: false,
+            message: "You're not at a limit this reset refills, so nothing was used.".into(),
+            fallback_url: String::new()
+        }
+    );
+    let forbidden = use_one().await.expect("used").expect("a subscription");
+    assert!(!forbidden.reset && forbidden.message.contains("Nothing was used"), "{}", forbidden.message);
+    assert_eq!(forbidden.fallback_url, "https://clau.de/reset");
+    assert_eq!(server.tokens("/reset_rate_limits").len(), 3, "each sent once");
+}
+
+/// ChatGPT's resets are counted with its usage and told apart by their
+/// list; using one names it and gives ChatGPT's answer.
+#[tokio::test]
+async fn chatgpt_resets_are_read_with_the_usage_and_used_by_id() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|seen| match seen.path.as_str() {
+        "/api/codex/usage" => json_answer(
+            200,
+            Vec::new(),
+            json!({
+                "plan_type": "pro",
+                "rate_limit": {"primary_window": {"used_percent": 95.0, "limit_window_seconds": 18_000, "reset_at": 1_900_000_000}},
+                "rate_limit_reset_credits": {"available_count": 2}
+            }),
+        ),
+        "/api/codex/rate-limit-reset-credits" => json_answer(
+            200,
+            Vec::new(),
+            json!({"available_count": 2, "credits": [
+                {"id": "later", "reset_type": "codex_rate_limits", "status": "available", "granted_at": "2030-01-01T00:00:00Z", "expires_at": "2031-02-01T00:00:00Z", "title": null, "description": null},
+                {"id": "used", "reset_type": "codex_rate_limits", "status": "redeemed", "granted_at": "2030-01-01T00:00:00Z", "expires_at": "2030-02-01T00:00:00Z"},
+                {"id": "sooner", "reset_type": "codex_rate_limits", "status": "available", "granted_at": "2030-01-01T00:00:00Z", "expires_at": "2031-01-01T00:00:00Z"}
+            ]}),
+        ),
+        "/api/codex/rate-limit-reset-credits/consume" => json_answer(200, Vec::new(), json!({"code": "nothing_to_reset", "windows_reset": 0})),
+        _ => json_answer(404, Vec::new(), json!({})),
+    }))
+    .await;
+    store_accounts(&file, "openai-codex", vec![account("a", "a@x.com", &codex_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+
+    let usage = registry.account_usage("openai-codex", Some("a")).await.expect("read").expect("a subscription");
+    assert_eq!(usage.resets.len(), 1, "{:?}", usage.resets);
+    let full = &usage.resets[0];
+    assert_eq!((full.id.as_str(), full.label.as_str(), full.left), ("sooner", "Full reset", 2));
+    assert_eq!(full.expires_at, factory_agent::clock::parse_iso_ms("2031-01-01T00:00:00Z").expect("time"));
+    assert_eq!(full.window_ids, ["five_hour"]);
+
+    let answer = registry.use_reset("openai-codex", Some("a"), full.clone()).await.expect("used").expect("a subscription");
+    assert!(!answer.reset && answer.message.contains("Nothing was used"), "{}", answer.message);
+    let consumed = bodies(&server, "/api/codex/rate-limit-reset-credits/consume");
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0]["credit_id"], "sooner");
+    assert!(consumed[0]["redeem_request_id"].as_str().is_some_and(|id| !id.is_empty()));
 }

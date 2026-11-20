@@ -1,5 +1,6 @@
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/extension_about.dart';
 import 'package:factory_app/extensions.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -319,6 +320,55 @@ void main() {
     );
     await settle(tester);
     expect(find.text('This panel needs a newer Claktory.'), findsOneWidget);
+  });
+
+  testWidgets('an extension with no view of its own says what it does', (
+    tester,
+  ) async {
+    final snapshot = workspace(openPanel: 'tree')
+      ..extensions.add(
+        Extension(
+          id: 'tree',
+          name: 'Own checkout',
+          description: 'A checkout of the repository of its own.',
+          icon: 'git-branch',
+          options: [
+            ExtensionOption(
+              id: 'land',
+              label: 'Can land on main',
+              kind: ExtensionOptionKind.EXTENSION_OPTION_KIND_SWITCH,
+              defaultValue: true,
+            ),
+          ],
+        ),
+      );
+    snapshot.agents[1].extensions.add(
+      AgentExtension(
+        id: 'tree',
+        enabled: true,
+        options: {'land': OptionValue(on: false)}.entries,
+      ),
+    );
+    await showWith(tester, snapshot);
+    expect(glyphButton('Close Own checkout'), findsOneWidget);
+    expect(
+      find.text('A checkout of the repository of its own.'),
+      findsOneWidget,
+    );
+    expect(find.text('Can land on main'), findsOneWidget);
+    expect(find.text('Off'), findsOneWidget);
+    await tester.tap(find.text('Open agent settings'));
+    await settle(tester);
+    expect(find.text('Message box hint'), findsOneWidget);
+  });
+
+  test('instances of extensions with views have views', () {
+    expect(hasExtensionView(checklistExtension), isTrue);
+    expect(
+      hasExtensionView(Extension(id: 'database:factory', base: 'database')),
+      isTrue,
+    );
+    expect(hasExtensionView(Extension(id: 'web')), isFalse);
   });
 
   testWidgets('a panel shows only while open, for an agent that has it', (

@@ -19,6 +19,7 @@ class AppDelegate: FlutterAppDelegate {
   override func applicationWillFinishLaunching(_ notification: Notification) {
     // MainMenu.xib says "About APP_NAME", "Hide APP_NAME", "Quit APP_NAME".
     if let menu = NSApp.mainMenu { Self.name(menu) }
+    MainFlutterWindow.addZoomItems()
     super.applicationWillFinishLaunching(notification)
   }
 

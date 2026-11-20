@@ -119,7 +119,7 @@ impl Factory {
 
     /// Fails unless the provider exists and, when `account_id` isn't empty,
     /// has that account.
-    fn known_account(&self, provider_id: &str, account_id: &str) -> Result<(), RequestError> {
+    pub(crate) fn known_account(&self, provider_id: &str, account_id: &str) -> Result<(), RequestError> {
         let inner = self.lock();
         let Some(provider) = inner.providers.iter().find(|provider| provider.id == provider_id) else {
             return Err(RequestError::UnknownProvider(provider_id.to_owned()));

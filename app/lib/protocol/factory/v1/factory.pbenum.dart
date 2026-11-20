@@ -730,15 +730,22 @@ class SecretRequestState extends $pb.ProtobufEnum {
       SecretRequestState._(
           3, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_DISMISSED');
 
+  /// Left unanswered too long (12 hours, or 10 of the agent's runs): it can't
+  /// be answered any more, and the agent was told. decided_ms says when.
+  static const SecretRequestState SECRET_REQUEST_STATE_EXPIRED =
+      SecretRequestState._(
+          4, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_EXPIRED');
+
   static const $core.List<SecretRequestState> values = <SecretRequestState>[
     SECRET_REQUEST_STATE_UNSPECIFIED,
     SECRET_REQUEST_STATE_PENDING,
     SECRET_REQUEST_STATE_GRANTED,
     SECRET_REQUEST_STATE_DISMISSED,
+    SECRET_REQUEST_STATE_EXPIRED,
   ];
 
   static final $core.List<SecretRequestState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 3);
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
   static SecretRequestState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -884,14 +891,21 @@ class ConnectorFlowKind extends $pb.ProtobufEnum {
       ConnectorFlowKind._(
           2, _omitEnumNames ? '' : 'CONNECTOR_FLOW_KIND_DEVICE');
 
+  /// The app opens the service's page that makes a token (ConnectStarted.url)
+  /// and asks the person to paste the token it shows, sent in
+  /// FinishConnect.token. The app never shows it again nor keeps it.
+  static const ConnectorFlowKind CONNECTOR_FLOW_KIND_PASTE =
+      ConnectorFlowKind._(3, _omitEnumNames ? '' : 'CONNECTOR_FLOW_KIND_PASTE');
+
   static const $core.List<ConnectorFlowKind> values = <ConnectorFlowKind>[
     CONNECTOR_FLOW_KIND_UNSPECIFIED,
     CONNECTOR_FLOW_KIND_BROWSER,
     CONNECTOR_FLOW_KIND_DEVICE,
+    CONNECTOR_FLOW_KIND_PASTE,
   ];
 
   static final $core.List<ConnectorFlowKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 2);
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
   static ConnectorFlowKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -932,11 +946,13 @@ class ConnectFlowState extends $pb.ProtobufEnum {
       ConnectFlowState._(
           0, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_UNSPECIFIED');
 
-  /// Waiting for the person, in the browser.
+  /// Waiting for the person, in the browser (PASTE: for the token; `error`
+  /// says why the last one pasted didn't work).
   static const ConnectFlowState CONNECT_FLOW_STATE_WAITING =
       ConnectFlowState._(1, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_WAITING');
 
-  /// Signing in with what the browser brought back.
+  /// Signing in with what the browser brought back (PASTE: checking the
+  /// token with the service).
   static const ConnectFlowState CONNECT_FLOW_STATE_EXCHANGING =
       ConnectFlowState._(
           2, _omitEnumNames ? '' : 'CONNECT_FLOW_STATE_EXCHANGING');

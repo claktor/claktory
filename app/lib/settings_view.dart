@@ -16,6 +16,7 @@ import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
+import 'zoom.dart' show ZoomSetting;
 
 /// Factory-wide settings: provider sign-in and the defaults for new agents.
 /// On a Mac, a pane beside the conversation ([InPane]); on a phone, or with
@@ -133,7 +134,10 @@ class SettingsView extends StatelessWidget {
                         const SizedBox(height: Space.xxl),
                         _Section(
                           title: 'Display',
-                          children: [_Highlights(workspace: workspace)],
+                          children: [
+                            const ZoomSetting(),
+                            _Highlights(workspace: workspace),
+                          ],
                         ),
                       ],
                     ),

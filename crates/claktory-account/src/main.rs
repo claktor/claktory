@@ -14,15 +14,21 @@ Usage:
   claktory-account init-secrets FILE
   claktory-account stats --db FILE
   claktory-account backup --db FILE --to DIR [--keep N]
+  claktory-account set-cloudflare-token FILE (the token on standard input)
   claktory-account set-resend-key FILE      (the key on standard input)
 
 serve options:
   --listen ADDRESS        where to listen (127.0.0.1:8080)
   --trust-proxy           behind a TLS proxy such as Caddy: the client's IP is
                           the last of X-Forwarded-For, and cookies are Secure
+  --email PROVIDER        how emails go: cloudflare, resend or folder. Left
+                          out: Cloudflare when the secrets file has
+                          cloudflare_api_token, else Resend when it has
+                          resend_api_key, else the folder of --mail-dir
+  --cloudflare-account ID the Cloudflare account that sends (Cloudflare Email
+                          Sending, its domain onboarded there)
   --mail-dir DIR          write emails to files in DIR instead of sending them
-                          (when the secrets file has no resend_api_key)
-  --mail-domain DOMAIN    emails come from signin@ and notices@ it (auth.claktory.com)
+  --mail-domain DOMAIN    emails come from code@ and notices@ it (auth.claktory.com)
   --account-page TEXT     the account page, as emails write it (claktory.com/account)
   --email-daily-cap N     emails a day at most (90); codes stop there
   --admin-email ADDRESS   who runs the service: told when 80% of the day's
@@ -33,7 +39,8 @@ serve options:
   --relay URL             a relay for Claktories to use; repeat for more
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
-signing_key offline, and add resend_api_key to send email.
+signing_key offline. To send email, set-cloudflare-token puts a Cloudflare API
+token with Email Sending: Edit in it (or set-resend-key a Resend key).
 
 backup writes a consistent copy of the database to DIR, while it's in use, and
 keeps the newest N copies (14).
@@ -52,6 +59,7 @@ fn main() -> ExitCode {
         "stats" => stats(&args),
         "backup" => backup(&args),
         "set-resend-key" => set_resend_key(&args),
+        "set-cloudflare-token" => set_cloudflare_token(&args),
         "help" => {
             print!("{USAGE}");
             Ok(())
@@ -115,6 +123,8 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--db",
             "--secrets",
             "--listen",
+            "--email",
+            "--cloudflare-account",
             "--mail-dir",
             "--mail-domain",
             "--account-page",
@@ -147,11 +157,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             tracing::warn!("no GeoIP file at {} yet: places stay unknown until it's there and the service restarts", path.display());
         }
     }
-    let mailer: Arc<dyn Mailer> = match (&secrets.resend_api_key, options.value("--mail-dir")?) {
-        (Some(key), _) => Arc::new(mail::Resend::new(key.clone())),
-        (None, Some(dir)) => Arc::new(mail::Folder::new(PathBuf::from(&dir)).map_err(|error| format!("can't use {dir}: {error}"))?),
-        (None, None) => return Err("no way to send email: add resend_api_key to the secrets file, or give --mail-dir".to_owned()),
-    };
+    let mailer = mailer(&options, &secrets)?;
     if secrets.relay_bearer.is_none() {
         tracing::info!("no relay_bearer in the secrets file: the relay allowlist is off");
     }
@@ -173,6 +179,47 @@ fn serve(args: &[String]) -> Result<(), String> {
             }
         }
     })
+}
+
+/// How emails go: as `--email` says, or by what's configured.
+fn mailer(options: &Options, secrets: &Secrets) -> Result<Arc<dyn Mailer>, String> {
+    let dir = options.value("--mail-dir")?;
+    let account = options.value("--cloudflare-account")?;
+    let provider = match options.value("--email")? {
+        Some(provider) => provider,
+        None if secrets.cloudflare_api_token.is_some() => "cloudflare".to_owned(),
+        None if secrets.resend_api_key.is_some() => "resend".to_owned(),
+        None if dir.is_some() => "folder".to_owned(),
+        None => {
+            return Err(
+                "no way to send email: put a Cloudflare API token in the secrets file (set-cloudflare-token) and give --cloudflare-account, or give --mail-dir"
+                    .to_owned(),
+            );
+        }
+    };
+    let mailer: Arc<dyn Mailer> = match provider.as_str() {
+        "cloudflare" => {
+            let token = secrets
+                .cloudflare_api_token
+                .clone()
+                .ok_or("--email cloudflare needs cloudflare_api_token in the secrets file (set-cloudflare-token)")?;
+            let account = account.ok_or("--email cloudflare needs --cloudflare-account, the account's id")?;
+            tracing::info!("emails go through Cloudflare Email Sending");
+            Arc::new(mail::Cloudflare::new(token, &account))
+        }
+        "resend" => {
+            let key = secrets.resend_api_key.clone().ok_or("--email resend needs resend_api_key in the secrets file (set-resend-key)")?;
+            tracing::info!("emails go through Resend");
+            Arc::new(mail::Resend::new(key))
+        }
+        "folder" => {
+            let dir = dir.ok_or("--email folder needs --mail-dir")?;
+            tracing::info!("emails are written to {dir}, not sent");
+            Arc::new(mail::Folder::new(PathBuf::from(&dir)).map_err(|error| format!("can't use {dir}: {error}"))?)
+        }
+        other => return Err(format!("--email is cloudflare, resend or folder, not {other}")),
+    };
+    Ok(mailer)
 }
 
 async fn shutdown() {
@@ -218,6 +265,17 @@ fn backup(args: &[String]) -> Result<(), String> {
     };
     let written = server::db::backup(&db, &dir, keep, jiff::Timestamp::now().as_second())?;
     println!("Wrote {}", written.display());
+    Ok(())
+}
+
+fn set_cloudflare_token(args: &[String]) -> Result<(), String> {
+    let [path] = args else {
+        return Err(format!("set-cloudflare-token takes the secrets file, and the token on standard input\n\n{USAGE}"));
+    };
+    let mut token = zeroize::Zeroizing::new(String::new());
+    std::io::stdin().read_line(&mut token).map_err(|error| error.to_string())?;
+    Secrets::set_cloudflare_token(&PathBuf::from(path), token.trim())?;
+    println!("Set the Cloudflare token in {path}. Restart the service to use it.");
     Ok(())
 }
 

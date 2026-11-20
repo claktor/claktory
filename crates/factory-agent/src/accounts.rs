@@ -17,6 +17,20 @@ pub fn mark_usage_limit(output: &mut AssistantMessage, resets_at: Option<u64>) {
     output.extra.insert(USAGE_LIMIT.into(), json!({ "resetsAt": resets_at }));
 }
 
+/// The key in an answer's `extra` naming the account that gave it, when the
+/// provider has several: the account's id.
+pub const ANSWERED_BY: &str = "account";
+
+/// Marks `output` as given by the account `id`.
+pub fn mark_answered_by(output: &mut AssistantMessage, id: &str) {
+    output.extra.insert(ANSWERED_BY.into(), json!(id));
+}
+
+/// The account that gave the answer, when it's known.
+pub fn answered_by(message: &AssistantMessage) -> Option<&str> {
+    message.extra.get(ANSWERED_BY).and_then(Value::as_str)
+}
+
 /// The key a provider sets in a failed response's `extra` when the API key
 /// ran out of credit.
 pub const OUT_OF_CREDIT: &str = "outOfCredit";

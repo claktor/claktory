@@ -959,10 +959,19 @@ class Backend {
     return reply.connectStarted;
   }
 
-  /// The whole address the browser came back to, as it is.
-  Future<void> finishConnect(String flowId, String callbackUrl) => _request(
+  /// The whole address the browser came back to, as it is (BROWSER), or
+  /// the token the person pasted (PASTE).
+  Future<void> finishConnect(
+    String flowId,
+    String callbackUrl, {
+    String token = '',
+  }) => _request(
     ClientMessage(
-      finishConnect: FinishConnect(flowId: flowId, callbackUrl: callbackUrl),
+      finishConnect: FinishConnect(
+        flowId: flowId,
+        callbackUrl: callbackUrl,
+        token: token,
+      ),
     ),
   );
 
@@ -994,6 +1003,17 @@ class Backend {
     return reply.connectChoices;
   }
 
+  /// Uses one of an account's usage resets, as the person asked (never on
+  /// its own): how it went, as the provider said. The account's usage is
+  /// read again either way.
+  Future<UsageResetAnswer> useUsageReset(UseUsageReset use) async {
+    final reply = await _call(ClientMessage(useUsageReset: use));
+    if (!reply.hasUsageResetAnswer()) {
+      throw const RequestFailure('Claktory sent no answer.');
+    }
+    return reply.usageResetAnswer;
+  }
+
   /// Makes a secret from a connection, with only the access asked for.
   Future<void> deriveSecret(DeriveSecret derive) =>
       _request(ClientMessage(deriveSecret: derive));
@@ -1009,6 +1029,16 @@ class Backend {
           ),
         ),
       );
+
+  /// How many tokens went where over a range (the Usage pane), to this
+  /// device only.
+  Future<UsageReport> loadUsage(LoadUsage ask) async {
+    final reply = await _call(ClientMessage(loadUsage: ask));
+    if (!reply.hasUsageReport()) {
+      throw const RequestFailure('Claktory sent no usage.');
+    }
+    return reply.usageReport;
+  }
 
   /// Emails a code to sign this Claktory in to [email].
   Future<void> accountSignIn(String email) =>
@@ -1142,6 +1172,15 @@ class Backend {
   /// Turns highlights on or off for the person (`Workspace.highlights`).
   Future<void> setHighlights(bool on) =>
       _request(ClientMessage(setHighlights: SetHighlights(on: on)));
+
+  /// Zooms the whole app on this device ([zoom] 1 is actual size): kept
+  /// for this device only (`Settings.zoom`, see zoom.dart).
+  Future<void> setZoom(double zoom) =>
+      _request(ClientMessage(setZoom: SetZoom(zoom: zoom)));
+
+  /// This device's key in `Settings.zoom`: its paired id, or "local" for
+  /// this machine's own app.
+  String get zoomKey => deviceId.isEmpty ? 'local' : deviceId;
 
   /// Folds a project folder's agents away in the sidebar, or shows them.
   Future<void> setFolderCollapsed(
@@ -1438,6 +1477,8 @@ class Backend {
       case ServerMessage_Body.uploadedFile:
       case ServerMessage_Body.connectStarted:
       case ServerMessage_Body.connectChoices:
+      case ServerMessage_Body.usageReport:
+      case ServerMessage_Body.usageResetAnswer:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.threadList:
         threads.apply(message.threadList);

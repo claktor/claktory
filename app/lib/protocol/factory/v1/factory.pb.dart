@@ -112,6 +112,9 @@ enum ClientMessage_Body {
   listConnectChoices,
   deriveSecret,
   disconnectService,
+  setZoom,
+  useUsageReset,
+  loadUsage,
   notSet
 }
 
@@ -208,6 +211,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     ListConnectChoices? listConnectChoices,
     DeriveSecret? deriveSecret,
     DisconnectService? disconnectService,
+    SetZoom? setZoom,
+    UseUsageReset? useUsageReset,
+    LoadUsage? loadUsage,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -306,6 +312,9 @@ class ClientMessage extends $pb.GeneratedMessage {
       result.listConnectChoices = listConnectChoices;
     if (deriveSecret != null) result.deriveSecret = deriveSecret;
     if (disconnectService != null) result.disconnectService = disconnectService;
+    if (setZoom != null) result.setZoom = setZoom;
+    if (useUsageReset != null) result.useUsageReset = useUsageReset;
+    if (loadUsage != null) result.loadUsage = loadUsage;
     return result;
   }
 
@@ -410,6 +419,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     94: ClientMessage_Body.listConnectChoices,
     95: ClientMessage_Body.deriveSecret,
     96: ClientMessage_Body.disconnectService,
+    97: ClientMessage_Body.setZoom,
+    98: ClientMessage_Body.useUsageReset,
+    99: ClientMessage_Body.loadUsage,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -506,7 +518,10 @@ class ClientMessage extends $pb.GeneratedMessage {
       93,
       94,
       95,
-      96
+      96,
+      97,
+      98,
+      99
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -691,6 +706,12 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: DeriveSecret.$_createMessage)
     ..aOM<DisconnectService>(96, _omitFieldNames ? '' : 'disconnectService',
         subBuilder: DisconnectService.$_createMessage)
+    ..aOM<SetZoom>(97, _omitFieldNames ? '' : 'setZoom',
+        subBuilder: SetZoom.$_createMessage)
+    ..aOM<UseUsageReset>(98, _omitFieldNames ? '' : 'useUsageReset',
+        subBuilder: UseUsageReset.$_createMessage)
+    ..aOM<LoadUsage>(99, _omitFieldNames ? '' : 'loadUsage',
+        subBuilder: LoadUsage.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -805,6 +826,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(94)
   @$pb.TagNumber(95)
   @$pb.TagNumber(96)
+  @$pb.TagNumber(97)
+  @$pb.TagNumber(98)
+  @$pb.TagNumber(99)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -896,6 +920,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(94)
   @$pb.TagNumber(95)
   @$pb.TagNumber(96)
+  @$pb.TagNumber(97)
+  @$pb.TagNumber(98)
+  @$pb.TagNumber(99)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -1908,6 +1935,42 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearDisconnectService() => $_clearField(96);
   @$pb.TagNumber(96)
   DisconnectService ensureDisconnectService() => $_ensure(90);
+
+  @$pb.TagNumber(97)
+  SetZoom get setZoom => $_getN(91);
+  @$pb.TagNumber(97)
+  set setZoom(SetZoom value) => $_setField(97, value);
+  @$pb.TagNumber(97)
+  $core.bool hasSetZoom() => $_has(91);
+  @$pb.TagNumber(97)
+  void clearSetZoom() => $_clearField(97);
+  @$pb.TagNumber(97)
+  SetZoom ensureSetZoom() => $_ensure(91);
+
+  /// The person uses one of an account's usage resets (see UsageReset).
+  @$pb.TagNumber(98)
+  UseUsageReset get useUsageReset => $_getN(92);
+  @$pb.TagNumber(98)
+  set useUsageReset(UseUsageReset value) => $_setField(98, value);
+  @$pb.TagNumber(98)
+  $core.bool hasUseUsageReset() => $_has(92);
+  @$pb.TagNumber(98)
+  void clearUseUsageReset() => $_clearField(98);
+  @$pb.TagNumber(98)
+  UseUsageReset ensureUseUsageReset() => $_ensure(92);
+
+  /// The usage breakdown for a time range, on demand; answered with
+  /// UsageReport.
+  @$pb.TagNumber(99)
+  LoadUsage get loadUsage => $_getN(93);
+  @$pb.TagNumber(99)
+  set loadUsage(LoadUsage value) => $_setField(99, value);
+  @$pb.TagNumber(99)
+  $core.bool hasLoadUsage() => $_has(93);
+  @$pb.TagNumber(99)
+  void clearLoadUsage() => $_clearField(99);
+  @$pb.TagNumber(99)
+  LoadUsage ensureLoadUsage() => $_ensure(93);
 }
 
 enum ServerMessage_Body {
@@ -1941,6 +2004,8 @@ enum ServerMessage_Body {
   thread,
   connectStarted,
   connectChoices,
+  usageResetAnswer,
+  usageReport,
   notSet
 }
 
@@ -1977,6 +2042,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     Thread? thread,
     ConnectStarted? connectStarted,
     ConnectChoices? connectChoices,
+    UsageResetAnswer? usageResetAnswer,
+    UsageReport? usageReport,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -2010,6 +2077,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (thread != null) result.thread = thread;
     if (connectStarted != null) result.connectStarted = connectStarted;
     if (connectChoices != null) result.connectChoices = connectChoices;
+    if (usageResetAnswer != null) result.usageResetAnswer = usageResetAnswer;
+    if (usageReport != null) result.usageReport = usageReport;
     return result;
   }
 
@@ -2054,6 +2123,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     32: ServerMessage_Body.thread,
     34: ServerMessage_Body.connectStarted,
     35: ServerMessage_Body.connectChoices,
+    36: ServerMessage_Body.usageResetAnswer,
+    37: ServerMessage_Body.usageReport,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -2090,7 +2161,9 @@ class ServerMessage extends $pb.GeneratedMessage {
       31,
       32,
       34,
-      35
+      35,
+      36,
+      37
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -2153,6 +2226,10 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: ConnectStarted.$_createMessage)
     ..aOM<ConnectChoices>(35, _omitFieldNames ? '' : 'connectChoices',
         subBuilder: ConnectChoices.$_createMessage)
+    ..aOM<UsageResetAnswer>(36, _omitFieldNames ? '' : 'usageResetAnswer',
+        subBuilder: UsageResetAnswer.$_createMessage)
+    ..aOM<UsageReport>(37, _omitFieldNames ? '' : 'usageReport',
+        subBuilder: UsageReport.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2207,6 +2284,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(32)
   @$pb.TagNumber(34)
   @$pb.TagNumber(35)
+  @$pb.TagNumber(36)
+  @$pb.TagNumber(37)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -2238,6 +2317,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(32)
   @$pb.TagNumber(34)
   @$pb.TagNumber(35)
+  @$pb.TagNumber(36)
+  @$pb.TagNumber(37)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -2602,6 +2683,30 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearConnectChoices() => $_clearField(35);
   @$pb.TagNumber(35)
   ConnectChoices ensureConnectChoices() => $_ensure(30);
+
+  /// The answer to UseUsageReset, to the asker only.
+  @$pb.TagNumber(36)
+  UsageResetAnswer get usageResetAnswer => $_getN(31);
+  @$pb.TagNumber(36)
+  set usageResetAnswer(UsageResetAnswer value) => $_setField(36, value);
+  @$pb.TagNumber(36)
+  $core.bool hasUsageResetAnswer() => $_has(31);
+  @$pb.TagNumber(36)
+  void clearUsageResetAnswer() => $_clearField(36);
+  @$pb.TagNumber(36)
+  UsageResetAnswer ensureUsageResetAnswer() => $_ensure(31);
+
+  /// The answer to LoadUsage, to the asker only.
+  @$pb.TagNumber(37)
+  UsageReport get usageReport => $_getN(32);
+  @$pb.TagNumber(37)
+  set usageReport(UsageReport value) => $_setField(37, value);
+  @$pb.TagNumber(37)
+  $core.bool hasUsageReport() => $_has(32);
+  @$pb.TagNumber(37)
+  void clearUsageReport() => $_clearField(37);
+  @$pb.TagNumber(37)
+  UsageReport ensureUsageReport() => $_ensure(32);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -10233,6 +10338,93 @@ class UpdateAccount extends $pb.GeneratedMessage {
   void clearRetry() => $_clearField(4);
 }
 
+/// Uses one of an account's usage resets (`ProviderUsage.resets`), only ever
+/// at the person's word. Answered with UsageResetAnswer, then the account's
+/// usage is read again and reaches everyone with Workspace. An Error when the
+/// account or the reset isn't there (any more) or a reset is already being
+/// used on the account.
+class UseUsageReset extends $pb.GeneratedMessage {
+  factory UseUsageReset({
+    $core.String? providerId,
+    $core.String? accountId,
+    $core.String? resetId,
+  }) {
+    final result = UseUsageReset._();
+    if (providerId != null) result.providerId = providerId;
+    if (accountId != null) result.accountId = accountId;
+    if (resetId != null) result.resetId = resetId;
+    return result;
+  }
+
+  UseUsageReset._();
+
+  factory UseUsageReset.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UseUsageReset()..mergeFromBuffer(data, registry);
+  factory UseUsageReset.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UseUsageReset()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UseUsageReset',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UseUsageReset.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerId')
+    ..aOS(2, _omitFieldNames ? '' : 'accountId')
+    ..aOS(3, _omitFieldNames ? '' : 'resetId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UseUsageReset clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UseUsageReset copyWith(void Function(UseUsageReset) updates) =>
+      super.copyWith((message) => updates(message as UseUsageReset))
+          as UseUsageReset;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UseUsageReset() / UseUsageReset.new instead')
+  static UseUsageReset create() => UseUsageReset._();
+  static $pb.GeneratedMessage $_createMessage() => UseUsageReset._();
+  @$core.override
+  UseUsageReset createEmptyInstance() => UseUsageReset._();
+  @$core.pragma('dart2js:noInline')
+  static UseUsageReset getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UseUsageReset>(
+          UseUsageReset.$_createMessage);
+  static UseUsageReset? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get providerId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get accountId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set accountId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAccountId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAccountId() => $_clearField(2);
+
+  /// `UsageReset.id`.
+  @$pb.TagNumber(3)
+  $core.String get resetId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set resetId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasResetId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearResetId() => $_clearField(3);
+}
+
 class Ack extends $pb.GeneratedMessage {
   factory Ack() => Ack._();
 
@@ -10270,6 +10462,94 @@ class Ack extends $pb.GeneratedMessage {
   static Ack getDefault() => _defaultInstance ??=
       $pb.GeneratedMessage.$_defaultFor<Ack>(Ack.$_createMessage);
   static Ack? _defaultInstance;
+}
+
+class UsageResetAnswer extends $pb.GeneratedMessage {
+  factory UsageResetAnswer({
+    $core.bool? reset,
+    $core.String? message,
+    $core.String? fallbackUrl,
+  }) {
+    final result = UsageResetAnswer._();
+    if (reset != null) result.reset = reset;
+    if (message != null) result.message = message;
+    if (fallbackUrl != null) result.fallbackUrl = fallbackUrl;
+    return result;
+  }
+
+  UsageResetAnswer._();
+
+  factory UsageResetAnswer.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageResetAnswer()..mergeFromBuffer(data, registry);
+  factory UsageResetAnswer.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageResetAnswer()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageResetAnswer',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageResetAnswer.$_createMessage)
+    ..aOB(1, _omitFieldNames ? '' : 'reset')
+    ..aOS(2, _omitFieldNames ? '' : 'message')
+    ..aOS(3, _omitFieldNames ? '' : 'fallbackUrl')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageResetAnswer clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageResetAnswer copyWith(void Function(UsageResetAnswer) updates) =>
+      super.copyWith((message) => updates(message as UsageResetAnswer))
+          as UsageResetAnswer;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageResetAnswer() / UsageResetAnswer.new instead')
+  static UsageResetAnswer create() => UsageResetAnswer._();
+  static $pb.GeneratedMessage $_createMessage() => UsageResetAnswer._();
+  @$core.override
+  UsageResetAnswer createEmptyInstance() => UsageResetAnswer._();
+  @$core.pragma('dart2js:noInline')
+  static UsageResetAnswer getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UsageResetAnswer>(
+          UsageResetAnswer.$_createMessage);
+  static UsageResetAnswer? _defaultInstance;
+
+  /// A limit was reset.
+  @$pb.TagNumber(1)
+  $core.bool get reset => $_getBF(0);
+  @$pb.TagNumber(1)
+  set reset($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasReset() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearReset() => $_clearField(1);
+
+  /// What happened, a sentence or two to show as is: "Your 5-hour limit is
+  /// reset. 1 five-hour reset left.", or why nothing was used. A failure on
+  /// the way is an answer too, since the reset may have gone through.
+  @$pb.TagNumber(2)
+  $core.String get message => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set message($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMessage() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMessage() => $_clearField(2);
+
+  /// Where the person can use the reset on the provider's own site, when it
+  /// refused Claktory's request or couldn't be reached
+  /// ("https://clau.de/reset"); empty otherwise.
+  @$pb.TagNumber(3)
+  $core.String get fallbackUrl => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set fallbackUrl($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFallbackUrl() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFallbackUrl() => $_clearField(3);
 }
 
 class Error extends $pb.GeneratedMessage {
@@ -14084,6 +14364,7 @@ class Settings extends $pb.GeneratedMessage {
     $core.Iterable<CacheTtl>? cacheTtls,
     $core.String? name,
     $core.String? color,
+    $core.Iterable<$core.MapEntry<$core.String, $core.double>>? zoom,
   }) {
     final result = Settings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -14105,6 +14386,7 @@ class Settings extends $pb.GeneratedMessage {
     if (cacheTtls != null) result.cacheTtls.addAll(cacheTtls);
     if (name != null) result.name = name;
     if (color != null) result.color = color;
+    if (zoom != null) result.zoom.addEntries(zoom);
     return result;
   }
 
@@ -14143,6 +14425,11 @@ class Settings extends $pb.GeneratedMessage {
         subBuilder: CacheTtl.$_createMessage)
     ..aOS(26, _omitFieldNames ? '' : 'name')
     ..aOS(27, _omitFieldNames ? '' : 'color')
+    ..m<$core.String, $core.double>(28, _omitFieldNames ? '' : 'zoom',
+        entryClassName: 'Settings.ZoomEntry',
+        keyFieldType: $pb.PbFieldType.OS,
+        valueFieldType: $pb.PbFieldType.OD,
+        packageName: const $pb.PackageName('factory.v1'))
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -14348,6 +14635,15 @@ class Settings extends $pb.GeneratedMessage {
   $core.bool hasColor() => $_has(16);
   @$pb.TagNumber(27)
   void clearColor() => $_clearField(27);
+
+  /// How much each device zooms the whole app (config.json's `display.zoom`),
+  /// by device id as Welcome.device_id gives it: "local" for this machine's
+  /// own app, which a connection on the loopback port without a token (an
+  /// empty Welcome.device_id) also counts as. 1.0 is actual size, which a
+  /// device not listed has; 0.5 to 2.0. Each device's own, since each has its
+  /// own screen; set with SetZoom.
+  @$pb.TagNumber(28)
+  $pb.PbMap<$core.String, $core.double> get zoom => $_getMap(17);
 }
 
 /// How long a provider's (or one model's) prompt cache is asked to last.
@@ -14764,11 +15060,13 @@ class ProviderUsage extends $pb.GeneratedMessage {
     $core.Iterable<UsageWindow>? windows,
     $fixnum.Int64? updated,
     $core.String? error,
+    $core.Iterable<UsageReset>? resets,
   }) {
     final result = ProviderUsage._();
     if (windows != null) result.windows.addAll(windows);
     if (updated != null) result.updated = updated;
     if (error != null) result.error = error;
+    if (resets != null) result.resets.addAll(resets);
     return result;
   }
 
@@ -14789,6 +15087,8 @@ class ProviderUsage extends $pb.GeneratedMessage {
         subBuilder: UsageWindow.$_createMessage)
     ..aInt64(2, _omitFieldNames ? '' : 'updated')
     ..aOS(3, _omitFieldNames ? '' : 'error')
+    ..pPM<UsageReset>(4, _omitFieldNames ? '' : 'resets',
+        subBuilder: UsageReset.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -14838,6 +15138,173 @@ class ProviderUsage extends $pb.GeneratedMessage {
   $core.bool hasError() => $_has(2);
   @$pb.TagNumber(3)
   void clearError() => $_clearField(3);
+
+  /// The usage resets the account has left, read with its usage (kept from
+  /// the last good read, like `windows`); empty when it has none or the
+  /// provider offers none. Only the person uses one, with UseUsageReset.
+  @$pb.TagNumber(4)
+  $pb.PbList<UsageReset> get resets => $_getList(3);
+}
+
+/// Some of an account's usage resets, all of one kind: each refills some of
+/// its limits now, once.
+class UsageReset extends $pb.GeneratedMessage {
+  factory UsageReset({
+    $core.String? id,
+    $core.String? label,
+    $core.String? detail,
+    $core.int? left,
+    $core.int? total,
+    $fixnum.Int64? expiresAt,
+    $core.bool? usable,
+    $core.String? unavailable,
+    $core.Iterable<$core.String>? windowIds,
+  }) {
+    final result = UsageReset._();
+    if (id != null) result.id = id;
+    if (label != null) result.label = label;
+    if (detail != null) result.detail = detail;
+    if (left != null) result.left = left;
+    if (total != null) result.total = total;
+    if (expiresAt != null) result.expiresAt = expiresAt;
+    if (usable != null) result.usable = usable;
+    if (unavailable != null) result.unavailable = unavailable;
+    if (windowIds != null) result.windowIds.addAll(windowIds);
+    return result;
+  }
+
+  UsageReset._();
+
+  factory UsageReset.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageReset()..mergeFromBuffer(data, registry);
+  factory UsageReset.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageReset()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageReset',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageReset.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aOS(3, _omitFieldNames ? '' : 'detail')
+    ..aI(4, _omitFieldNames ? '' : 'left', fieldType: $pb.PbFieldType.OU3)
+    ..aI(5, _omitFieldNames ? '' : 'total', fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(6, _omitFieldNames ? '' : 'expiresAt')
+    ..aOB(7, _omitFieldNames ? '' : 'usable')
+    ..aOS(8, _omitFieldNames ? '' : 'unavailable')
+    ..pPS(9, _omitFieldNames ? '' : 'windowIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageReset clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageReset copyWith(void Function(UsageReset) updates) =>
+      super.copyWith((message) => updates(message as UsageReset)) as UsageReset;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageReset() / UsageReset.new instead')
+  static UsageReset create() => UsageReset._();
+  static $pb.GeneratedMessage $_createMessage() => UsageReset._();
+  @$core.override
+  UsageReset createEmptyInstance() => UsageReset._();
+  @$core.pragma('dart2js:noInline')
+  static UsageReset getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UsageReset>(UsageReset.$_createMessage);
+  static UsageReset? _defaultInstance;
+
+  /// The provider's id for it, given back in `UseUsageReset.reset_id`; may be
+  /// empty (the provider then picks one of the account's resets).
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// What it is, shown as is: "Fable reset", "5-hour reset", "Weekly reset",
+  /// "Full reset"; ChatGPT's own title for it, or else "Full reset".
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// What using it does, a sentence: "Refills your 5-hour limit."
+  @$pb.TagNumber(3)
+  $core.String get detail => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set detail($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDetail() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDetail() => $_clearField(3);
+
+  /// How many of these are left: 1 or more (spent ones aren't listed).
+  @$pb.TagNumber(4)
+  $core.int get left => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set left($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasLeft() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearLeft() => $_clearField(4);
+
+  /// How many it came with; 0 when the provider doesn't say.
+  @$pb.TagNumber(5)
+  $core.int get total => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set total($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTotal() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTotal() => $_clearField(5);
+
+  /// When the first of them expires, in ms since 1970; 0 when they don't.
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get expiresAt => $_getI64(5);
+  @$pb.TagNumber(6)
+  set expiresAt($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasExpiresAt() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearExpiresAt() => $_clearField(6);
+
+  /// The provider says it can be used now. The person may still try one that
+  /// isn't: the provider's answer says what happened.
+  @$pb.TagNumber(7)
+  $core.bool get usable => $_getBF(6);
+  @$pb.TagNumber(7)
+  set usable($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasUsable() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearUsable() => $_clearField(7);
+
+  /// Why it can't be used now, a sentence ("It works only at a usage
+  /// limit."); empty when `usable`.
+  @$pb.TagNumber(8)
+  $core.String get unavailable => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set unavailable($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasUnavailable() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearUnavailable() => $_clearField(8);
+
+  /// The `UsageWindow` ids it refills ("five_hour", "weekly",
+  /// "weekly_fable"…); empty when the provider doesn't say.
+  @$pb.TagNumber(9)
+  $pb.PbList<$core.String> get windowIds => $_getList(8);
 }
 
 /// One usage limit, such as the weekly or the 5-hour one.
@@ -20893,7 +21360,7 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(7)
   void clearState() => $_clearField(7);
 
-  /// When it was decided, in ms since 1970; 0 while pending.
+  /// When it was decided, or expired, in ms since 1970; 0 while pending.
   @$pb.TagNumber(8)
   $fixnum.Int64 get decidedMs => $_getI64(7);
   @$pb.TagNumber(8)
@@ -21948,6 +22415,7 @@ class Connector extends $pb.GeneratedMessage {
     $core.Iterable<$core.String>? variables,
     $core.String? setupNote,
     $core.String? setupUrl,
+    $core.String? tokenUrl,
   }) {
     final result = Connector._();
     if (id != null) result.id = id;
@@ -21960,6 +22428,7 @@ class Connector extends $pb.GeneratedMessage {
     if (variables != null) result.variables.addAll(variables);
     if (setupNote != null) result.setupNote = setupNote;
     if (setupUrl != null) result.setupUrl = setupUrl;
+    if (tokenUrl != null) result.tokenUrl = tokenUrl;
     return result;
   }
 
@@ -21989,6 +22458,7 @@ class Connector extends $pb.GeneratedMessage {
     ..pPS(8, _omitFieldNames ? '' : 'variables')
     ..aOS(9, _omitFieldNames ? '' : 'setupNote')
     ..aOS(10, _omitFieldNames ? '' : 'setupUrl')
+    ..aOS(11, _omitFieldNames ? '' : 'tokenUrl')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22089,6 +22559,17 @@ class Connector extends $pb.GeneratedMessage {
   $core.bool hasSetupUrl() => $_has(9);
   @$pb.TagNumber(10)
   void clearSetupUrl() => $_clearField(10);
+
+  /// PASTE: the service's page that makes the token, with what it needs
+  /// filled in, as ConnectStarted.url also gives it.
+  @$pb.TagNumber(11)
+  $core.String get tokenUrl => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set tokenUrl($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasTokenUrl() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearTokenUrl() => $_clearField(11);
 }
 
 class ConnectorAccess extends $pb.GeneratedMessage {
@@ -22321,6 +22802,8 @@ class ConnectProposal extends $pb.GeneratedMessage {
     $core.String? comment,
     $core.String? secretId,
     $core.String? secretName,
+    $core.Iterable<PolicyStatement>? statements,
+    $core.String? region,
   }) {
     final result = ConnectProposal._();
     if (id != null) result.id = id;
@@ -22336,6 +22819,8 @@ class ConnectProposal extends $pb.GeneratedMessage {
     if (comment != null) result.comment = comment;
     if (secretId != null) result.secretId = secretId;
     if (secretName != null) result.secretName = secretName;
+    if (statements != null) result.statements.addAll(statements);
+    if (region != null) result.region = region;
     return result;
   }
 
@@ -22366,6 +22851,9 @@ class ConnectProposal extends $pb.GeneratedMessage {
     ..aOS(11, _omitFieldNames ? '' : 'comment')
     ..aOS(12, _omitFieldNames ? '' : 'secretId')
     ..aOS(13, _omitFieldNames ? '' : 'secretName')
+    ..pPM<PolicyStatement>(14, _omitFieldNames ? '' : 'statements',
+        subBuilder: PolicyStatement.$_createMessage)
+    ..aOS(15, _omitFieldNames ? '' : 'region')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22516,6 +23004,99 @@ class ConnectProposal extends $pb.GeneratedMessage {
   $core.bool hasSecretName() => $_has(12);
   @$pb.TagNumber(13)
   void clearSecretName() => $_clearField(13);
+
+  /// The exact permissions it asks for, where the service takes them (AWS):
+  /// each an Allow statement. The connection is made with exactly these, and
+  /// the backend refuses one that reaches more. Empty for the others.
+  @$pb.TagNumber(14)
+  $pb.PbList<PolicyStatement> get statements => $_getList(13);
+
+  /// AWS: the region it's for ("eu-central-1"); empty for the others.
+  @$pb.TagNumber(15)
+  $core.String get region => $_getSZ(14);
+  @$pb.TagNumber(15)
+  set region($core.String value) => $_setString(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasRegion() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearRegion() => $_clearField(15);
+}
+
+/// One Allow statement of a permissions policy (AWS IAM): the actions, on the
+/// resources, under the condition.
+class PolicyStatement extends $pb.GeneratedMessage {
+  factory PolicyStatement({
+    $core.Iterable<$core.String>? actions,
+    $core.Iterable<$core.String>? resources,
+    $core.String? condition,
+  }) {
+    final result = PolicyStatement._();
+    if (actions != null) result.actions.addAll(actions);
+    if (resources != null) result.resources.addAll(resources);
+    if (condition != null) result.condition = condition;
+    return result;
+  }
+
+  PolicyStatement._();
+
+  factory PolicyStatement.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PolicyStatement()..mergeFromBuffer(data, registry);
+  factory PolicyStatement.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PolicyStatement()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PolicyStatement',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PolicyStatement.$_createMessage)
+    ..pPS(1, _omitFieldNames ? '' : 'actions')
+    ..pPS(2, _omitFieldNames ? '' : 'resources')
+    ..aOS(3, _omitFieldNames ? '' : 'condition')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PolicyStatement clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PolicyStatement copyWith(void Function(PolicyStatement) updates) =>
+      super.copyWith((message) => updates(message as PolicyStatement))
+          as PolicyStatement;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PolicyStatement() / PolicyStatement.new instead')
+  static PolicyStatement create() => PolicyStatement._();
+  static $pb.GeneratedMessage $_createMessage() => PolicyStatement._();
+  @$core.override
+  PolicyStatement createEmptyInstance() => PolicyStatement._();
+  @$core.pragma('dart2js:noInline')
+  static PolicyStatement getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PolicyStatement>(
+          PolicyStatement.$_createMessage);
+  static PolicyStatement? _defaultInstance;
+
+  /// "ec2:RunInstances", "s3:GetObject"; wildcards as IAM takes them
+  /// ("ec2:Describe*").
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.String> get actions => $_getList(0);
+
+  /// ARNs, or "*" (for actions that take no resource).
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get resources => $_getList(1);
+
+  /// IAM's Condition block as compact JSON, such as
+  /// {"StringEquals":{"aws:RequestedRegion":"eu-central-1"}}; empty for
+  /// none. Shown to the person as it is.
+  @$pb.TagNumber(3)
+  $core.String get condition => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set condition($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCondition() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCondition() => $_clearField(3);
 }
 
 /// Starts connecting a service. The flow belongs to the device that asked:
@@ -22709,8 +23290,9 @@ class ConnectStarted extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearFlowId() => $_clearField(1);
 
-  /// The page to open: the service's sign-in (BROWSER), or its verification
-  /// page with the code filled in (DEVICE).
+  /// The page to open: the service's sign-in (BROWSER), its verification
+  /// page with the code filled in (DEVICE), or its page that makes a token
+  /// (PASTE).
   @$pb.TagNumber(2)
   $core.String get url => $_getSZ(1);
   @$pb.TagNumber(2)
@@ -22742,15 +23324,18 @@ class ConnectStarted extends $pb.GeneratedMessage {
 }
 
 /// Where the browser came back to (BROWSER): the whole URL, as it is, with
-/// its code and state or the service's error.
+/// its code and state or the service's error. Or the token the person
+/// pasted (PASTE). Only the device that started the flow can finish it.
 class FinishConnect extends $pb.GeneratedMessage {
   factory FinishConnect({
     $core.String? flowId,
     $core.String? callbackUrl,
+    $core.String? token,
   }) {
     final result = FinishConnect._();
     if (flowId != null) result.flowId = flowId;
     if (callbackUrl != null) result.callbackUrl = callbackUrl;
+    if (token != null) result.token = token;
     return result;
   }
 
@@ -22769,6 +23354,7 @@ class FinishConnect extends $pb.GeneratedMessage {
       createEmptyInstance: FinishConnect.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'flowId')
     ..aOS(2, _omitFieldNames ? '' : 'callbackUrl')
+    ..aOS(3, _omitFieldNames ? '' : 'token')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22810,6 +23396,18 @@ class FinishConnect extends $pb.GeneratedMessage {
   $core.bool hasCallbackUrl() => $_has(1);
   @$pb.TagNumber(2)
   void clearCallbackUrl() => $_clearField(2);
+
+  /// PASTE: the token, as pasted. The backend checks it with the service
+  /// before keeping it; one the service doesn't accept leaves the flow
+  /// WAITING with ConnectFlow.error saying why, to paste another.
+  @$pb.TagNumber(3)
+  $core.String get token => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set token($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasToken() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearToken() => $_clearField(3);
 }
 
 /// Stops a flow, or removes an ended one from VaultState.flows.
@@ -22979,7 +23577,8 @@ class ConnectFlow extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearState() => $_clearField(4);
 
-  /// FAILED: why, a sentence for the person.
+  /// FAILED: why, a sentence for the person. WAITING (PASTE): why the token
+  /// pasted last didn't work; empty before one is.
   @$pb.TagNumber(5)
   $core.String get error => $_getSZ(4);
   @$pb.TagNumber(5)
@@ -23720,6 +24319,64 @@ class DeriveSecret extends $pb.GeneratedMessage {
   void clearExpiresMs() => $_clearField(6);
 }
 
+/// Sets how much this device zooms the whole app (Settings.zoom): the
+/// device this connection is, never another. 1.0, or 0, is actual size;
+/// otherwise 0.5 to 2.0 (finite), or it's refused. Answered with Ack.
+class SetZoom extends $pb.GeneratedMessage {
+  factory SetZoom({
+    $core.double? zoom,
+  }) {
+    final result = SetZoom._();
+    if (zoom != null) result.zoom = zoom;
+    return result;
+  }
+
+  SetZoom._();
+
+  factory SetZoom.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetZoom()..mergeFromBuffer(data, registry);
+  factory SetZoom.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetZoom()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetZoom',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetZoom.$_createMessage)
+    ..aD(1, _omitFieldNames ? '' : 'zoom')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetZoom clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetZoom copyWith(void Function(SetZoom) updates) =>
+      super.copyWith((message) => updates(message as SetZoom)) as SetZoom;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetZoom() / SetZoom.new instead')
+  static SetZoom create() => SetZoom._();
+  static $pb.GeneratedMessage $_createMessage() => SetZoom._();
+  @$core.override
+  SetZoom createEmptyInstance() => SetZoom._();
+  @$core.pragma('dart2js:noInline')
+  static SetZoom getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetZoom>(SetZoom.$_createMessage);
+  static SetZoom? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.double get zoom => $_getN(0);
+  @$pb.TagNumber(1)
+  set zoom($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasZoom() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearZoom() => $_clearField(1);
+}
+
 /// Removes a connection and the secrets made from it.
 class DisconnectService extends $pb.GeneratedMessage {
   factory DisconnectService({
@@ -23790,6 +24447,532 @@ class DisconnectService extends $pb.GeneratedMessage {
   $core.bool hasRevoke() => $_has(1);
   @$pb.TagNumber(2)
   void clearRevoke() => $_clearField(2);
+}
+
+/// Asks for the tokens agents' model calls used in a time range, by provider,
+/// model, account and agent, for the Usage pane: not in the Workspace, asked
+/// again to refresh. Calls are counted per UTC hour, so the range's ends are
+/// rounded down to whole hours.
+class LoadUsage extends $pb.GeneratedMessage {
+  factory LoadUsage({
+    $fixnum.Int64? sinceMs,
+    $fixnum.Int64? untilMs,
+    $fixnum.Int64? bucketMs,
+    $core.int? utcOffsetMinutes,
+  }) {
+    final result = LoadUsage._();
+    if (sinceMs != null) result.sinceMs = sinceMs;
+    if (untilMs != null) result.untilMs = untilMs;
+    if (bucketMs != null) result.bucketMs = bucketMs;
+    if (utcOffsetMinutes != null) result.utcOffsetMinutes = utcOffsetMinutes;
+    return result;
+  }
+
+  LoadUsage._();
+
+  factory LoadUsage.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LoadUsage()..mergeFromBuffer(data, registry);
+  factory LoadUsage.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      LoadUsage()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'LoadUsage',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: LoadUsage.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'sinceMs')
+    ..aInt64(2, _omitFieldNames ? '' : 'untilMs')
+    ..aInt64(3, _omitFieldNames ? '' : 'bucketMs')
+    ..aI(4, _omitFieldNames ? '' : 'utcOffsetMinutes')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LoadUsage clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  LoadUsage copyWith(void Function(LoadUsage) updates) =>
+      super.copyWith((message) => updates(message as LoadUsage)) as LoadUsage;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use LoadUsage() / LoadUsage.new instead')
+  static LoadUsage create() => LoadUsage._();
+  static $pb.GeneratedMessage $_createMessage() => LoadUsage._();
+  @$core.override
+  LoadUsage createEmptyInstance() => LoadUsage._();
+  @$core.pragma('dart2js:noInline')
+  static LoadUsage getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<LoadUsage>(LoadUsage.$_createMessage);
+  static LoadUsage? _defaultInstance;
+
+  /// From, in ms since 1970; 0 for since the first call counted.
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get sinceMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set sinceMs($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSinceMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSinceMs() => $_clearField(1);
+
+  /// To, exclusive; 0 for now.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get untilMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set untilMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUntilMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUntilMs() => $_clearField(2);
+
+  /// The series' step: a whole number of hours, such as 3600000 or 86400000;
+  /// 0 for no series. At most 5,000 buckets.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get bucketMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set bucketMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasBucketMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearBucketMs() => $_clearField(3);
+
+  /// Where the person's days start (minutes east of UTC), for day buckets.
+  @$pb.TagNumber(4)
+  $core.int get utcOffsetMinutes => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set utcOffsetMinutes($core.int value) => $_setSignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasUtcOffsetMinutes() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearUtcOffsetMinutes() => $_clearField(4);
+}
+
+class UsageReport extends $pb.GeneratedMessage {
+  factory UsageReport({
+    $fixnum.Int64? sinceMs,
+    $fixnum.Int64? untilMs,
+    $core.Iterable<UsageRow>? rows,
+    $core.Iterable<UsageBucket>? series,
+    $fixnum.Int64? agentsSinceMs,
+  }) {
+    final result = UsageReport._();
+    if (sinceMs != null) result.sinceMs = sinceMs;
+    if (untilMs != null) result.untilMs = untilMs;
+    if (rows != null) result.rows.addAll(rows);
+    if (series != null) result.series.addAll(series);
+    if (agentsSinceMs != null) result.agentsSinceMs = agentsSinceMs;
+    return result;
+  }
+
+  UsageReport._();
+
+  factory UsageReport.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageReport()..mergeFromBuffer(data, registry);
+  factory UsageReport.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageReport()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageReport',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageReport.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'sinceMs')
+    ..aInt64(2, _omitFieldNames ? '' : 'untilMs')
+    ..pPM<UsageRow>(3, _omitFieldNames ? '' : 'rows',
+        subBuilder: UsageRow.$_createMessage)
+    ..pPM<UsageBucket>(4, _omitFieldNames ? '' : 'series',
+        subBuilder: UsageBucket.$_createMessage)
+    ..aInt64(5, _omitFieldNames ? '' : 'agentsSinceMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageReport clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageReport copyWith(void Function(UsageReport) updates) =>
+      super.copyWith((message) => updates(message as UsageReport))
+          as UsageReport;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageReport() / UsageReport.new instead')
+  static UsageReport create() => UsageReport._();
+  static $pb.GeneratedMessage $_createMessage() => UsageReport._();
+  @$core.override
+  UsageReport createEmptyInstance() => UsageReport._();
+  @$core.pragma('dart2js:noInline')
+  static UsageReport getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UsageReport>(
+          UsageReport.$_createMessage);
+  static UsageReport? _defaultInstance;
+
+  /// The range as applied: for all time, the first counted call's hour.
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get sinceMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set sinceMs($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSinceMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSinceMs() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get untilMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set untilMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUntilMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUntilMs() => $_clearField(2);
+
+  /// One per provider × model × account × agent with any use in the range;
+  /// every grouping of them adds up.
+  @$pb.TagNumber(3)
+  $pb.PbList<UsageRow> get rows => $_getList(2);
+
+  /// Every bucket of the range, empty ones too, oldest first.
+  @$pb.TagNumber(4)
+  $pb.PbList<UsageBucket> get series => $_getList(3);
+
+  /// When counting by agent (and account) began: earlier use has agent_id and
+  /// account_id ""; 0 if nothing's been counted by agent yet.
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get agentsSinceMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set agentsSinceMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAgentsSinceMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAgentsSinceMs() => $_clearField(5);
+}
+
+class UsageRow extends $pb.GeneratedMessage {
+  factory UsageRow({
+    $core.String? providerId,
+    $core.String? model,
+    $core.String? accountId,
+    $core.String? accountLabel,
+    $core.String? agentId,
+    $core.String? agentName,
+    UsageTokens? tokens,
+    $fixnum.Int64? requests,
+  }) {
+    final result = UsageRow._();
+    if (providerId != null) result.providerId = providerId;
+    if (model != null) result.model = model;
+    if (accountId != null) result.accountId = accountId;
+    if (accountLabel != null) result.accountLabel = accountLabel;
+    if (agentId != null) result.agentId = agentId;
+    if (agentName != null) result.agentName = agentName;
+    if (tokens != null) result.tokens = tokens;
+    if (requests != null) result.requests = requests;
+    return result;
+  }
+
+  UsageRow._();
+
+  factory UsageRow.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageRow()..mergeFromBuffer(data, registry);
+  factory UsageRow.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageRow()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageRow',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageRow.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerId')
+    ..aOS(2, _omitFieldNames ? '' : 'model')
+    ..aOS(3, _omitFieldNames ? '' : 'accountId')
+    ..aOS(4, _omitFieldNames ? '' : 'accountLabel')
+    ..aOS(5, _omitFieldNames ? '' : 'agentId')
+    ..aOS(6, _omitFieldNames ? '' : 'agentName')
+    ..aOM<UsageTokens>(7, _omitFieldNames ? '' : 'tokens',
+        subBuilder: UsageTokens.$_createMessage)
+    ..a<$fixnum.Int64>(
+        8, _omitFieldNames ? '' : 'requests', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageRow clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageRow copyWith(void Function(UsageRow) updates) =>
+      super.copyWith((message) => updates(message as UsageRow)) as UsageRow;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageRow() / UsageRow.new instead')
+  static UsageRow create() => UsageRow._();
+  static $pb.GeneratedMessage $_createMessage() => UsageRow._();
+  @$core.override
+  UsageRow createEmptyInstance() => UsageRow._();
+  @$core.pragma('dart2js:noInline')
+  static UsageRow getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UsageRow>(UsageRow.$_createMessage);
+  static UsageRow? _defaultInstance;
+
+  /// "anthropic".
+  @$pb.TagNumber(1)
+  $core.String get providerId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderId() => $_clearField(1);
+
+  /// "claude-opus-4-5", as the provider named it.
+  @$pb.TagNumber(2)
+  $core.String get model => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set model($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasModel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearModel() => $_clearField(2);
+
+  /// The provider account that answered (Account.id); "" when unknown.
+  @$pb.TagNumber(3)
+  $core.String get accountId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set accountId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAccountId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAccountId() => $_clearField(3);
+
+  /// Its label as Settings shows it (an email, a key's name); "" when unknown
+  /// or signed out.
+  @$pb.TagNumber(4)
+  $core.String get accountLabel => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set accountLabel($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasAccountLabel() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAccountLabel() => $_clearField(4);
+
+  /// "" for calls from before agents were counted.
+  @$pb.TagNumber(5)
+  $core.String get agentId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set agentId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAgentId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAgentId() => $_clearField(5);
+
+  /// The agent's name at its latest counted call, so a deleted one still
+  /// reads right.
+  @$pb.TagNumber(6)
+  $core.String get agentName => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set agentName($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasAgentName() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAgentName() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  UsageTokens get tokens => $_getN(6);
+  @$pb.TagNumber(7)
+  set tokens(UsageTokens value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasTokens() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearTokens() => $_clearField(7);
+  @$pb.TagNumber(7)
+  UsageTokens ensureTokens() => $_ensure(6);
+
+  /// Model calls.
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get requests => $_getI64(7);
+  @$pb.TagNumber(8)
+  set requests($fixnum.Int64 value) => $_setInt64(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasRequests() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearRequests() => $_clearField(8);
+}
+
+class UsageTokens extends $pb.GeneratedMessage {
+  factory UsageTokens({
+    $fixnum.Int64? input,
+    $fixnum.Int64? output,
+    $fixnum.Int64? cacheRead,
+    $fixnum.Int64? cacheWrite,
+  }) {
+    final result = UsageTokens._();
+    if (input != null) result.input = input;
+    if (output != null) result.output = output;
+    if (cacheRead != null) result.cacheRead = cacheRead;
+    if (cacheWrite != null) result.cacheWrite = cacheWrite;
+    return result;
+  }
+
+  UsageTokens._();
+
+  factory UsageTokens.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageTokens()..mergeFromBuffer(data, registry);
+  factory UsageTokens.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageTokens()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageTokens',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageTokens.$_createMessage)
+    ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'input', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'output', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'cacheRead', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        4, _omitFieldNames ? '' : 'cacheWrite', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageTokens clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageTokens copyWith(void Function(UsageTokens) updates) =>
+      super.copyWith((message) => updates(message as UsageTokens))
+          as UsageTokens;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageTokens() / UsageTokens.new instead')
+  static UsageTokens create() => UsageTokens._();
+  static $pb.GeneratedMessage $_createMessage() => UsageTokens._();
+  @$core.override
+  UsageTokens createEmptyInstance() => UsageTokens._();
+  @$core.pragma('dart2js:noInline')
+  static UsageTokens getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UsageTokens>(
+          UsageTokens.$_createMessage);
+  static UsageTokens? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get input => $_getI64(0);
+  @$pb.TagNumber(1)
+  set input($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasInput() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearInput() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get output => $_getI64(1);
+  @$pb.TagNumber(2)
+  set output($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasOutput() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearOutput() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get cacheRead => $_getI64(2);
+  @$pb.TagNumber(3)
+  set cacheRead($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCacheRead() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCacheRead() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get cacheWrite => $_getI64(3);
+  @$pb.TagNumber(4)
+  set cacheWrite($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCacheWrite() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCacheWrite() => $_clearField(4);
+}
+
+class UsageBucket extends $pb.GeneratedMessage {
+  factory UsageBucket({
+    $fixnum.Int64? startMs,
+    UsageTokens? tokens,
+  }) {
+    final result = UsageBucket._();
+    if (startMs != null) result.startMs = startMs;
+    if (tokens != null) result.tokens = tokens;
+    return result;
+  }
+
+  UsageBucket._();
+
+  factory UsageBucket.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageBucket()..mergeFromBuffer(data, registry);
+  factory UsageBucket.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageBucket()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageBucket',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageBucket.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'startMs')
+    ..aOM<UsageTokens>(2, _omitFieldNames ? '' : 'tokens',
+        subBuilder: UsageTokens.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageBucket clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageBucket copyWith(void Function(UsageBucket) updates) =>
+      super.copyWith((message) => updates(message as UsageBucket))
+          as UsageBucket;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageBucket() / UsageBucket.new instead')
+  static UsageBucket create() => UsageBucket._();
+  static $pb.GeneratedMessage $_createMessage() => UsageBucket._();
+  @$core.override
+  UsageBucket createEmptyInstance() => UsageBucket._();
+  @$core.pragma('dart2js:noInline')
+  static UsageBucket getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UsageBucket>(
+          UsageBucket.$_createMessage);
+  static UsageBucket? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get startMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set startMs($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasStartMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearStartMs() => $_clearField(1);
+
+  /// All providers together.
+  @$pb.TagNumber(2)
+  UsageTokens get tokens => $_getN(1);
+  @$pb.TagNumber(2)
+  set tokens(UsageTokens value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasTokens() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTokens() => $_clearField(2);
+  @$pb.TagNumber(2)
+  UsageTokens ensureTokens() => $_ensure(1);
 }
 
 const $core.bool _omitFieldNames =

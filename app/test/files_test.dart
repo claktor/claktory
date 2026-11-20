@@ -123,7 +123,7 @@ void main() {
     await showFiles(tester, focused: 'p1', explorers: [tree()]);
     expect(find.byType(FilesPane), findsNothing);
     expect(find.text('README.md'), findsNothing);
-    expect(find.text('Show everything'), findsNothing);
+    expect(find.text('Show hidden files'), findsNothing);
   });
 
   testWidgets("a project row's Files button opens its Files beside the "
@@ -176,7 +176,7 @@ void main() {
     expect(tester.takeException(), isNull, reason: 'nothing overflows');
     expect(find.byType(FilesPane), findsOneWidget);
     expect(
-      find.bySemanticsLabel('Show everything'),
+      find.bySemanticsLabel('Show hidden files'),
       findsOneWidget,
       reason: 'a narrow pane keeps just the check',
     );
@@ -228,7 +228,7 @@ void main() {
       ExpandFolder(projectId: 'p1', path: 'app', expanded: false),
     );
 
-    await tester.tap(find.text('Show everything'));
+    await tester.tap(find.text('Show hidden files'));
     await settle(tester);
     expect(
       harness.last.showAllFiles,

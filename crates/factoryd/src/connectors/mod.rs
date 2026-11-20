@@ -16,6 +16,7 @@
 //! with only the access the work needs (`derive`).
 
 pub mod aws;
+pub mod aws_stack;
 pub mod cloudflare;
 pub(crate) mod proposals;
 
@@ -39,8 +40,10 @@ use crate::vault::{Value, VaultError};
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// How long a flow waits for the person.
+/// How long a flow waits for the person…
 const FLOW_MS: i64 = 10 * 60 * 1000;
+/// …and one that waits for a token the person makes on the service's site.
+const PASTE_FLOW_MS: i64 = 30 * 60 * 1000;
 /// How long an ended flow stays listed, for every device to see how it went.
 const ENDED_MS: i64 = 10 * 60 * 1000;
 /// How long values an export had before are still hidden from agents: a
@@ -63,6 +66,8 @@ pub struct Spec {
     pub variables: Vec<String>,
     pub setup_note: String,
     pub setup_url: String,
+    /// PASTE: the page that makes the token, filled in.
+    pub token_url: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,6 +93,8 @@ pub enum FlowKind {
     #[default]
     Browser,
     Device,
+    /// The person makes a token on the service's page and pastes it.
+    Paste,
 }
 
 impl Spec {
@@ -121,12 +128,14 @@ impl Spec {
             flow: match self.flow {
                 FlowKind::Browser => v1::ConnectorFlowKind::Browser,
                 FlowKind::Device => v1::ConnectorFlowKind::Device,
+                FlowKind::Paste => v1::ConnectorFlowKind::Paste,
             }
             .into(),
             redirect_uris: self.redirect_uris.clone(),
             variables: self.variables.clone(),
             setup_note: self.setup_note.clone(),
             setup_url: self.setup_url.clone(),
+            token_url: self.token_url.clone(),
         }
     }
 
@@ -175,9 +184,14 @@ pub struct Start<'a> {
     pub fields: &'a BTreeMap<String, String>,
     /// BROWSER: where the browser comes back to, checked against the spec.
     pub redirect_uri: &'a str,
-    /// BROWSER: the state to send, and PKCE's S256 challenge.
+    /// BROWSER: the state to send, and PKCE's S256 challenge. The state is
+    /// 43 random URL-safe characters, unique to the flow.
     pub state: &'a str,
     pub challenge: &'a str,
+    /// The flow's id ("f" and 12 hex digits).
+    pub flow: &'a str,
+    /// The agent's suggestion it answers, if it answers one.
+    pub proposal: Option<&'a v1::ConnectProposal>,
 }
 
 /// A device flow started (DEVICE).
@@ -372,6 +386,28 @@ pub trait Recipe: Send + Sync {
         Box::pin(async { Err(Problem::unsupported()) })
     }
 
+    /// PASTE: starts the flow: the page to open (by default the spec's
+    /// `token_url`), and what checking the token will need, kept with the
+    /// flow (by default nothing; a key made for this flow, say).
+    fn start_paste<'a>(&'a self, _http: &'a Http, _start: &'a Start<'a>) -> BoxFuture<'a, Result<(String, Control), Problem>> {
+        let url = self.spec().token_url.clone();
+        Box::pin(async move { Ok((url, Control::new(String::new()))) })
+    }
+
+    /// PASTE: the token the person pasted, checked with the service (with
+    /// `pending`, what `start_paste` kept), as the connection's control. A
+    /// token it doesn't accept is a Problem saying why, and the person can
+    /// paste another.
+    fn paste<'a>(
+        &'a self,
+        _http: &'a Http,
+        _start: &'a Start<'a>,
+        _pending: &'a Control,
+        _token: &'a str,
+    ) -> BoxFuture<'a, Result<Control, Problem>> {
+        Box::pin(async { Err(Problem::unsupported()) })
+    }
+
     /// Who the connection is and what it reaches.
     fn inspect<'a>(&'a self, http: &'a Http, control: &'a Control) -> BoxFuture<'a, Result<Inspected, Problem>>;
 
@@ -430,6 +466,7 @@ pub trait Recipe: Send + Sync {
 /// The recipes built in.
 fn built_in() -> Vec<Arc<dyn Recipe>> {
     let mut recipes: Vec<Arc<dyn Recipe>> = Vec::new();
+    recipes.extend(aws_stack::AwsStack::built_in().map(|recipe| Arc::new(recipe) as Arc<dyn Recipe>));
     recipes.extend(aws::Aws::built_in().map(|recipe| Arc::new(recipe) as Arc<dyn Recipe>));
     recipes.extend(cloudflare::Cloudflare::built_in().map(|recipe| Arc::new(recipe) as Arc<dyn Recipe>));
     recipes
@@ -458,6 +495,10 @@ struct Flow {
     challenge: String,
     /// A connection to connect again in place.
     reconnect: String,
+    /// The suggestion it answers.
+    proposal: Option<v1::ConnectProposal>,
+    /// PASTE: what `start_paste` kept for checking the token.
+    pending: Control,
     /// The browser's answer was taken (codes are used once).
     finished: bool,
     cancel: CancellationToken,
@@ -476,6 +517,8 @@ impl Flow {
             redirect_uri: &self.redirect_uri,
             state: &self.state,
             challenge: &self.challenge,
+            flow: &self.view.id,
+            proposal: self.proposal.as_ref(),
         }
     }
 }
@@ -677,14 +720,16 @@ impl Factory {
             }
             fields.insert(field.id.clone(), value.to_owned());
         }
+        let mut proposal = None;
         if !request.proposal_id.is_empty() {
-            let proposal = self.vault.connect_proposal(&request.proposal_id)?;
-            if proposal.state() != v1::ConnectProposalState::Pending {
+            let found = self.vault.connect_proposal(&request.proposal_id)?;
+            if found.state() != v1::ConnectProposalState::Pending {
                 return Err(RequestError::Connect("This suggestion was already answered.".to_owned()));
             }
-            if proposal.connector_id != spec.id {
+            if found.connector_id != spec.id {
                 return Err(RequestError::Connect("This suggestion is for a different service.".to_owned()));
             }
+            proposal = Some(found);
         }
         if !request.secret_id.is_empty() {
             let opened = self.vault.connection(&request.secret_id)?;
@@ -706,7 +751,7 @@ impl Factory {
                 state: ConnectFlowState::Waiting.into(),
                 proposal_id: request.proposal_id.clone(),
                 started_ms: now,
-                expires_ms: now + FLOW_MS,
+                expires_ms: now + if spec.flow == FlowKind::Paste { PASTE_FLOW_MS } else { FLOW_MS },
                 ..Default::default()
             },
             recipe: recipe.clone(),
@@ -718,6 +763,8 @@ impl Factory {
             verifier: Zeroizing::new(String::new()),
             challenge: String::new(),
             reconnect: request.secret_id.clone(),
+            proposal,
+            pending: Control::new(String::new()),
             finished: false,
             cancel: CancellationToken::new(),
             ended_ms: 0,
@@ -743,6 +790,11 @@ impl Factory {
                 };
                 device = Some(started_device);
                 started
+            }
+            FlowKind::Paste => {
+                let (url, pending) = recipe.start_paste(&self.broker.http, &flow.start()).await?;
+                flow.pending = pending;
+                v1::ConnectStarted { flow_id: id.clone(), url, user_code: String::new(), expires_ms: flow.view.expires_ms }
             }
         };
         let (cancel, expires_ms) = (flow.cancel.clone(), flow.view.expires_ms);
@@ -790,8 +842,23 @@ impl Factory {
             if !flow.active() || flow.finished {
                 return refused("This connection is already done.");
             }
-            if flow.recipe.spec().flow != FlowKind::Browser {
-                return refused("This connection finishes by itself once you approve it.");
+            match flow.recipe.spec().flow {
+                FlowKind::Browser => {}
+                FlowKind::Device => return refused("This connection finishes by itself once you approve it."),
+                FlowKind::Paste => {
+                    let token = Zeroizing::new(request.token.trim().to_owned());
+                    if token.is_empty() {
+                        return refused("Paste the token to connect.");
+                    }
+                    flow.finished = true;
+                    flow.view.error.clear();
+                    flow.view.state = ConnectFlowState::Exchanging.into();
+                    let recipe = flow.recipe.clone();
+                    drop(flows);
+                    self.flows_changed();
+                    tokio::spawn(self.clone().pasted(request.flow_id.clone(), recipe, token));
+                    return Ok(());
+                }
             }
             let Ok(url) = reqwest::Url::parse(request.callback_url.trim()) else {
                 return refused("That address doesn't belong to this connection.");
@@ -847,6 +914,32 @@ impl Factory {
         Ok(())
     }
 
+    /// PASTE: checks the token pasted with the service, and keeps it; one it
+    /// doesn't accept leaves the flow waiting for another, saying why.
+    async fn pasted(self: Arc<Self>, id: String, recipe: Arc<dyn Recipe>, token: Zeroizing<String>) {
+        let Some((owned, cancel)) = self.flow_start(&id) else { return };
+        let start = owned.start();
+        let checked = tokio::select! {
+            checked = recipe.paste(&self.broker.http, &start, &owned.pending, &token) => checked,
+            () = cancel.cancelled() => return,
+        };
+        match checked {
+            Ok(control) => self.connected(&id, control).await,
+            Err(problem) => {
+                tracing::info!(flow = %id, error = problem.text(), "a pasted token didn't work");
+                if self.broker.update(&id, |flow| {
+                    if flow.active() {
+                        flow.finished = false;
+                        flow.view.error = problem.text().to_owned();
+                        flow.view.state = ConnectFlowState::Waiting.into();
+                    }
+                }) {
+                    self.flows_changed();
+                }
+            }
+        }
+    }
+
     /// A copy of what a flow needs to go on, outside the lock.
     fn flow_start(&self, id: &str) -> Option<(OwnedStart, CancellationToken)> {
         let flows = guard(&self.broker.flows);
@@ -859,6 +952,9 @@ impl Factory {
                 state: flow.state.clone(),
                 verifier: flow.verifier.clone(),
                 challenge: flow.challenge.clone(),
+                flow: flow.view.id.clone(),
+                proposal: flow.proposal.clone(),
+                pending: Control(flow.pending.0.clone()),
             },
             flow.cancel.clone(),
         ))
@@ -971,7 +1067,9 @@ impl Factory {
                     tracing::warn!(error = problem.text(), "could not revoke a connection that couldn't be kept");
                 }
                 let text = match error {
-                    VaultError::Locked => "Secrets locked before the connection was saved. Unlock them and connect again.".to_owned(),
+                    VaultError::Locked => {
+                        "Secrets were locked before the connection could be saved. Unlock them and connect again.".to_owned()
+                    }
                     other => other.to_string(),
                 };
                 return self.flow_failed(id, &text);
@@ -1236,6 +1334,10 @@ struct OwnedStart {
     state: Zeroizing<String>,
     verifier: Zeroizing<String>,
     challenge: String,
+    flow: String,
+    proposal: Option<v1::ConnectProposal>,
+    /// PASTE: what `start_paste` kept.
+    pending: Control,
 }
 
 impl OwnedStart {
@@ -1246,6 +1348,8 @@ impl OwnedStart {
             redirect_uri: &self.redirect_uri,
             state: &self.state,
             challenge: &self.challenge,
+            flow: &self.flow,
+            proposal: self.proposal.as_ref(),
         }
     }
 }

@@ -8,12 +8,14 @@ use hashbrown::HashMap;
 
 use parking_lot::Mutex;
 
-use crate::accounts::{account_name, account_noun, exhausted_message, key_label, out_of_credit, switch_note, usage_limit};
+use crate::accounts::{
+    account_name, account_noun, exhausted_message, key_label, mark_answered_by, out_of_credit, switch_note, usage_limit,
+};
 use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
 use crate::credentials::{Account, Credential, FileCredentialStore};
 use crate::errors::{Error, models_error};
-use crate::limits::UsageLimit;
+use crate::limits::{AccountUsage, ResetAnswer, UsageLimit, UsageReset};
 use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels};
 use crate::stream::{EventStream, LlmContext, StreamFn, StreamOptions, ThinkingLevel, event_stream};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent, Usage};
@@ -323,15 +325,39 @@ impl Registry {
     /// provider; None when it isn't signed in that way or has no limits to read. Refreshes a token due for it.
     /// Its first account's.
     pub async fn usage_limits(&self, id: &str) -> Result<Option<Vec<UsageLimit>>, Error> {
-        self.account_usage(id, None).await
+        Ok(self.account_usage(id, None).await?.map(|usage| usage.limits))
     }
 
-    /// `usage_limits` of one of the provider's accounts (None: its first).
-    pub async fn account_usage(&self, id: &str, account: Option<&str>) -> Result<Option<Vec<UsageLimit>>, Error> {
+    /// The usage limits and usage resets of one of the provider's accounts
+    /// (None: its first), as `usage_limits`.
+    pub async fn account_usage(&self, id: &str, account: Option<&str>) -> Result<Option<AccountUsage>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(limits) = provider.limits else { return Ok(None) };
         let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
         limits(base_url, auth).await.map(Some)
+    }
+
+    /// Uses one of the usage resets of one of the provider's accounts (None:
+    /// its first), as its last usage read listed it: only ever at the
+    /// person's word, since it can't be undone. A limit reset gives the
+    /// account requests again at once. None when it isn't signed in with a
+    /// subscription that has resets.
+    pub async fn use_reset(&self, id: &str, account: Option<&str>, reset: UsageReset) -> Result<Option<ResetAnswer>, Error> {
+        let Some(provider) = self.provider(id) else { return Ok(None) };
+        let Some(use_reset) = provider.reset else { return Ok(None) };
+        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
+        let answer = use_reset(base_url, auth, reset).await?;
+        if answer.reset {
+            let stored = credential_result(self.inner.store.accounts(id).await, "read", id)?;
+            let reset_account = match account {
+                Some(account) => stored.iter().find(|stored| stored.id == account),
+                None => stored.first(),
+            };
+            if let Some(reset_account) = reset_account.map(|stored| stored.id.clone()) {
+                self.set_state(id, &reset_account, |until, _| *until = 0).await?;
+            }
+        }
+        Ok(Some(answer))
     }
 
     /// The plan of a provider signed in with a subscription, such as "Claude Max 20x", read from the provider;
@@ -559,9 +585,13 @@ impl Registry {
         let resets_at = match resets_at.filter(|at| *at > now) {
             Some(at) => Some(at),
             None => match self.account_usage(id, Some(account)).await {
-                Ok(Some(limits)) => {
-                    limits.iter().filter(|limit| limit.used_percent >= 100.0).map(|limit| limit.resets_at).filter(|at| *at > now).max()
-                }
+                Ok(Some(usage)) => usage
+                    .limits
+                    .iter()
+                    .filter(|limit| limit.used_percent >= 100.0)
+                    .map(|limit| limit.resets_at)
+                    .filter(|at| *at > now)
+                    .max(),
                 Ok(None) => None,
                 Err(error) => {
                     tracing::warn!(provider = id, %error, "could not read the usage of an account at its limit");
@@ -640,7 +670,7 @@ impl Registry {
                     // before anything but its start: held until something else comes.
                     let (mut held, mut forwarding) = (None, false);
                     let (mut gone, mut done) = (None, false);
-                    while let Some(event) = inner.next().await {
+                    while let Some(mut event) = inner.next().await {
                         if !forwarding {
                             match &event {
                                 StreamEvent::Start { .. } => {
@@ -661,6 +691,9 @@ impl Registry {
                             }
                         }
                         done = matches!(event, StreamEvent::Done { .. });
+                        if let (Some(account), StreamEvent::Done { message, .. }) = (&account, &mut event) {
+                            mark_answered_by(message, account);
+                        }
                         sink.push(event);
                     }
                     let (Some(gone), Some(account)) = (gone, account) else {

@@ -1,10 +1,12 @@
-//! Cloudflare: Claktory's public OAuth client (authorization code with
-//! PKCE, no client secret) connects the person's account with what they
-//! approve on Cloudflare's consent screen. That grant never reaches an
-//! agent: it stays in the vault, and with it Claktory mints each secret its
-//! own account-owned API token, as narrow as the work needs (these
-//! permissions, on this account or these zones, until then), extends it
-//! while it's used, and deletes it when the secret goes.
+//! Cloudflare: the person makes an API token on Cloudflare's page, with
+//! what Claktory needs already chosen, and pastes it (or, with an OAuth
+//! client, `FACTORY_CLOUDFLARE_CLIENT_ID`, approves Claktory's public client
+//! on Cloudflare's consent screen: authorization code with PKCE, no client
+//! secret). That token or grant never reaches an agent: it stays in the
+//! vault, and with it Claktory mints each secret its own account-owned API
+//! token, as narrow as the work needs (these permissions, on this account
+//! or these zones, until then), extends it while it's used, and deletes it
+//! when the secret goes.
 
 use std::collections::BTreeMap;
 
@@ -31,6 +33,26 @@ const SCOPES: &[(&str, &str)] = &[
     ("zone.read", "See your zones (domains)"),
 ];
 
+/// Whether Cloudflare connects by a pasted token in this version; until the
+/// app takes it, only the dev Claktory offers it (`FACTORY_CLOUDFLARE_BASE`
+/// or `FACTORY_CLOUDFLARE_ENABLED`).
+const SHIPPED: bool = true;
+
+/// What the token the person makes may do, as Cloudflare's page for an
+/// account-owned token takes it (`permissionGroupKeys`, see
+/// developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/):
+/// make API tokens in the account and read its name and zones, to offer
+/// them; and the permissions agents most often get, which a token it makes
+/// can then carry. The page fills these in; zones are chosen there.
+const TOKEN_PERMISSIONS: &[(&str, &str, &str)] = &[
+    ("account_api_tokens", "edit", "Make and delete API tokens in your account"),
+    ("account_settings", "read", "See your account names"),
+    ("zone", "read", "See your zones (domains)"),
+    ("dns", "edit", "Edit DNS"),
+    ("workers_scripts", "edit", "Edit Workers"),
+    ("page", "edit", "Edit Pages"),
+];
+
 /// A secret made from it lasts this long unless asked otherwise…
 const LIFETIME_MS: i64 = 30 * 24 * 3600 * 1000;
 /// …and is extended this long before it ends, by a command that uses it.
@@ -46,6 +68,7 @@ const ZONE_RESOURCE: &str = "com.cloudflare.api.account.zone";
 
 pub struct Cloudflare {
     spec: Spec,
+    /// The OAuth client; empty when the person pastes a token instead.
     client_id: String,
     /// Where Cloudflare's sign-in and API are, unless a test says otherwise
     /// (`Http::base`): Cloudflare's own, or a stand-in in the dev Claktory.
@@ -81,10 +104,35 @@ impl Cloudflare {
                 variables: vec!["CLOUDFLARE_API_TOKEN".to_owned(), "CLOUDFLARE_ACCOUNT_ID".to_owned()],
                 setup_note: String::new(),
                 setup_url: String::new(),
+                token_url: String::new(),
             },
             client_id: client_id.to_owned(),
             dash_base: DASH.1.to_owned(),
             api_base: API.1.to_owned(),
+        }
+    }
+
+    /// The recipe that takes a token the person makes on Cloudflare's page
+    /// and pastes: no OAuth client needed.
+    pub fn pasted() -> Cloudflare {
+        let mut recipe = Cloudflare::new("");
+        recipe.spec.flow = FlowKind::Paste;
+        recipe.spec.redirect_uris.clear();
+        let access = &mut recipe.spec.accesses[0];
+        access.why = "Claktory makes tokens with only what each agent's work needs, renews them while they're in use, and deletes each one at Cloudflare when you delete its secret or disconnect. It also reads your account and zone names so you can choose."
+            .to_owned();
+        access.scopes = TOKEN_PERMISSIONS.iter().map(|(_, _, said)| (*said).to_owned()).collect();
+        recipe.spec.setup_note = "Cloudflare's page opens with the permissions Claktory needs already chosen. Under Zone Resources, choose All zones or the zones agents may work on, then Continue to summary and Create Token. Copy the token and paste it here."
+            .to_owned();
+        recipe.set_dash(DASH.1);
+        recipe
+    }
+
+    /// Where Cloudflare's dashboard is, and so the page that makes the token.
+    fn set_dash(&mut self, base: &str) {
+        self.dash_base = base.to_owned();
+        if self.spec.flow == FlowKind::Paste {
+            self.spec.token_url = token_url(base);
         }
     }
 
@@ -95,16 +143,21 @@ impl Cloudflare {
     /// try the whole flow without Cloudflare.
     pub(crate) fn built_in() -> Option<Cloudflare> {
         let set = |name: &str| std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
-        let client_id = set("FACTORY_CLOUDFLARE_CLIENT_ID").unwrap_or_else(|| CLIENT_ID.to_owned());
-        if client_id.is_empty() {
-            return None;
-        }
-        let mut recipe = Cloudflare::new(&client_id);
         let dev = std::env::args().any(|arg| arg == "--dev");
-        if let Some(base) = set("FACTORY_CLOUDFLARE_BASE").filter(|_| dev) {
-            let base = base.trim_end_matches('/');
+        let stand_in = set("FACTORY_CLOUDFLARE_BASE").filter(|_| dev).map(|base| base.trim_end_matches('/').to_owned());
+        let client_id = set("FACTORY_CLOUDFLARE_CLIENT_ID").unwrap_or_else(|| CLIENT_ID.to_owned());
+        let mut recipe = if client_id.is_empty() {
+            let enabled = dev && set("FACTORY_CLOUDFLARE_ENABLED").is_some_and(|value| value != "0");
+            if !(SHIPPED || enabled || stand_in.is_some()) {
+                return None;
+            }
+            Cloudflare::pasted()
+        } else {
+            Cloudflare::new(&client_id)
+        };
+        if let Some(base) = stand_in {
             tracing::warn!(%base, "Cloudflare is played by a stand-in");
-            recipe.dash_base = base.to_owned();
+            recipe.set_dash(&base);
             recipe.api_base = format!("{base}/client/v4");
         }
         Some(recipe)
@@ -134,6 +187,25 @@ struct Grant {
     expires_ms: i64,
     #[serde(default)]
     scopes: Vec<String>,
+    /// A token the person pasted, rather than an OAuth grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pasted: Option<Pasted>,
+}
+
+/// Which token was pasted: its id, and the account that owns it (empty for
+/// one the person owns).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Pasted {
+    id: String,
+    #[serde(default)]
+    account: String,
+}
+
+impl Pasted {
+    /// Where it is in Cloudflare's API.
+    fn path(&self) -> String {
+        if self.account.is_empty() { format!("/user/tokens/{}", self.id) } else { format!("/accounts/{}/tokens/{}", self.account, self.id) }
+    }
 }
 
 /// What a secret made from it needs to be renewed and deleted (kept in
@@ -246,7 +318,7 @@ impl Failure {
             Failure::Network(error) => {
                 Problem::Unreachable(format!("Couldn't reach Cloudflare to {doing}: {}.", error.trim_end_matches('.')))
             }
-            Failure::Said(401, _) => Problem::Reconnect("Cloudflare no longer accepts its sign-in.".to_owned()),
+            Failure::Said(401, _) => Problem::Reconnect("Cloudflare no longer accepts Claktory's access.".to_owned()),
             Failure::Said(403, said) => Problem::Refused(format!(
                 "Cloudflare didn't let Claktory {doing}: {said}. Your role in that Cloudflare account may not allow it, or the connection may not have that access. Connect Cloudflare again and allow it."
             )),
@@ -286,6 +358,7 @@ impl Cloudflare {
             refresh_token: tokens.refresh_token.unwrap_or_default(),
             expires_ms: now_ms() + tokens.expires_in.unwrap_or(3600).max(0) * 1000,
             scopes: tokens.scope.unwrap_or_default().split_whitespace().map(str::to_owned).collect(),
+            pasted: None,
         })
     }
 
@@ -358,7 +431,8 @@ impl Cloudflare {
     }
 
     /// Mints a token that can do only `minted.policy` until `expires_ms`.
-    async fn mint(&self, http: &Http, token: &str, minted: &Minted, expires_ms: i64) -> Result<(String, Zeroizing<String>), Problem> {
+    async fn mint(&self, http: &Http, grant: &Grant, minted: &Minted, expires_ms: i64) -> Result<(String, Zeroizing<String>), Problem> {
+        let token = grant.access_token.as_str();
         #[derive(Deserialize)]
         struct Created {
             id: String,
@@ -366,11 +440,86 @@ impl Cloudflare {
         }
         let url = format!("{}/accounts/{}/tokens", self.api(http), minted.account);
         let body = token_body(minted, expires_ms);
-        let (created, _): (Created, _) = Cloudflare::send(http.client().post(url).bearer_auth(token).json(&body))
-            .await
-            .map_err(|failure| failure.problem("make an API token"))?;
+        let (created, _): (Created, _) =
+            Cloudflare::send(http.client().post(url).bearer_auth(token).json(&body)).await.map_err(|failure| match failure {
+                Failure::Said(403, _) if grant.pasted.is_some() => Problem::Refused(
+                    "The token you pasted can't make tokens for agents: it needs the permission Account API Tokens: Edit. Connect Cloudflare again, and make a new token on the page Claktory opens."
+                        .to_owned(),
+                ),
+                failure => failure.problem("make an API token"),
+            })?;
         Ok((created.id, Zeroizing::new(created.value)))
     }
+}
+
+impl Cloudflare {
+    /// What a pasted token is: its accounts, and what Cloudflare says it may
+    /// do, when it lets the token read itself.
+    async fn inspect_pasted(&self, http: &Http, token: &str, pasted: &Pasted, accounts: &[Account]) -> Inspected {
+        #[derive(Deserialize)]
+        struct Policy {
+            #[serde(default)]
+            permission_groups: Vec<PermissionGroup>,
+        }
+        #[derive(Deserialize)]
+        struct Itself {
+            #[serde(default)]
+            policies: Vec<Policy>,
+            #[serde(default)]
+            expires_on: Option<String>,
+        }
+        let url = format!("{}{}", self.api(http), pasted.path());
+        let itself: Option<Itself> = Cloudflare::send(http.client().get(url).bearer_auth(token)).await.ok().map(|(itself, _)| itself);
+        let mut access: Vec<String> = Vec::new();
+        for group in itself.iter().flat_map(|itself| &itself.policies).flat_map(|policy| &policy.permission_groups) {
+            if !group.name.is_empty() && !access.contains(&group.name) {
+                access.push(group.name.clone());
+            }
+        }
+        if access.is_empty() {
+            access = self.spec.accesses[0].scopes.clone();
+        }
+        let expires_ms = itself
+            .and_then(|itself| itself.expires_on)
+            .and_then(|time| time.parse::<jiff::Timestamp>().ok())
+            .map_or(0, |time| time.as_millisecond());
+        let mut ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+        ids.sort_unstable();
+        let names: Vec<&str> =
+            accounts.iter().map(|account| if account.name.is_empty() { account.id.as_str() } else { account.name.as_str() }).collect();
+        Inspected {
+            subject: ids.join(","),
+            account: names.join(", "),
+            scopes: access.clone(),
+            access,
+            resources: names.iter().map(|name| format!("Cloudflare account {name}")).collect(),
+            expires_ms,
+        }
+    }
+}
+
+/// Cloudflare's page that makes an account-owned token, with Claktory's
+/// permissions and name filled in.
+fn token_url(dash: &str) -> String {
+    let keys: Vec<Value> = TOKEN_PERMISSIONS.iter().map(|(key, kind, _)| json!({"key": key, "type": kind})).collect();
+    let mut url = reqwest::Url::parse(&format!("{}/", dash.trim_end_matches('/'))).expect("a URL");
+    url.query_pairs_mut()
+        .append_pair("to", "/:account/api-tokens")
+        .append_pair("permissionGroupKeys", &Value::Array(keys).to_string())
+        .append_pair("name", "Claktory");
+    // As Cloudflare's own links write it: "/:account/…" unescaped.
+    String::from(url).replace("to=%2F%3Aaccount%2Fapi-tokens", "to=/:account/api-tokens")
+}
+
+/// The token pasted, as Cloudflare checks it: (its id, its status, when it
+/// ends in ms since 1970 or 0).
+#[derive(Deserialize)]
+struct Verified {
+    id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    expires_on: Option<String>,
 }
 
 /// An account-owned token's name, policies and expiry, as Cloudflare takes them.
@@ -467,12 +616,72 @@ impl Recipe for Cloudflare {
         })
     }
 
+    fn paste<'a>(
+        &'a self,
+        http: &'a Http,
+        _start: &'a Start<'a>,
+        _pending: &'a Control,
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<Control, Problem>> {
+        Box::pin(async move {
+            let refused =
+                || Problem::Refused("Cloudflare didn't accept that token. Check that you copied all of it, or make a new one.".to_owned());
+            let api = self.api(http);
+            // An account's token (what Cloudflare's page makes), checked in
+            // its account…
+            let mut found: Option<(Verified, String)> = None;
+            match self.pages::<Account>(http, token, "/accounts", &[]).await {
+                Ok(accounts) => {
+                    for account in accounts {
+                        let url = format!("{api}/accounts/{}/tokens/verify", account.id);
+                        if let Ok((verified, _)) = Cloudflare::send::<Verified>(http.client().get(url).bearer_auth(token)).await {
+                            found = Some((verified, account.id));
+                            break;
+                        }
+                    }
+                }
+                Err(Failure::Network(error)) => return Err(Failure::Network(error).problem("check the token")),
+                Err(Failure::Said(..)) => {}
+            }
+            // …or one the person owns.
+            if found.is_none() {
+                match Cloudflare::send::<Verified>(http.client().get(format!("{api}/user/tokens/verify")).bearer_auth(token)).await {
+                    Ok((verified, _)) => found = Some((verified, String::new())),
+                    Err(Failure::Network(error)) => return Err(Failure::Network(error).problem("check the token")),
+                    Err(Failure::Said(..)) => {}
+                }
+            }
+            let Some((verified, account)) = found else { return Err(refused()) };
+            if !verified.status.is_empty() && verified.status != "active" {
+                return Err(Problem::Refused(format!("That token is {} at Cloudflare. Make a new one.", verified.status)));
+            }
+            let expires_ms = verified
+                .expires_on
+                .as_deref()
+                .and_then(|time| time.parse::<jiff::Timestamp>().ok())
+                .map_or(0, |time| time.as_millisecond());
+            if expires_ms != 0 && expires_ms <= now_ms() {
+                return Err(Problem::Refused("That token has expired at Cloudflare. Make a new one.".to_owned()));
+            }
+            Ok(Control::from_value(&Grant {
+                access_token: token.to_owned(),
+                refresh_token: String::new(),
+                expires_ms: 0,
+                scopes: Vec::new(),
+                pasted: Some(Pasted { id: verified.id, account }),
+            }))
+        })
+    }
+
     fn inspect<'a>(&'a self, http: &'a Http, control: &'a Control) -> BoxFuture<'a, Result<Inspected, Problem>> {
         Box::pin(async move {
             let grant: Grant = control.parse()?;
             let accounts = self.accounts(http, &grant.access_token).await?;
             if accounts.is_empty() {
                 return Err(Problem::Refused("Cloudflare didn't share an account with Claktory. Connect again and choose one.".to_owned()));
+            }
+            if let Some(pasted) = &grant.pasted {
+                return Ok(self.inspect_pasted(http, &grant.access_token, pasted, &accounts).await);
             }
             // Who signed in, if Cloudflare says; else the accounts tell it apart.
             let user: Value = async {
@@ -505,6 +714,7 @@ impl Recipe for Cloudflare {
     }
 
     fn refresh<'a>(&'a self, http: &'a Http, control: &'a Control) -> BoxFuture<'a, Result<Option<Control>, Problem>> {
+        // A pasted token isn't refreshed: it lasts until the person ends it.
         Box::pin(async move {
             let grant: Grant = control.parse()?;
             if grant.expires_ms == 0 || now_ms() < grant.expires_ms - REFRESH_MARGIN_MS {
@@ -624,7 +834,7 @@ impl Recipe for Cloudflare {
             let expires_ms = now + lifetime_ms;
             let name = if ask.name.is_empty() { "Claktory".to_owned() } else { format!("Claktory: {}", ask.name) };
             let mut minted = Minted { account: account.id.clone(), token_id: String::new(), name, policy, lifetime_ms };
-            let (token_id, value) = self.mint(http, token, &minted, expires_ms).await?;
+            let (token_id, value) = self.mint(http, &grant, &minted, expires_ms).await?;
             minted.token_id = token_id;
             let account_name = if account.name.is_empty() { account.id.clone() } else { account.name.clone() };
             let reach = if picked_zones.is_empty() {
@@ -677,7 +887,7 @@ impl Recipe for Cloudflare {
                 Ok(_) => Ok(Derived { values: None, meta }),
                 // Deleted at Cloudflare meanwhile: a new one, as it was.
                 Err(Failure::Said(404, _)) => {
-                    let (token_id, value) = self.mint(http, &grant.access_token, &minted, expires_ms).await?;
+                    let (token_id, value) = self.mint(http, &grant, &minted, expires_ms).await?;
                     minted.token_id = token_id;
                     meta.recipe = serde_json::to_value(&minted).unwrap_or_default();
                     Ok(Derived {
@@ -716,6 +926,14 @@ impl Recipe for Cloudflare {
     fn revoke<'a>(&'a self, http: &'a Http, control: &'a Control) -> BoxFuture<'a, Result<(), Problem>> {
         Box::pin(async move {
             let grant: Grant = control.parse()?;
+            // A pasted token is deleted at Cloudflare.
+            if let Some(pasted) = &grant.pasted {
+                let url = format!("{}{}", self.api(http), pasted.path());
+                return match Cloudflare::send::<Value>(http.client().delete(url).bearer_auth(&grant.access_token)).await {
+                    Ok(_) | Err(Failure::Said(404, _)) => Ok(()),
+                    Err(failure) => Err(failure.problem("delete the token you pasted")),
+                };
+            }
             // Revoking the refresh token ends the whole grant.
             let token = if grant.refresh_token.is_empty() { &grant.access_token } else { &grant.refresh_token };
             let url = format!("{}/oauth2/revoke", self.dash(http));

@@ -11,6 +11,7 @@ import 'scope.dart';
 import 'shell.dart';
 import 'state.dart';
 import 'update.dart';
+import 'zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -116,7 +117,9 @@ class _FactoryAppState extends State<FactoryApp> {
               connections: widget.connections,
               child: ScrollConfiguration(
                 behavior: const _ScrollBehavior(),
-                child: DevMark(child: Overlay(initialEntries: [_window])),
+                child: DevMark(
+                  child: AppZoom(child: Overlay(initialEntries: [_window])),
+                ),
               ),
             );
           },

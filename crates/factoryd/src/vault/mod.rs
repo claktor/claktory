@@ -170,6 +170,12 @@ CREATE TABLE connect_proposals (
     secret_name TEXT NOT NULL DEFAULT ''
 );
 ",
+    "
+-- A proposal's exact permissions, where the service takes them (AWS): its
+-- Allow statements as JSON [{actions, resources, condition}], and its region.
+ALTER TABLE connect_proposals ADD COLUMN statements TEXT NOT NULL DEFAULT '';
+ALTER TABLE connect_proposals ADD COLUMN region TEXT NOT NULL DEFAULT '';
+",
 ];
 
 /// A value is too short to hide in output below this many bytes.
@@ -629,6 +635,22 @@ impl Vault {
         inner.db.as_ref().ok_or(VaultError::NoVault)
     }
 
+    /// Holds the unlocked vault through a write, committing before invalidating its cached view.
+    fn with_unlocked_transaction<T>(
+        &self,
+        write: impl FnOnce(&rusqlite::Transaction<'_>, &str, &[u8; 32]) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
+        let mut inner = self.lock();
+        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
+        let vault_id = inner.vault_id.clone();
+        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
+        let transaction = db.transaction()?;
+        let value = write(&transaction, &vault_id, &vmk)?;
+        transaction.commit()?;
+        inner.state = None;
+        Ok(value)
+    }
+
     /// Replaces the passphrase, given the vault's key.
     pub(crate) fn set_passphrase(&self, vmk: &Key, passphrase: &str) -> Result<(), VaultError> {
         let inner = self.lock();
@@ -722,22 +744,17 @@ impl Vault {
     pub(crate) fn create_secret(&self, name: &str, description: &str, values: &[Value], owner: &str) -> Result<String, VaultError> {
         let name = check_name(name)?;
         check_values(values)?;
-        let mut inner = self.lock();
-        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
-        let vault_id = inner.vault_id.clone();
-        let Some(db) = inner.db.as_mut() else { return Err(VaultError::NoVault) };
-        let transaction = db.transaction()?;
-        Self::name_taken(&transaction, &name, "")?;
-        let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-        let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, &id, 1, values)?;
-        let now = now_ms();
-        transaction.execute(
-            "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6)",
-            params![id, name, description.trim(), sealed_dek, owner, now],
-        )?;
-        transaction.commit()?;
-        inner.state = None;
-        Ok(id)
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            Self::name_taken(transaction, &name, "")?;
+            let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values)?;
+            let now = now_ms();
+            transaction.execute(
+                "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6)",
+                params![id, name, description.trim(), sealed_dek, owner, now],
+            )?;
+            Ok(id)
+        })
     }
 
     /// Renames and redescribes a secret, and with `values`, replaces its
@@ -1018,7 +1035,7 @@ impl Vault {
             unlocked: inner.vmk.is_some(),
             locked_mode: inner.locked_mode,
             secrets,
-            requests: asks::pending(db)?,
+            // Requests show only in the conversation of the agent that asked.
             proposals: connections::pending_proposals(db)?,
             ..v1::VaultState::default()
         };

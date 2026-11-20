@@ -56,6 +56,6 @@ regexTarget = "secret"
 regexes = ['''^(?:sk_live_4f9a8b7c6d5e4f3a2b1c|re_123456789abcdef|wJalrXUtnFEMI/K7MDENG)$''']
 
 [[allowlists]]
-description = "The pairing tests' made-up token, the hex digits in order, the example both the backend and the app work the four-digit approval number out from (#132)"
+description = "Made-up tokens in tests: the hex digits in order, alone (the pairing tests' example both the backend and the app work the four-digit approval number out from, #132) or after a short prefix (the vault tests' fake keys, asc- and hz-)"
 regexTarget = "secret"
-regexes = ['''^0123456789abcdef$''']
+regexes = ['''^(?:[a-z]{2,3}-)?0123456789abcdef$''']

@@ -128,6 +128,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert_eq!(call(&mut client, &mut view, "builder", "agents_status", "{}").await, "writer Writer: idle");
     let prompt = system_prompt.lock().expect("lock").clone();
     assert!(prompt.contains("## Other agents") && prompt.contains("You can message: Writer (writer)."), "{prompt}");
+    assert!(prompt.contains("suggest it with agents_suggest_talk"), "{prompt}");
     let refused = call(&mut client, &mut view, "builder", "agents_send", r#"{"to":"scout","text":"hi"}"#).await;
     assert_eq!(refused, "No agent you can message is called \"scout\"; you can message: writer.");
 

@@ -61,6 +61,7 @@ pub fn provider() -> Provider {
     provider.limits = Some(crate::limits::codex);
     provider.plan = Some(crate::limits::codex_plan);
     provider.identity = Some(crate::limits::codex_identity);
+    provider.reset = Some(crate::limits::codex_reset);
     provider
 }
 

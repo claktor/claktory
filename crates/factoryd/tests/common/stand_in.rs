@@ -1,5 +1,6 @@
 //! A stand-in for a service's HTTP API in tests (connectors): each request
 //! is answered by the test's own function, and every request is recorded.
+//! An answer that's a JSON string is sent as the text itself (AWS's XML).
 
 use std::sync::{Arc, Mutex};
 
@@ -69,9 +70,13 @@ impl StandIn {
                     let Some(request) = read(&mut socket).await else { return };
                     let (status, body) = handler(&request);
                     recorded.lock().expect("lock").push(request);
-                    let body = body.to_string();
+                    // A string is sent as it is (XML, say); anything else as JSON.
+                    let (body, kind) = match body {
+                        Value::String(text) => (text, "text/xml"),
+                        other => (other.to_string(), "application/json"),
+                    };
                     let head = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = socket.write_all(head.as_bytes()).await;

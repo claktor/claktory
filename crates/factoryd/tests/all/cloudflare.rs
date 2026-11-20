@@ -34,7 +34,12 @@ struct Cloud {
     minted: usize,
     /// Refresh tokens used, in order.
     refreshed: Vec<String>,
+    /// The account's token the person made on Cloudflare's page, while it
+    /// isn't deleted.
+    pasted: Option<String>,
 }
+
+const PASTED: &str = "cf-pasted-0123456789abcdef";
 
 fn envelope(result: Value) -> (u16, Value) {
     (200, json!({"success": true, "errors": [], "result": result, "result_info": {"page": 1, "total_pages": 1}}))
@@ -82,11 +87,25 @@ fn answer(cloud: &mut Cloud, call: &Call) -> (u16, Value) {
         cloud.revoked = true;
         return (200, json!({}));
     }
-    // Everything else takes the latest access token.
-    if cloud.revoked || call.header("authorization") != Some(&format!("Bearer cf-access-{}-abcdefgh", cloud.issued)) {
+    // Everything else takes the latest access token, or the pasted one.
+    let pasted = cloud.pasted.as_ref().is_some_and(|token| call.header("authorization") == Some(&format!("Bearer {token}")));
+    if !pasted && (cloud.revoked || call.header("authorization") != Some(&format!("Bearer cf-access-{}-abcdefgh", cloud.issued))) {
         return (401, json!({"success": false, "errors": [{"code": 10000, "message": "Authentication error"}], "result": null}));
     }
     match (call.method.as_str(), path) {
+        // An account's own token can't check itself as a user's.
+        ("GET", "/client/v4/user/tokens/verify") => {
+            (401, json!({"success": false, "errors": [{"code": 1000, "message": "Invalid API Token"}], "result": null}))
+        }
+        ("GET", "/client/v4/accounts/acc/tokens/verify") => envelope(json!({"id": "pasted-1", "status": "active"})),
+        ("GET", "/client/v4/accounts/acc/tokens/pasted-1") => envelope(json!({"id": "pasted-1", "policies": [
+            {"permission_groups": [{"id": "tok-edit", "name": "Account API Tokens Write"}, {"id": "zone-read", "name": "Zone Read"}]},
+            {"permission_groups": [{"id": "zone-read", "name": "Zone Read"}]},
+        ]})),
+        ("DELETE", "/client/v4/accounts/acc/tokens/pasted-1") => {
+            cloud.pasted = None;
+            envelope(json!({"id": "pasted-1"}))
+        }
         ("GET", "/oauth2/userinfo") => (200, json!({"sub": "user-7", "email": "matt@example.com"})),
         ("GET", "/client/v4/accounts") => envelope(json!([{"id": "acc", "name": "Acme"}])),
         ("GET", "/client/v4/zones") => {
@@ -195,6 +214,7 @@ async fn cloudflare_connects_with_pkce_and_gives_agents_only_narrow_tokens_it_re
     let finish = Request::FinishConnect(v1::FinishConnect {
         flow_id: started.flow_id.clone(),
         callback_url: format!("{REDIRECT}?code=good-code&state={state}"),
+        token: String::new(),
     });
     ok(&mut client, &mut view, finish).await;
     let connected =
@@ -344,6 +364,7 @@ async fn a_cloudflare_grant_taken_away_needs_connecting_again() {
         Request::FinishConnect(v1::FinishConnect {
             flow_id: started.flow_id.clone(),
             callback_url: format!("{REDIRECT}?code={code}&state={state}"),
+            token: String::new(),
         })
     };
     ok(&mut client, &mut view, finish("bad-code")).await;
@@ -358,7 +379,7 @@ async fn a_cloudflare_grant_taken_away_needs_connecting_again() {
     cloud.lock().expect("lock").revoked = true;
     let list = Request::ListConnectChoices(v1::ListConnectChoices { secret_id: connection.id.clone() });
     let said = failure(&apply_request(&mut client, &mut view, list).await);
-    assert_eq!(said, format!("{} needs to be connected again. Cloudflare no longer accepts its sign-in.", connection.name));
+    assert_eq!(said, format!("{} needs to be connected again. Cloudflare no longer accepts Claktory's access.", connection.name));
     view.follow(&mut client, |view| {
         vault(view)
             .secrets
@@ -371,6 +392,12 @@ async fn a_cloudflare_grant_taken_away_needs_connecting_again() {
 /// A Claktory that can connect Cloudflare (as the stand-in plays it),
 /// with Rivet and a Builder on the scripted model.
 async fn setup() -> (Client, View, Arc<Mutex<Cloud>>, StandIn) {
+    let (client, view, cloud, stand_in, _) = setup_with(Cloudflare::new("test-client")).await;
+    (client, view, cloud, stand_in)
+}
+
+/// The same with `recipe`, and where the Claktory is.
+async fn setup_with(recipe: Cloudflare) -> (Client, View, Arc<Mutex<Cloud>>, StandIn, std::net::SocketAddr) {
     let dir = temp_dir();
     let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
     factory.set_vault_passphrase_cost("argon2id m=1024 t=1 p=1");
@@ -381,7 +408,7 @@ async fn setup() -> (Client, View, Arc<Mutex<Cloud>>, StandIn) {
     })
     .await;
     let api = format!("{}/client/v4", stand_in.base);
-    factory.add_connector(Arc::new(Cloudflare::new("test-client")), &[("cloudflare.dash", &stand_in.base), ("cloudflare.api", &api)]);
+    factory.add_connector(Arc::new(recipe), &[("cloudflare.dash", &stand_in.base), ("cloudflare.api", &api)]);
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
@@ -390,7 +417,7 @@ async fn setup() -> (Client, View, Arc<Mutex<Cloud>>, StandIn) {
         let model = v1::UpdateAgent { agent_id: agent.into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
         apply_request(&mut client, &mut view, Request::UpdateAgent(model)).await;
     }
-    (client, view, cloud, stand_in)
+    (client, view, cloud, stand_in, addr)
 }
 
 /// Connects Cloudflare, the person approving: the connection.
@@ -403,6 +430,7 @@ async fn connect(client: &mut Client, view: &mut View, cloud: &Mutex<Cloud>) -> 
     let finish = Request::FinishConnect(v1::FinishConnect {
         flow_id: started.flow_id.clone(),
         callback_url: format!("{REDIRECT}?code=good-code&state={state}"),
+        token: String::new(),
     });
     ok(client, view, finish).await;
     view.follow(client, |view| vault(view).secrets.iter().any(|secret| secret.connection.is_some())).await;
@@ -471,4 +499,76 @@ async fn rivet_reads_a_connection_and_gives_an_agent_only_a_narrow_secret_made_f
     // Only admin agents have them.
     let builder = call(&mut client, &mut view, "builder", "secrets_choices", &json!({"secret": name}).to_string()).await;
     assert!(!builder.contains("Accounts:"), "{builder}");
+}
+
+#[tokio::test]
+async fn cloudflare_connects_with_a_pasted_token_that_mints_narrow_ones_and_is_deleted_with_them() {
+    let (mut client, mut view, cloud, stand_in, addr) = setup_with(Cloudflare::pasted()).await;
+    cloud.lock().expect("lock").pasted = Some(PASTED.to_owned());
+    let connector = vault(&view).connectors.into_iter().find(|connector| connector.id == "cloudflare").expect("in the catalog");
+    assert_eq!(connector.flow(), v1::ConnectorFlowKind::Paste);
+    assert!(connector.redirect_uris.is_empty());
+    assert!(
+        connector.token_url.starts_with("https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys="),
+        "{}",
+        connector.token_url
+    );
+    let keys: Value = serde_json::from_str(&query(&connector.token_url, "permissionGroupKeys")).expect("JSON");
+    assert_eq!(keys[0], json!({"key": "account_api_tokens", "type": "edit"}));
+    assert_eq!(query(&connector.token_url, "name"), "Claktory");
+
+    // Cloudflare's page to make the token; the flow waits for it.
+    let start = Request::StartConnect(v1::StartConnect { connector_id: "cloudflare".into(), ..Default::default() });
+    let Body::ConnectStarted(started) = apply_request(&mut client, &mut view, start).await else { panic!("not started") };
+    assert_eq!(started.url, connector.token_url);
+    let flow = |view: &View| vault(view).flows.into_iter().find(|flow| flow.id == started.flow_id).expect("the flow");
+    assert_eq!(flow(&view).state(), ConnectFlowState::Waiting);
+    assert!(flow(&view).expires_ms - factoryd::transcript::now_ms() > 20 * 60 * 1000, "time to make a token");
+
+    let paste = |token: &str| {
+        Request::FinishConnect(v1::FinishConnect { flow_id: started.flow_id.clone(), token: token.into(), ..Default::default() })
+    };
+    assert_eq!(failure(&apply_request(&mut client, &mut view, paste("  ")).await), "Paste the token to connect.");
+    // Only the device that started it finishes it.
+    let (mut other, _, _) = Client::connect(addr).await;
+    let elsewhere = other.request(paste(PASTED)).await.body;
+    assert!(failure(&elsewhere).starts_with("This connection was started on another device."), "{elsewhere:?}");
+
+    // A token Cloudflare doesn't take: the flow waits for another, saying why.
+    ok(&mut client, &mut view, paste("cf-wrong-token")).await;
+    view.follow(&mut client, |view| !flow(view).error.is_empty()).await;
+    assert_eq!(flow(&view).state(), ConnectFlowState::Waiting);
+    assert_eq!(flow(&view).error, "Cloudflare didn't accept that token. Check that you copied all of it, or make a new one.");
+
+    ok(&mut client, &mut view, paste(&format!(" {PASTED}\n"))).await;
+    view.follow(&mut client, |view| flow(view).state() == ConnectFlowState::Connected).await;
+    assert_eq!(flow(&view).error, "");
+    let connection = vault(&view).secrets.into_iter().find(|secret| secret.connection.is_some()).expect("a connection");
+    let info = connection.connection.clone().expect("a connection");
+    assert_eq!((info.account.as_str(), info.status()), ("Acme", ConnectionStatus::Ready));
+    assert_eq!(info.access, ["Account API Tokens Write", "Zone Read"], "what the token may do, as Cloudflare says");
+    assert!(connection.variables.is_empty() && connection.grants.is_empty(), "given to no one");
+
+    // A narrow token, minted with the pasted one.
+    let derive = Request::DeriveSecret(v1::DeriveSecret {
+        secret_id: connection.id.clone(),
+        name: "Cloudflare DNS".into(),
+        description: String::new(),
+        permissions: vec!["dns-write".into()],
+        resources: vec!["acc".into(), "z1".into()],
+        expires_ms: 0,
+    });
+    ok(&mut client, &mut view, derive).await;
+    assert_eq!(secret(&view, "Cloudflare DNS").export.expect("made from it").access, ["DNS Write on claktory.com"]);
+    assert_eq!(cloud.lock().expect("lock").tokens.len(), 1);
+    assert!(
+        stand_in.requests().iter().any(|call| call.method == "POST" && call.header("authorization") == Some(&format!("Bearer {PASTED}"))),
+        "minted with the pasted token"
+    );
+
+    // Disconnected and revoked: what it made, and the pasted token itself, deleted at Cloudflare.
+    ok(&mut client, &mut view, Request::DisconnectService(v1::DisconnectService { secret_id: connection.id.clone(), revoke: true })).await;
+    view.follow(&mut client, |view| vault(view).secrets.is_empty()).await;
+    let cloud = cloud.lock().expect("lock");
+    assert!(cloud.tokens.is_empty() && cloud.pasted.is_none(), "{:?}", cloud.tokens.keys());
 }

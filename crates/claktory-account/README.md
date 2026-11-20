@@ -21,8 +21,11 @@ claktory-account --db account.db --secrets secrets.json --mail-dir mail/
 
 It listens on 127.0.0.1:8080 (`--listen`). With `--mail-dir` it writes each
 email to a file there instead of sending it, so a local instance needs no mail
-provider: the sign-in code is in the newest file. To send for real, put a
-Resend API key in the secrets file's `resend_api_key`.
+provider: the sign-in code is in the newest file. To send for real through
+Cloudflare Email Sending, put a Cloudflare API token with Email Sending: Edit
+in the secrets file (`claktory-account set-cloudflare-token secrets.json`,
+the token on standard input) and give `--cloudflare-account ID`; Resend still
+works too (`set-resend-key`, `--email resend`).
 
 Behind a TLS proxy such as Caddy, add `--trust-proxy`: the client's IP is then
 the last entry of `X-Forwarded-For`, and the account page's cookie is Secure.

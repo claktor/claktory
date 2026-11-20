@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'usage_resets.dart';
 
 /// The usage window a provider's circle shows.
 const headlineWindow = 'weekly';
@@ -86,20 +87,26 @@ class UsageCircle extends StatelessWidget {
     return Semantics(
       label: meter.name,
       child: HoverCard(
+        interactive: true,
+        // On iPhone, a touch and hold opens it.
+        holdToShow: true,
         card: (context) => UsageCard(meter: meter, now: DateTime.now()),
         child: SizedBox.square(
           dimension: 24,
-          child: Center(
-            child: Opacity(
-              // Numbers from before a failed read are shown, but faded.
-              opacity: usage != null && usage.error.isNotEmpty ? 0.5 : 1,
-              child: CustomPaint(
-                size: const Size.square(20),
-                painter: _CirclePainter(
-                  color: color,
-                  mark: mark,
-                  used: used,
-                  logo: providerMark(provider.id),
+          child: ResetCue(
+            shown: resetCue(meter),
+            child: Center(
+              child: Opacity(
+                // Numbers from before a failed read are shown, but faded.
+                opacity: usage != null && usage.error.isNotEmpty ? 0.5 : 1,
+                child: CustomPaint(
+                  size: const Size.square(20),
+                  painter: _CirclePainter(
+                    color: color,
+                    mark: mark,
+                    used: used,
+                    logo: providerMark(provider.id),
+                  ),
                 ),
               ),
             ),
@@ -347,6 +354,7 @@ class UsageCard extends StatelessWidget {
               style: TextStyles.caption.copyWith(color: palette.textFaint),
             ),
           ),
+        UsageResets(meter: meter, now: now),
       ],
     );
   }

@@ -387,6 +387,43 @@ async fn the_sidebar_and_panel_widths_are_kept_for_every_device() {
 }
 
 #[tokio::test]
+async fn each_device_keeps_its_own_zoom() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let zoom = |workspace: &v1::Workspace| workspace.settings.clone().expect("settings").zoom;
+    assert!(zoom(&workspace).is_empty(), "actual size everywhere");
+    let config = || std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    let set = |zoom: f64| client_message::Body::SetZoom(v1::SetZoom { zoom });
+
+    // The loopback port is this machine's own app.
+    let events = client.ok(set(1.25)).await;
+    assert_eq!(zoom(last_workspace(&events).expect("workspace")), [("local".to_owned(), 1.25)].into());
+    let saved: serde_json::Value = serde_json::from_str(&config()).expect("json");
+    assert_eq!(saved["display"], serde_json::json!({"zoom": {"local": 1.25}}));
+    let (_, workspace, _) = Client::connect(addr).await;
+    assert_eq!(zoom(&workspace)["local"], 1.25, "restored when it connects");
+
+    for wrong in [0.4, 2.5, f64::NAN, f64::INFINITY, -1.0] {
+        let refused = client.request(set(wrong)).await;
+        assert!(
+            matches!(&refused.body, Body::Error(error) if error.code() == v1::ErrorCode::InvalidRequest),
+            "{wrong}: {:?}",
+            refused.body
+        );
+    }
+    // Actual size isn't written.
+    client.ok(set(0.5)).await;
+    let events = client.ok(set(1.0)).await;
+    assert!(zoom(last_workspace(&events).expect("workspace")).is_empty());
+    assert!(!config().contains("\"display\""), "{}", config());
+    client.ok(set(0.0)).await;
+
+    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 1.5}}}"#).is_ok());
+    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 3}}}"#).is_err());
+}
+
+#[tokio::test]
 async fn the_vaults_unlock_window_is_a_setting() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;

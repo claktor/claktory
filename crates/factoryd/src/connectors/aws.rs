@@ -99,8 +99,8 @@ impl Aws {
 
 static SPEC: LazyLock<Spec> = LazyLock::new(|| {
     Spec {
-    id: "aws".into(),
-    name: "AWS".into(),
+    id: "aws-sso".into(),
+    name: "AWS IAM Identity Center".into(),
     description: "Give an agent one role in one of your AWS accounts, with short-lived keys that renew by themselves. Uses IAM Identity Center to sign in."
         .into(),
     accesses: vec![AccessSpec {
@@ -184,7 +184,7 @@ fn guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Checks a region's name, so it can only ever be a part of an AWS host name.
-fn region(text: &str) -> Result<String, Problem> {
+pub(super) fn region(text: &str) -> Result<String, Problem> {
     let region = text.trim();
     let valid = region.len() <= 32
         && region.contains('-')

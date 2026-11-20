@@ -1040,8 +1040,10 @@ impl Factory {
             if matches!(event, AgentEvent::MessageEnd { .. } | AgentEvent::Compacted { .. })
                 && let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.epoch == epoch)
             {
-                let model = inner.config.agent(id).map(|agent| agent.model.as_str()).unwrap_or_default();
-                crate::account::analytics::record(&self.store.db(), runtime.run, model, &event);
+                let (model, name) = inner.config.agent(id).map(|agent| (agent.model.as_str(), agent.name.as_str())).unwrap_or_default();
+                let db = self.store.db();
+                crate::account::analytics::record(&db, runtime.run, model, &event);
+                crate::usage_report::record(&db, id, name, model, &event);
             }
             let Some(runtime) = inner.agents.get_mut(id) else { return };
             // A run of a conversation the person cleared.

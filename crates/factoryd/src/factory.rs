@@ -129,6 +129,9 @@ pub enum RequestError {
     /// A comment that can't be made or changed so, and why.
     #[error("{0}")]
     Comments(String),
+    /// A usage breakdown that can't be made so, and why.
+    #[error("{0}")]
+    Usage(String),
     #[error(transparent)]
     Vault(#[from] crate::vault::VaultError),
     /// The account service's answer, or why it can't be asked (`crate::account`).
@@ -144,6 +147,12 @@ pub enum RequestError {
     /// A service that couldn't be reached, or answered with an error.
     #[error("{0}")]
     Unreachable(String),
+    /// A usage reset that isn't there (any more), and why (`crate::usage`).
+    #[error("{0}")]
+    NoReset(String),
+    /// A usage reset that can't be used now, and why (`crate::usage`).
+    #[error("{0}")]
+    Reset(String),
 }
 
 impl RequestError {
@@ -161,7 +170,8 @@ impl RequestError {
             | RequestError::NoApp { .. }
             | RequestError::UnknownProposal(_)
             | RequestError::UnknownThread(_)
-            | RequestError::UnknownComment(_) => v1::ErrorCode::NotFound,
+            | RequestError::UnknownComment(_)
+            | RequestError::NoReset(_) => v1::ErrorCode::NotFound,
             RequestError::Empty(_)
             | RequestError::RelativePath(_)
             | RequestError::ConfigBroken
@@ -182,7 +192,9 @@ impl RequestError {
             | RequestError::NoEntries(_)
             | RequestError::Upload(_)
             | RequestError::Connect(_)
-            | RequestError::Comments(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Comments(_)
+            | RequestError::Usage(_)
+            | RequestError::Reset(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
@@ -258,6 +270,8 @@ pub struct Factory {
     task_check_every: std::sync::atomic::AtomicU64,
     /// Wakes the usage monitor, so a new sign-in's usage and plan are read at once.
     pub(crate) usage_wake: Arc<tokio::sync::Notify>,
+    /// The accounts a usage reset is being used on now (`crate::usage`).
+    pub(crate) resetting: Mutex<std::collections::HashSet<crate::usage::AccountKey>>,
     /// The Monitors extension's scheduler.
     pub(crate) monitors: crate::extensions::monitors::State,
     /// Web search and fetch, shared by every agent (`extensions::web`).
@@ -527,6 +541,7 @@ impl Factory {
             nudge_after: std::sync::atomic::AtomicU64::new(30_000),
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
+            resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
             web: crate::extensions::web::State::default(),
             characters: crate::characters::State::new(presences),
@@ -565,6 +580,7 @@ impl Factory {
         tokio::spawn(crate::extensions::resources::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::vault::requests::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
@@ -899,6 +915,28 @@ impl Factory {
                 if let Some(value) = value {
                     *setting = value;
                 }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// SetZoom: how much `device` (a connection's own) zooms the app; 1 or 0
+    /// for actual size, which leaves it out of config.json.
+    pub async fn set_zoom(&self, device: &str, zoom: f64) -> Result<(), RequestError> {
+        let actual = zoom == 0.0 || (zoom - 1.0).abs() < 1e-9;
+        if !actual && !(crate::config::ZOOM_MIN..=crate::config::ZOOM_MAX).contains(&zoom) {
+            let why = format!("zoom must be from {} to {}", crate::config::ZOOM_MIN, crate::config::ZOOM_MAX);
+            return Err(RequestError::Invalid(crate::config::Invalid::BadDisplay(why)));
+        }
+        if actual && !self.lock().config.display.zoom.contains_key(device) {
+            return Ok(());
+        }
+        self.edit_config(|config| {
+            if actual {
+                config.display.zoom.remove(device);
+            } else {
+                config.display.zoom.insert(device.to_owned(), zoom);
             }
             Ok(())
         })
@@ -1735,6 +1773,7 @@ impl Factory {
                 build_cache_gb: config.resources.build_cache_gb,
                 sidebar_width: config.display.sidebar_width,
                 panel_width: config.display.panel_width,
+                zoom: config.display.zoom.iter().map(|(device, zoom)| (device.clone(), *zoom)).collect(),
                 user_name: config.user.name.clone(),
                 vault_unlock_minutes: config.vault.unlock_minutes,
                 idle_compaction: config.compaction.idle,
@@ -1923,7 +1962,6 @@ impl Factory {
     pub(crate) fn vault_changed(&self) {
         let mut hidden = self.vault.every_variable();
         hidden.extend(self.broker.hidden(&self.vault));
-        eprintln!("HIDDEN {:?}", hidden.iter().map(|v| format!("{}/{} {}", v.secret, v.variable, v.public)).collect::<Vec<_>>());
         self.redaction.set(factory_agent::Redactor::new(&hidden));
         self.broadcast_workspace(&self.lock());
     }

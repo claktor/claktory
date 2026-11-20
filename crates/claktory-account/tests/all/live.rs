@@ -1,6 +1,6 @@
 //! A Claktory's whole round with a running service, as a backend would make
-//! it: only when CLAKTORY_ACCOUNT_LIVE names one (scripts/test-deploy-account.sh
-//! does, for a service it deployed in a container). The rest of these tests
+//! it: only when CLAKTORY_ACCOUNT_LIVE names one (the ops repository's deploy
+//! test does, for a service it deployed in a container). The rest of these tests
 //! run their own instance instead.
 //!
 //!   CLAKTORY_ACCOUNT_LIVE      the service, e.g. https://account.test:8443
