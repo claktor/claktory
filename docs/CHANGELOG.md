@@ -6,6 +6,14 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.12
+Released 2026-11-20 19:12 UTC.
+- Added: Remove Claktory from this Mac in Settings → This Mac. Keep your data to pick up where you left off later, or delete it too.
+- Added: When the app and your Claktory are too far apart in version to work together, the app says which one to update, and how.
+- Changed: An agent's card on the Map shows who it reports to and who it leads.
+- Changed: Click a switch's label or note to turn it on or off, not only the switch itself.
+- Fixed: When one of your Claktories couldn't go on (stuck setting up, signing in or needing an update), it could fill the window with no way to switch to another. Your other Claktories now stay in reach, on the Mac and on iPhone.
+
 ## v0.1.11
 Released 2026-11-20 18:23 UTC.
 - Added: Download Claktory for Mac from claktory.com and open it: it sets itself up, and offers to move itself to Applications.

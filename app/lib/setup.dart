@@ -58,6 +58,9 @@ class InstallResult {
     this.detail = '',
     this.version = '',
     this.running = false,
+    this.dataBytes = 0,
+    this.dataComplete = true,
+    this.answered = true,
   });
 
   /// Its JSON line, or a failure when there's none.
@@ -72,6 +75,16 @@ class InstallResult {
           detail: json['detail'] as String? ?? '',
           version: json['version'] as String? ?? '',
           running: json['running'] as bool? ?? false,
+          // What a dry run of uninstall would delete, the backend itself
+          // aside (it goes either way).
+          dataBytes: [
+            for (final item in json['items'] as List? ?? const [])
+              if (item is Map && item['what'] != 'backend')
+                (item['bytes'] as num?)?.toInt() ?? 0,
+          ].fold(0, (sum, bytes) => sum + bytes),
+          dataComplete: (json['items'] as List? ?? const []).every(
+            (item) => item is! Map || item['complete'] != false,
+          ),
         );
       } on FormatException {
         break;
@@ -81,6 +94,7 @@ class InstallResult {
     }
     return InstallResult(
       result: 'failed',
+      answered: false,
       detail: [
         'exit $code',
         if (stderr.trim().isNotEmpty) stderr.trim(),
@@ -103,6 +117,15 @@ class InstallResult {
 
   /// For already_installed: whether the backend answered then.
   final bool running;
+
+  /// For a dry run of uninstall: how much data it would delete (0 when
+  /// not said), and whether that's all of it (else at least that much).
+  final int dataBytes;
+  final bool dataComplete;
+
+  /// Whether `factoryd` answered with its line at all: one from before a
+  /// command (uninstall, say) doesn't.
+  final bool answered;
 }
 
 /// The app's native side of setting up, a channel to Setup.swift; tests
@@ -123,10 +146,23 @@ class SetupChannel {
   }
 
   /// Runs the bundled `factoryd` with [arguments].
-  Future<InstallResult> install(List<String> arguments) async {
+  Future<InstallResult> install(List<String> arguments) =>
+      _factoryd('install', arguments);
+
+  /// Runs `factoryd uninstall` (the installed one, else the bundled one)
+  /// with [arguments].
+  Future<InstallResult> uninstall(List<String> arguments) =>
+      _factoryd('uninstall', arguments);
+
+  /// Puts this app in the Trash and quits; with [forget], what it keeps on
+  /// this Mac (its window, drafts and connections) goes too.
+  Future<void> removeApp({required bool forget}) =>
+      _channel.invokeMethod<void>('removeApp', forget);
+
+  Future<InstallResult> _factoryd(String method, List<String> arguments) async {
     try {
       final answer = await _channel.invokeMapMethod<String, Object?>(
-        'install',
+        method,
         arguments,
       );
       return InstallResult.parse(

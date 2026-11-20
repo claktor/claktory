@@ -54,6 +54,19 @@ class FakeSetupChannel implements SetupChannel {
   }
 
   @override
+  Future<InstallResult> uninstall(List<String> arguments) async {
+    final key = arguments.join(' ');
+    runs.add(key);
+    return results[key] ?? const InstallResult(result: 'failed');
+  }
+
+  /// Each removeApp's forget.
+  final removed = <bool>[];
+
+  @override
+  Future<void> removeApp({required bool forget}) async => removed.add(forget);
+
+  @override
   Future<String?> moveToApplications() async {
     moves++;
     return moveError;

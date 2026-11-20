@@ -107,6 +107,8 @@ pub(crate) struct Setup {
     pub(crate) codesign: PathBuf,
     /// The backend's port.
     pub(crate) port: u16,
+    /// How long the backend has to answer once its job is loaded; for
+    /// `uninstall`, how long launchd and the backend have to stop.
     pub(crate) answer_within: Duration,
     /// The job's PATH; None asks the login shell.
     pub(crate) path: Option<String>,
@@ -164,7 +166,7 @@ fn examine(setup: &Setup) -> Found {
 }
 
 /// Whether something answers on the backend's port, within `within`.
-fn answers(port: u16, within: Duration) -> bool {
+pub(crate) fn answers(port: u16, within: Duration) -> bool {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     port != 0 && std::net::TcpStream::connect_timeout(&addr, within).is_ok()
 }
@@ -445,7 +447,7 @@ pub fn main(args: &[String]) -> ExitCode {
 
 /// The real Claktory on this Mac, for this user, from the bundle this
 /// factoryd is in.
-fn this_mac() -> Option<Setup> {
+pub(crate) fn this_mac() -> Option<Setup> {
     let user_home = std::env::home_dir()?;
     let instance = crate::home::instance(false, &user_home);
     let job = launch_agent::Job::for_this_user()?;

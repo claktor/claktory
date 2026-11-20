@@ -13,6 +13,7 @@ import 'identity.dart';
 import 'login.dart';
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'remove_mac.dart';
 import 'scope.dart';
 import 'secrets.dart';
 import 'transcript.dart';
@@ -152,6 +153,14 @@ class SettingsView extends StatelessWidget {
                             _Highlights(workspace: workspace),
                           ],
                         ),
+                        // Removing Claktory, from the Mac it runs on.
+                        if (canRemoveThisMac(context)) ...const [
+                          SizedBox(height: Space.xxl),
+                          _Section(
+                            title: 'This Mac',
+                            children: [RemoveThisMac()],
+                          ),
+                        ],
                       ],
                     ),
                   );
@@ -398,9 +407,9 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
               _Switch(
                 label: 'Summarize idle conversations',
                 note:
-                    'When an agent with a long conversation is left idle, '
-                    'Claktory summarizes it shortly before picking it up '
-                    'again would cost more, so your next message costs less.',
+                    'When a long conversation sits idle, Claktory summarizes '
+                    'it just before it stops being kept ready, so your next '
+                    'message costs less.',
                 value: settings.idleCompaction,
                 onChanged: (on) => _update(UpdateSettings(idleCompaction: on)),
               ),
@@ -410,8 +419,8 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
                 child: _Switch(
                   label: 'Also after 5 minutes idle',
                   note:
-                      'For conversations kept ready only 5 minutes. This '
-                      'summarizes far more often.',
+                      'For conversations kept ready only 5 minutes. '
+                      'Summarizes far more often.',
                   value: settings.idleCompactionShortCache,
                   onChanged: settings.idleCompaction
                       ? (on) => _update(
@@ -781,28 +790,35 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
       children: [
         SettingRow(
           label: 'Highlights',
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Toggle(
-                  value: on,
-                  label: 'Highlights',
-                  onChanged: (value) =>
-                      run(() => AppScope.of(context).setHighlights(value)),
+          child: ToggleTap(
+            value: on,
+            onChanged: (value) =>
+                run(() => AppScope.of(context).setHighlights(value)),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Toggle(
+                    value: on,
+                    label: 'Highlights',
+                    onChanged: (value) =>
+                        run(() => AppScope.of(context).setHighlights(value)),
+                  ),
                 ),
-              ),
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: Text(
-                  'A soft glow on what changes: new agents, projects and '
-                  'folders, checklist updates, messages between agents, '
-                  'and what an agent points out to you.',
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                const SizedBox(width: Space.m),
+                Expanded(
+                  child: Text(
+                    'A soft glow on what changes: new agents, projects and '
+                    'folders, checklist updates, messages between agents, '
+                    'and what an agent points out to you.',
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textMuted,
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
         failureLine(palette),
@@ -831,33 +847,37 @@ class _Switch extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final enabled = onChanged != null;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Toggle(value: value, label: label, onChanged: onChanged),
-        ),
-        const SizedBox(width: Space.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyles.body.copyWith(
-                  color: enabled ? palette.text : palette.textFaint,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                note,
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
-              ),
-            ],
+    return ToggleTap(
+      value: value,
+      onChanged: onChanged,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Toggle(value: value, label: label, onChanged: onChanged),
           ),
-        ),
-      ],
+          const SizedBox(width: Space.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyles.body.copyWith(
+                    color: enabled ? palette.text : palette.textFaint,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  note,
+                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

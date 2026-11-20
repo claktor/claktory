@@ -304,7 +304,7 @@ class _LoginPanelState extends State<LoginPanel> {
             children: [
               Text(
                 flow.instructions.isEmpty
-                    ? 'Finish signing in in your browser.'
+                    ? 'Finish signing in with your browser.'
                     : flow.instructions,
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
@@ -666,7 +666,7 @@ class _ProviderCardState extends State<ProviderCard> {
               const SizedBox(height: Space.xs),
               Text(
                 'When one account reaches its limit, Claktory switches to '
-                'the next.',
+                'the next. When all have, agents wait until one resets.',
                 style: TextStyles.caption.copyWith(color: palette.textMuted),
               ),
             ],

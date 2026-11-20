@@ -275,28 +275,37 @@ class _ToggleRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Toggle(value: value, label: label, onChanged: onChanged),
-        ),
-        const SizedBox(width: Space.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: TextStyles.body.copyWith(color: palette.text)),
-              if (note != null)
-                Text(
-                  note!,
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
-                ),
-            ],
+    return ToggleTap(
+      value: value,
+      onChanged: onChanged,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Toggle(value: value, label: label, onChanged: onChanged),
           ),
-        ),
-      ],
+          const SizedBox(width: Space.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyles.body.copyWith(color: palette.text),
+                ),
+                if (note != null)
+                  Text(
+                    note!,
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textMuted,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -940,36 +940,40 @@ class _SwitchLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final note = this.note;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Toggle(value: value, label: label, onChanged: onChanged),
-        ),
-        const SizedBox(width: Space.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyles.body.copyWith(
-                  color: onChanged == null ? palette.textMuted : palette.text,
-                ),
-              ),
-              if (note != null && note.isNotEmpty)
+    return ToggleTap(
+      value: value,
+      onChanged: onChanged,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Toggle(value: value, label: label, onChanged: onChanged),
+          ),
+          const SizedBox(width: Space.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Text(
-                  note,
-                  style: TextStyles.caption.copyWith(
-                    color: palette.textFaint,
-                    fontFamily: mono ? TextStyles.mono : null,
+                  label,
+                  style: TextStyles.body.copyWith(
+                    color: onChanged == null ? palette.textMuted : palette.text,
                   ),
                 ),
-            ],
+                if (note != null && note.isNotEmpty)
+                  Text(
+                    note,
+                    style: TextStyles.caption.copyWith(
+                      color: palette.textFaint,
+                      fontFamily: mono ? TextStyles.mono : null,
+                    ),
+                  ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

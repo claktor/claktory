@@ -37,6 +37,7 @@ mod store;
 pub mod terminal_qr;
 pub mod transcript;
 mod trees;
+pub mod uninstall;
 pub mod update;
 mod uploads;
 mod usage;

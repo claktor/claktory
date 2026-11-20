@@ -2274,6 +2274,45 @@ class Toggle extends StatelessWidget {
   }
 }
 
+/// A switch's whole row, its label and note included, as one click
+/// target for it: a click anywhere on [child] turns it over, as on the
+/// switch itself (whose own click goes to it alone). Its words stay
+/// selectable by dragging, as settings' descriptions are.
+class ToggleTap extends StatelessWidget {
+  const ToggleTap({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    required this.child,
+  });
+
+  final bool value;
+
+  /// Null when it can't be changed now.
+  final ValueChanged<bool>? onChanged;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final onChanged = this.onChanged;
+    if (onChanged == null) return child;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!value),
+      // The pointer over the words too, which would otherwise show the
+      // text cursor: a region laid over them that lets the pointer through.
+      child: Stack(
+        children: [
+          child,
+          const Positioned.fill(
+            child: MouseRegion(opaque: false, cursor: SystemMouseCursors.click),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// A small checkbox mark: a 10px square, filled with signal when on. [dim]
 /// greys it, for a choice that's fixed.
 class CheckMark extends StatelessWidget {

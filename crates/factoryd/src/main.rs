@@ -60,15 +60,15 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("redact") {
         return factory_agent::secrets::filter_main();
     }
-    // `factoryd install`, run by the Mac app from its bundle: its answer is
-    // one JSON line on stdout, so no logs there.
+    // `factoryd install` and `uninstall`, run by the Mac app: their answer
+    // is one JSON line on stdout, so no logs there.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(at) = args.iter().position(|arg| arg != "--dev")
-        && args[at] == "install"
+        && (args[at] == "install" || args[at] == "uninstall")
     {
         let mut flags: Vec<String> = args[..at].to_vec();
         flags.extend_from_slice(&args[at + 1..]);
-        return factoryd::install::main(&flags);
+        return if args[at] == "install" { factoryd::install::main(&flags) } else { factoryd::uninstall::main(&flags) };
     }
     serve_main()
 }

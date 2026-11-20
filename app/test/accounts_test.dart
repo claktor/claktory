@@ -85,7 +85,7 @@ void main() {
     expect(
       find.text(
         'When one account reaches its limit, Claktory switches to '
-        'the next.',
+        'the next. When all have, agents wait until one resets.',
       ),
       findsOneWidget,
     );

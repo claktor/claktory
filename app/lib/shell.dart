@@ -8,6 +8,7 @@ import 'agent_view.dart';
 import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
+import 'compatibility.dart';
 import 'map.dart';
 import 'pairing.dart';
 import 'marketplace.dart';
@@ -19,7 +20,7 @@ import 'extensions.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
-import 'rail.dart' show railWidth;
+import 'rail.dart' show ClaktoriesBackStrip, railWidth;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'setup.dart';
@@ -127,9 +128,13 @@ class _ShellState extends State<Shell> {
           ? SetupStep(setup: setup)
           : null;
       // What's new, opened from the update banner, shows instead of the
-      // first launch's questions until it's closed.
+      // first launch's questions until it's closed. First of them: this
+      // app and its Claktory can't work together (compatibility.dart).
+      final mismatch = mismatchIn(context);
       final question = AppScope.pageShown(context, AppPage.changelog)
           ? null
+          : mismatch != null
+          ? VersionStep(which: mismatch)
           : asksSignIn(context)
           ? const SignInStep()
           : asksName(context)
@@ -144,12 +149,27 @@ class _ShellState extends State<Shell> {
       );
       if (step == null) return window;
       // The first launch asks the person to sign in, then their name, over
-      // everything.
+      // everything but the rail: switching to another Claktory always
+      // works, so one that can't go on (too old, say) never traps them.
+      final rail = widget.rail == null || isPhoneLayout(context)
+          ? 0.0
+          : railWidth;
       return Stack(
         fit: StackFit.expand,
         children: [
           ExcludeFocus(child: window),
-          NameStepBarrier(child: step),
+          Positioned.fill(
+            left: rail,
+            child: NameStepBarrier(child: step),
+          ),
+          // A phone has no rail: the way back to its Claktories sits on top.
+          if (isPhoneLayout(context))
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: ClaktoriesBackStrip(),
+            ),
         ],
       );
     },

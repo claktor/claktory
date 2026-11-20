@@ -213,6 +213,53 @@ void main() {
     );
   });
 
+  testWidgets("an agent's card says whom it reports to and whom it leads", (
+    tester,
+  ) async {
+    final workspace = claktoryWorkspace(leads: true);
+    final mike = mapAgentDetails(
+      workspace,
+      node(workspace, 'agent:coordinator'),
+    );
+    expect(mike.lead?.label, 'Rivet');
+    // In the sidebar's order.
+    expect(mike.reports.map((n) => n.label).take(3), ['Nora', 'Iris', 'Theo']);
+    expect(mike.reports.map((n) => n.label), contains('Zoe'));
+    final zoe = mapAgentDetails(workspace, node(workspace, 'agent:frontend-3'));
+    expect(zoe.lead?.label, 'Mike');
+    expect(zoe.reports, isEmpty);
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(child: MapAgentCard(details: mike)),
+      ),
+    );
+    expect(find.text('Reports to'), findsOneWidget);
+    expect(find.text('Rivet'), findsOneWidget);
+    expect(find.text('Leads'), findsOneWidget);
+    // Just under the heading, after Reports to and before Extensions.
+    final under = tester.getRect(
+      find.text(mike.reports.map((n) => n.label).join(', ')).first,
+    );
+    final heading = tester.getRect(find.text('Leads'));
+    expect(under.top - heading.bottom, lessThan(4));
+    expect(tester.getRect(find.text('Reports to')).top, lessThan(heading.top));
+    expect(heading.top, lessThan(tester.getRect(find.text('Extensions')).top));
+    // No lead and no one under it: neither section.
+    final plain = mapAgentDetails(
+      claktoryWorkspace(),
+      node(claktoryWorkspace(), 'agent:coordinator'),
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(child: MapAgentCard(details: plain)),
+      ),
+    );
+    expect(find.text('Reports to'), findsNothing);
+    expect(find.text('Leads'), findsNothing);
+  });
+
   testWidgets('the key says what badges are', (tester) async {
     await showMap(tester);
     expect(find.text('Badges: extra reach or power'), findsOneWidget);

@@ -12,8 +12,8 @@ typedef MapCardExtension = ({String label, String icon, bool important});
 
 /// Everything the Map and the workspace say about an agent, for its card:
 /// every extension it has on (the badges' first, in their order), the
-/// folder it works in and the folders it only reads, whom it can message
-/// and the secrets it has.
+/// folder it works in and the folders it only reads, its lead and the
+/// agents it leads, whom it can message and the secrets it has.
 class MapAgentDetails {
   const MapAgentDetails({
     required this.agent,
@@ -24,6 +24,8 @@ class MapAgentDetails {
     required this.messages,
     required this.secrets,
     this.apps = const [],
+    this.lead,
+    this.reports = const [],
   });
 
   final MapNode agent;
@@ -39,6 +41,11 @@ class MapAgentDetails {
   final bool everyone;
   final List<MapNode> messages;
   final List<MapNode> secrets;
+
+  /// The agent it reports to (Agent.lead_id, the Map's lead line), and
+  /// those that report to it.
+  final MapNode? lead;
+  final List<MapNode> reports;
 
   /// The apps given to it: each app's node, what it may do with it and
   /// the events it hears (the edges' labels; empty when none).
@@ -69,6 +76,8 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
             (label: known.name, icon: known.icon, important: false),
   ];
   MapNode? folder;
+  MapNode? lead;
+  final reports = <MapNode>[];
   final reads = <MapNode>[];
   final messages = <MapNode>[];
   final secrets = <MapNode>[];
@@ -95,6 +104,10 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
         if (!messages.contains(other)) messages.add(other);
       case MapEdgeKind.MAP_EDGE_KIND_SECRET when to:
         secrets.add(other);
+      case MapEdgeKind.MAP_EDGE_KIND_LEAD when from:
+        lead = other;
+      case MapEdgeKind.MAP_EDGE_KIND_LEAD when to:
+        reports.add(other);
       case MapEdgeKind.MAP_EDGE_KIND_APP when to:
         can[other.id] = edge.label;
       case MapEdgeKind.MAP_EDGE_KIND_HEARS when to:
@@ -109,6 +122,7 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
       (order[a.id] ?? 1 << 30).compareTo(order[b.id] ?? 1 << 30);
   reads.sort(bySidebar);
   messages.sort(bySidebar);
+  reports.sort(bySidebar);
   return MapAgentDetails(
     agent: node,
     extensions: extensions,
@@ -117,6 +131,8 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
     everyone: node.admin,
     messages: messages,
     secrets: secrets,
+    lead: lead,
+    reports: reports,
     apps: [
       for (final id in {...can.keys, ...hears.keys})
         if (nodes[id] case final app?)
@@ -126,7 +142,8 @@ MapAgentDetails mapAgentDetails(Workspace workspace, MapNode node) {
 }
 
 /// An agent's card on the Map: a floating layer like a hover card, with
-/// its name and role, then its extensions (the badges' in `text`, the
+/// its name and role, then whom it reports to and whom it leads, its
+/// extensions (the badges' in `text`, the
 /// rest faint), where it works, whom it can message and its secrets.
 /// [actions] go along the bottom (on a phone, where it's tapped open).
 class MapAgentCard extends StatelessWidget {
@@ -154,6 +171,7 @@ class MapAgentCard extends StatelessWidget {
       style: nodes.isEmpty ? faint : caption,
     );
     final folder = details.folder;
+    final lead = details.lead;
     final actions = this.actions;
     return Container(
       width: width,
@@ -190,6 +208,10 @@ class MapAgentCard extends StatelessWidget {
               padding: const EdgeInsets.only(left: 8 + Space.s),
               child: Text(agent.detail, style: caption),
             ),
+          if (lead != null)
+            _Section(title: 'Reports to', child: names([lead], '')),
+          if (details.reports.isNotEmpty)
+            _Section(title: 'Leads', child: names(details.reports, '')),
           _Section(
             title: 'Extensions',
             child: details.extensions.isEmpty

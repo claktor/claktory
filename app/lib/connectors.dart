@@ -1592,37 +1592,41 @@ class _DisconnectFormState extends State<_DisconnectForm> {
           'The secrets made from it are deleted too, and agents that have '
           "them can't use them anymore.",
       fields: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Toggle(
-                value: _revoke,
-                label: 'Also cancel it at $service',
-                onChanged: (value) => setState(() => _revoke = value),
+        ToggleTap(
+          value: _revoke,
+          onChanged: (value) => setState(() => _revoke = value),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Toggle(
+                  value: _revoke,
+                  label: 'Also cancel it at $service',
+                  onChanged: (value) => setState(() => _revoke = value),
+                ),
               ),
-            ),
-            const SizedBox(width: Space.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Also cancel it at $service',
-                    style: TextStyles.body.copyWith(color: palette.text),
-                  ),
-                  Text(
-                    'So keys made from it stop working everywhere, even '
-                    'where they were copied.',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Also cancel it at $service',
+                      style: TextStyles.body.copyWith(color: palette.text),
                     ),
-                  ),
-                ],
+                    Text(
+                      'So keys made from it stop working everywhere, even '
+                      'where they were copied.',
+                      style: TextStyles.caption.copyWith(
+                        color: palette.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         const SizedBox(height: Space.l),
       ],
@@ -1840,7 +1844,7 @@ class _DeriveSecretFormState extends State<DeriveSecretForm> {
         ),
         Field(
           label: 'Description',
-          note: 'What it is and what it’s for. Agents read it.',
+          note: 'What it’s for. Agents and the Map show it.',
           child: TextField(controller: _description, maxLines: 3),
         ),
         if (choices == null)

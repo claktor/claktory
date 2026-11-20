@@ -799,6 +799,30 @@ class _BackToList extends InheritedWidget {
   bool updateShouldNotify(_BackToList old) => old.back != back;
 }
 
+/// On a phone, [ClaktoriesBackRow] along the top of the screen, in the
+/// sidebar's color, over a step that covers the rest (the name step, say),
+/// so another Claktory is always in reach. Nothing where there's no list to
+/// go back to.
+class ClaktoriesBackStrip extends StatelessWidget {
+  const ClaktoriesBackStrip({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (context.dependOnInheritedWidgetOfExactType<_BackToList>() == null ||
+        ClaktoriesScope.of(context) == null) {
+      return const SizedBox.shrink();
+    }
+    final palette = Palette.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: palette.sidebar,
+        border: Border(bottom: BorderSide(color: palette.hairline)),
+      ),
+      child: const SafeArea(bottom: false, child: ClaktoriesBackRow()),
+    );
+  }
+}
+
 /// On a phone, a 44pt "‹ Claktories" row at the top of a Claktory's
 /// sidebar screen, back to the list of them, with a dot while another one
 /// has news. Nothing anywhere else.

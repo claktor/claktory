@@ -23,6 +23,11 @@ enum Setup {
       case "install":
         let arguments = call.arguments as? [String] ?? []
         install(arguments, result)
+      case "uninstall":
+        let arguments = call.arguments as? [String] ?? []
+        uninstall(arguments, result)
+      case "removeApp":
+        removeApp(forget: call.arguments as? Bool ?? false, result)
       case "moveToApplications":
         moveToApplications(result)
       default:
@@ -104,12 +109,57 @@ enum Setup {
     guard arguments.first == "install" else {
       return result(FlutterError(code: "arguments", message: "only install", details: nil))
     }
-    guard FileManager.default.isExecutableFile(atPath: helper.path) else {
-      return result(FlutterError(code: "missing", message: helper.path, details: nil))
+    runFactoryd(helper, arguments, result)
+  }
+
+  /// The installed backend, which any Claktory on this Mac has, from the
+  /// online installer too.
+  static var installed: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".factory/bin/factoryd")
+  }
+
+  /// Runs `factoryd uninstall` with `arguments` (which must start with
+  /// "uninstall"): the one the app carries, which matches it, else the
+  /// installed backend's. It's the app's child, so it carries on as the
+  /// backend stops.
+  static func uninstall(_ arguments: [String], _ result: @escaping FlutterResult) {
+    guard arguments.first == "uninstall" else {
+      return result(FlutterError(code: "arguments", message: "only uninstall", details: nil))
+    }
+    let factoryd =
+      FileManager.default.isExecutableFile(atPath: helper.path) ? helper : installed
+    runFactoryd(factoryd, arguments, result)
+  }
+
+  /// Puts this app in the Trash and quits, once Claktory is removed. With
+  /// `forget`, what the app keeps on this Mac goes too: its user defaults
+  /// (the window's frame, drafts) and its connections in the Keychain.
+  static func removeApp(forget: Bool, _ result: @escaping FlutterResult) {
+    if forget, let bundleID = Bundle.main.bundleIdentifier {
+      KeychainItem(service: "Claktory connections", account: bundleID, label: "").delete()
+      UserDefaults.standard.removePersistentDomain(forName: bundleID)
+      UserDefaults.standard.synchronize()
+    }
+    // From a disk image there's nothing to put away: it just quits.
+    try? FileManager.default.trashItem(at: originalURL, resultingItemURL: nil)
+    result(nil)
+    // At once, so nothing writes the defaults back on the way out.
+    DispatchQueue.main.async { exit(0) }
+  }
+
+  /// Runs `factoryd` at `executable` with `arguments`, off the main thread,
+  /// and answers its exit code and output: {"code": Int, "stdout": String,
+  /// "stderr": String}, or a FlutterError when it can't start.
+  private static func runFactoryd(
+    _ executable: URL, _ arguments: [String], _ result: @escaping FlutterResult
+  ) {
+    guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+      return result(FlutterError(code: "missing", message: executable.path, details: nil))
     }
     DispatchQueue.global(qos: .userInitiated).async {
       let process = Process()
-      process.executableURL = helper
+      process.executableURL = executable
       process.arguments = arguments
       let out = Pipe()
       let err = Pipe()

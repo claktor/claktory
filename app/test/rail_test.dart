@@ -386,6 +386,47 @@ void main() {
     );
   });
 
+  testWidgets("a step over one Claktory leaves the rail free to switch", (
+    tester,
+  ) async {
+    final app = _App(
+      snapshots: {
+        '': _workspace('Rivet'),
+        // Asks the name first: a step over the window.
+        _nixos: _workspace('Nix')..settings.userName = '',
+      },
+    );
+    app.connections.use(parsePairingCode(_nixos));
+    await app.show(tester);
+    expect(find.text("What's your name?"), findsOneWidget);
+
+    await tester.tap(_labeled('This Mac'));
+    await pumpFrames(tester);
+    expect(app.connections.current, isNull);
+    expect(find.text("What's your name?"), findsNothing);
+  });
+
+  testWidgets('on a phone, a step leaves the way back to the Claktories', (
+    tester,
+  ) async {
+    final app = _App(
+      localBackend: false,
+      snapshots: {
+        _nixos: _workspace('Nix')..settings.userName = '',
+        _mini: _workspace('Mini'),
+      },
+    );
+    app.connections
+      ..use(parsePairingCode(_mini))
+      ..use(parsePairingCode(_nixos));
+    await app.show(tester, size: const Size(390, 844));
+    expect(find.text("What's your name?"), findsOneWidget);
+
+    await tester.tap(_labeled('Back to Claktories').hitTestable());
+    await pumpFrames(tester);
+    expect(find.byType(ClaktoryList), findsOneWidget);
+  });
+
   testWidgets('on a phone, the Claktories are a list at the top', (
     tester,
   ) async {
