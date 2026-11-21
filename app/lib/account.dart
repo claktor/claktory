@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
@@ -12,7 +13,7 @@ import 'identity.dart';
 import 'markdown.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
-import 'mobile/metrics.dart' show Touch, TypeScale;
+import 'mobile/metrics.dart' show Metrics, Touch, TypeScale;
 import 'name_step.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -78,6 +79,169 @@ const resendAfter = Duration(seconds: 30);
 
 /// How long a code works (the service's 15 minutes).
 const codeLife = Duration(minutes: 15);
+
+/// An emailed sign-in code's digits.
+const codeLength = 6;
+
+/// The field for an emailed sign-in code, drawn as [codeLength] digit
+/// boxes. Underneath it's one text field, invisible over the boxes, so it
+/// types, deletes, pastes and autofills as any field does: typing fills the
+/// boxes from the left, Delete empties them from the right, pasting the
+/// whole code fills all six, and the system offers the code from Mail or
+/// Messages. The boxes only show its digits, and while it's focused the
+/// box the next digit goes in (the last when it's full) has the signal
+/// border. To a screen reader it's one field, [semanticsLabel].
+class CodeBoxes extends StatefulWidget {
+  const CodeBoxes({
+    super.key,
+    required this.controller,
+    this.autofocus = false,
+    this.onSubmitted,
+    this.semanticsLabel = 'Code from your email',
+    this.scrollPadding = const EdgeInsets.all(20),
+  });
+
+  final TextEditingController controller;
+  final bool autofocus;
+  final ValueChanged<String>? onSubmitted;
+  final String semanticsLabel;
+  final EdgeInsets scrollPadding;
+
+  @override
+  State<CodeBoxes> createState() => _CodeBoxesState();
+}
+
+class _CodeBoxesState extends State<CodeBoxes> {
+  final _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final metrics = Metrics.of(context);
+    final style = TypeScale.of(context).title.copyWith(
+      fontFamily: TextStyles.mono,
+      fontWeight: FontWeight.w500,
+      color: palette.text,
+    );
+    // The widest digit at the system's text size.
+    final glyph = TextPainter(
+      text: TextSpan(text: '0', style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final glyphSize = glyph.size;
+    glyph.dispose();
+    final inset = metrics.phone ? Space.m : Space.s;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // As wide as a digit and its margins, at least a finger on a
+        // phone; where six don't fit, the gaps shrink first, then the
+        // boxes, and the digits with them.
+        var width = math.max(
+          metrics.phone ? metrics.target : 36.0,
+          glyphSize.width + 2 * inset,
+        );
+        var gap = Space.s;
+        final room = constraints.maxWidth;
+        if (codeLength * width + (codeLength - 1) * gap > room) {
+          gap = Space.xs;
+        }
+        if (codeLength * width + (codeLength - 1) * gap > room) {
+          width = (room - (codeLength - 1) * gap) / codeLength;
+        }
+        final scale = math.min(1.0, (width - 2 * Space.xs) / glyphSize.width);
+        final height = math.max(
+          metrics.phone ? metrics.target : 40.0,
+          glyphSize.height * scale + 2 * inset,
+        );
+        final boxes = ListenableBuilder(
+          listenable: Listenable.merge([widget.controller, _focus]),
+          builder: (context, _) {
+            final value = widget.controller.value;
+            final text = value.text;
+            final selection = value.selection;
+            final focused = _focus.hasFocus;
+            final next = !focused || !selection.isValid
+                ? null
+                : selection.isCollapsed
+                ? math.min(selection.extentOffset, codeLength - 1)
+                : null;
+            bool selected(int i) =>
+                focused &&
+                selection.isValid &&
+                !selection.isCollapsed &&
+                i >= selection.start &&
+                i < selection.end;
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < codeLength; i++) ...[
+                  if (i > 0) SizedBox(width: gap),
+                  Container(
+                    key: ValueKey('code-box-$i'),
+                    width: width,
+                    height: height,
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+                    decoration: BoxDecoration(
+                      color: selected(i)
+                          ? palette.signal.withValues(alpha: 0.28)
+                          : palette.canvas,
+                      borderRadius: BorderRadius.circular(Radii.control),
+                      border: Border.all(
+                        color: i == next ? palette.signal : palette.hairline,
+                      ),
+                    ),
+                    child: i < text.length
+                        ? FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(text[i], style: style, maxLines: 1),
+                          )
+                        : null,
+                  ),
+                ],
+              ],
+            );
+          },
+        );
+        return Align(
+          alignment: AlignmentDirectional.centerStart,
+          heightFactor: 1,
+          child: Stack(
+            children: [
+              ExcludeSemantics(child: boxes),
+              // The field itself, over the boxes, unseen: a tap or a
+              // click anywhere on them focuses it, a long press or a
+              // right click offers Paste, and a screen reader finds it.
+              Positioned.fill(
+                child: Opacity(
+                  opacity: 0,
+                  alwaysIncludeSemantics: true,
+                  child: TextField(
+                    controller: widget.controller,
+                    focusNode: _focus,
+                    autofocus: widget.autofocus,
+                    kind: InputKind.oneTimeCode,
+                    semanticsLabel: widget.semanticsLabel,
+                    scrollPadding: widget.scrollPadding,
+                    onSubmitted: widget.onSubmitted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
 
 /// The first launch's first step, over the window until it's done: an
 /// email address, then the code sent to it. Then the name step.
@@ -403,13 +567,13 @@ class _SignInStepState extends State<SignInStep> {
             'Enter the 6-digit code sent to ${account.email}. It works for '
                 '15 minutes.',
           ),
-          TextField(
+          CodeBoxes(
             key: const ValueKey('code'),
             controller: _code,
             autofocus: true,
-            kind: InputKind.oneTimeCode,
             scrollPadding: stepFieldScrollPadding(context),
-            onSubmitted: (_) => _code.text.length == 6 ? _verify() : null,
+            onSubmitted: (_) =>
+                _code.text.length == codeLength ? _verify() : null,
           ),
           _errorLine(context),
           const SizedBox(height: Space.s),

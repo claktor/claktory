@@ -1344,7 +1344,18 @@ impl Factory {
             }
         }
         queued.id = self.store.add_message(id, &queued)?;
+        let person = queued.event.is_none();
         inner.agents.entry(id.to_owned()).or_default().queue.push(queued);
+        // The person's message to an agent waiting out a usage limit doesn't
+        // queue dead: it makes the agent ask the provider again now, since
+        // the person may just have brought usage back (`probe_accounts`).
+        if person && inner.agents.get(id).is_some_and(|runtime| runtime.usage_wait.is_some()) {
+            let model =
+                inner.config.agent(id).map(|agent| agent.model.clone()).or_else(|| self.chats.model_and_name(id).map(|(model, _)| model));
+            if let Some(provider) = model.and_then(|model| model.split_once('/').map(|(provider, _)| provider.to_owned())) {
+                tokio::spawn(self.clone().probe_accounts(provider));
+            }
+        }
         self.wake(inner, id);
         Ok(())
     }
@@ -1535,9 +1546,6 @@ impl Factory {
                 tracing::info!("config.json reloaded");
                 for unknown in crate::extensions::unknown_settings(&config) {
                     tracing::warn!(%unknown, "config.json: ignoring an extension setting");
-                }
-                for ignored in crate::arrange::ignored_parents(&config) {
-                    tracing::warn!(%ignored, "config.json: ignoring a parent");
                 }
                 self.apply_config(&mut inner, config);
             }
@@ -2007,11 +2015,21 @@ impl Factory {
                 usage_wait: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map(|wait| wait.text.clone()).unwrap_or_default(),
                 usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
                 tainted_by_pipes: self.pipes.tainted(&agent.id),
+                quarantined: self.pipes.quarantined(&agent.id),
                 fallback_model: agent.fallback_model.clone(),
             });
         }
         let config = &inner.config;
         let mut vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
+        // Given to an agent quarantined for a pipe, a secret isn't usable by it.
+        for secret in &mut vault.secrets {
+            for grant in &secret.grants {
+                if self.pipes.quarantined(&grant.agent_id) {
+                    let name = config.agent(&grant.agent_id).map_or(grant.agent_id.as_str(), |agent| agent.name.as_str());
+                    secret.warnings.push(format!("{name} can't use it while it's limited to a pipe."));
+                }
+            }
+        }
         if vault.exists {
             vault.connectors = self.broker.catalog();
             vault.flows = self.broker.flows();
@@ -2152,7 +2170,13 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
         None => "This conversation couldn't be loaded.".to_owned(),
     };
     let notice = v1::Notice { text, level: v1::NoticeLevel::Error.into(), ..Default::default() };
-    let entry = v1::Entry { seq: 0, timestamp_ms: crate::transcript::now_ms(), kind: Some(v1::entry::Kind::Notice(notice)), reply: 0 };
+    let entry = v1::Entry {
+        seq: 0,
+        timestamp_ms: crate::transcript::now_ms(),
+        kind: Some(v1::entry::Kind::Notice(notice)),
+        reply: 0,
+        replied_to: None,
+    };
     v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false }
 }
 

@@ -112,8 +112,14 @@ async fn serve_main() -> ExitCode {
     // through other crates) there's none, and rustls panics. Factory's own clients name theirs.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // Colors only for a terminal; log files stay plain text.
-    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
+    // Colors only for a terminal; log files stay plain text. `receive
+    // --json` keeps stdout for its JSON lines: its logs go to stderr.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "receive") && args.iter().any(|arg| arg == "--json") {
+        tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::io::stderr).init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -194,6 +200,14 @@ async fn run() -> Result<(), MainError> {
             allow_in_terminal(&instance.home, &device).await
         }
         [allow, device @ ..] if allow == "allow" && !device.is_empty() => {
+            // Run by a program rather than a person at a terminal: only the
+            // first device (cli::HAS_DEVICES).
+            if !std::io::stdin().is_terminal()
+                && factoryd::remote::devices(&instance.home)?.iter().any(|known| !known.local && !known.endpoint_id.is_empty())
+            {
+                eprintln!("{}", factoryd::cli::HAS_DEVICES);
+                std::process::exit(3);
+            }
             let device = factoryd::remote::approve(&instance.home, &device.join(" "))?;
             println!("Allowed {}: it can connect now.", device.name);
             Ok(())
@@ -297,20 +311,31 @@ fn import(instance: &Instance, args: &[String]) -> Result<(), MainError> {
     }
 }
 
-/// `factoryd receive [--committed]`: shows a code, and takes in the
+/// `factoryd receive [--committed] [--json]`: shows a code, and takes in the
 /// Claktory a source moves here with it (docs/MOVE.md, "The handshake").
+/// With --json, for an agent: one JSON line per event (`cli::receive_json`).
 async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> {
+    use factoryd::cli::receive_json;
     use factoryd::move_import::ImportError;
     use factoryd::move_import::receive::{self, Options, Ui};
     let mut options = Options::default();
+    let json = args.iter().any(|arg| arg == "--json");
     for arg in args {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("usage: factoryd receive [--committed]");
+                println!("usage: factoryd receive [--committed] [--json]");
                 return Ok(());
             }
             "--committed" => options.committed = true,
-            other => return Err(ImportError::Refused(format!("{other} isn't an option of receive")).into()),
+            "--json" => {}
+            other => {
+                let refused = ImportError::Refused(format!("{other} isn't an option of receive"));
+                if json {
+                    println!("{}", receive_json::end(&Err(refused)).0);
+                    std::process::exit(3);
+                }
+                return Err(refused.into());
+            }
         }
     }
     // The person's answers, a line at a time; lines typed when nothing was
@@ -326,48 +351,57 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
     });
     let lines = Arc::new(tokio::sync::Mutex::new(lines));
     let terminal = std::io::stdout().is_terminal();
-    let ui = Ui {
-        code: Arc::new(move |code| {
-            let text = code.text();
-            if let Some(lines) = terminal.then(|| factoryd::terminal_qr::lines(&text)).flatten() {
-                println!("\nScan this with Claktory on your iPhone, or paste the code below:\n");
-                for line in lines {
-                    println!("  {line}");
-                }
-            }
-            println!(
-                "\nOn the computer you're moving from, open Claktory and choose Move to another computer… (Settings, This Claktory), then paste this code:\n\n{text}\n\nKeep this running until the move is done."
-            );
-        }),
-        say: Arc::new(|text| println!("{text}")),
-        confirm: Arc::new(move |asked| {
-            let lines = lines.clone();
-            Box::pin(async move {
-                println!(
-                    "\n{} ({}) wants to move its Claktory here. Check that it shows these digits:\n\n    {}\n\nType yes if they match, or no:",
-                    asked.machine, asked.platform, asked.digits
-                );
-                let mut lines = lines.lock().await;
-                while lines.try_recv().is_ok() {}
-                loop {
-                    match lines.recv().await.map(|line| line.trim().to_lowercase()) {
-                        Some(answer) if answer == "yes" || answer == "y" => return true,
-                        Some(answer) if answer == "no" || answer == "n" => return false,
-                        Some(_) => println!("Type yes or no:"),
-                        None => return false,
+    let ui = if json {
+        receive_json::ui(Arc::new(|line| println!("{line}")), lines)
+    } else {
+        Ui {
+            code: Arc::new(move |code| {
+                let text = code.text();
+                if let Some(lines) = terminal.then(|| factoryd::terminal_qr::lines(&text)).flatten() {
+                    println!("\nScan this with Claktory on your iPhone, or paste the code below:\n");
+                    for line in lines {
+                        println!("  {line}");
                     }
                 }
-            })
-        }),
-    };
-    let done = tokio::select! {
-        done = receive::receive(&instance.home, instance.addr, &options, &ui) => done,
-        _ = tokio::signal::ctrl_c() => {
-            receive::forget_unclaimed(&instance.home);
-            println!("\nStopped. Run factoryd receive again to carry on.");
-            std::process::exit(130);
+                println!(
+                    "\nOn the computer you're moving from, open Claktory and choose Move to another computer… (Settings → General), then paste this code:\n\n{text}\n\nKeep this running until the move is done."
+                );
+            }),
+            say: Arc::new(|text| println!("{text}")),
+            confirm: Arc::new(move |asked| {
+                let lines = lines.clone();
+                Box::pin(async move {
+                    println!(
+                        "\n{} ({}) wants to move its Claktory here. Check that it shows these digits:\n\n    {}\n\nType yes if they match, or no:",
+                        asked.machine, asked.platform, asked.digits
+                    );
+                    let mut lines = lines.lock().await;
+                    while lines.try_recv().is_ok() {}
+                    loop {
+                        match lines.recv().await.map(|line| line.trim().to_lowercase()) {
+                            Some(answer) if answer == "yes" || answer == "y" => return true,
+                            Some(answer) if answer == "no" || answer == "n" => return false,
+                            Some(_) => println!("Type yes or no:"),
+                            None => return false,
+                        }
+                    }
+                })
+            }),
         }
     };
+    // Stopped by Ctrl-C, or by a TERM signal (an agent stopping its task):
+    // a code no source has is forgotten, and running it again carries on.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(MainError::Signal)?;
+    let done = tokio::select! {
+        done = receive::receive(&instance.home, instance.addr, &options, &ui) => done,
+        _ = tokio::signal::ctrl_c() => stop_receiving(&instance.home, json),
+        _ = terminate.recv() => stop_receiving(&instance.home, json),
+    };
+    if json {
+        let (line, code) = receive_json::end(&done);
+        println!("{line}");
+        std::process::exit(code.into());
+    }
     match done {
         Ok(text) => {
             println!("{text}");
@@ -378,6 +412,17 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
             std::process::exit(if matches!(error, ImportError::Refused(_)) { 3 } else { 1 });
         }
     }
+}
+
+/// `factoryd receive` stopped by the person or a signal: says so, and exits 130.
+fn stop_receiving(home: &Home, json: bool) -> ! {
+    factoryd::move_import::receive::forget_unclaimed(home);
+    if json {
+        println!("{}", factoryd::cli::receive_json::stopped());
+    } else {
+        println!("\nStopped. Run factoryd receive again to carry on.");
+    }
+    std::process::exit(130);
 }
 
 fn now_ms() -> i64 {
@@ -588,6 +633,8 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     if let Some(why) = factoryd::move_import::unfinished(&home) {
         return Err(MainError::ImportUnfinished(why));
     }
+    // A helper an older backend's update left out goes in beside this one.
+    factoryd::update::heal_helpers(&home);
     let listener = TcpListener::bind(addr).await.map_err(|source| match source.kind() {
         std::io::ErrorKind::AddrInUse => MainError::PortInUse(addr.port()),
         _ => MainError::Bind { addr, source },

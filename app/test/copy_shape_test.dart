@@ -1,5 +1,6 @@
 import 'package:cupertino_ui/cupertino_ui.dart'
     show DefaultCupertinoLocalizations;
+import 'package:factory_app/markdown.dart' show markdownToPlain;
 import 'package:factory_app/mobile/message_actions.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
@@ -142,4 +143,47 @@ void main() {
     await tester.pump();
     expect(copied.last, 'Hi Ana,\n\n• one\n• two\n  • nested');
   });
+
+  test(
+    'markdownToPlain gives what a selection of the rendered text copies',
+    () {
+      expect(
+        markdownToPlain('Hi Ana,\n\nThe **launch** is today.\n\nBest,\nMatt'),
+        'Hi Ana,\n\nThe launch is today.\n\nBest,\nMatt',
+      );
+      expect(
+        markdownToPlain('Today:\n\n- one\n- two\n\n1. first\n2. second'),
+        'Today:\n\n• one\n• two\n\n1. first\n2. second',
+      );
+      expect(
+        markdownToPlain('- one\n- two\n  - nested\n  - again\n- three'),
+        '• one\n• two\n  • nested\n  • again\n• three',
+      );
+      expect(
+        markdownToPlain(
+          '| Name | Role |\n| --- | --- |\n| Ana | Writer |\n| Kenji | Frontend |',
+        ),
+        'Name\tRole\nAna\tWriter\nKenji\tFrontend',
+      );
+      expect(
+        markdownToPlain(
+          'See [the docs](https://x.dev) and `cargo test`.\n\n'
+          '```\nfn main() {}\n```\n\n> quoted\n\n---\n\n3. third\n4. fourth',
+        ),
+        'See the docs and cargo test.\n\nfn main() {}\n\nquoted\n\n'
+        '3. third\n4. fourth',
+      );
+    },
+  );
+
+  const sample =
+      '# Plan\n\nHi **Ana**, see [this](https://x.dev):\n\n'
+      '1. first\n2. second\n   - nested `code`\n\n'
+      '> a quote\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nBest,\nMatt';
+
+  testWidgets('markdownToPlain and a whole selection agree', (tester) async {
+    final copied = await showReply(tester, sample);
+    await copyAll(tester, 'Plan');
+    expect(copied.last, markdownToPlain(sample));
+  }, variant: mac);
 }

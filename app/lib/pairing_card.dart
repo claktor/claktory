@@ -7,7 +7,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'devices.dart' show QrCode;
+import 'devices.dart' show PairingInstructions, PairingWay, pairingWayOf;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
 import 'pairing.dart' show PairingDigits;
@@ -213,18 +213,27 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
       milliseconds:
           pairing.expiresMs.toInt() - pairingNow().millisecondsSinceEpoch,
     );
-    final body = TextStyles.body.copyWith(color: palette.textMuted);
+    final way = pairingWayOf(pairing.kind);
+    // A computer can't scan: copying is what it takes.
+    final copyFirst = way != PairingWay.scan;
+    final copy = Button(
+      label: _copied ? 'Copied' : 'Copy code',
+      primary: copyFirst,
+      onPressed: code == null ? null : _copy,
+    );
+    final cancel = Button(
+      label: 'Cancel',
+      onPressed: _deciding
+          ? null
+          : () => _decide((backend) => backend.cancelPairing(pairing.deviceId)),
+    );
     return [
-      Text('Open Claktory on $device and scan this code.', style: body),
-      const SizedBox(height: Space.l),
-      Center(
-        child: code == null
-            // Its room, until the code arrives.
-            ? const SizedBox.square(dimension: _qrSize)
-            : QrCode(key: ValueKey(code.code), text: code.code, size: _qrSize),
+      PairingInstructions(
+        code: code?.code,
+        device: device,
+        way: way,
+        qrSize: _qrSize,
       ),
-      const SizedBox(height: Space.l),
-      Text('Or copy the code and paste it on $device.', style: body),
       const SizedBox(height: Space.xs),
       Text(
         _error ??
@@ -237,21 +246,9 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
       const SizedBox(height: Space.l),
       Row(
         mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          Button(
-            label: _copied ? 'Copied' : 'Copy code',
-            onPressed: code == null ? null : _copy,
-          ),
-          const SizedBox(width: Space.s),
-          Button(
-            label: 'Cancel',
-            onPressed: _deciding
-                ? null
-                : () => _decide(
-                    (backend) => backend.cancelPairing(pairing.deviceId),
-                  ),
-          ),
-        ],
+        children: copyFirst
+            ? [cancel, const SizedBox(width: Space.s), copy]
+            : [copy, const SizedBox(width: Space.s), cancel],
       ),
     ];
   }

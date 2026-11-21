@@ -13,6 +13,9 @@ Usage:
   claktory-account [serve] --db FILE --secrets FILE [options]
   claktory-account init-secrets FILE
   claktory-account rotate-secrets FILE [--signing-key] [--k-share]
+  claktory-account service-key-statement --secrets FILE [--service URL]
+  claktory-account service-key-statement --secrets FILE --text FILE --signature ID:SIG --out FILE
+  claktory-account check-statement URL
   claktory-account stats --db FILE
   claktory-account backup --db FILE --to DIR [--keep N]
   claktory-account set-cloudflare-token FILE (the token on standard input)
@@ -31,6 +34,8 @@ serve options:
   --mail-dir DIR          write emails to files in DIR instead of sending them
   --mail-domain DOMAIN    emails come from code@ and notices@ it (auth.claktory.com)
   --account-page TEXT     the account page, as emails write it (claktory.com/account)
+  --public-url URL        where the service is, for the mark sign-in emails show
+                          (https://account.claktory.com)
   --email-daily-cap N     emails a day at most (90); codes stop there
   --admin-email ADDRESS   who runs the service: told when 80% of the day's
                           emails are used, and shown the usage counts at
@@ -38,6 +43,9 @@ serve options:
   --geoip FILE            a GeoIP city file (.mmdb: DB-IP's IP to City Lite, or
                           GeoLite2 City) to know roughly where Claktories are
   --relay URL             a relay for Claktories to use; repeat for more
+  --service-key-statement FILE
+                          the account root's word for the service key, served
+                          at well-known (from service-key-statement --out)
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
 signing_key offline.
@@ -48,6 +56,15 @@ Claktory signs in again, and its secrets open by themselves after. A new
 k_share: every Claktory's secrets open only with its recovery key, once.
 Restart the service to use them. To send email, set-cloudflare-token puts a Cloudflare API
 token with Email Sending: Edit in it (or set-resend-key a Resend key).
+
+service-key-statement prints the statement that the service's key is its own
+(for https://account.claktory.com, or --service URL), from now. Sign exactly
+those bytes offline with the account root (ed25519), then give the text, the
+signature as ROOT-ID:BASE64 and --out: it checks them and writes the file
+--service-key-statement serves. Claktories take a new key only with one, newer
+than the last. check-statement fetches URL's well-known and checks its
+statement against the roots, as Claktory does; it fails when it's missing or
+wrong.
 
 backup writes a consistent copy of the database to DIR, while it's in use, and
 keeps the newest N copies (14).
@@ -64,6 +81,8 @@ fn main() -> ExitCode {
         "serve" => serve(&args),
         "init-secrets" => init_secrets(&args),
         "rotate-secrets" => rotate_secrets(&args),
+        "service-key-statement" => service_key_statement(&args),
+        "check-statement" => check_statement(&args),
         "stats" => stats(&args),
         "backup" => backup(&args),
         "set-resend-key" => set_resend_key(&args),
@@ -136,10 +155,12 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--mail-dir",
             "--mail-domain",
             "--account-page",
+            "--public-url",
             "--email-daily-cap",
             "--admin-email",
             "--relay",
             "--geoip",
+            "--service-key-statement",
         ],
         &["--trust-proxy"],
     )?;
@@ -153,10 +174,21 @@ fn serve(args: &[String]) -> Result<(), String> {
     if let Some(page) = options.value("--account-page")? {
         config.account_page = page;
     }
+    if let Some(url) = options.value("--public-url")? {
+        config.public_url = url;
+    }
     if let Some(cap) = options.value("--email-daily-cap")? {
         config.email_daily_cap = cap.parse().map_err(|_| "--email-daily-cap takes a number")?;
     }
     config.admins = options.values("--admin-email");
+    let service_key = claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes());
+    if let Some(path) = options.value("--service-key-statement")? {
+        // A wrong one isn't served, rather than stopping the service: check-statement catches it.
+        match server::statement::read(&PathBuf::from(&path), &service_key, claktory_account::protocol::ACCOUNT_ROOTS) {
+            Ok(signed) => config.service_key_statement = Some(signed),
+            Err(error) => tracing::error!("not serving the service-key statement in {path}: {error}"),
+        }
+    }
     if let Some(path) = options.value("--geoip")? {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -281,7 +313,7 @@ fn rotate_secrets(args: &[String]) -> Result<(), String> {
     said.push(format!("The file as it was is {}: delete it once the service runs with the new keys.", before.display()));
     if rotate.signing_key {
         said.push(format!(
-            "The service key is now {}. Every Claktory signs in again; their secrets open by themselves after.",
+            "The service key is now {}. Make its statement (service-key-statement), have the account root sign it offline, and serve it with --service-key-statement: Claktories take the new key from it. Any that can't sign in again; their secrets open by themselves after.",
             claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes())
         ));
     }
@@ -290,6 +322,51 @@ fn rotate_secrets(args: &[String]) -> Result<(), String> {
     }
     said.push("Back up the new keys offline, then restart the service.".to_owned());
     println!("{}", said.join("\n"));
+    Ok(())
+}
+
+fn service_key_statement(args: &[String]) -> Result<(), String> {
+    use claktory_account::protocol::{ACCOUNT_ROOTS, KeyStatement, SignedStatement, b64, verify_statement};
+    let options = Options(args.to_vec());
+    options.check(&["--secrets", "--service", "--text", "--signature", "--out"], &[])?;
+    let secrets = Secrets::load(&PathBuf::from(options.required("--secrets")?))?;
+    let key = b64(secrets.signing_key.verifying_key().to_bytes());
+    let Some(text_path) = options.value("--text")? else {
+        let service = options.value("--service")?.unwrap_or_else(|| "https://account.claktory.com".to_owned());
+        let service = service.trim_end_matches('/').to_owned();
+        let statement = KeyStatement { service, key, from: jiff::Timestamp::now().as_second() };
+        if KeyStatement::parse(&statement.text()).as_ref() != Some(&statement) {
+            return Err(format!("{} can't go in a statement", statement.service));
+        }
+        print!("{}", statement.text());
+        return Ok(());
+    };
+    let text = std::fs::read_to_string(&text_path).map_err(|error| format!("{text_path}: {error}"))?;
+    let signed = SignedStatement { text, signature: options.required("--signature")?.trim().to_owned() };
+    let statement = verify_statement(&signed, ACCOUNT_ROOTS)?;
+    if statement.key != key {
+        return Err(format!("the statement is for the key {}, not this service's {key}", statement.key));
+    }
+    let out = PathBuf::from(options.required("--out")?);
+    let json = serde_json::to_string_pretty(&signed).map_err(|error| error.to_string())?;
+    std::fs::write(&out, format!("{json}\n")).map_err(|error| format!("{}: {error}", out.display()))?;
+    println!(
+        "{} holds the statement for {} from {}. Serve it with --service-key-statement {}, then run check-statement {}.",
+        out.display(),
+        statement.service,
+        statement.from,
+        out.display(),
+        statement.service
+    );
+    Ok(())
+}
+
+/// What a Claktory sees at `url`'s well-known, checked as it checks it.
+fn check_statement(args: &[String]) -> Result<(), String> {
+    let [url] = args else { return Err(format!("check-statement takes the service's address\n\n{USAGE}")) };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let statement = runtime.block_on(server::statement::check(url, claktory_account::protocol::ACCOUNT_ROOTS))?;
+    println!("{}: the statement holds for its key {}, from {}.", statement.service, statement.key, statement.from);
     Ok(())
 }
 

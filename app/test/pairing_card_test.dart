@@ -1,3 +1,5 @@
+import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/devices.dart' show QrCode;
 import 'package:factory_app/pairing_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
@@ -16,6 +18,7 @@ DevicePairing _pairing(
   DevicePairingState state, {
   int expiresIn = 9 * 60 + 42,
   int endedMs = 0,
+  DeviceKind kind = DeviceKind.DEVICE_KIND_UNSPECIFIED,
 }) => DevicePairing(
   id: 'p1',
   agentId: 'a1',
@@ -24,6 +27,7 @@ DevicePairing _pairing(
   state: state,
   expiresMs: Int64(_now.millisecondsSinceEpoch + expiresIn * 1000),
   endedMs: Int64(endedMs),
+  kind: kind,
 );
 
 /// Shows agent a1's conversation with the pairing card in it, the backend
@@ -56,6 +60,13 @@ Future<void> _becomes(
   await pumpFrames(tester);
 }
 
+/// The card's primary button's label.
+String? _primary(WidgetTester tester) => tester
+    .widgetList<Button>(find.byType(Button))
+    .where((button) => button.primary)
+    .map((button) => button.label)
+    .firstOrNull;
+
 Iterable<ClientMessage> _asks(Harness harness) =>
     harness.backend.sent.where((m) => m.hasShowPairingCode());
 
@@ -78,14 +89,19 @@ void main() {
     );
     expect(find.text('Builder adds a device: Laptop'), findsOneWidget);
     expect(_asks(harness).single.showPairingCode.pairingId, 'p1');
+    // The agent didn't say what it is: copying first, the QR code under it.
     expect(
-      find.text('Open Claktory on Laptop and scan this code.'),
+      find.text(
+        'In Claktory on Laptop, click Add a Claktory and paste this code.',
+      ),
       findsOneWidget,
     );
+    expect(find.byType(QrCode), findsOneWidget);
     expect(
-      find.text('Or copy the code and paste it on Laptop.'),
+      find.text('On a phone or tablet, open Claktory and scan it instead.'),
       findsOneWidget,
     );
+    expect(_primary(tester), 'Copy code');
     expect(
       find.text('This code works only for Laptop. It expires in 9:42.'),
       findsOneWidget,
@@ -121,6 +137,56 @@ void main() {
     expect(copied, [_code]);
     expect(find.text('Copied'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a phone or tablet leads with the QR code', (tester) async {
+    for (final kind in [
+      DeviceKind.DEVICE_KIND_PHONE,
+      DeviceKind.DEVICE_KIND_TABLET,
+    ]) {
+      await _show(
+        tester,
+        _pairing(DevicePairingState.DEVICE_PAIRING_STATE_WAITING, kind: kind),
+      );
+      expect(
+        find.text('Open Claktory on Laptop and scan this code.'),
+        findsOneWidget,
+      );
+      expect(find.byType(QrCode), findsOneWidget);
+      expect(
+        find.text('Or copy the code and paste it on Laptop.'),
+        findsOneWidget,
+      );
+      expect(_primary(tester), isNull, reason: 'Copy code is secondary');
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets("a computer can't scan: Copy code leads, and the QR code shows "
+      'only when asked for', (tester) async {
+    for (final kind in [
+      DeviceKind.DEVICE_KIND_LAPTOP,
+      DeviceKind.DEVICE_KIND_DESKTOP,
+    ]) {
+      await _show(
+        tester,
+        _pairing(DevicePairingState.DEVICE_PAIRING_STATE_WAITING, kind: kind),
+      );
+      expect(
+        find.text(
+          'In Claktory on Laptop, click Add a Claktory and paste this code.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(QrCode), findsNothing);
+      expect(find.textContaining('scan'), findsNothing);
+      expect(_primary(tester), 'Copy code');
+      await tester.tap(find.text('Show QR code'));
+      await pumpFrames(tester);
+      expect(find.byType(QrCode), findsOneWidget);
+      expect(find.text('Show QR code'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    }
   });
 
   testWidgets('Cancel cancels its device; the card turns Cancelled when the '

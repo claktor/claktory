@@ -260,6 +260,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
     let summary = format!("m{} {} fired", monitor.id, monitor.name);
     let event =
         Event { source: EventSource::Monitor, from: monitor.name.clone(), id: format!("m{}", monitor.id), summary, transient: false };
+    crate::pipes::agents::spread_taint(factory, &monitor.created_by, &monitor.agent);
     factory.deliver_event(&monitor.agent, text, event);
     monitor.last_fired = Some(now);
     monitor.carry.clear();

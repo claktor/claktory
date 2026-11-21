@@ -44,7 +44,7 @@ fn config(dir: &std::path::Path) -> Config {
         ProjectConfig { id: "site".into(), name: "Site".into(), path: dir.join("site"), folders: Vec::new(), archived: false },
     ];
     let mut lena = agent(&rivet, "lena", "factory", "app", "Backend", json!({}));
-    lena.parent = Some("sam".into());
+    lena.lead = Some("sam".into());
     config.agents.extend([
         agent(&rivet, "mike", "factory", "", "Coordinator", json!({"agents": {"also": ["ana"]}})),
         agent(&rivet, "sam", "factory", "app", "Backend", json!({"database": {"enabled": true}, "web": {"enabled": false}})),
@@ -116,7 +116,7 @@ async fn the_map_shows_where_agents_are_whom_they_message_and_what_they_reach() 
     assert!(node(&map, "agent:rivet").admin && !node(&map, "agent:mike").admin);
     assert_eq!(parent("agent:mike"), "project:factory");
     assert_eq!(parent("agent:sam"), "folder:factory/app");
-    assert_eq!(parent("agent:lena"), "agent:sam", "nested under Sam");
+    assert_eq!(parent("agent:lena"), "agent:sam", "nested under Sam, its lead");
     assert_eq!(parent("agent:iris"), "folder:factory/research");
     assert_eq!(parent("agent:ana"), "project:site");
     assert_eq!(parent("folder:factory/app"), "project:factory");

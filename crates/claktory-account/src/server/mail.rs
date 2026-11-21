@@ -55,34 +55,48 @@ pub fn code_address(domain: &str) -> String {
     format!("code@{domain}")
 }
 
-/// The code that signs in, from Claktory, from `code@<domain>`.
-pub fn code_mail(domain: &str, to: &str, code: &str) -> Mail {
-    let text = format!(
-        "Your code to sign in to Claktory:\n\n{code}\n\nIt works for 15 minutes.\n\nIf you didn't ask for it, ignore this email. No one can sign in without the code.\n"
-    );
-    let html = page(&format!(
-        "<p>Your code to sign in to Claktory:</p>\
-         <p style=\"font-size:32px;font-weight:600;letter-spacing:6px;margin:24px 0\">{code}</p>\
-         <p>It works for 15 minutes.</p>\
-         <p>If you didn't ask for it, ignore this email. No one can sign in without the code.</p>"
-    ));
-    let from = format!("Claktory <{}>", code_address(domain));
-    Mail { from, to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
+/// The code that signs in, from Claktory, from `code@<domain>`; the mark
+/// from the service at `public_url`.
+pub fn code_mail(domain: &str, public_url: &str, to: &str, code: &str) -> Mail {
+    sign_in_mail(domain, public_url, to, code, "Your code to sign in to Claktory:")
 }
 
 /// The code that signs a device in, such as the app on a phone, naming it
 /// so the person knows which one asked.
-pub fn device_code_mail(domain: &str, to: &str, code: &str, device: &str) -> Mail {
-    let text = format!(
-        "Your code to sign in to Claktory on {device}:\n\n{code}\n\nIt works for 15 minutes.\n\nIf you didn't ask for it, ignore this email. No one can sign in without the code.\n"
+pub fn device_code_mail(domain: &str, public_url: &str, to: &str, code: &str, device: &str) -> Mail {
+    sign_in_mail(domain, public_url, to, code, &format!("Your code to sign in to Claktory on {device}:"))
+}
+
+const FONT: &str = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
+
+/// A sign-in code: in plain text, and in HTML as the app looks (its mark,
+/// the code large in a well, the rest quieter), laid out in tables with
+/// inline styles, which Gmail and Apple Mail both keep. `intro` is plain
+/// text, escaped here.
+fn sign_in_mail(domain: &str, public_url: &str, to: &str, code: &str, intro: &str) -> Mail {
+    const WORKS: &str = "It works for 15 minutes.";
+    const IGNORE: &str = "If you didn't ask for it, ignore this email. No one can sign in without the code.";
+    let text = format!("{intro}\n\n{code}\n\n{WORKS}\n\n{IGNORE}\n");
+    let mark = escape(&format!("{}/mark.png", public_url.trim_end_matches('/')));
+    let (intro, code) = (escape(intro), escape(code));
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">\
+         <meta name=\"color-scheme\" content=\"light\"><meta name=\"supported-color-schemes\" content=\"light\"><title>Your Claktory code</title></head>\
+         <body style=\"margin:0;padding:0;background:#F5F5F6\">\
+         <div style=\"display:none;max-height:0;overflow:hidden;opacity:0\">{code} is your code to sign in to Claktory.</div>\
+         <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F6\"><tr><td align=\"center\" style=\"padding:40px 16px\">\
+         <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"max-width:440px;background:#FFFFFF;border:1px solid #E5E5E7;border-radius:14px\">\
+         <tr><td style=\"padding:28px 32px 0\">\
+         <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>\
+         <td style=\"vertical-align:middle\"><img src=\"{mark}\" width=\"36\" height=\"36\" alt=\"\" style=\"display:block;border:0\"></td>\
+         <td style=\"vertical-align:middle;padding-left:10px;font-family:{FONT};font-size:17px;font-weight:600;color:#1D1D1F\">Claktory</td>\
+         </tr></table></td></tr>\
+         <tr><td style=\"padding:24px 32px 0;font-family:{FONT};font-size:15px;line-height:1.5;color:#1D1D1F\">{intro}</td></tr>\
+         <tr><td style=\"padding:16px 32px\"><div style=\"background:#F5F5F6;border-radius:10px;padding:18px 0 18px 8px;text-align:center;\
+         font-family:'SF Mono',Menlo,Consolas,monospace;font-size:34px;font-weight:600;letter-spacing:8px;color:#1D1D1F\">{code}</div></td></tr>\
+         <tr><td style=\"padding:0 32px 32px;font-family:{FONT};font-size:14px;line-height:1.5;color:#6E6E73\">{WORKS}<br><br>{IGNORE}</td></tr>\
+         </table></td></tr></table></body></html>"
     );
-    let html = page(&format!(
-        "<p>Your code to sign in to Claktory on {device}:</p>\
-         <p style=\"font-size:32px;font-weight:600;letter-spacing:6px;margin:24px 0\">{code}</p>\
-         <p>It works for 15 minutes.</p>\
-         <p>If you didn't ask for it, ignore this email. No one can sign in without the code.</p>",
-        device = escape(device)
-    ));
     let from = format!("Claktory <{}>", code_address(domain));
     Mail { from, to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
 }
@@ -417,10 +431,22 @@ mod tests {
 
     #[test]
     fn the_emails_read_as_written() {
-        let mail = code_mail("auth.claktory.com", "matt@example.com", "482913");
+        let mail = code_mail("auth.claktory.com", "https://account.claktory.com", "matt@example.com", "482913");
         assert_eq!(mail.from, "Claktory <code@auth.claktory.com>");
         assert_eq!(mail.subject, "Your Claktory code: 482913");
         assert!(mail.text.starts_with("Your code to sign in to Claktory:\n\n482913\n\nIt works for 15 minutes.\n\n"));
+        // The HTML part: the mark from the service, the code large, the same words.
+        assert!(mail.html.contains("<img src=\"https://account.claktory.com/mark.png\""), "{}", mail.html);
+        assert!(mail.html.contains("letter-spacing:8px;color:#1D1D1F\">482913</div>"), "{}", mail.html);
+        assert!(mail.html.contains("482913 is your code to sign in to Claktory."), "the inbox preview");
+        assert!(mail.html.contains("It works for 15 minutes.<br><br>If you didn't ask for it"), "{}", mail.html);
+        assert!(!mail.html.contains("<script") && !mail.html.contains("<style"), "inline styles only");
+
+        // A device's name is the one thing in it from outside: escaped in HTML.
+        let mail = device_code_mail("auth.claktory.com", "https://account.claktory.com/", "matt@example.com", "482913", "Matt's <iPhone>");
+        assert!(mail.text.starts_with("Your code to sign in to Claktory on Matt's <iPhone>:\n\n482913\n"));
+        assert!(mail.html.contains("on Matt&#39;s &lt;iPhone&gt;:") && !mail.html.contains("<iPhone>"));
+        assert!(mail.html.contains("src=\"https://account.claktory.com/mark.png\""), "no double slash");
 
         let mail = unlock_mail("auth.claktory.com", "matt@example.com", "Mac <mini>", 1_795_183_320, "203.0.113.7", "claktory.com/account");
         assert_eq!(mail.from, "Claktory <notices@auth.claktory.com>");

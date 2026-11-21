@@ -241,3 +241,142 @@ async fn a_message_waits_out_the_peer_being_away_and_a_wrong_secret_gets_nothing
         .await;
     wait_for(&a, |event| matches!(event, Event::Delivered { pipe, msg_id } if pipe == "pipe" && msg_id == "m1").then_some(())).await;
 }
+
+// -- Hostile-peer regressions: a pipe's other end is an outside party --
+
+/// What a frame's signature covers (pipe_link's LABEL; a change there is
+/// a wire change and should fail here loudly).
+const LABEL: &[u8] = b"claktory pipe frame v1\n";
+
+fn pct_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%'
+            && at + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&text[at + 1..at + 3], 16)
+        {
+            out.push(byte);
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The values of `name` in an invite code's query.
+fn code_values(code: &str, name: &str) -> Vec<String> {
+    code.trim().split(['?', '&']).filter_map(|part| part.strip_prefix(name)?.strip_prefix('=')).map(pct_decode).collect()
+}
+
+fn code_value(code: &str, name: &str) -> String {
+    code_values(code, name).into_iter().next().unwrap_or_default()
+}
+
+/// A frame as the wire has it: length, payload, signature — and no file
+/// bytes, whatever the payload lists.
+fn raw_frame(key: &iroh::SecretKey, payload: &serde_json::Value) -> Vec<u8> {
+    let body = serde_json::to_vec(payload).expect("payload");
+    let signature = key.sign(&[LABEL, body.as_slice()].concat());
+    let mut out = u32::try_from(body.len()).expect("length").to_be_bytes().to_vec();
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&signature.to_bytes());
+    out
+}
+
+/// Sends a frame and reads the reply, leaving the stream open: a server
+/// still waiting for the file bytes the payload lists would answer
+/// nothing, and the timeout here would fail the test.
+async fn ask(connection: &iroh::endpoint::Connection, frame: &[u8]) -> serde_json::Value {
+    use tokio::io::AsyncReadExt;
+    let (mut send, mut receive) = connection.open_bi().await.expect("a stream");
+    tokio::io::AsyncWriteExt::write_all(&mut send, frame).await.expect("written");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let length = receive.read_u32().await.expect("a length") as usize;
+        let mut body = vec![0; length];
+        receive.read_exact(&mut body).await.expect("a body");
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json")
+    })
+    .await
+    .expect("a prompt reply, not a server waiting for file bytes")
+}
+
+/// The link's stored relays and addresses, straight from factory.db.
+fn stored_route(dir: &Path, pipe: &str) -> (String, String) {
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.query_row("SELECT relays, addresses FROM pipe_links WHERE pipe = ?1", [pipe], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })
+    .expect("the link")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stranger_gets_no_buffering_and_a_peer_cannot_point_us_at_ourselves() {
+    let dir_a = temp_dir();
+    let a = claktory(&dir_a).await;
+    let (code, _) = pipe_link::invite(&a, "p-a", &side("Matt")).await.expect("a code");
+    let wire = code_value(&code, "w");
+    let secret = code_value(&code, "s");
+
+    // A client of our own, the key fresh: admitted only because the
+    // invite waits.
+    let key = iroh::SecretKey::generate();
+    let client = iroh::endpoint::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(key.clone())
+        .bind()
+        .await
+        .expect("a client endpoint");
+    let mut addr = iroh::EndpointAddr::new(code_value(&code, "e").parse().expect("an endpoint id"));
+    for address in code_values(&code, "a") {
+        if let Ok(address) = address.parse() {
+            addr = addr.with_ip_addr(address);
+        }
+    }
+    let connection = client.connect(addr, pipe_link::ALPN_PIPE).await.expect("connected");
+
+    // Unpinned, a signed message frame listing a 10 MB file is turned
+    // away before any file byte is read.
+    let big_file = serde_json::json!([{"name": "big.bin", "size": 10 * 1024 * 1024, "sha256": "0".repeat(64)}]);
+    let message = serde_json::json!({
+        "v": 1, "wire": wire, "kind": "message", "seq": 1, "msg_id": "big", "text": "x", "sent_at": 1, "files": big_file,
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &message)).await["code"], "bad");
+
+    // The same key joins: pinned from here on.
+    let join = serde_json::json!({
+        "v": 1, "wire": wire, "kind": "join", "secret": secret, "sent_at": 1,
+        "side": {"claktory": "Eve's Claktory", "owner_name": "Eve"}, "relays": [], "addresses": [],
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &join)).await["code"], "ok");
+
+    // Pinned, but a frame with files on another pipe's wire is turned
+    // away before its files are read too.
+    let (code2, _) = pipe_link::invite(&a, "p-a2", &side("Matt")).await.expect("a second code");
+    let other = serde_json::json!({
+        "v": 1, "wire": code_value(&code2, "w"), "kind": "message", "seq": 1, "msg_id": "big2", "text": "x", "sent_at": 1,
+        "files": big_file,
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &other)).await["code"], "bad");
+
+    // A ping's relays and addresses are kept only when this side may
+    // dial them: an https relay and a routable address land...
+    let good = serde_json::json!({
+        "v": 1, "wire": wire, "kind": "ping", "sent_at": 1,
+        "relays": ["https://relay.example/"], "addresses": ["203.0.113.5:4433"],
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &good)).await["code"], "ok");
+    let (relays, addresses) = stored_route(&dir_a, "p-a");
+    assert!(relays.contains("https://relay.example/"), "{relays}");
+    assert!(addresses.contains("203.0.113.5:4433"), "{addresses}");
+
+    // ...and an http relay with a loopback address changes nothing.
+    let evil = serde_json::json!({
+        "v": 1, "wire": wire, "kind": "ping", "sent_at": 1,
+        "relays": ["http://127.0.0.1:9/"], "addresses": ["127.0.0.1:22"],
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &evil)).await["code"], "ok");
+    assert_eq!(stored_route(&dir_a, "p-a"), (relays, addresses), "the peer's http relay and loopback address were ignored");
+}

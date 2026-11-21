@@ -79,6 +79,13 @@ pub trait Models: Send + Sync {
     fn plan<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(async { Ok(String::new()) })
     }
+    /// Forgets that one of the provider's accounts (empty: all of them) is
+    /// at its usage limits or out of credit, so the next request asks the
+    /// provider itself again: for when usage may be back without a sign-in
+    /// changing. True when any account was marked.
+    fn forget_spent<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// An account id as `Registry` takes it: None for the first.
@@ -294,5 +301,9 @@ impl Models for Registry {
 
     fn plan<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(async move { Ok(Registry::account_plan(self, provider, account_arg(account)).await?.unwrap_or_default()) })
+    }
+
+    fn forget_spent<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
+        Box::pin(Registry::forget_spent(self, provider, account_arg(account)))
     }
 }

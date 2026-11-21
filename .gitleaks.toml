@@ -61,6 +61,11 @@ regexTarget = "secret"
 regexes = ['''^(?:[a-z]{2,3}-)?0123456789abcdef$''']
 
 [[allowlists]]
+description = "The account-root ceremony test's service key (crates/claktory-account/src/protocol.rs, a_statement_signed_with_openssl_as_the_ceremony_does_holds, since 97fc7f2c): the bytes 0x00 to 0x1f in order, base64url, standing in for a service's Ed25519 public key in a key statement. A public key's place, counting bytes, no private material; the statement's real keys come from the service, never the repository"
+regexTarget = "secret"
+regexes = ['''^AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8$''']
+
+[[allowlists]]
 description = "Development-history commits (move docs, re-pathing code and app tests, #217 cycle) that carried this machine's user name and home paths before the v0.1.14 cut fixed the files to placeholder homes. The public repository receives one squashed tree per release, never this history; these commits' trees were never published. Exact commits only, nothing after the fix may use this."
 commits = [
   "2328b697fb0c386b1575dd118f6034df1bb095a8",

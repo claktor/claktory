@@ -118,7 +118,7 @@ if $BUILT; then
     # Only files that neither build nor ship in a release may have changed
     # since (a secret-check exception, say): then what was built is still
     # this commit's release, and the source pushed with it is HEAD.
-    NOT_SHIPPED='^(\.gitleaks\.toml|AGENTS\.md|scripts/(publish|check-secrets|push-source|testflight)\.sh)$'
+    NOT_SHIPPED='^(\.gitleaks\.toml|AGENTS\.md|scripts/(publish|check-secrets|push-source|testflight|qa)\.sh|crates/claktory-qa/README\.md)$'
     CHANGED="$(git -C "$ROOT" diff --name-only "$BUILT_FROM" "$HEAD" 2>/dev/null)" &&
       git -C "$ROOT" merge-base --is-ancestor "$BUILT_FROM" "$HEAD" &&
       { [[ -z "$CHANGED" ]] || ! grep -Eqv "$NOT_SHIPPED" <<<"$CHANGED"; } || {

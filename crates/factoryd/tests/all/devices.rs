@@ -148,12 +148,17 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
     assert!(matches!(apply_request(&mut client, &mut view, deny).await, Body::Ack(_)));
     follow_card(&mut client, &mut view, "Tablet", DevicePairingState::Denied).await;
 
-    // Cancelled from the card.
-    call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Phone"})).await;
+    // Cancelled from the card. Said to be a phone, the card knows (#236)
+    // and keeps it through every later update, which factory.db can't say.
+    let said = call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Phone", "kind": "watch"})).await;
+    assert!(said.starts_with("kind is \"phone\", \"tablet\", \"laptop\" or \"desktop\", or left out"), "{said}");
+    call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Phone", "kind": "phone"})).await;
     let phone = card(&view, "Phone").expect("card").1;
+    assert_eq!(phone.kind(), v1::DeviceKind::Phone);
     let cancel = client_message::Body::CancelPairing(v1::CancelPairing { device_id: phone.device_id.clone() });
     assert!(matches!(apply_request(&mut client, &mut view, cancel).await, Body::Ack(_)));
-    follow_card(&mut client, &mut view, "Phone", DevicePairingState::Cancelled).await;
+    let ended = follow_card(&mut client, &mut view, "Phone", DevicePairingState::Cancelled).await;
+    assert_eq!(ended.kind(), v1::DeviceKind::Phone, "the card keeps what the device is");
 
     // Its 10 minutes run out.
     call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Watch"})).await;
@@ -182,22 +187,23 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
     .await;
     assert!(view.agent("rivet").waiting_seqs.is_empty());
 
-    // Each card shows how it ended.
-    let states: Vec<(String, DevicePairingState)> = view
+    // Each card shows how it ended, and what the device is only when the
+    // call said (Tablet's call didn't, so its card offers both ways).
+    let states: Vec<(String, DevicePairingState, v1::DeviceKind)> = view
         .entries
         .iter()
         .filter_map(|entry| match &entry.kind {
-            Some(Kind::DevicePairing(pairing)) => Some((pairing.name.clone(), pairing.state())),
+            Some(Kind::DevicePairing(pairing)) => Some((pairing.name.clone(), pairing.state(), pairing.kind())),
             _ => None,
         })
         .collect();
     assert_eq!(
         states,
         [
-            ("Tablet".to_owned(), DevicePairingState::Denied),
-            ("Phone".to_owned(), DevicePairingState::Cancelled),
-            ("Watch".to_owned(), DevicePairingState::Expired),
-            ("Desk".to_owned(), DevicePairingState::Cancelled),
+            ("Tablet".to_owned(), DevicePairingState::Denied, v1::DeviceKind::Unspecified),
+            ("Phone".to_owned(), DevicePairingState::Cancelled, v1::DeviceKind::Phone),
+            ("Watch".to_owned(), DevicePairingState::Expired, v1::DeviceKind::Unspecified),
+            ("Desk".to_owned(), DevicePairingState::Cancelled, v1::DeviceKind::Unspecified),
         ]
     );
 
@@ -210,16 +216,16 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
     factory.set_tunnel_online_wait(Duration::from_millis(100));
     let (mut client, workspace, transcript) = Client::connect(restarted).await;
     let mut view = View { workspace, entries: transcript.expect("Rivet's transcript").entries, ..View::default() };
-    let states: Vec<(String, DevicePairingState)> = view
+    let states: Vec<(String, DevicePairingState, v1::DeviceKind)> = view
         .entries
         .iter()
         .filter_map(|entry| match &entry.kind {
-            Some(Kind::DevicePairing(pairing)) => Some((pairing.name.clone(), pairing.state())),
+            Some(Kind::DevicePairing(pairing)) => Some((pairing.name.clone(), pairing.state(), pairing.kind())),
             _ => None,
         })
         .collect();
     assert_eq!(
-        states.iter().map(|(_, state)| *state).collect::<Vec<_>>(),
+        states.iter().map(|(_, state, _)| *state).collect::<Vec<_>>(),
         [
             DevicePairingState::Denied,
             DevicePairingState::Cancelled,
@@ -228,6 +234,7 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
             DevicePairingState::Waiting,
         ]
     );
+    assert_eq!(states[1].2, v1::DeviceKind::Phone, "a reload keeps what the device is");
     let Body::PairingCode(after) = apply_request(&mut client, &mut view, show(&spare)).await else { panic!("a code") };
     assert_ne!(parse(&after.code).token, parse(&before.code).token);
     let devices = factoryd::remote::devices(&home(&dir)).expect("devices");

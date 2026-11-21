@@ -387,8 +387,9 @@ fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
 }
 
 /// With its only account at its usage limit, an agent doesn't fail: it
-/// waits, says so in its conversation and its status, sleeps, takes messages
-/// meanwhile, and carries on by itself once the limit resets, with them.
+/// waits, says so in its conversation and its status, sleeps, and carries
+/// on by itself once the limit resets. (A message meanwhile makes it ask
+/// sooner: `a_message_from_the_person_makes_a_waiting_agent_ask_again`.)
 #[tokio::test]
 async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
     let dir = temp_dir();
@@ -417,12 +418,11 @@ async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
         shown[1]
     );
 
-    // A message meanwhile waits with it; then the limit resets.
-    apply_request(&mut client, &mut view, send_message("builder", "meanwhile")).await;
+    // The limit resets; the agent carries on by itself.
     limited.store(false, Ordering::SeqCst);
     view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
     view.follow(&mut client, |view| builder(view).status() == v1::AgentStatus::Idle).await;
-    assert_eq!(describe(&view.entries)[2..], ["user: meanwhile", "assistant: hi"]);
+    assert_eq!(describe(&view.entries)[2..], ["assistant: hi"]);
     assert_eq!((builder(&view).usage_wait.as_str(), builder(&view).usage_wait_until_ms), ("", 0));
     assert_eq!(model_requests(&seen), 2, "one at the limit, one after it reset");
     assert!(now_ms() >= resets * 1000, "not before the reset");
@@ -466,4 +466,75 @@ fn only_a_again(dir: &std::path::Path, base_url: &str) -> Registry {
     let registry = registry(dir, base_url);
     std::fs::write(dir.join("auth.json"), credentials).expect("credentials");
     registry
+}
+
+/// A claimed reset resumes an agent waiting on the Fable pool too. That
+/// pool's limit mark isn't in the providers listing, so refreshing it sees
+/// no change there: the claim has to wake waiters itself.
+#[tokio::test]
+async fn a_claimed_reset_wakes_an_agent_waiting_on_the_fable_pool() {
+    let dir = temp_dir();
+    let resets = now_ms() / 1000 + 3 * 3600;
+    let (base_url, seen) = anthropic(resets).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    let (mut client, mut view) = serve(&factory, &dir).await;
+
+    let model = factory_agent::providers::catalog::models("anthropic")
+        .into_iter()
+        .find(|model| model.id.starts_with("claude-fable"))
+        .expect("a Fable model")
+        .id;
+    let create = Request::CreateAgent(v1::CreateAgent {
+        name: "Builder".into(),
+        model: format!("anthropic/{model}"),
+        effort: "low".into(),
+        ..Default::default()
+    });
+    assert!(matches!(apply_request(&mut client, &mut view, create).await, Body::Ack(_)));
+    let select = Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() });
+    apply_request(&mut client, &mut view, select).await;
+
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
+    // The listing carries the normal pool's mark alone, so it shows no change.
+    assert_eq!(claude(&view).accounts[0].exhausted_until, 0);
+
+    // The person uses the reset: the agent asks again at once and answers.
+    view.follow(&mut client, |view| claude(view).accounts[0].usage.as_ref().is_some_and(|usage| !usage.resets.is_empty())).await;
+    let use_it =
+        Request::UseUsageReset(v1::UseUsageReset { provider_id: "anthropic".into(), account_id: "a".into(), reset_id: "full_1".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, use_it).await, Body::UsageResetAnswer(_)));
+    view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
+    view.follow(&mut client, |view| builder(view).status() == v1::AgentStatus::Idle && builder(view).usage_wait.is_empty()).await;
+    assert_eq!(model_requests(&seen), 2, "one at the limit, one woken by the claim");
+}
+
+/// A message from the person to a waiting agent doesn't queue dead: it
+/// makes the agent ask the provider again now, so usage brought back
+/// outside Claktory (here, the limit lifting with no claim and no sign-in
+/// change) is found at once, and the queued message runs.
+#[tokio::test]
+async fn a_message_from_the_person_makes_a_waiting_agent_ask_again() {
+    let dir = temp_dir();
+    let resets = now_ms() / 1000 + 3 * 3600;
+    let limited = Arc::new(AtomicBool::new(true));
+    let (base_url, seen) = anthropic_with(resets, limited.clone()).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    let (mut client, mut view) = serve(&factory, &dir).await;
+    create_builder(&mut client, &mut view).await;
+
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
+    assert_eq!(model_requests(&seen), 1);
+
+    // Usage comes back on the provider's side; nothing in Claktory saw it.
+    // The person's message makes the agent try, and it carries on with it.
+    limited.store(false, Ordering::SeqCst);
+    apply_request(&mut client, &mut view, send_message("builder", "carry on")).await;
+    view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
+    view.follow(&mut client, |view| builder(view).status() == v1::AgentStatus::Idle && builder(view).usage_wait.is_empty()).await;
+    assert_eq!(model_requests(&seen), 2, "one at the limit, one asked by the message");
+    let shown = describe(&view.entries);
+    assert!(shown.contains(&"user: carry on".to_owned()), "{shown:?}");
+    assert!(now_ms() < resets * 1000, "well before the reset");
 }

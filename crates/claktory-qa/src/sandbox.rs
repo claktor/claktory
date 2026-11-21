@@ -168,6 +168,9 @@ pub struct Sandbox {
     pub model_pid: Option<i32>,
     pub bin: PathBuf,
     pub commit: String,
+    /// The machine name its Claktory shows (devices, the footer, move
+    /// codes): never this computer's own.
+    pub machine_name: String,
 }
 
 impl Sandbox {
@@ -213,6 +216,7 @@ impl Sandbox {
             "model_log": self.model_port.map(|_| self.model_log()),
             "log": self.dir.join("factoryd.log"),
             "commit": self.commit,
+            "machine_name": self.machine_name,
         })
     }
 
@@ -227,6 +231,7 @@ impl Sandbox {
             "model_pid": self.model_pid,
             "bin": self.bin,
             "commit": self.commit,
+            "machine_name": self.machine_name,
         })
     }
 
@@ -238,8 +243,11 @@ impl Sandbox {
     fn load(dir: &Path) -> Option<Sandbox> {
         let record: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sandbox.json")).ok()?).ok()?;
         let number = |key: &str| record.get(key).and_then(Value::as_i64);
+        let name = record.get("name")?.as_str()?.to_owned();
         Some(Sandbox {
-            name: record.get("name")?.as_str()?.to_owned(),
+            // Sandboxes from before it had one: the default.
+            machine_name: record.get("machine_name").and_then(Value::as_str).map_or_else(|| default_machine_name(&name), str::to_owned),
+            name,
             dir: dir.to_owned(),
             port: u16::try_from(number("port")?).ok()?,
             pid: i32::try_from(number("pid")?).ok()?,
@@ -251,6 +259,11 @@ impl Sandbox {
             commit: record.get("commit").and_then(Value::as_str).unwrap_or_default().to_owned(),
         })
     }
+}
+
+/// The machine name a sandbox shows unless `up --machine-name` chose one.
+fn default_machine_name(sandbox: &str) -> String {
+    format!("qa-{sandbox}")
 }
 
 /// The sandbox called `name`.
@@ -278,6 +291,8 @@ pub struct Up {
     pub account: bool,
     /// qa-model for its agents, with this script (or the built-in answers).
     pub model: Option<Option<PathBuf>>,
+    /// The machine name it shows; "qa-<name>" when left out.
+    pub machine_name: Option<String>,
 }
 
 /// Starts a sandbox: its account service (unless left out), its settings,
@@ -307,6 +322,13 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         None => (1..).map(|number| format!("qa{number}")).find(|name| !root.join(name).exists()).unwrap_or_default(),
     };
     check_name(&name)?;
+    let machine_name = match request.machine_name.map(|chosen| chosen.trim().to_owned()) {
+        Some(chosen) if chosen.is_empty() || chosen.chars().count() > 64 || chosen.chars().any(char::is_control) => {
+            return Err(Failure::usage("--machine-name takes a name of up to 64 characters."));
+        }
+        Some(chosen) => chosen,
+        None => default_machine_name(&name),
+    };
     let dir = root.join(&name);
     if dir.exists() {
         return Err(Failure::refused(format!("There's already a sandbox called {name}: `claktory-qa down {name}` ends it.")));
@@ -334,6 +356,7 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         model_pid: None,
         bin: bin.clone(),
         commit: std::env::var("CLAKTORY_QA_COMMIT").unwrap_or_default(),
+        machine_name,
     };
     let started = start(&mut sandbox, request.account, request.model.as_ref(), &ports);
     if let Err(failure) = started {
@@ -565,10 +588,15 @@ pub fn stop(sandbox: &Sandbox) {
 }
 
 /// What factoryd's environment always holds, beyond what any program
-/// needs: its home and port, and with qa-model, OpenRouter pointed at it
+/// needs: its home and port, the machine name it shows (so no sandbox
+/// shows this computer's), and with qa-model, OpenRouter pointed at it
 /// with a key that opens nothing.
 fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
-    let mut environment = vec![("FACTORY_HOME", sandbox.home().display().to_string()), ("FACTORY_PORT", sandbox.port.to_string())];
+    let mut environment = vec![
+        ("FACTORY_HOME", sandbox.home().display().to_string()),
+        ("FACTORY_PORT", sandbox.port.to_string()),
+        ("FACTORY_MACHINE_NAME", sandbox.machine_name.clone()),
+    ];
     if let Some(port) = sandbox.model_port {
         environment.push(("OPENROUTER_API_KEY", "qa-model".to_owned()));
         environment.push(("OPENROUTER_BASE_URL", format!("http://127.0.0.1:{port}/v1")));

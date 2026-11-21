@@ -14,7 +14,7 @@
 //! `set_store`; until it does, nothing arrives.
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -274,6 +274,12 @@ impl Admits {
     pub(crate) fn admits(&self, key: &str, now: i64) -> bool {
         self.invite_until.load(Ordering::Relaxed) > now || lock(&self.keys).contains(key)
     }
+
+    /// Whether `key` is pinned to a pipe, invite window aside: an unpinned
+    /// key is here only to claim a waiting invite, and gets less.
+    fn pinned(&self, key: &str) -> bool {
+        lock(&self.keys).contains(key)
+    }
 }
 
 /// What the transport keeps while Factory runs.
@@ -516,8 +522,9 @@ fn frame(key: &SecretKey, payload: &Payload, files: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Reads a frame from `peer`, checking its signature and sizes.
-async fn read_frame(receive: &mut RecvStream, peer: &EndpointId) -> Result<(Payload, Vec<Vec<u8>>), String> {
+/// Reads a frame's payload from `peer`, checking its signature and sizes;
+/// its files follow, read by `read_files` once the payload is allowed.
+async fn read_payload(receive: &mut RecvStream, peer: &EndpointId) -> Result<Payload, String> {
     let length = receive.read_u32().await.map_err(|error| error.to_string())? as usize;
     if length > MAX_PAYLOAD {
         return Err("too large".to_owned());
@@ -532,6 +539,11 @@ async fn read_frame(receive: &mut RecvStream, peer: &EndpointId) -> Result<(Payl
     if payload.files.len() > MAX_FILES || total > MAX_FILE || payload.text.len() > MAX_TEXT {
         return Err("too large".to_owned());
     }
+    Ok(payload)
+}
+
+/// Reads the files the payload lists, checking each against its sha256.
+async fn read_files(receive: &mut RecvStream, payload: &Payload) -> Result<Vec<Vec<u8>>, String> {
     let mut files = Vec::with_capacity(payload.files.len());
     for meta in &payload.files {
         let mut bytes = vec![0; usize::try_from(meta.size).map_err(|error| error.to_string())?];
@@ -541,6 +553,31 @@ async fn read_frame(receive: &mut RecvStream, peer: &EndpointId) -> Result<(Payl
         }
         files.push(bytes);
     }
+    Ok(files)
+}
+
+/// Reads a frame, taking only what this peer may send: an unpinned
+/// key, admitted only because an invite waits, gets to send one join with
+/// no files, and a pinned peer's files are read only on its own pipe's
+/// wire — both checked after the signature and before any file byte is
+/// buffered, so a stranger can't make this side hold its 10 MB.
+async fn read_frame(
+    factory: &Weak<Factory>,
+    receive: &mut RecvStream,
+    peer: &EndpointId,
+    pinned: bool,
+) -> Result<(Payload, Vec<Vec<u8>>), String> {
+    let payload = read_payload(receive, peer).await?;
+    if !pinned && (payload.kind != KIND_JOIN || !payload.files.is_empty()) {
+        return Err("not a pipe's peer".to_owned());
+    }
+    if !payload.files.is_empty() {
+        let factory = factory.upgrade().ok_or("shutting down")?;
+        if !by_wire(&factory, &payload.wire).is_some_and(|link| link.peer == peer.to_string()) {
+            return Err("a frame for a pipe that isn't its".to_owned());
+        }
+    }
+    let files = read_files(receive, &payload).await?;
     Ok((payload, files))
 }
 
@@ -595,6 +632,29 @@ async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: 
         Ok(Ok(connection)) => Ok(connection),
         Ok(Err(error)) => Err(format!("{error:#}")),
         Err(_) => Err("no answer in time".to_owned()),
+    }
+}
+
+/// The relays a peer may point this Claktory at: https only. A plain
+/// http relay would carry this side's traffic readable by whatever host
+/// the peer named. What the person pasted (an invite code's relays)
+/// is taken as it is.
+fn peer_relays(relays: Vec<String>) -> Vec<String> {
+    relays.into_iter().filter(|relay| relay.parse::<RelayUrl>().is_ok_and(|url| url.scheme() == "https")).collect()
+}
+
+/// The addresses a peer may point this Claktory at: never loopback,
+/// link-local or unspecified, which would aim its dials at its own
+/// machine or network segment. An invite code's addresses, pasted
+/// by the person, are taken as they are.
+fn peer_addresses(addresses: Vec<String>) -> Vec<String> {
+    addresses.into_iter().filter(|address| address.parse::<SocketAddr>().is_ok_and(|address| dialable(address.ip()))).collect()
+}
+
+fn dialable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast()),
+        IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80),
     }
 }
 
@@ -838,7 +898,7 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
         _ => return Err(PipeError::BadCode),
     }
     let side = reply.side.unwrap_or_default();
-    let mut known_addresses = reply.addresses;
+    let mut known_addresses = peer_addresses(reply.addresses);
     for address in code.addresses {
         if !known_addresses.contains(&address) {
             known_addresses.push(address);
@@ -852,7 +912,10 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
         mine: mine.clone(),
         peer: code.endpoint.clone(),
         peer_side: side.clone(),
-        relays: if reply.relays.is_empty() { code.relays } else { reply.relays },
+        relays: {
+            let relays = peer_relays(reply.relays);
+            if relays.is_empty() { code.relays } else { relays }
+        },
         addresses: known_addresses,
         next_seq: 1,
         next_cseq: 1,
@@ -1183,22 +1246,52 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
     }
 }
 
+/// Frames read at once per peer connection: enough for a busy pipe, and
+/// a bound on what one connection can make this side hold in memory.
+const STREAMS_AT_ONCE: usize = 8;
+/// Streams a connection whose key isn't pinned to a pipe gets in all: a
+/// joiner needs one per try, and it's pinned once it claims the invite.
+const UNPINNED_STREAMS: usize = 8;
+
 /// Serves a peer's connection on the pipes' ALPN: each stream one frame,
 /// answered.
 pub(crate) async fn serve(connection: Connection, factory: Weak<Factory>) {
     let peer = connection.remote_id();
+    let reading = Arc::new(tokio::sync::Semaphore::new(STREAMS_AT_ONCE));
+    let mut unpinned_streams = 0;
     while let Ok((send, receive)) = connection.accept_bi().await {
+        let Some(strong) = factory.upgrade() else { return };
+        let pinned = strong.remote.pipes.admits.pinned(&peer.to_string());
+        drop(strong);
+        if !pinned {
+            unpinned_streams += 1;
+            if unpinned_streams > UNPINNED_STREAMS {
+                // Here only to claim a waiting invite, and that takes one
+                // stream, not a stream mill.
+                connection.close(0u32.into(), b"too many streams");
+                return;
+            }
+        }
+        let Ok(permit) = reading.clone().acquire_owned().await else { return };
         let factory = factory.clone();
         tokio::spawn(async move {
-            if let Err(error) = answer(factory, peer, send, receive).await {
+            let _reading = permit;
+            if let Err(error) = answer(factory, peer, pinned, send, receive).await {
                 tracing::debug!(%error, "a pipe's frame failed");
             }
         });
     }
 }
 
-async fn answer(factory: Weak<Factory>, peer: EndpointId, mut send: SendStream, mut receive: RecvStream) -> std::io::Result<()> {
-    let read = tokio::time::timeout(ANSWER + Duration::from_secs(MAX_FILE / 1_000_000), read_frame(&mut receive, &peer)).await;
+async fn answer(
+    factory: Weak<Factory>,
+    peer: EndpointId,
+    pinned: bool,
+    mut send: SendStream,
+    mut receive: RecvStream,
+) -> std::io::Result<()> {
+    let patience = ANSWER + Duration::from_secs(MAX_FILE / 1_000_000);
+    let read = tokio::time::timeout(patience, read_frame(&factory, &mut receive, &peer, pinned)).await;
     let (payload, files) = match read {
         Ok(Ok(read)) => read,
         Ok(Err(error)) => {
@@ -1239,8 +1332,8 @@ fn joined(factory: &Arc<Factory>, peer: &str, payload: Payload) -> Reply {
     }
     link.peer = peer.to_owned();
     link.peer_side = payload.side.unwrap_or_default();
-    link.relays = payload.relays;
-    link.addresses = payload.addresses;
+    link.relays = peer_relays(payload.relays);
+    link.addresses = peer_addresses(payload.addresses);
     // invite_expires stays: until it passes, a second claimant of the code
     // still gets in far enough to hear "used".
     link.last_seen = now_ms();
@@ -1281,9 +1374,11 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
     let pipe = link.pipe.clone();
     let reply = match payload.kind.as_str() {
         KIND_PING => {
-            if !payload.relays.is_empty() || !payload.addresses.is_empty() {
-                link.relays = payload.relays;
-                link.addresses = payload.addresses;
+            let relays = peer_relays(payload.relays);
+            let addresses = peer_addresses(payload.addresses);
+            if !relays.is_empty() || !addresses.is_empty() {
+                link.relays = relays;
+                link.addresses = addresses;
             }
             Reply::code("ok")
         }

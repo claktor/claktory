@@ -22,6 +22,8 @@ pub(crate) struct Instance {
     mail: Arc<mail::Memory>,
     ahead: Arc<AtomicI64>,
     pub(crate) secrets: ([u8; 32], [u8; 32]),
+    /// What it serves as its root's word for its key (F-OK1), if anything.
+    pub(crate) statement: Option<claktory_account::protocol::SignedStatement>,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
@@ -38,6 +40,7 @@ impl Instance {
             mail: Arc::new(mail::Memory::default()),
             ahead: Arc::default(),
             secrets: kept,
+            statement: None,
             server: tokio::spawn(async { Ok(()) }),
         };
         instance.serve(listener);
@@ -54,7 +57,8 @@ impl Instance {
         };
         let ahead = self.ahead.clone();
         let clock: server::Clock = Arc::new(move || jiff::Timestamp::now().as_second() + ahead.load(Ordering::SeqCst));
-        let service = Service::new(&self.db, secrets, Config::default(), self.mail.clone(), clock).expect("the service");
+        let config = Config { service_key_statement: self.statement.clone(), ..Config::default() };
+        let service = Service::new(&self.db, secrets, config, self.mail.clone(), clock).expect("the service");
         self.server = tokio::spawn(server::serve(listener, service));
     }
 
@@ -78,6 +82,21 @@ impl Instance {
     /// The service's clock moves on, so its once-a-minute share is given again.
     fn advance(&self, seconds: i64) {
         self.ahead.fetch_add(seconds, Ordering::SeqCst);
+    }
+
+    /// Its current key, vouched for from `from` by `root` (id "test-root").
+    fn vouch(&mut self, root: &ed25519_dalek::SigningKey, from: i64) {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&self.secrets.1).verifying_key();
+        let statement = claktory_account::protocol::KeyStatement {
+            service: self.url.clone(),
+            key: claktory_account::protocol::b64(key.to_bytes()),
+            from,
+        };
+        let text = statement.text();
+        let signature = base64::engine::general_purpose::STANDARD.encode(root.sign(text.as_bytes()).to_bytes());
+        self.statement = Some(claktory_account::protocol::SignedStatement { text, signature: format!("test-root:{signature}") });
     }
 
     fn last_code(&self, email: &str) -> String {
@@ -606,4 +625,76 @@ async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_s
 fn factoryd_unhex(text: &str) -> Vec<u8> {
     let text = text.trim();
     (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex")).collect()
+}
+
+/// F-OK1: a service anchored to a root (as claktory.com is, once its root's
+/// statement is live). No statement, no sign-in; then a key it rotates to is
+/// taken by itself on the root's word, so the vault opens with no sign-in;
+/// and an older key, even one the root once vouched for, isn't taken back.
+#[tokio::test]
+async fn an_anchored_service_s_key_is_taken_only_on_its_root_s_word_and_never_rolled_back() {
+    use base64::Engine;
+    let dir = temp_dir();
+    let mut instance = Instance::start(&dir).await;
+    let root = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let roots = vec![("test-root".to_owned(), base64::engine::general_purpose::STANDARD.encode(root.verifying_key().to_bytes()))];
+    const FLOOR: i64 = 1_795_000_000;
+    factoryd::anchor_account_for_tests(&instance.url, roots, FLOOR);
+    let saved = |dir: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json")).expect("json")
+    };
+    // Nothing vouches for its key, then a statement older than this build's
+    // floor: no sign-in. (Each with the Claktory started again, so it
+    // reaches the service as it's served now.)
+    for from in [None, Some(FLOOR - 1)] {
+        if let Some(from) = from {
+            instance.vouch(&root, from);
+            instance.restart().await;
+        }
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        let refused = client.request(Request::AccountSignIn(v1::AccountSignIn { email: "matt@example.com".into() })).await;
+        assert_eq!(
+            failure(&refused.body),
+            (ErrorCode::Unreachable, "Couldn't confirm this is really 127.0.0.1, so you can't sign in right now. Try again later.".into())
+        );
+    }
+    instance.vouch(&root, FLOOR);
+    instance.restart().await;
+    {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        sign_in(&mut client, &instance, "matt@example.com").await;
+        assert_eq!(saved(&dir)["service_key_from"], FLOOR);
+    }
+
+    // Rotated, with the root's word for the new key: taken by itself.
+    let old = (instance.secrets.1, instance.statement.clone());
+    instance.secrets.1 = Secrets::generate().signing_key.to_bytes();
+    instance.vouch(&root, FLOOR + 10);
+    instance.restart().await;
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, unlocked).await;
+    assert_eq!(account(&workspace).problem, "");
+    let new_key = claktory_account::protocol::b64(ed25519_dalek::SigningKey::from_bytes(&instance.secrets.1).verifying_key().to_bytes());
+    assert_eq!((saved(&dir)["service_key"].as_str(), saved(&dir)["service_key_from"].as_i64()), (Some(new_key.as_str()), Some(FLOOR + 10)));
+    drop(client);
+
+    // The old key back, with its old statement (a leak, served by someone
+    // else): not taken, and said so.
+    instance.secrets.1 = old.0;
+    instance.statement = old.1;
+    instance.restart().await;
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, |workspace| !account(workspace).problem.is_empty()).await;
+    assert!(!unlocked(&workspace));
+    assert_eq!(
+        account(&workspace).problem,
+        "Couldn't confirm this is really 127.0.0.1, so your secrets stay locked for now. Claktory keeps trying."
+    );
+    assert_eq!(saved(&dir)["service_key"].as_str(), Some(new_key.as_str()), "the pinned key stays");
 }

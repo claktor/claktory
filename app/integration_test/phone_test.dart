@@ -48,7 +48,8 @@ Future<void> askAndWait(WidgetTester tester) async {
     'reversed, and nothing else.',
   );
   await tester.pump();
-  await tester.tap(find.text('Send'));
+  // By what VoiceOver and TalkBack read: the button is a glyph.
+  await tester.tap(find.bySemanticsLabel('Send').last);
   final reversed = word.split('').reversed.join();
   // The reply alone (its thinking mentions the word too).
   await waitFor(
@@ -120,8 +121,18 @@ void main() {
       await tester.tap(find.text('Continue'));
       await waitFor(tester, find.text("What's your name?"), gone: true);
     }
-    await tester.tap(find.text(_agent).first);
-    await waitFor(tester, find.text('Send'));
+    // The agent's row in the sidebar, never its name in a conversation's
+    // header (which opens its settings): a phone that opens at a
+    // conversation shows the drawer first.
+    final row = find
+        .descendant(of: find.byType(Sidebar), matching: find.text(_agent))
+        .hitTestable();
+    if (row.evaluate().isEmpty) {
+      await tester.tap(find.bySemanticsLabel('Menu').last);
+      await waitFor(tester, row);
+    }
+    await tester.tap(row.first);
+    await waitFor(tester, find.bySemanticsLabel('Send'));
     await askAndWait(tester);
 
     if (_lifecycle) {

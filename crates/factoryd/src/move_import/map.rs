@@ -130,10 +130,8 @@ mod tests {
         );
         assert_eq!(map.said(), "/Users/me → /home/you; /Users/me/factory → /srv/factory");
         // The person's pair replaces a default for the same prefix.
-        let mine = PathMap::new([
-            (PathBuf::from("/Users/me"), PathBuf::from("/home/you")),
-            (PathBuf::from("/Users/me"), PathBuf::from("/data")),
-        ]);
+        let mine =
+            PathMap::new([(PathBuf::from("/Users/me"), PathBuf::from("/home/you")), (PathBuf::from("/Users/me"), PathBuf::from("/data"))]);
         assert_eq!(mine.path(Path::new("/Users/me/x")), Some(PathBuf::from("/data/x")));
         assert!(parse_pair("/a=/b").is_ok() && parse_pair("a=/b").is_err() && parse_pair("/a").is_err());
     }

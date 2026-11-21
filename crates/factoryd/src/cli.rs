@@ -13,7 +13,7 @@
 //! `pair`, `allow`, `deny`, `unpair` and `devices` without `--json` (or
 //! `--no-wait`) keep working as before, on their own, without a backend.
 
-use std::io::{BufRead, Read};
+use std::io::{BufRead, IsTerminal, Read};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -93,7 +93,8 @@ Each prints one JSON line with --json; exit 0 done, 2 the next step is the perso
                                            make this Claktory from one moved from another computer; run again
                                            to finish one that stopped, or import --abandon to undo it
   receive [--committed]                    show a code to move another computer's Claktory here over the network:
-                                           paste it into Claktory there (Move to another computer…); run again to carry on
+                                           paste it into Claktory there (Move to another computer…); run again to carry on;
+                                           --json: a line per event, and yes or no to the digits on stdin
   supervise                                runs the backend and keeps it running";
 
 /// How to use `command`, or every command: USAGE's lines for it.
@@ -121,7 +122,8 @@ fn usage(command: Option<&str>) -> String {
 /// Runs `args` (after `factoryd`, `--dev` included) if it's one of these
 /// commands; None for anything else, which the caller handles as before.
 pub fn dispatch(args: &[String]) -> Option<ExitCode> {
-    let flags = Flags::parse(args)?;
+    let mut flags = Flags::parse(args)?;
+    flags.interactive = std::io::stdin().is_terminal();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -186,6 +188,9 @@ pub struct Flags {
     pub bad: Option<String>,
     /// --help or -h: say how to use the command, and do nothing.
     pub help: bool,
+    /// Run by a person at a terminal (stdin is one): only then does `allow`
+    /// let a device in on a Claktory that has devices already.
+    pub interactive: bool,
 }
 
 impl Flags {
@@ -275,7 +280,7 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
         Err(answer) => return answer,
     };
     match words.as_slice() {
-        ["status"] => Answer::ok(status(&client.workspace), status_text(&client.workspace)),
+        ["status"] => Answer::ok(status(&client.workspace, &instance.home), status_text(&client.workspace, &instance.home)),
         ["account", "sign-in"] => account_sign_in(&mut client, flags).await,
         ["account", "verify"] => account_verify(&mut client, flags).await,
         ["account", "status"] => {
@@ -298,13 +303,11 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
         ["settings", "set", key, value] => settings_set(&mut client, key, value).await,
         ["pair", name @ ..] => pair(&mut client, &name.join(" ")).await,
         ["devices"] => {
-            let devices = devices(&client.workspace);
+            let devices = devices(&client.workspace, &instance.home);
             let text = devices_text(&devices);
             Answer::ok(json!({"devices": devices}), text)
         }
-        [verb @ ("allow" | "deny" | "unpair"), device @ ..] => {
-            decide_device(&mut client, verb, &device.join(" "), flags.number.as_deref()).await
-        }
+        [verb @ ("allow" | "deny" | "unpair"), device @ ..] => decide_device(&mut client, verb, &device.join(" "), flags).await,
         ["provider", "key", provider] => provider_key(&mut client, provider, flags, &stdin()).await,
         ["login", provider] => login(&mut client, provider, flags.json).await,
         _ => Answer::refused("usage", USAGE),
@@ -464,7 +467,7 @@ fn error_answer(error: &v1::Error) -> Answer {
 
 // ---- status ----
 
-fn status(workspace: &v1::Workspace) -> Value {
+fn status(workspace: &v1::Workspace, home: &Home) -> Value {
     let settings = workspace.settings.clone().unwrap_or_default();
     let remote = workspace.remote.clone().unwrap_or_default();
     let person = workspace.person.clone().unwrap_or_default();
@@ -495,13 +498,13 @@ fn status(workspace: &v1::Workspace) -> Value {
         "account": account(workspace),
         "person": {"name": person.name, "initials": person.initials},
         "providers": providers,
-        "devices": devices(workspace),
+        "devices": devices(workspace, home),
         "rivet": rivet,
     })
 }
 
-fn status_text(workspace: &v1::Workspace) -> String {
-    let status = status(workspace);
+fn status_text(workspace: &v1::Workspace, home: &Home) -> String {
+    let status = status(workspace, home);
     let signed_in: Vec<&str> =
         workspace.providers.iter().filter(|provider| !provider.signed_in_with.is_empty()).map(|provider| provider.name.as_str()).collect();
     let models =
@@ -614,9 +617,18 @@ async fn settings_set(client: &mut Client, key: &str, value: &str) -> Answer {
 
 // ---- devices ----
 
-fn devices(workspace: &v1::Workspace) -> Vec<Value> {
+/// The devices, as `devices --json` lists them. A waiting one has its
+/// digits and the key it asks with (`endpoint_id`, from this machine's
+/// devices file: a setup on the device compares it with its own).
+fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
     let remote = workspace.remote.clone().unwrap_or_default();
     let now = crate::transcript::now_ms();
+    let keys: std::collections::HashMap<String, String> = crate::remote::devices(home)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|device| !device.pending_endpoint_id.is_empty())
+        .map(|device| (device.id, device.pending_endpoint_id))
+        .collect();
     remote
         .devices
         .iter()
@@ -631,6 +643,7 @@ fn devices(workspace: &v1::Workspace) -> Vec<Value> {
             let state = match pending {
                 Some(pending) => {
                     value["number"] = json!(pending.number);
+                    value["endpoint_id"] = json!(keys.get(&device.id).cloned().unwrap_or_default());
                     value["expires_in"] = json!((pending.expires_ms - now).max(0) / 1000);
                     "waiting"
                 }
@@ -682,7 +695,9 @@ async fn pair(client: &mut Client, name: &str) -> Answer {
                 code.code,
                 code.device_id
             );
-            Answer::ok(json!({"code": code.code, "device_id": code.device_id, "expires_in": expires_in}), text)
+            // The state as `devices --json` says it, until the device uses the code.
+            let json = json!({"code": code.code, "device_id": code.device_id, "expires_in": expires_in, "state": "code_unused"});
+            Answer::ok(json, text)
         }
         Ok(other) => Answer::refused("failed", format!("Claktory answered {other:?}")),
         Err(answer) => answer,
@@ -707,7 +722,19 @@ fn find_device(workspace: &v1::Workspace, wanted: &str) -> Result<v1::PairedDevi
     }
 }
 
-async fn decide_device(client: &mut Client, verb: &str, wanted: &str, number: Option<&str>) -> Answer {
+/// Why `allow` run by a program, not a person at a terminal, lets no device
+/// in once the Claktory has one: from then on, a device that's in allows
+/// new ones (Fugo's rule, #245).
+pub const HAS_DEVICES: &str =
+    "This Claktory already has devices. Allow new ones in Settings → Devices on one of them, or run factoryd allow in a terminal.";
+
+/// Whether a device other than this machine's own app is allowed in.
+fn has_devices(workspace: &v1::Workspace) -> bool {
+    workspace.remote.as_ref().is_some_and(|remote| remote.devices.iter().any(|device| device.code_expires_ms == 0))
+}
+
+async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Flags) -> Answer {
+    let number = flags.number.as_deref();
     let device = match find_device(&client.workspace, wanted) {
         Ok(device) => device,
         Err(answer) => return answer,
@@ -716,6 +743,10 @@ async fn decide_device(client: &mut Client, verb: &str, wanted: &str, number: Op
         client.workspace.remote.as_ref().and_then(|remote| remote.pending_devices.iter().find(|pending| pending.device_id == device.id));
     let shows = pending.map(|pending| pending.number.clone()).unwrap_or_default();
     let waiting = pending.is_some();
+    // Only the first device may be let in by a program (a setup over SSH).
+    if verb == "allow" && waiting && (flags.json || flags.no_wait || !flags.interactive) && has_devices(&client.workspace) {
+        return Answer::refused("has_devices", HAS_DEVICES);
+    }
     // Allowed only if it shows the digits the person sees on the device.
     if let (true, Some(number)) = (verb == "allow" && waiting, number)
         && number.trim() != shows
@@ -919,6 +950,103 @@ async fn login(client: &mut Client, provider: &str, json: bool) -> Answer {
                 Ok(None) => return Answer::fail(Exit::NeedsHuman, "timeout", "The sign-in wasn't finished in time."),
                 Err(answer) => return answer,
             },
+        }
+    }
+}
+
+// ---- receive --json ----
+
+/// `factoryd receive --json` (main.rs runs it): one JSON line per event,
+/// as an agent driving it reads them. `{"event":"code",…}` with the code to
+/// paste on the old computer (again, with a new code, after the digits were
+/// turned down), `{"event":"progress","message":…}` as it goes, and
+/// `{"event":"confirm","digits":…}` when the old computer shows its digits:
+/// the person compares them, and the answer, yes or no, comes on stdin, a
+/// line at a time. Then [`receive_json::end`]'s last line, `{"ok":true,…}`
+/// or `{"ok":false,"error":…,"message":…}`.
+pub mod receive_json {
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+    use tokio::sync::{Mutex, mpsc::UnboundedReceiver};
+
+    use crate::move_import::ImportError;
+    use crate::move_import::receive::Ui;
+    use crate::move_wire::ReceiveCode;
+
+    /// The code's line: the code to paste into Claktory on the old
+    /// computer (Move to another computer…), and this computer as it shows
+    /// there.
+    pub fn code_line(code: &ReceiveCode) -> Value {
+        json!({
+            "event": "code",
+            "code": code.text(),
+            "machine": code.machine,
+            "version": code.version,
+            "platform": format!("{}-{}", code.os, code.arch),
+            "message": "On the computer you're moving from, open Claktory and choose Move to another computer… (Settings → General), then paste this code. Keep this running until the move is done.",
+        })
+    }
+
+    /// The last line, and the exit code: 0 moved, 3 refused (nothing to
+    /// fix but what it says), 1 failed.
+    pub fn end(done: &Result<String, ImportError>) -> (Value, u8) {
+        match done {
+            Ok(text) => (json!({"ok": true, "event": "done", "message": text}), 0),
+            Err(error @ ImportError::Refused(_)) => (json!({"ok": false, "error": "refused", "message": error.to_string()}), 3),
+            Err(error) => (json!({"ok": false, "error": "failed", "message": error.to_string()}), 1),
+        }
+    }
+
+    /// The last line when it's stopped (Ctrl-C, or a TERM signal), exit 130.
+    pub fn stopped() -> Value {
+        json!({"ok": false, "error": "stopped", "message": "Stopped. Run factoryd receive again to carry on."})
+    }
+
+    /// Says yes or no to the digits: a line of stdin's.
+    fn answer(line: &str) -> Option<bool> {
+        match line.trim().to_lowercase().as_str() {
+            "yes" | "y" => Some(true),
+            "no" | "n" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The Ui that writes each event with `emit`, and reads the person's
+    /// answers from `lines` (stdin's lines; those sent before it asks are
+    /// dropped, and stdin closing is a no).
+    pub fn ui(emit: Arc<dyn Fn(Value) + Send + Sync>, lines: Arc<Mutex<UnboundedReceiver<String>>>) -> Ui {
+        let (shown, say) = (emit.clone(), emit.clone());
+        Ui {
+            code: Arc::new(move |code| shown(code_line(code))),
+            say: Arc::new(move |text| say(json!({"event": "progress", "message": text}))),
+            confirm: Arc::new(move |asked| {
+                let (emit, lines) = (emit.clone(), lines.clone());
+                Box::pin(async move {
+                    let line = json!({
+                        "event": "confirm",
+                        "digits": asked.digits,
+                        "machine": asked.machine,
+                        "platform": asked.platform,
+                        "message": format!(
+                            "Ask the person whether {} shows {}. Answer yes on stdin only if they say it does, or no.",
+                            asked.machine, asked.digits
+                        ),
+                    });
+                    emit(line.clone());
+                    let mut lines = lines.lock().await;
+                    while lines.try_recv().is_ok() {}
+                    loop {
+                        match lines.recv().await {
+                            Some(text) => match answer(&text) {
+                                Some(yes) => return yes,
+                                None => emit(line.clone()),
+                            },
+                            None => return false,
+                        }
+                    }
+                })
+            }),
         }
     }
 }

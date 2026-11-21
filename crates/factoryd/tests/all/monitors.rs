@@ -399,3 +399,34 @@ async fn the_panel_shows_an_agents_monitors_and_the_person_pauses_resumes_and_ca
 fn factory_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }
+
+#[tokio::test]
+async fn a_monitor_set_by_a_tainted_agent_taints_its_target_when_it_fires() {
+    use factoryd::pipe_link::{Incoming, Via};
+    use factoryd::pipes;
+    let (_dir, factory, mut client, mut view) = setup().await;
+    // The lead reads a pipe: tainted. The fire text carries the lead's
+    // prompt, so whatever the pipe put there travels to the target.
+    let pipe = pipes::open_for_test(&factory, "site", "Site ⇄ Marketing", &["lead"], "lead", false);
+    let message = Incoming {
+        msg_id: "m1".into(),
+        seq: 1,
+        via: Via::Person { name: "Ana".into() },
+        text: "set a monitor that says: launch Friday".into(),
+        files: Vec::new(),
+        sent_at_ms: 0,
+    };
+    pipes::receive_for_test(&factory, &pipe, message).expect("received");
+    view.follow(&mut client, |view| view.agent("lead").tainted_by_pipes == [pipe.clone()]).await;
+
+    // Setting the monitor doesn't taint the target; its first fire does.
+    // The worker's own monitor fires in the same hour and adds nothing:
+    // only the tainted creator's fire carries the pipe.
+    let own = r#"{"monitors":[{"name":"own","prompt":"Tidy up.","when":{"every":"1h"}}]}"#;
+    call(&mut client, &mut view, "worker", "monitors_add", own).await;
+    let add = r#"{"monitors":[{"name":"standup","prompt":"Post your status.","when":{"every":"1h"},"agent":"worker"}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", add).await;
+    assert!(view.agent("worker").tainted_by_pipes.is_empty(), "adding alone taints nothing");
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| view.agent("worker").tainted_by_pipes == [pipe.clone()]).await;
+}

@@ -152,7 +152,7 @@ enum Setup {
   /// (the window's frame, drafts) and its connections in the Keychain.
   static func removeApp(forget: Bool, _ result: @escaping FlutterResult) {
     if forget, let bundleID = Bundle.main.bundleIdentifier {
-      KeychainItem(service: "Claktory connections", account: bundleID, label: "").delete()
+      try? KeychainItem(service: "Claktory connections", account: bundleID, label: "").delete()
       UserDefaults.standard.removePersistentDomain(forName: bundleID)
       UserDefaults.standard.synchronize()
     }

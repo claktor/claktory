@@ -75,9 +75,9 @@ every distinct blob has its own hash.
   maps composite pixels (y down) to PDF user space (unrotated, y up) or to
   oriented image pixels; `drawing.drawing_to_document` maps the drawing's
   own space to the same. A page overlay's drawing is in points from the
-  CropBox's top left, y down (`[1, 0, 0, -1, cx, cy + ch]`): **pending
-  verification in the native spike**; correcting it once PDFKit says
-  otherwise is a correction, not a schema change.
+  CropBox's top left, y down (`[1, 0, 0, -1, cx, cy + ch]`), whatever the
+  page's /Rotate: verified through PDFKit's own conversions in the native
+  spike (docs/ipad-ink-spike.md).
 - Composites stay within 2048 px on the long edge and 3 MiB, so
   `read_image` passes them through unchanged.
 

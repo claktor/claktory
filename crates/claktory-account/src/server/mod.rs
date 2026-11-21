@@ -6,6 +6,7 @@ mod devices;
 pub mod geo;
 pub mod mail;
 pub mod secrets;
+pub mod statement;
 pub mod stats;
 mod web;
 
@@ -47,6 +48,9 @@ const IP_PER_MINUTE: u32 = 30;
 pub struct Config {
     /// Where the account page is, as emails write it.
     pub account_page: String,
+    /// Where the service is, as emails link to it: its mark is there, at
+    /// `/mark.png`.
+    pub public_url: String,
     /// The domain emails come from: code@ and notices@ it.
     pub mail_domain: String,
     /// Behind a proxy (Caddy): the client's IP is the last of
@@ -62,18 +66,23 @@ pub struct Config {
     pub locator: Option<Arc<dyn geo::Locator>>,
     /// Relays Claktories should use, in check-in answers.
     pub relays: Vec<String>,
+    /// An offline root's word for the service key, served at well-known
+    /// (`--service-key-statement`).
+    pub service_key_statement: Option<protocol::SignedStatement>,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
             account_page: "claktory.com/account".to_owned(),
+            public_url: "https://account.claktory.com".to_owned(),
             mail_domain: "auth.claktory.com".to_owned(),
             trust_proxy: false,
             email_daily_cap: 90,
             admins: Vec::new(),
             locator: None,
             relays: Vec::new(),
+            service_key_statement: None,
         }
     }
 }
@@ -236,6 +245,11 @@ impl Service {
 
     async fn route(&self, call: &Call) -> Result<Reply, ApiError> {
         let relay = call.path == "/v1/relay/allowlist";
+        // The mark is fetched by mail providers' image proxies, from few
+        // addresses for many people's emails.
+        if call.path == "/mark.png" && matches!(call.method, Method::GET | Method::HEAD) {
+            return Ok(mark());
+        }
         if !relay {
             let key = format!("ip-minute:{}", call.ip);
             self.limit(&[(&key, 60, IP_PER_MINUTE)])?;
@@ -294,6 +308,15 @@ impl Service {
         }
         response
     }
+}
+
+/// Claktory's mark (the app's icon, 128px), as the sign-in emails show it.
+const MARK: &[u8] = include_bytes!("../../assets/mark.png");
+
+fn mark() -> Reply {
+    let mut reply = Reply { status: StatusCode::OK, content_type: "image/png", headers: Vec::new(), body: MARK.to_vec() };
+    reply.headers.push((hyper::header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=604800")));
+    reply
 }
 
 /// Serves until the listener fails.

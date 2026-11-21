@@ -628,7 +628,10 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
             });
         }
     }
+    // What a pipe brought reaches them through the sender: they're as
+    // tainted as it is (their secrets wait for the person too).
     for (id, text, event) in letters {
+        crate::pipes::agents::spread_taint(factory, sender, &id);
         factory.deliver_event(&id, text, event);
     }
     // The person sees who talks to whom: the rows glow.

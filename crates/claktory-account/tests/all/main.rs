@@ -8,5 +8,6 @@ mod limits;
 mod live;
 mod sign_in;
 mod signed;
+mod statement;
 mod support;
 mod web;

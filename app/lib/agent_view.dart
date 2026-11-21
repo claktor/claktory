@@ -18,6 +18,7 @@ import 'mobile/metrics.dart';
 import 'mobile/presentation.dart' show showPanel;
 import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
+import 'pipes.dart' show PipeLimitMark;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart';
@@ -310,6 +311,11 @@ class _Header extends StatelessWidget {
                               .copyWith(color: palette.textMuted),
                         ),
                       ),
+                      // Limited to a pipe: plainly, beside what it runs.
+                      if (agent.quarantined) ...[
+                        const SizedBox(width: Space.s),
+                        Flexible(child: PipeLimitMark(agent: agent)),
+                      ],
                       if (!agent.modelAvailable) ...[
                         const SizedBox(width: Space.s),
                         // No model at all: connect one, as the first

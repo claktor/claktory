@@ -22,6 +22,7 @@
 //! the service and the app isn't asked to sign in.
 
 pub(crate) mod analytics;
+pub(crate) mod anchor;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -76,6 +77,9 @@ struct Saved {
     /// email, the machine token and the share's epoch. Empty when not.
     service: String,
     service_key: String,
+    /// When the account root's statement for the pinned key says it's the
+    /// service's from (unix seconds); None when there was none (`anchor`).
+    service_key_from: Option<i64>,
     account_id: String,
     email: String,
     machine_token: String,
@@ -137,6 +141,8 @@ struct Params {
 struct Pending {
     service: String,
     service_key: String,
+    /// Its statement's `from`, if it had one.
+    key_from: Option<i64>,
     start: SignInStart,
     request_id: String,
     expires_ms: i64,
@@ -509,13 +515,13 @@ impl State {
     }
 
     /// The service's key, from its well-known address.
-    async fn well_known(&self, service: &str) -> Result<String, Failure> {
+    async fn well_known(&self, service: &str) -> Result<WellKnown, Failure> {
         let answer = self.send(service, None, "GET", api::WELL_KNOWN, Vec::new(), None).await?;
         let known: WellKnown = serde_json::from_slice(&answer).map_err(|error| Failure::Unreachable(error.to_string()))?;
         if known.service != "claktory-account" || known.api != api::API {
             return Err(Failure::Unreachable(format!("{} API {}, not claktory-account API {}", known.service, known.api, api::API)));
         }
-        Ok(known.service_key)
+        Ok(known)
     }
 
     /// A signed call as the signed-in Claktory.
@@ -633,6 +639,9 @@ pub(crate) struct Owner {
     /// When it signed in, in ms since 1970; 0 when that's unknown (a
     /// sign-in from before it was kept).
     pub signed_in_ms: i64,
+    /// The pinned key is from before this build's floor (`anchor`): it no
+    /// longer vouches for devices.
+    pub retired: bool,
 }
 
 /// The account it's signed in to, while signing in is on (`config`, so it
@@ -651,6 +660,7 @@ pub(crate) fn owner(factory: &Factory, config: &AccountConfig) -> Option<Owner> 
         account_id: saved.account_id.clone(),
         service_key: api::verifying_key(&saved.service_key)?,
         signed_in_ms: saved.signed_in_ms,
+        retired: anchor::retired(&saved.service, saved.service_key_from),
     })
 }
 
@@ -680,6 +690,9 @@ pub(crate) fn check_assertion(
     endpoint_id: &str,
 ) -> Result<api::DeviceAssertion, AssertionRefusal> {
     let owner = owner(factory, config).ok_or(AssertionRefusal::NotSignedIn)?;
+    if owner.retired {
+        return Err(AssertionRefusal::Invalid);
+    }
     let said = api::read_device_assertion(&owner.service_key, assertion).ok_or(AssertionRefusal::Invalid)?;
     if api::verify_device_assertion(&owner.service_key, assertion, now_s()).is_none() {
         return Err(AssertionRefusal::Expired);
@@ -721,7 +734,17 @@ pub(crate) async fn sign_in(factory: &Arc<Factory>, email: &str) -> Result<(), R
     let account = &factory.account;
     let _busy = account.busy.lock().await;
     let service = configured_service(&config);
-    let service_key = account.well_known(&service).await.map_err(|failure| sign_in_error(&service, failure))?;
+    let known = account.well_known(&service).await.map_err(|failure| sign_in_error(&service, failure))?;
+    let key_from = match anchor::vouch(&service, &known) {
+        anchor::Vouch::Free(from) => from,
+        anchor::Vouch::Vouched(from) => Some(from),
+        anchor::Vouch::Refused(why) => {
+            tracing::warn!(service, why, "the account service's key isn't vouched for; not signing in");
+            let unverified = unverified_key(&service_name(&service));
+            return Err(refused(ErrorCode::Unreachable, format!("{unverified}, so you can't sign in right now. Try again later.")));
+        }
+    };
+    let service_key = known.service_key;
     let Some(verifying) = api::verifying_key(&service_key) else {
         return Err(sign_in_error(&service, Failure::Unreachable("a bad service key".to_owned())));
     };
@@ -734,7 +757,7 @@ pub(crate) async fn sign_in(factory: &Arc<Factory>, email: &str) -> Result<(), R
         version: crate::update::VERSION.to_owned(),
         platform: platform(),
     };
-    send_code(factory, &service, &service_key, &verifying, start).await
+    send_code(factory, &service, &service_key, key_from, &verifying, start).await
 }
 
 /// Sends `start`, and waits for its code.
@@ -742,6 +765,7 @@ async fn send_code(
     factory: &Arc<Factory>,
     service: &str,
     service_key: &str,
+    key_from: Option<i64>,
     verifying: &VerifyingKey,
     start: SignInStart,
 ) -> Result<(), RequestError> {
@@ -757,6 +781,7 @@ async fn send_code(
         inner.pending = Some(Pending {
             service: service.to_owned(),
             service_key: service_key.to_owned(),
+            key_from,
             start,
             request_id: started.request_id,
             expires_ms: now_ms() + started.expires_in * 1000,
@@ -783,7 +808,7 @@ pub(crate) async fn resend(factory: &Arc<Factory>) -> Result<(), RequestError> {
     let Some(verifying) = api::verifying_key(&pending.service_key) else {
         return Err(refused(ErrorCode::Internal, "The service's key is unreadable."));
     };
-    send_code(factory, &pending.service, &pending.service_key, &verifying, pending.start).await
+    send_code(factory, &pending.service, &pending.service_key, pending.key_from, &verifying, pending.start).await
 }
 
 /// AccountVerify: signs in with the emailed code, and protects the vault
@@ -835,6 +860,7 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), Req
         inner.problem.clear();
         inner.saved.service = pending.service.clone();
         inner.saved.service_key = signed_in.service_key.clone();
+        inner.saved.service_key_from = pending.key_from;
         inner.saved.account_id = signed_in.account_id.clone();
         inner.saved.email = signed_in.email.clone();
         inner.saved.machine_token = signed_in.machine_token.clone();
@@ -907,6 +933,7 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
             field.clear();
         }
         saved.epoch = 0;
+        saved.service_key_from = None;
         saved.revoked = false;
         saved.periods.clear();
         saved.periods_until = 0;
@@ -986,7 +1013,9 @@ async fn try_unlock(factory: &Arc<Factory>) {
         stop(format!("Your secrets don't open with this sign-in. Open them with the recovery key, then sign in to {name} again."));
         return;
     }
-    match account.share(Some(params.epoch)).await {
+    let asked = account.share(Some(params.epoch)).await;
+    let change = if matches!(asked, Err(Failure::OtherKey)) { key_change(account).await } else { KeyChange::Same };
+    match asked {
         Ok((_, share)) => {
             let opened = account.local_share().map_err(|error| error.to_string()).and_then(|local| {
                 let shares = Zeroizing::new([local.as_slice(), share.as_slice()].concat());
@@ -1015,7 +1044,16 @@ async fn try_unlock(factory: &Arc<Factory>) {
         }
         // Asking again would only spend the service's one share a minute,
         // which signing in again then needs.
-        Err(Failure::OtherKey) if new_service_key(account).await => stop(changed_key(&name)),
+        Err(Failure::OtherKey) if change == KeyChange::SignIn => stop(changed_key(&name)),
+        // The new key is the service's on its root's word: asked again with it.
+        Err(Failure::OtherKey) if change == KeyChange::Taken => account.lock().next_unlock = Instant::now(),
+        Err(Failure::OtherKey) if change == KeyChange::Unverified => {
+            let mut inner = account.lock();
+            let wait = UNLOCK_RETRIES.get(inner.unlock_tries).copied().unwrap_or(UNLOCK_RETRY_LAST);
+            inner.unlock_tries += 1;
+            inner.next_unlock = Instant::now() + wait;
+            inner.problem = format!("{}, so your secrets stay locked for now. Claktory keeps trying.", unverified_key(&name));
+        }
         Err(Failure::Refused(_, body)) if body.error == "rate_limited" => {
             let wait = Duration::from_secs(body.retry_after.unwrap_or(60).clamp(1, 3600) as u64);
             account.lock().next_unlock = Instant::now() + wait;
@@ -1038,20 +1076,79 @@ async fn try_unlock(factory: &Arc<Factory>) {
     factory.vault_changed();
 }
 
-/// Whether the service now says it has another key than the one pinned at
-/// sign-in (it rotated it): the answer signed by another key was its own.
-async fn new_service_key(account: &State) -> bool {
+/// What an answer signed by another key than the pinned one means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyChange {
+    /// Nothing known: its well-known names the pinned key, or can't be had.
+    Same,
+    /// It changed its key, and isn't anchored (`anchor`): signing in again
+    /// takes the new one.
+    SignIn,
+    /// It changed its key, and its root vouched for the new one, newer than
+    /// the pinned one's statement: it's pinned now.
+    Taken,
+    /// Another key, without the root's word for it (or an older one): the
+    /// pinned key stays.
+    Unverified,
+}
+
+/// Asks the service's well-known what key it has now, and takes it when its
+/// root vouches for it.
+async fn key_change(account: &State) -> KeyChange {
+    let (service, pinned, pinned_from) = {
+        let inner = account.lock();
+        (inner.saved.service.clone(), inner.saved.service_key.clone(), inner.saved.service_key_from)
+    };
+    let Ok(known) = account.well_known(&service).await else { return KeyChange::Same };
+    if known.service_key == pinned {
+        return KeyChange::Same;
+    }
+    if !anchor::anchored(&service) {
+        tracing::warn!("the account service changed its key since this Claktory signed in");
+        return KeyChange::SignIn;
+    }
+    match anchor::vouch(&service, &known) {
+        anchor::Vouch::Vouched(from) if pinned_from.is_none_or(|pinned| from > pinned) => {
+            tracing::warn!(from, "the account service changed its key, and its root vouches for the new one; taking it");
+            let mut inner = account.lock();
+            inner.saved.service_key = known.service_key;
+            inner.saved.service_key_from = Some(from);
+            drop(inner);
+            account.save();
+            KeyChange::Taken
+        }
+        vouched => {
+            tracing::error!(?vouched, "the account service answers with a key its root doesn't vouch for; keeping the pinned one");
+            KeyChange::Unverified
+        }
+    }
+}
+
+/// Notes when the root's statement for the pinned key says it's the
+/// service's from, for a key pinned without one (`anchor`): asked at each
+/// check-in until it's known.
+async fn note_key_from(account: &State) {
     let (service, pinned) = {
         let inner = account.lock();
+        if inner.saved.service_key_from.is_some() {
+            return;
+        }
         (inner.saved.service.clone(), inner.saved.service_key.clone())
     };
-    match account.well_known(&service).await {
-        Ok(key) if key != pinned => {
-            tracing::warn!("the account service changed its key since this Claktory signed in");
-            true
-        }
-        _ => false,
+    let Ok(known) = account.well_known(&service).await else { return };
+    if known.service_key != pinned {
+        return;
     }
+    let (anchor::Vouch::Free(Some(from)) | anchor::Vouch::Vouched(from)) = anchor::vouch(&service, &known) else { return };
+    tracing::info!(from, "the account root vouches for the pinned service key");
+    account.lock().saved.service_key_from = Some(from);
+    account.save();
+}
+
+/// What the person reads, first, when the service answers with a key the
+/// root doesn't vouch for.
+fn unverified_key(name: &str) -> String {
+    format!("Couldn't confirm this is really {name}")
 }
 
 /// What the person reads when the service changed its key.
@@ -1089,7 +1186,9 @@ async fn check_in(factory: &Arc<Factory>) {
     body.periods = analytics::to_send(&account.lock().saved.periods, base, now_s());
     let jitter = Duration::from_secs(u64::from(api::random_32()[0]) * CHECK_IN_JITTER * 2 / 255);
     let next = CHECK_IN_EVERY - Duration::from_secs(CHECK_IN_JITTER) + jitter;
-    match account.signed::<CheckedIn>("/v1/check-in", &body).await {
+    let checked = account.signed::<CheckedIn>("/v1/check-in", &body).await;
+    let change = if matches!(checked, Err(Failure::OtherKey)) { key_change(account).await } else { KeyChange::Same };
+    match checked {
         Ok(checked) => {
             {
                 let mut inner = account.lock();
@@ -1111,6 +1210,7 @@ async fn check_in(factory: &Arc<Factory>) {
             account.save();
             reseal(factory, checked.epoch).await;
             register_endpoints(factory).await;
+            note_key_from(account).await;
         }
         Err(Failure::Refused(_, body)) if body.error == "revoked" => {
             tracing::warn!("this Claktory was removed at the account service");
@@ -1118,10 +1218,23 @@ async fn check_in(factory: &Arc<Factory>) {
             inner.saved.revoked = true;
             inner.next_check_in = Instant::now() + next;
         }
-        Err(Failure::OtherKey) if new_service_key(account).await => {
+        Err(Failure::OtherKey) if change == KeyChange::SignIn => {
             let mut inner = account.lock();
             inner.problem = changed_key(&service_name(&inner.saved.service));
             inner.next_check_in = Instant::now() + next;
+        }
+        // Checked in again at once, with the key its root vouched for.
+        Err(Failure::OtherKey) if change == KeyChange::Taken => account.lock().next_check_in = Instant::now(),
+        Err(Failure::OtherKey) if change == KeyChange::Unverified => {
+            let locked = factory.vault.exists() && !factory.vault.is_open();
+            let mut inner = account.lock();
+            let unverified = unverified_key(&service_name(&inner.saved.service));
+            inner.problem = if locked {
+                format!("{unverified}, so your secrets stay locked for now. Claktory keeps trying.")
+            } else {
+                format!("{unverified}. Claktory keeps trying.")
+            };
+            inner.next_check_in = Instant::now() + CHECK_IN_RETRY;
         }
         Err(Failure::Refused(401, body)) => {
             tracing::warn!(error = body.error, "the account service doesn't know this Claktory's token");

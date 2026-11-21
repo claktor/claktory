@@ -114,7 +114,7 @@ void main() {
     tester,
   ) async {
     final harness = await show(tester, workspace());
-    await tester.tap(labeled('Hide agents under Lead'));
+    await tester.tap(labeled("Hide Lead's reports"));
     await settle(tester);
     expect(harness.last.setAgentCollapsed.agentId, 'lead');
     expect(harness.last.setAgentCollapsed.collapsed, isTrue);
@@ -126,7 +126,7 @@ void main() {
     await settle(tester);
     expect(find.text('Back'), findsNothing);
     expect(find.text('Front'), findsNothing);
-    expect(labeled('Show agents under Lead'), findsOneWidget);
+    expect(labeled("Show Lead's reports"), findsOneWidget);
     // Back works and Front has news, out of sight: Lead says so.
     expect(find.byType(WorkingWave), findsOneWidget, reason: "on Lead's row");
     expect(labeled('Lead has something new'), findsOneWidget);

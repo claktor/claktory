@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
-import 'package:factory_app/controls.dart' show showModal;
-import 'package:factory_app/devices.dart' show FactoryChooser;
+import 'package:factory_app/controls.dart' show Button, showModal;
+import 'package:factory_app/devices.dart' show FactoryChooser, QrCode;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
@@ -209,46 +209,83 @@ void main() {
     expect(harness.last.unpairDevice.deviceId, 'd1');
   });
 
-  testWidgets('adding a device shows its code once, to copy', (tester) async {
+  testWidgets('adding a phone shows its code once, as a QR code first, '
+      'to copy too', (tester) async {
     final harness = await showSettings(tester, workspace());
     await tester.ensureVisible(find.text('Add a device…'));
     await tester.tap(find.text('Add a device…'));
     await pumpFrames(tester);
     expect(find.text('Add a device'), findsOneWidget);
-    await tester.enterText(find.byType(EditableText).last, 'Laptop');
+    // A phone or tablet unless the person says otherwise.
+    expect(find.text('Phone or tablet'), findsOneWidget);
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
     await tester.pump();
     await tester.tap(find.text('Show code'));
     await pumpFrames(tester);
     final request = harness.last.createPairing;
-    expect(request.name, 'Laptop');
+    expect(request.name, 'iPhone');
     expect(
       harness.backend.sent.where((m) => m.hasSetRemoteAccess()),
       isEmpty,
       reason: 'already on',
     );
-    expect(find.text('Scan with your iPhone'), findsOneWidget);
+    expect(find.text('Connect iPhone'), findsOneWidget);
+    expect(
+      find.text('Open Claktory on iPhone and scan this code.'),
+      findsOneWidget,
+    );
+    expect(find.byType(QrCode), findsOneWidget);
+    expect(_primaryButton(tester), isNull, reason: 'Copy code is secondary');
     expect(
       find.text(harness.backend.pairingCode.code),
       findsNothing,
       reason: 'the code is the QR code; Copy code copies it',
     );
-    final copied = <String>[];
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        if (call.method == 'Clipboard.setData') {
-          copied.add((call.arguments as Map)['text'] as String);
-        }
-        return null;
-      },
-    );
+    final copied = _clipboard(tester);
     await tester.tap(find.text('Copy code'));
     await tester.pump();
     expect(copied, [harness.backend.pairingCode.code]);
     // Closing ends the code: it lasts only while it's shown.
     await tester.tap(find.text('Cancel').last);
     await pumpFrames(tester);
-    expect(find.text('Scan with your iPhone'), findsNothing);
+    expect(find.text('Connect iPhone'), findsNothing);
+    expect(harness.last.cancelPairing.deviceId, 'd9');
+  });
+
+  testWidgets("adding a computer, which can't scan, leads with Copy code; the "
+      'QR code shows only when asked for', (tester) async {
+    final harness = await showSettings(tester, workspace());
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Phone or tablet'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Computer').last);
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'Laptop');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await pumpFrames(tester);
+    expect(harness.last.createPairing.name, 'Laptop');
+    expect(find.text('Connect Laptop'), findsOneWidget);
+    expect(
+      find.text(
+        'In Claktory on Laptop, click Add a Claktory and paste this code.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(QrCode), findsNothing);
+    expect(_primaryButton(tester), 'Copy code');
+    final copied = _clipboard(tester);
+    await tester.tap(find.text('Copy code'));
+    await tester.pump();
+    expect(copied, [harness.backend.pairingCode.code]);
+    expect(find.text('Copied'), findsOneWidget);
+    await tester.tap(find.text('Show QR code'));
+    await pumpFrames(tester);
+    expect(find.byType(QrCode), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
     expect(harness.last.cancelPairing.deviceId, 'd9');
   });
 
@@ -387,7 +424,7 @@ void main() {
       reason: 'the device the lost answer made is taken back',
     );
     expect(harness.last.createPairing.name, 'iPhone');
-    expect(find.text('Scan with your iPhone'), findsOneWidget);
+    expect(find.text('Connect iPhone'), findsOneWidget);
   });
 
   testWidgets("a refusal while connected shows as it is", (tester) async {
@@ -455,4 +492,32 @@ void main() {
     expect(harness.backend.refused.value, isNull);
     expect(harness.connections.saved, [target], reason: 'still known');
   });
+}
+
+/// The primary button's label, if one shows.
+String? _primaryButton(WidgetTester tester) => tester
+    .widgetList<Button>(find.byType(Button))
+    .where((button) => button.primary)
+    .map((button) => button.label)
+    .firstOrNull;
+
+/// What's copied from now on.
+List<String> _clipboard(WidgetTester tester) {
+  final copied = <String>[];
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    SystemChannels.platform,
+    (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied.add((call.arguments as Map)['text'] as String);
+      }
+      return null;
+    },
+  );
+  addTearDown(
+    () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      null,
+    ),
+  );
+  return copied;
 }

@@ -6,6 +6,25 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.15
+Released 2026-11-21 20:50 UTC.
+- Changed: A pipe's liaison agent is now limited to the pipe: it can only read and answer it. It can't run commands, reach your other files, or use secrets, the web or your other agents, so a misleading message from the other side can't get further. Liaisons you already have are limited too; to lift it, turn on Can run commands on this computer in the pipe's settings.
+- Changed: The sidebar shows who reports to whom: each agent's reports sit under it. Drag an agent onto another to make it report to that agent, or choose its lead in its settings; as you drag, it says what letting go will do. Agents you'd nested only to arrange them are back at the top level: drag them under their lead again, or ask Rivet.
+- Added: When an agent names another with @ (@Kenji), the conversation shows a tag with that agent's character, name and role. Click or tap it to open its conversation.
+- Added: In a busy conversation, an agent's answer shows a quote of the message it's answering, so you can tell what it replies to. Click or tap the quote to go to your message.
+- Changed: The sign-in code now shows as six boxes, one per digit. Type it, paste it from your email, or tap the code your iPhone offers above the keyboard: it fills all six and signs you in.
+- Changed: Adding a computer as a device now gives you a code to copy and paste in Claktory there, instead of a QR code it can't scan. In Settings → Devices → Add a device, choose Phone or tablet or Computer.
+- Added: When an agent sets up Claktory on a server for you, it connects your Mac to it too, with no code to paste, and your Mac tells you once it's done.
+- Added: An agent can move another computer's Claktory onto the computer it runs on: it shows you the move's digits to check, and goes on only once you say they match.
+- Changed: On a server, a setup script or an agent can add only your first device. After that, allow new devices from one that's already connected, or run factoryd allow in a terminal.
+- Changed: A file you're reading beside a conversation is no longer swapped out when its agent shows you another. An agent can show up to 5 files at once, then asks you to close one.
+- Fixed: A pipe could be misused in a few ways, now closed: allowing an agent a secret covers only the command you saw; a file that changed after you looked at it isn't sent; an agent that hears from one that read a pipe asks you before it uses a secret too; the other side's description of itself is cut to one short line; and files over a pipe's limits wait outside the inbox until you let them in.
+- Fixed: An agent waiting for usage could stay asleep after usage was back. Using a usage reset now wakes it at once, even on Fable, and messaging a waiting agent makes it try again right away.
+- Fixed: You couldn't select or copy the text of an agent's question, so a command it asked you to run had to be typed out. Now you can select its text anywhere it shows, and a command in it has a Copy button.
+- Fixed: The scrollbar in a conversation jumped around and changed size while you scrolled. Now it moves smoothly with you.
+- Fixed: Pasting a garbled code to connect to a Claktory, or opening a garbled link to one, made the form disappear. Now it says it isn't a Claktory code, so you can paste the right one.
+- Fixed: After updating from v0.1.13 or earlier, voice messages could say speech recognition isn't installed. Claktory now adds what's missing the next time it starts.
+
 ## v0.1.14
 Released 2026-11-21 18:44 UTC.
 - Added: Move Claktory to another computer, such as a new Mac or a Linux server, with everything in it: agents, conversations, secrets, sign-ins and project folders. In Settings → General, choose Move to another computer and follow the steps: your agents keep working while it copies, and your devices follow it by themselves. From a terminal, factoryd receive and factoryd move do the same, and factoryd export --final with factoryd import moves it by file. On a computer with no Claktory yet, the install command with --receive (or --import for a move file) installs it and brings the move in, in one line.

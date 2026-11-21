@@ -305,6 +305,10 @@ class PairDeviceForm extends StatefulWidget {
 
 class _PairDeviceFormState extends State<PairDeviceForm> {
   final _name = TextEditingController();
+
+  /// What the device is, as the person says: a phone or tablet scans its
+  /// code, a computer pastes it.
+  var _kind = DeviceKind.DEVICE_KIND_PHONE;
   var _submitting = false;
 
   /// The connection dropped while the code was asked for: waiting for it.
@@ -392,6 +396,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
           return PairingCodeView(
             code: code.code,
             device: _name.text.trim(),
+            way: pairingWayOf(_kind),
             close: widget.close,
           );
         },
@@ -413,10 +418,24 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
           onCancel: widget.close,
           fields: [
             Field(
+              label: 'Device',
+              child: Select<DeviceKind>(
+                title: 'Device',
+                value: _kind,
+                options: const [
+                  SelectOption(DeviceKind.DEVICE_KIND_PHONE, 'Phone or tablet'),
+                  SelectOption(DeviceKind.DEVICE_KIND_DESKTOP, 'Computer'),
+                ],
+                onChanged: (kind) => setState(() => _kind = kind),
+              ),
+            ),
+            Field(
               label: 'Name',
               child: TextField(
                 controller: _name,
-                placeholder: 'iPhone',
+                placeholder: _kind == DeviceKind.DEVICE_KIND_PHONE
+                    ? 'iPhone'
+                    : 'MacBook',
                 kind: InputKind.text,
                 autofocus: true,
                 onSubmitted: (_) {
@@ -510,13 +529,119 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
   }
 }
 
-/// A new device's pairing code: a QR code and the link to copy, shown
-/// only this once, since it holds the device's key.
+/// How a new device takes its code: a phone or tablet scans it with its
+/// camera; a computer can't, so its code is copied and pasted there.
+enum PairingWay {
+  /// A phone or tablet: the QR code first, Copy code too.
+  scan,
+
+  /// A computer: Copy code first; the QR code only when asked for.
+  paste,
+
+  /// Not said (an agent's card that gave no kind): Copy code first, the
+  /// QR code under it for a phone or tablet.
+  either,
+}
+
+/// The way a [kind] of device takes its code.
+PairingWay pairingWayOf(DeviceKind kind) => switch (kind) {
+  DeviceKind.DEVICE_KIND_PHONE ||
+  DeviceKind.DEVICE_KIND_TABLET => PairingWay.scan,
+  DeviceKind.DEVICE_KIND_DESKTOP ||
+  DeviceKind.DEVICE_KIND_LAPTOP => PairingWay.paste,
+  _ => PairingWay.either,
+};
+
+/// What to do with a new device's code, the [way] its device takes it:
+/// what to do on [device], and the QR code where it helps. [code] is null
+/// until it arrives (its room is kept).
+class PairingInstructions extends StatefulWidget {
+  const PairingInstructions({
+    super.key,
+    required this.code,
+    required this.device,
+    required this.way,
+    required this.qrSize,
+  });
+
+  final String? code;
+  final String device;
+  final PairingWay way;
+  final double qrSize;
+
+  @override
+  State<PairingInstructions> createState() => _PairingInstructionsState();
+}
+
+class _PairingInstructionsState extends State<PairingInstructions> {
+  /// A computer's QR code, shown once asked for.
+  var _qrShown = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final body = TypeScale.of(context).body.copyWith(color: palette.textMuted);
+    final device = widget.device;
+    final code = widget.code;
+    final qr = Center(
+      child: code == null
+          ? SizedBox.square(dimension: widget.qrSize)
+          : QrCode(key: ValueKey(code), text: code, size: widget.qrSize),
+    );
+    final paste = Text(
+      'In Claktory on $device, click Add a Claktory and paste this code.',
+      style: body,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: switch (widget.way) {
+        PairingWay.scan => [
+          Text('Open Claktory on $device and scan this code.', style: body),
+          const SizedBox(height: Space.l),
+          qr,
+          const SizedBox(height: Space.l),
+          Text('Or copy the code and paste it on $device.', style: body),
+        ],
+        PairingWay.paste => [
+          paste,
+          if (_qrShown) ...[
+            const SizedBox(height: Space.l),
+            qr,
+          ] else ...[
+            const SizedBox(height: Space.s),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Button(
+                label: 'Show QR code',
+                onPressed: () => setState(() => _qrShown = true),
+              ),
+            ),
+          ],
+        ],
+        PairingWay.either => [
+          paste,
+          const SizedBox(height: Space.l),
+          qr,
+          const SizedBox(height: Space.l),
+          Text(
+            'On a phone or tablet, open Claktory and scan it instead.',
+            style: body,
+          ),
+        ],
+      },
+    );
+  }
+}
+
+/// A new device's pairing code, shown only this once, since it holds the
+/// device's key: what to do with it on the device, the way it takes it
+/// ([PairingInstructions]), and Copy code, first for a computer.
 class PairingCodeView extends StatefulWidget {
   const PairingCodeView({
     super.key,
     required this.code,
     required this.device,
+    this.way = PairingWay.scan,
     required this.close,
   });
 
@@ -524,6 +649,9 @@ class PairingCodeView extends StatefulWidget {
 
   /// The device it's for, e.g. "Laptop".
   final String device;
+
+  /// How the device takes the code.
+  final PairingWay way;
   final VoidCallback close;
 
   @override
@@ -542,6 +670,19 @@ class _PairingCodeViewState extends State<PairingCodeView> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final device = widget.device.isEmpty ? 'the device' : widget.device;
+    // A computer can't scan: copying is what it takes.
+    final copyFirst = widget.way != PairingWay.scan;
+    final copy = Button(
+      label: 'Copy code',
+      primary: copyFirst,
+      onPressed: _copy,
+    );
+    // Closing ends the code: it lasts only while it's shown.
+    final cancel = Button(label: 'Cancel', onPressed: widget.close);
+    final copied = Text(
+      'Copied',
+      style: TypeScale.of(context).caption.copyWith(color: palette.textMuted),
+    );
     return CallbackShortcuts(
       // Escape closes it, as every form; Enter doesn't, since closing ends
       // the code.
@@ -553,22 +694,15 @@ class _PairingCodeViewState extends State<PairingCodeView> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Scan with your iPhone',
+            'Connect $device',
             style: TypeScale.of(context).emphasis.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.s),
-          Text(
-            'Open Claktory on $device and scan this code.',
-            style: TypeScale.of(context).body
-                .copyWith(color: palette.textMuted),
-          ),
-          const SizedBox(height: Space.xl),
-          Center(child: QrCode(text: widget.code, size: 240)),
-          const SizedBox(height: Space.l),
-          Text(
-            'Or copy the code and paste it on $device.',
-            style: TypeScale.of(context).body
-                .copyWith(color: palette.textMuted),
+          PairingInstructions(
+            code: widget.code,
+            device: device,
+            way: widget.way,
+            qrSize: 240,
           ),
           const SizedBox(height: Space.xs),
           Text(
@@ -583,31 +717,22 @@ class _PairingCodeViewState extends State<PairingCodeView> {
               spacing: Space.s,
               runSpacing: Space.s,
               crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Button(label: 'Copy code', onPressed: _copy),
-                Button(label: 'Cancel', onPressed: widget.close),
-                if (_copied)
-                  Text(
-                    'Copied',
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textMuted),
-                  ),
-              ],
+              children: [copy, cancel, if (_copied) copied],
             )
           else
             Row(
               children: [
-                if (_copied)
-                  Text(
-                    'Copied',
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textMuted),
-                  ),
+                if (_copied) copied,
                 const Spacer(),
-                Button(label: 'Copy code', onPressed: _copy),
-                const SizedBox(width: Space.s),
-                // Closing ends the code: it lasts only while it's shown.
-                Button(label: 'Cancel', onPressed: widget.close),
+                if (copyFirst) ...[
+                  cancel,
+                  const SizedBox(width: Space.s),
+                  copy,
+                ] else ...[
+                  copy,
+                  const SizedBox(width: Space.s),
+                  cancel,
+                ],
               ],
             ),
         ],

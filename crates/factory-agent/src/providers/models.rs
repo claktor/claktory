@@ -342,6 +342,35 @@ impl Registry {
         self.candidates(id).await
     }
 
+    /// Forgets that one of the provider's accounts (None: all of them) is at
+    /// its usage limits (either pool) or out of credit, so the next request
+    /// asks the provider itself again: for when usage may be back without a
+    /// sign-in changing, such as a reset claimed on the provider's own site
+    /// or one the provider applied late. True when any account was marked. A
+    /// wrong guess costs one refused request, which marks the account spent
+    /// again with the provider's fresh reset time.
+    pub async fn forget_spent(&self, id: &str, account: Option<&str>) -> Result<bool, Error> {
+        let now = now_ms();
+        let accounts = self.candidates(id).await?;
+        let mut any = false;
+        for stored in accounts {
+            if account.is_some_and(|wanted| wanted != stored.id) {
+                continue;
+            }
+            if stored.exhausted_until <= now && stored.fable_exhausted_until <= now && stored.out_of_credit_since == 0 {
+                continue;
+            }
+            self.set_state(id, &stored.id, false, |until, since| {
+                *until = 0;
+                *since = 0;
+            })
+            .await?;
+            self.set_state(id, &stored.id, true, |until, _| *until = 0).await?;
+            any = true;
+        }
+        Ok(any)
+    }
+
     /// Renames one of the provider's accounts (an empty `label`: back to the
     /// name Factory gives it) and, with `retry`, tries a key out of credit
     /// again from the next request.

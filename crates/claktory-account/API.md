@@ -20,6 +20,19 @@ never change what a field means.
 
 - **The service key**: Ed25519. `GET /.well-known/claktory-account` gives it;
   a Claktory pins it at its first sign-in and checks every answer with it.
+- **The account root's statement** for the service key, beside it at
+  well-known: an offline key of `ACCOUNT_ROOTS` (`protocol.rs`) signs exactly
+  ```
+  "claktory-account-service-key/1\n" "service: " URL "\n" "key: " b64(service key) "\n" "from: " UNIX_SECONDS "\n"
+  ```
+  (no other bytes: no CR, no spaces but those, `from` digits with no sign or
+  leading zero), and the signature is `ROOT_ID ":" base64(ed25519 sig)`
+  (standard base64, as releases' `latest.json.sig`). For claktory.com, once a
+  Claktory release anchors it, a key comes only with one: at sign-in, at or
+  after that release's floor; a key the service changes to, with a `from`
+  later than the pinned key's, which a Claktory then takes by itself; and a
+  pinned key from before a release's floor no longer checks device
+  assertions. Services run by others aren't anchored.
 - **Every answer** (errors too) carries `Claktory-Signature: b64(sig)`, the
   service key's signature over
   ```
@@ -80,7 +93,8 @@ never change what a field means.
 ## Endpoints
 
 ### `GET /.well-known/claktory-account`
-`{"service": "claktory-account", "api": 1, "version": "0.1.0", "service_key": b64}`
+`{"service": "claktory-account", "api": 1, "version": "0.1.0", "service_key": b64, "service_key_statement": {"text": "…", "signature": "ROOT_ID:…"}}`
+(`service_key_statement` is newer, and left out by a service without one.)
 
 ### `POST /v1/sign-in/start`
 ```json
@@ -288,6 +302,11 @@ provider refused today and yesterday, by why. The first refusal of a kind
 each day (the account isn't entitled to send, sending is turned off, the
 token is refused, the sending is throttled…) is also emailed to them, and
 logged.
+
+### `GET /mark.png`
+Claktory's mark, as the sign-in emails show it from `--public-url`: a PNG,
+cached a week, and not counted against the IP's requests a minute, since mail
+providers fetch it through a few image proxies.
 
 ## Error codes
 

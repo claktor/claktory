@@ -26,6 +26,13 @@ fn shell_words(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// An answer's keys, sorted: the shape agents rely on stays as it is.
+fn keys(value: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+}
+
 fn ok(answer: &Answer) -> &Value {
     assert_eq!((answer.exit, &answer.json["ok"]), (Exit::Ok, &Value::Bool(true)), "{answer:?}");
     &answer.json
@@ -80,8 +87,12 @@ async fn devices_are_paired_without_waiting_and_allowed_once_they_ask() {
     let json = ok(&pair).clone();
     assert!(json["code"].as_str().is_some_and(|code| code.starts_with("factory://")), "{json}");
     assert_eq!((json["device_id"].as_str(), json["expires_in"].as_u64()), (Some("matt-s-iphone"), Some(600)), "{json}");
+    // The shape agents read (#245): the same state as devices says.
+    assert_eq!(keys(&json), ["code", "device_id", "expires_in", "ok", "state"]);
+    assert_eq!(json["state"], "code_unused");
     let devices = cli(&dir, addr, "devices --json", "").await;
     assert_eq!(ok(&devices)["devices"][0]["state"], "code_unused");
+    assert_eq!(keys(&devices.json["devices"][0]), ["connected", "expires_in", "id", "last_seen_ms", "name", "state"]);
     // Not yet: the device has to use its code first.
     let early = cli(&dir, addr, r#"allow "matt's iphone" --json"#, "").await;
     assert_eq!((early.exit, early.json["error"].as_str()), (Exit::NeedsHuman, Some("not_waiting")), "{early:?}");
@@ -144,6 +155,9 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     let listed = &ok(&devices)["devices"][0];
     assert_eq!((listed["name"].as_str(), listed["state"].as_str()), (Some("Matt's MacBook"), Some("waiting")), "{listed}");
     assert_eq!(listed["number"].as_str(), Some(shows.as_str()));
+    // The key it asks with, for a setup on the device to compare with its own (#245).
+    assert_eq!(listed["endpoint_id"].as_str(), Some(device.id().to_string().as_str()));
+    assert_eq!(keys(listed), ["connected", "endpoint_id", "expires_in", "id", "last_seen_ms", "name", "number", "state"]);
 
     // Other digits: it may be someone else's device, so nothing is allowed.
     let other = if shows == "0000" { "0001" } else { "0000" };
@@ -152,6 +166,39 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
     let allowed = cli(&dir, addr, &format!(r#"allow "Matt's MacBook" --number {shows} --json"#), "").await;
     assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json["number"].as_str()), (Some(id.as_str()), Some(shows.as_str())));
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+
+    // Fugo's rule (#245): once a device is in, a program lets no other in,
+    // with its digits or without; a person at a terminal still can.
+    let second = ok(&cli(&dir, addr, "pair --no-wait --json", "").await).clone();
+    let second_id = second["device_id"].as_str().expect("an id").to_owned();
+    let code = parse(second["code"].as_str().expect("a code"));
+    let phone = new_device().await;
+    let connection = dial(&phone, &code, &code.addresses).await.expect("let in");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello_as(&mut socket, &code.token, "iPad").await, Body::PairingPending(_)));
+    let shows = number(&code, &phone.id().to_string());
+    for line in [
+        format!("allow {second_id} --number {shows} --json"),
+        format!("allow {second_id} --json"),
+        format!("allow {second_id} --number {shows}"),
+    ] {
+        let refused = cli(&dir, addr, &line, "").await;
+        assert_eq!((refused.exit, refused.json["error"].as_str()), (Exit::Refused, Some("has_devices")), "{line}: {refused:?}");
+        assert_eq!(refused.text, factoryd::cli::HAS_DEVICES);
+    }
+    let waiting = ok(&cli(&dir, addr, "devices --json", "").await).clone();
+    assert!(
+        waiting["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .any(|device| device["id"] == second_id.as_str() && device["state"] == "waiting")
+    );
+    let mut flags = Flags::parse(&shell_words(&format!("allow {second_id} --number {shows}"))).expect("ours");
+    flags.interactive = true;
+    let allowed = run(&Instance { home: home(&dir), addr }, &flags, String::new).await;
+    assert_eq!(ok(&allowed)["allowed"].as_str(), Some(second_id.as_str()));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 }
 
@@ -177,4 +224,53 @@ async fn factoryd_pair_without_a_name_makes_a_code_the_device_names() {
     let devices = factoryd::remote::devices(&home(&dir)).expect("devices");
     let made = devices.iter().find(|device| !device.local).expect("a device");
     assert_eq!((made.name.as_str(), made.unnamed), ("New device", true));
+}
+
+/// Fugo's rule (#245) for `factoryd allow` without --json too: run by a
+/// program (stdin isn't a terminal), it lets in the first device only.
+#[test]
+fn factoryd_allow_from_a_program_lets_in_only_the_first_device() {
+    use factoryd::remote::Device;
+    let dir = temp_dir();
+    let home = home(&dir);
+    let later = jiff::Timestamp::now().as_millisecond() + 600_000;
+    let waiting = |id: &str, key: &str| Device {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        token_sha256: "00".repeat(32),
+        code_expires: Some(later),
+        pending_endpoint_id: key.to_owned(),
+        pending_since: Some(later - 1000),
+        ..Device::default()
+    };
+    let write = |devices: &[Device]| {
+        std::fs::create_dir_all(home.root().join("remote")).expect("remote");
+        std::fs::write(home.root().join("remote/devices.json"), serde_json::to_vec(devices).expect("json")).expect("devices");
+    };
+    let allow = |id: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
+            .args(["allow", id])
+            .env("FACTORY_HOME", home.root())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("factoryd allow")
+    };
+    let local = Device { id: "local".to_owned(), local: true, endpoint_id: "e-local".to_owned(), ..Device::default() };
+
+    // The first: this machine's own app doesn't count.
+    write(&[local.clone(), waiting("first", "e-first")]);
+    let output = allow("first");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let first = factoryd::remote::devices(&home).expect("devices").into_iter().find(|device| device.id == "first").expect("first");
+    assert_eq!(first.endpoint_id, "e-first");
+
+    // The second: refused, and it's still waiting for a person to allow it.
+    let mut devices = factoryd::remote::devices(&home).expect("devices");
+    devices.push(waiting("second", "e-second"));
+    write(&devices);
+    let output = allow("second");
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), factoryd::cli::HAS_DEVICES);
+    let second = factoryd::remote::devices(&home).expect("devices").into_iter().find(|device| device.id == "second").expect("second");
+    assert_eq!((second.endpoint_id.as_str(), second.pending_endpoint_id.as_str()), ("", "e-second"));
 }

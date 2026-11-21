@@ -202,3 +202,254 @@ struct NetworkPathTests {
     #expect(NetworkPath.name(of: .other) == "other")
   }
 }
+
+/// What the device is (#iPad hook 4, Capabilities.swift), in the shape
+/// docs/ipad-workbench.md §3 agreed: from UIKit, never the window.
+@MainActor
+struct CapabilitiesTests {
+  @Test func saysWhatThisDeviceIs() throws {
+    let caps = Capabilities.current()
+    #expect(caps["schema_version"] as? Int == 1)
+    let idiom = try #require(caps["idiom"] as? String)
+    #expect(idiom == Capabilities.idiom(UIDevice.current.userInterfaceIdiom))
+    #expect(["pad", "phone", "mac", "unspecified"].contains(idiom))
+    #expect(caps["ios_app_on_mac"] as? Bool == false)
+    #expect(caps["os_version"] as? String == UIDevice.current.systemVersion)
+    #expect(caps["hardware_keyboard"] is Bool)
+    let pencil = try #require(caps["pencil"] as? [String: Bool])
+    #expect(Set(pencil.keys) == ["hover", "squeeze", "double_tap"])
+    // A phone has no Pencil to offer.
+    if idiom == "phone" { #expect(pencil.values.allSatisfy { !$0 }) }
+    let overlay = try #require(caps["pdf_page_overlay"] as? [String: Any])
+    #expect(overlay["available"] as? Bool == true)
+    #expect(overlay["min_os"] as? String == "16.0")
+    let strokes = try #require(caps["stroke_recognizer"] as? [String: Any])
+    #expect(strokes["min_os"] as? String == "27.0")
+    #expect(strokes["available"] is Bool)
+  }
+
+  /// The same keys and kinds of value as Yuki's fixtures, which the
+  /// Dart side reads (app/test/ipad/fixtures/bridge/).
+  @Test func hasTheFixturesShape() throws {
+    let bridge = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().appendingPathComponent("../../test/ipad/fixtures/bridge")
+    func shape(_ value: Any) -> Any {
+      switch value {
+      case let map as [String: Any]: return map.mapValues(shape)
+      case is Bool: return "bool"
+      case is String: return "string"
+      case is Int: return "number"
+      default: return "\(type(of: value))"
+      }
+    }
+    let ours = shape(Capabilities.current()) as! [String: Any]
+    for name in ["capabilities_phone", "capabilities_pad", "capabilities_pad_ios15"] {
+      let data = try Data(contentsOf: bridge.appendingPathComponent("\(name).json"))
+      let fixture = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+      // JSON's true and 1 are both NSNumber: compare through the fixture's
+      // own kinds, booleans told apart by their Objective-C type.
+      func kinds(_ value: Any) -> Any {
+        switch value {
+        case let map as [String: Any]: return map.mapValues(kinds)
+        case let number as NSNumber:
+          return CFGetTypeID(number) == CFBooleanGetTypeID() ? "bool" : "number"
+        case is String: return "string"
+        default: return "\(type(of: value))"
+        }
+      }
+      #expect(
+        NSDictionary(dictionary: kinds(fixture) as! [String: Any]).isEqual(to: ours), "\(name)")
+    }
+    let keyboard = try Data(contentsOf: bridge.appendingPathComponent("keyboard_changed.json"))
+    let event = try #require(
+      (try JSONSerialization.jsonObject(with: keyboard) as? [String: Any])?["event"]
+        as? [String: Any])
+    #expect(Set(event.keys) == ["hardware_keyboard"])
+  }
+
+  @Test func idiomsHaveTheirNames() {
+    #expect(Capabilities.idiom(.pad) == "pad")
+    #expect(Capabilities.idiom(.phone) == "phone")
+    #expect(Capabilities.idiom(.mac) == "mac")
+    #expect(Capabilities.idiom(.tv) == "unspecified")
+  }
+}
+
+/// The iPhone's connections (the Mac's ConnectionStore.swift): a keychain
+/// it can't read is an error, never an empty store, and isn't written over.
+struct ConnectionStoreTests {
+  final class Locked: SecretStore {
+    var data: Data? = try! ConnectionStore.encode(["current": "factory://?t=x"])
+    var locked = true
+    func read() throws -> Data? {
+      if locked { throw KeychainError(status: errSecInteractionNotAllowed) }
+      return data
+    }
+    func write(_ data: Data) throws { self.data = data }
+    func delete() throws { data = nil }
+  }
+
+  func code(_ run: () throws -> Void) -> String? {
+    do {
+      try run()
+      return nil
+    } catch {
+      return (error as? StoreFailure)?.code ?? "\(error)"
+    }
+  }
+
+  @Test func aLockedKeychainIsAnErrorAndIsntWrittenOver() throws {
+    let keychain = Locked()
+    let store = ConnectionStore(
+      defaults: UserDefaults(suiteName: "claktory-check-\(UUID())")!, keychain: keychain,
+      fallsBack: false, log: { _ in })
+    #expect(code { _ = try store.read() } == "credentials_unavailable")
+    #expect(code { try store.write([:]) } == "credentials_read_failed")
+    #expect(keychain.data != nil)
+    keychain.locked = false
+    #expect(try store.read()["current"] as? String == "factory://?t=x")
+    try store.write(["current": ""])
+    try store.reset()
+    #expect(keychain.data == nil)
+    #expect(try store.read().isEmpty)
+  }
+
+  @Test func theRealKeychainKeepsAnItemAfterFirstUnlock() throws {
+    let item = KeychainItem(
+      service: "Claktory connections check", account: UUID().uuidString, label: nil,
+      accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+    defer { try? item.delete() }
+    #expect(try item.read() == nil)
+    try item.write(Data("one".utf8))
+    try item.write(Data("two".utf8))
+    #expect(try item.read() == Data("two".utf8))
+    try item.delete()
+    #expect(try item.read() == nil)
+  }
+}
+
+/// The iPad workbench's commands in the system's menu (#209, Petra's
+/// app/lib/ipad/commands.dart), against her fixtures in
+/// app/test/ipad/fixtures/commands/.
+@MainActor
+struct CommandMenuTests {
+  static func fixture(_ name: String) throws -> [String: Any] {
+    let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .appendingPathComponent("../../test/ipad/fixtures/commands/\(name).json")
+    let data = try Data(contentsOf: url)
+    return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+  }
+
+  /// A menu on a fake messenger, counting the rebuilds it asks for.
+  static func menu() -> (CommandMenu, FakeMessenger, () -> Int) {
+    let messenger = FakeMessenger()
+    let menu = CommandMenu()
+    var rebuilds = 0
+    menu.rebuild = { rebuilds += 1 }
+    menu.attach(FlutterMethodChannel(name: CommandMenu.channelName, binaryMessenger: messenger))
+    return (menu, messenger, { rebuilds })
+  }
+
+  @Test func takesTheFixturesCommandsAsKeyCommands() async throws {
+    let set = try Self.fixture("set_commands")
+    #expect(set["channel"] as? String == CommandMenu.channelName)
+    let (menu, messenger, rebuilds) = Self.menu()
+    let answer = await messenger.call(CommandMenu.channelName, "setCommands", set["arguments"])
+    #expect(answer as? Bool == set["result"] as? Bool)
+    #expect(rebuilds() == 1)
+
+    let keys = menu.keyCommands(action: #selector(AppDelegate.runWorkbenchCommand(_:)))
+    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…"])
+    #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes"])
+    #expect(keys.map(\.input) == ["s", "\t", "\t", "p"])
+    #expect(keys[0].modifierFlags == [.command, .control])
+    #expect(keys[1].modifierFlags == [.control])
+    #expect(keys[2].modifierFlags == [.control, .shift])
+    #expect(keys[3].modifierFlags == [.command, .alternate])
+    #expect(keys.filter { !$0.wantsPriorityOverSystemBehavior }.isEmpty)
+    #expect(menu.isEnabled("sidebar"))
+    #expect(!menu.isEnabled("nonsense"))
+    #expect(!menu.isEnabled(nil))
+  }
+
+  @Test func rebuildsOnlyWhenWhatItShowsChanges() async throws {
+    let (menu, messenger, rebuilds) = Self.menu()
+    var arguments = try #require(try Self.fixture("set_commands")["arguments"] as? [String: Any])
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+    #expect(rebuilds() == 1)
+
+    // Disabled: asked each time it's shown or pressed, no rebuild.
+    var commands = try #require(arguments["commands"] as? [[String: Any]])
+    commands[1]["enabled"] = false
+    arguments["commands"] = commands
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+    #expect(rebuilds() == 1)
+    #expect(!menu.isEnabled("next-pane"))
+
+    // A new title is a new menu.
+    commands[0]["title"] = "Show Sidebar"
+    arguments["commands"] = commands
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+    #expect(rebuilds() == 2)
+    #expect(menu.commands.first?.title == "Show Sidebar")
+  }
+
+  @Test func runsWhatThePersonChoseAsTheFixtureSays() async throws {
+    let run = try Self.fixture("run")
+    let (menu, messenger, _) = Self.menu()
+    var arguments = try #require(try Self.fixture("set_commands")["arguments"] as? [String: Any])
+    var commands = try #require(arguments["commands"] as? [[String: Any]])
+    commands[3]["enabled"] = false
+    arguments["commands"] = commands
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+
+    menu.run("sidebar")
+    menu.run("panes")  // Disabled: nothing goes.
+    menu.run("nonsense")
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    let calls = (messenger.sent[CommandMenu.channelName] ?? []).map(codec.decodeMethodCall)
+    #expect(calls.map(\.method) == [run["method"] as? String])
+    let sent = NSDictionary(dictionary: calls.first?.arguments as? [String: Any] ?? [:])
+    let same = sent.isEqual(to: run["arguments"] as? [String: Any] ?? [:])
+    #expect(same)
+  }
+
+  @Test func refusesWhatItCantShowAsAsked() async throws {
+    let (menu, messenger, rebuilds) = Self.menu()
+    let good = try #require(try Self.fixture("set_commands")["arguments"] as? [String: Any])
+    _ = await messenger.call(CommandMenu.channelName, "setCommands", good)
+    let command: [String: Any] = [
+      "id": "x", "title": "X", "input": "x", "modifiers": ["command"], "enabled": true,
+    ]
+    func with(_ change: (inout [String: Any]) -> Void) -> [String: Any] {
+      var one = command
+      change(&one)
+      return ["schema_version": 1, "commands": [one]]
+    }
+    let refused: [Any?] = [
+      nil,
+      ["schema_version": 2, "commands": [command]],
+      with { $0["modifiers"] = ["hyper"] },
+      with { $0["input"] = UIKeyCommand.inputEscape },
+      with { $0["title"] = "" },
+      with { $0.removeValue(forKey: "enabled") },
+      ["schema_version": 1, "commands": [command, command]],
+    ]
+    for arguments in refused {
+      let answer = await messenger.call(CommandMenu.channelName, "setCommands", arguments)
+      #expect(answer as? Bool == false)
+    }
+    // What it showed stays.
+    #expect(menu.commands.count == 4)
+    #expect(rebuilds() == 1)
+    // None at all is fine: the menu goes.
+    let none = await messenger.call(
+      CommandMenu.channelName, "setCommands", ["schema_version": 1, "commands": [Any]()])
+    #expect(none as? Bool == true)
+    #expect(menu.commands.isEmpty)
+    #expect(rebuilds() == 2)
+    let unknown = await messenger.call(CommandMenu.channelName, "nonsense")
+    #expect(unknown as? NSObject === FlutterMethodNotImplemented)
+  }
+}

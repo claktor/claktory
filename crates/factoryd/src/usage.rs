@@ -190,7 +190,21 @@ impl Factory {
                         entry.failed = false;
                         let resets = usage.windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
                         entry.next_reset = resets.min().unwrap_or(0);
+                        // The provider says the account has room in every
+                        // window: one still marked spent (a reset claimed on
+                        // the provider's own site, or applied late) is
+                        // forgotten, and waiting agents ask again.
+                        let room = !usage.windows.is_empty() && usage.windows.iter().all(|window| window.used_percent < 100.0);
                         self.set_usage(&key, Some(v1::ProviderUsage { updated: now, error: String::new(), ..usage }));
+                        if room {
+                            match self.models.forget_spent(&id, &account).await {
+                                Ok(true) => self.capacity_changed(),
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(provider = %id, %account, %error, "could not mark the account as having room");
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         entry.failed = true;
@@ -254,6 +268,11 @@ impl Factory {
         }
         if answer.reset {
             self.refresh_models().await;
+            // Agents waiting out the limits ask again now. (Directly: the
+            // refresh wakes them only when the providers listing changed,
+            // and it carries the normal pool's marks alone, so a reset that
+            // freed only the Fable pool looks like no change to it.)
+            self.capacity_changed();
         }
         Ok(answer)
     }

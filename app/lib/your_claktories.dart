@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
-import 'account.dart' show looksLikeEmail;
+import 'account.dart' show CodeBoxes, codeLength, looksLikeEmail;
 import 'backend.dart' show Backend, RequestFailure;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
@@ -303,14 +303,13 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
               style: type.body.copyWith(color: palette.textMuted),
             ),
             const SizedBox(height: Space.l),
-            TextField(
+            CodeBoxes(
               key: const ValueKey('device-code'),
               controller: _code,
               autofocus: true,
-              placeholder: 'Code',
-              kind: InputKind.oneTimeCode,
               scrollPadding: stepFieldScrollPadding(context),
-              onSubmitted: (_) => _code.text.length == 6 ? _verify() : null,
+              onSubmitted: (_) =>
+                  _code.text.length == codeLength ? _verify() : null,
             ),
             _errorLine(context),
             const SizedBox(height: Space.s),

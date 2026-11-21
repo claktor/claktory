@@ -7,10 +7,13 @@ import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import 'identity.dart';
+import 'mentions.dart';
+import 'protocol/factory/v1/factory.pb.dart' show Agent;
 import 'selection.dart' show CopyShape, Unselectable;
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart';
 import 'loopback_forward.dart' show openLink;
+import 'transcript.dart' show AgentTints;
 
 /// Builds one block of rendered text: [span] is all it shows (with its
 /// style), [index] its place among the blocks in reading order (from 0,
@@ -82,10 +85,6 @@ class _MarkdownState extends State<Markdown> {
 
   @override
   Widget build(BuildContext context) {
-    final nodes = md.Document(
-      extensionSet: md.ExtensionSet.gitHubFlavored,
-      encodeHtml: false,
-    ).parse(widget.text);
     final palette = Palette.of(context);
     final textBlock = widget.textBlock;
     final color = widget.color;
@@ -95,6 +94,18 @@ class _MarkdownState extends State<Markdown> {
         color != palette.text &&
         color != palette.textMuted &&
         color != palette.textFaint;
+    // Where agents can be mentioned (an agent's conversation, not a chat
+    // or a viewer's commented text), "@Kenji" is a tag for Kenji.
+    final tints = AgentTints.of(context);
+    final mentions =
+        textBlock == null && tints != null && tints.agents.isNotEmpty
+        ? _Mentions(tints.agents.values, tints.open, onFill ? color : null)
+        : null;
+    final nodes = md.Document(
+      extensionSet: md.ExtensionSet.gitHubFlavored,
+      encodeHtml: false,
+      inlineSyntaxes: [if (mentions != null) MentionSyntax()],
+    ).parse(widget.text);
     _links.start();
     final renderer = _Renderer(
       palette,
@@ -112,6 +123,7 @@ class _MarkdownState extends State<Markdown> {
         );
       },
       widget.shortLinks ? (_shortened..clear()) : null,
+      mentions,
     );
     final blocks = renderer.blocks(nodes);
     _links.finish();
@@ -527,6 +539,17 @@ InlineSpan _linked(InlineSpan span, LinkLook look) {
   );
 }
 
+/// Who "@word" can name, and what a tag for them does.
+class _Mentions {
+  _Mentions(this.agents, this.open, this.onFill);
+
+  final Iterable<Agent> agents;
+  final ValueChanged<String>? open;
+
+  /// The text's color on a fill, for the tag's name ([MentionChip.onFill]).
+  final Color? onFill;
+}
+
 class _Renderer {
   _Renderer(
     this.palette,
@@ -535,6 +558,7 @@ class _Renderer {
     this.textBlocks,
     this.link,
     this.shortened,
+    this.mentions,
   ]);
 
   final Palette palette;
@@ -552,6 +576,9 @@ class _Renderer {
   /// Where a long bare address shows short ([Markdown.shortLinks]), the
   /// addresses shown so; null where they show whole.
   final Set<String>? shortened;
+
+  /// Who an @mention can name; null where none can.
+  final _Mentions? mentions;
 
   TextStyle get _body => type.body.copyWith(color: color);
 
@@ -631,6 +658,7 @@ class _Renderer {
                 textBlocks,
                 link,
                 shortened,
+                mentions,
               ).blocks(node.children ?? const []),
             ),
           ),
@@ -811,6 +839,25 @@ class _Renderer {
               ),
             ),
           );
+        case mentionTag:
+          final word = node.textContent;
+          final mentions = this.mentions;
+          final agent = mentions == null
+              ? null
+              : resolveMention(word, mentions.agents);
+          out.add(
+            agent == null
+                ? TextSpan(text: '@$word')
+                : WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: MentionChip(
+                      agent: agent,
+                      style: style,
+                      onFill: mentions!.onFill,
+                      open: mentions.open,
+                    ),
+                  ),
+          );
         case 'br':
           out.add(const TextSpan(text: '\n'));
         case 'img':
@@ -873,3 +920,134 @@ class _Renderer {
 
 String _trimTrailingNewline(String text) =>
     text.endsWith('\n') ? text.substring(0, text.length - 1) : text;
+
+/// [text] (an agent's Markdown) as it reads, for copying a whole message
+/// where nothing is selected (a phone's touch-and-hold Copy): the same
+/// shape a selection of the rendered text copies ([CopyShape]). Paragraphs
+/// and other blocks are a blank line apart; a list item is a line with its
+/// "• " or "1. ", its other lines and nested lists indented under its text;
+/// a table's cells are tab-separated, a row a line; code is as written;
+/// emphasis and link markers are gone, leaving their words. With [agents],
+/// an @mention of one of them is its name, as its tag copies.
+String markdownToPlain(String text, {Iterable<Agent> agents = const []}) {
+  final nodes = md.Document(
+    extensionSet: md.ExtensionSet.gitHubFlavored,
+    encodeHtml: false,
+    inlineSyntaxes: [if (agents.isNotEmpty) MentionSyntax()],
+  ).parse(text);
+  return _Plain(agents).blocks(nodes);
+}
+
+class _Plain {
+  _Plain(this.agents);
+
+  final Iterable<Agent> agents;
+
+  String blocks(List<md.Node> nodes, [String separator = '\n\n']) => [
+    for (final node in nodes) ?_block(node),
+  ].where((part) => part.isNotEmpty).join(separator);
+
+  String? _block(md.Node node) {
+    if (node is md.Text) return node.text.trim();
+    if (node is! md.Element) return null;
+    return switch (node.tag) {
+      'pre' => _trimTrailingNewline(node.textContent),
+      'ul' || 'ol' => _list(node),
+      'blockquote' => blocks(node.children ?? const []),
+      'hr' => null,
+      'table' => _table(node),
+      _ => inline(node.children ?? const []),
+    };
+  }
+
+  String _list(md.Element list) {
+    final ordered = list.tag == 'ol';
+    var number = int.tryParse(list.attributes['start'] ?? '') ?? 1;
+    final items = <String>[];
+    for (final item in list.children ?? const <md.Node>[]) {
+      if (item is! md.Element || item.tag != 'li') continue;
+      final lead = ordered ? '${number++}. ' : '• ';
+      final lines = _item(item).split('\n');
+      final pad = ' ' * lead.length;
+      items.add(
+        [
+          '$lead${lines.first}',
+          for (final line in lines.skip(1)) line.isEmpty ? '' : '$pad$line',
+        ].join('\n'),
+      );
+    }
+    return items.join('\n');
+  }
+
+  /// A list item's parts, a line apart: its words, then any blocks in it.
+  String _item(md.Element item) {
+    final parts = <String>[];
+    final words = <md.Node>[];
+    void flush() {
+      if (words.isEmpty) return;
+      parts.add(inline(List.of(words)));
+      words.clear();
+    }
+
+    for (final child in item.children ?? const <md.Node>[]) {
+      if (child is md.Element && _Renderer._isBlock(child.tag)) {
+        flush();
+        final block = _block(child);
+        if (block != null && block.isNotEmpty) parts.add(block);
+      } else {
+        words.add(child);
+      }
+    }
+    flush();
+    return parts.where((part) => part.isNotEmpty).join('\n');
+  }
+
+  String _table(md.Element table) {
+    final rows = <List<String>>[];
+    for (final section in table.children ?? const <md.Node>[]) {
+      if (section is! md.Element) continue;
+      for (final row in section.children ?? const <md.Node>[]) {
+        if (row is! md.Element || row.tag != 'tr') continue;
+        final cells = [
+          for (final cell in row.children ?? const <md.Node>[])
+            if (cell is md.Element) inline(cell.children ?? const []),
+        ];
+        // As the table shows it: rows that don't fit its columns are left out.
+        if (rows.isNotEmpty && cells.length != rows.first.length) continue;
+        rows.add(cells);
+      }
+    }
+    return [for (final row in rows) row.join('\t')].join('\n');
+  }
+
+  String inline(List<md.Node> nodes) {
+    final out = StringBuffer();
+    void walk(List<md.Node> nodes) {
+      for (final node in nodes) {
+        if (node is md.Text) {
+          out.write(node.text);
+          continue;
+        }
+        if (node is! md.Element) continue;
+        switch (node.tag) {
+          case 'code':
+            out.write(node.textContent);
+          case 'br':
+            out.write('\n');
+          case 'img':
+            out.write(node.attributes['alt'] ?? '');
+          case 'input':
+            out.write(node.attributes['checked'] != null ? '☑ ' : '☐ ');
+          case mentionTag:
+            final word = node.textContent;
+            out.write(resolveMention(word, agents)?.name ?? '@$word');
+          default:
+            walk(node.children ?? const []);
+        }
+      }
+    }
+
+    walk(nodes);
+    return out.toString();
+  }
+}

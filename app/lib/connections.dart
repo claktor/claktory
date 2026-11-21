@@ -143,23 +143,29 @@ final _socketAddress = RegExp(
 RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
   final code = text.trim();
   final Uri uri;
+  final Map<String, String> query;
+  final Map<String, List<String>> queryAll;
   try {
     uri = Uri.parse(code);
+    // Decoding the query throws on a broken escape (%E0%A4, say), which a
+    // garbled paste has: that's not a code, rather than an error.
+    query = uri.queryParameters;
+    queryAll = uri.queryParametersAll;
   } on FormatException {
     return null;
   }
-  final token = uri.queryParameters['t'] ?? '';
-  final fingerprint = uri.queryParameters['fp'] ?? '';
-  final endpointId = (uri.queryParameters['e'] ?? '').toLowerCase();
+  final token = query['t'] ?? '';
+  final fingerprint = query['fp'] ?? '';
+  final endpointId = (query['e'] ?? '').toLowerCase();
   final relays = [
-    for (final relay in uri.queryParametersAll['r'] ?? const <String>[])
+    for (final relay in queryAll['r'] ?? const <String>[])
       if (Uri.tryParse(relay)?.scheme case 'https' || 'http') relay,
   ];
   final addresses = [
-    for (final address in uri.queryParametersAll['a'] ?? const <String>[])
+    for (final address in queryAll['a'] ?? const <String>[])
       if (_socketAddress.hasMatch(address)) address,
   ];
-  final accountId = fromAccount ? uri.queryParameters['account'] ?? '' : '';
+  final accountId = fromAccount ? query['account'] ?? '' : '';
   if (accountId.isNotEmpty) {
     if (uri.scheme != 'factory' || !_endpointId.hasMatch(endpointId)) {
       return null;
@@ -170,8 +176,8 @@ RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
       port: 0,
       token: '',
       fingerprint: '',
-      name: uri.queryParameters['name'] ?? '',
-      color: uri.queryParameters['color'] ?? '',
+      name: query['name'] ?? '',
+      color: query['color'] ?? '',
       endpointId: endpointId,
       relays: relays,
       accountId: accountId,
@@ -196,8 +202,8 @@ RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
     port: uri.hasPort ? uri.port : 0,
     token: token,
     fingerprint: fingerprint.toLowerCase(),
-    name: uri.queryParameters['name'] ?? '',
-    color: uri.queryParameters['color'] ?? '',
+    name: query['name'] ?? '',
+    color: query['color'] ?? '',
     endpointId: endpointId,
     relays: relays,
     addresses: addresses,

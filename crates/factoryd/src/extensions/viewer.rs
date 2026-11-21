@@ -36,7 +36,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image or a video (MP4 or QuickTime). Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\" or \"video\", inferred when left out. A file already open isn't opened twice. Returns at once.";
+const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image or a video (MP4 or QuickTime). Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\" or \"video\", inferred when left out. A file already open isn't opened twice. At most 5 files can be open at once: past that, show refuses until the person closes one. Returns at once.";
 
 pub(crate) const SCHEMA: &str = "
 -- How each agent's main area is laid out (the Viewer extension): its
@@ -56,6 +56,10 @@ const VIDEO_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const HASHES_KEPT: usize = 64;
 /// Panes in one layout, the conversation included.
 const MAX_LEAVES: usize = 12;
+/// Viewer panes the show tool opens at most, besides the conversation:
+/// past them it refuses until the person closes one. The person's own
+/// layouts can hold more, up to `MAX_LEAVES`.
+const MAX_VIEWERS: usize = 5;
 /// Splits within splits.
 const MAX_DEPTH: usize = 8;
 
@@ -480,12 +484,8 @@ fn split(id: String, axis: v1::ViewAxis, children: Vec<v1::ViewNode>) -> v1::Vie
 }
 
 /// `root` with `pane` added where viewers go: right of the conversation,
-/// below the viewers already there. At the most panes, it takes the place
-/// of the first viewer.
+/// below the viewers already there.
 fn add_pane(root: v1::ViewNode, pane: v1::ViewNode) -> v1::ViewNode {
-    if leaves(&root).len() >= MAX_LEAVES {
-        return replace_first_viewer(root, pane).0;
-    }
     if is_plain(&root) {
         let id = new_id(&root, "split");
         return split(id, v1::ViewAxis::Row, vec![root, pane]);
@@ -530,25 +530,6 @@ fn beside_chat(node: &mut v1::ViewNode, pane: &mut Option<v1::ViewNode>, fresh: 
     true
 }
 
-/// `node` with its first viewer pane replaced by `pane`; whether it was.
-fn replace_first_viewer(mut node: v1::ViewNode, pane: v1::ViewNode) -> (v1::ViewNode, Option<v1::ViewNode>) {
-    match &mut node.node {
-        Some(Node::Leaf(leaf)) if leaf.kind != CHAT => (pane, None),
-        Some(Node::Split(split)) => {
-            let mut pane = Some(pane);
-            for child in &mut split.children {
-                if let Some(new) = pane.take() {
-                    let (replaced, left) = replace_first_viewer(std::mem::take(child), new);
-                    *child = replaced;
-                    pane = left;
-                }
-            }
-            (node, pane)
-        }
-        _ => (node, Some(pane)),
-    }
-}
-
 #[derive(Deserialize)]
 struct ShowArgs {
     path: String,
@@ -561,10 +542,10 @@ struct ShowArgs {
 /// layout) it's in.
 fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, String> {
     let args: ShowArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
-    let folder = {
+    let (folder, person) = {
         let inner = factory.lock();
         let me = super::caller(&inner.config, agent)?;
-        crate::runner::places(&factory.home, &inner.config, me, &[]).folder
+        (crate::runner::places(&factory.home, &inner.config, me, &[]).folder, inner.config.person().to_owned())
     };
     let asked = args.path.trim();
     if asked.is_empty() {
@@ -597,6 +578,14 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     let pane = match open {
         Some(pane) => pane,
         None => {
+            // Full, it refuses rather than take a pane the person may be
+            // reading; a file already open still shows (above).
+            let viewers = leaves(&root).iter().filter(|(_, leaf)| leaf.kind != CHAT).count();
+            if viewers >= MAX_VIEWERS {
+                return Err(format!(
+                    "This conversation already has {MAX_VIEWERS} files open beside it, the most show opens at once. Ask {person} to close one, or show an already-open file to point at it."
+                ));
+            }
             let id = new_id(&root, "pane");
             let title = path.file_name().map_or_else(|| path_text.clone(), |name| name.to_string_lossy().into_owned());
             let leaf = v1::ViewLeaf { kind: kind.to_owned(), path: path_text.clone(), title };
@@ -613,7 +602,6 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
         from_agent_id: agent.to_owned(),
         kind: v1::HighlightKind::Agent.into(),
     }));
-    let person = factory.lock().config.person().to_owned();
     let details = json!({"path": path_text, "kind": kind, "pane": pane, "agent": agent});
     Ok(ToolResult::text(format!("Showing {path_text} to {person}."), details))
 }
@@ -679,14 +667,6 @@ mod tests {
         let mut flipped = split("s".into(), v1::ViewAxis::Row, vec![leaf("x", "image", "x"), leaf("chat", CHAT, "")]);
         flipped = add_pane(flipped, leaf("pane-1", "text", "y"));
         assert_eq!(shape(&flipped), "row(x row(chat y))");
-        // At the most panes, the first viewer makes way.
-        let mut full = leaf("chat", CHAT, "");
-        for number in 0..MAX_LEAVES + 2 {
-            let id = new_id(&full, "pane");
-            full = add_pane(full, leaf(&id, "text", &format!("f{number}")));
-        }
-        assert_eq!(leaves(&full).len(), MAX_LEAVES);
-        validate(&full).expect("valid");
     }
 
     #[test]

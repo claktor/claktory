@@ -20,10 +20,11 @@ Every command prints one JSON line: {\"ok\":true,…} or {\"ok\":false,\"error\"
 Exit 0 done, 1 failed, 2 usage, 3 refused (by the sandbox, or as unsafe), 4 the sandbox isn't running.
 
 Sandboxes
-  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE]
+  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME]
                                            start one: a fresh Claktory on a free port (7500 up), with its
                                            own account service whose emails land in its mail folder; with
-                                           --model (or --script), its agents run on qa-model, a scripted model
+                                           --model (or --script), its agents run on qa-model, a scripted model;
+                                           it shows the machine name qa-NAME (or --machine-name's), never this computer's
   down NAME… | --all [--keep]              end them and delete their folders (--keep keeps the folders)
   list                                     the sandboxes, and whether each is running
   restart NAME [--kill]                    end its factoryd and start it again, environment and all (--kill:
@@ -172,7 +173,7 @@ async fn run(args: &[String]) -> Outcome {
     let Some((command, args)) = args.split_first() else { return Err(Failure::usage(USAGE)) };
     match command.as_str() {
         "up" => {
-            let args = Args::parse(args, &["--port", "--script"], &["--no-account", "--model"])?;
+            let args = Args::parse(args, &["--port", "--script", "--machine-name"], &["--no-account", "--model"])?;
             let port = match args.value("--port") {
                 Some(port) => Some(port.parse().map_err(|_| Failure::usage("--port takes a port number"))?),
                 None => None,
@@ -181,7 +182,14 @@ async fn run(args: &[String]) -> Outcome {
                 Some(script) => Some(Some(std::path::PathBuf::from(script))),
                 None => args.flag("--model").then_some(None),
             };
-            let sandbox = sandbox::up(sandbox::Up { name: args.rest.first().cloned(), port, account: !args.flag("--no-account"), model })?;
+            let up = sandbox::Up {
+                name: args.rest.first().cloned(),
+                port,
+                account: !args.flag("--no-account"),
+                model,
+                machine_name: args.value("--machine-name").map(str::to_owned),
+            };
+            let sandbox = sandbox::up(up)?;
             Ok(sandbox.to_json())
         }
         "down" => {

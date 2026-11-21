@@ -1,8 +1,10 @@
+import 'package:factory_app/controls.dart' show Toggle;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_layout.dart';
 import 'package:factory_app/pipes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/taint_label.dart';
 import 'package:factory_app/update.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
@@ -11,9 +13,19 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 
-Agent _agent(String id, String name, {String project = 'p1'}) => Agent(
+Agent _agent(
+  String id,
+  String name, {
+  String project = 'p1',
+  String role = '',
+  bool limited = false,
+  List<String> read = const [],
+}) => Agent(
   id: id,
   name: name,
+  role: role,
+  quarantined: limited,
+  taintedByPipes: read,
   projectId: project,
   modelAvailable: true,
   status: AgentStatus.AGENT_STATUS_IDLE,
@@ -29,6 +41,7 @@ Pipe _pipe({
   List<String> members = const [],
   String lead = '',
   bool review = true,
+  List<String> limited = const [],
 }) => Pipe(
   id: id,
   name: 'Acme launch',
@@ -57,6 +70,11 @@ Pipe _pipe({
   digits: digits,
   online: online,
   waitingSeqs: [for (final seq in waiting) Int64(seq)],
+  quarantinedIds: limited,
+  canRunCommandsIds: [
+    for (final member in members)
+      if (!limited.contains(member)) member,
+  ],
 );
 
 Workspace _workspace(List<Pipe> pipes, {String selected = ''}) => Workspace(
@@ -304,8 +322,10 @@ void main() {
     await settle(tester);
     expect(find.text('Pipe settings'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Review messages before they go out'));
     await tester.tap(find.text('Review messages before they go out'));
     await tester.pump();
+    await tester.ensureVisible(find.text('Save'));
     await tester.tap(find.text('Save'));
     await settle(tester);
     final update = harness.last.updatePipe;
@@ -441,5 +461,271 @@ void main() {
     expect(pads.single.rect.right, box.right - mapCell);
     expect(pads.single.rect.top, greaterThan(box.top));
     expect(pads.single.rect.left, greaterThan(box.center.dx));
+  });
+
+  group('limited to the pipe', () {
+    Workspace limits({
+      List<String> members = const ['june', 'omar'],
+      List<String> limited = const ['omar'],
+      List<String> omarRead = const ['pipe1'],
+    }) =>
+        _workspace([
+            _pipe(members: members, lead: 'omar', limited: limited),
+          ], selected: 'pipe1')
+          ..agents.clear()
+          ..agents.addAll([
+            _agent('june', 'June'),
+            _agent(
+              'omar',
+              'Omar',
+              role: 'Liaison',
+              limited: limited.contains('omar'),
+              read: omarRead,
+            ),
+          ]);
+
+    testWidgets('approving, each member says whether it can run commands, '
+        'with the warning while it can; a liaison starts limited', (
+      tester,
+    ) async {
+      final snapshot = _workspace([
+        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+      ], selected: 'pipe1');
+      snapshot.agents[1].role = 'Liaison';
+      final harness = await show(tester, snapshot);
+      expect(find.text(liaisonNote), findsOneWidget);
+      for (final name in ['June', 'Omar']) {
+        final line = find.byWidgetPredicate(
+          (widget) => widget is Toggle && widget.label == name,
+        );
+        await tester.ensureVisible(line);
+        await tester.tap(line);
+        await tester.pump();
+      }
+      expect(find.text('Can run commands on this computer'), findsNWidgets(2));
+      final warning = canRunCommandsWarning('June', snapshot.pipes.single);
+      expect(
+        warning,
+        startsWith(
+          'June can run commands on this computer. '
+          "If a message from Ana's Claktory misleads it",
+        ),
+      );
+      expect(find.text(warning), findsOneWidget);
+      expect(
+        find.text(canRunCommandsWarning('Omar', snapshot.pipes.single)),
+        findsNothing,
+        reason: 'a liaison is limited unless the person lets it',
+      );
+
+      // June limited too: no warning left.
+      await tester.ensureVisible(
+        find.text('Can run commands on this computer').first,
+      );
+      await tester.tap(find.text('Can run commands on this computer').first);
+      await tester.pump();
+      expect(find.text(warning), findsNothing);
+      await tester.ensureVisible(find.text('Approve'));
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      final approve = harness.last.approvePipe;
+      expect(approve.memberIds, unorderedEquals(['june', 'omar']));
+      expect(approve.quarantined.agentIds, unorderedEquals(['june', 'omar']));
+    });
+
+    testWidgets('the header says how many can run commands; letting one run '
+        'them asks first and says to clear what it read', (tester) async {
+      final harness = await show(tester, limits());
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      expect(find.text('1 agent can run commands'), findsOneWidget);
+
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      // June can; Omar is limited.
+      expect(
+        find.text(
+          canRunCommandsWarning(
+            'June',
+            harness.backend.workspace.workspace.pipes.single,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final omarsSwitch = find.text('Can run commands on this computer').last;
+      await tester.ensureVisible(omarsSwitch);
+      await tester.tap(omarsSwitch);
+      await settle(tester);
+      expect(
+        find.text('Let Omar run commands on this computer?'),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'It will be able to reach your files, secrets and network. It has '
+          "read messages from Ana's Claktory, so clear its conversation "
+          'first to start it afresh.',
+        ),
+        findsOneWidget,
+      );
+      // Cancel keeps it limited.
+      await tester.tap(find.text('Cancel').last);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      await tester.ensureVisible(omarsSwitch);
+      await tester.tap(omarsSwitch);
+      await settle(tester);
+      await tester.tap(find.text('Let it run commands'));
+      await settle(tester);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      final update = harness.last.updatePipe;
+      // Released: the whole set, without it.
+      expect(update.hasQuarantined(), isTrue);
+      expect(update.quarantined.agentIds, isEmpty);
+      expect(update.hasMembers(), isFalse);
+    });
+
+    testWidgets('limiting one needs no asking; one that never read the pipe '
+        'is let out without the clearing line', (tester) async {
+      final harness = await show(
+        tester,
+        limits(limited: const [], omarRead: const []),
+      );
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      expect(find.text('2 agents can run commands'), findsOneWidget);
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      await tester.tap(find.text('Can run commands on this computer').first);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      expect(harness.last.updatePipe.quarantined.agentIds, ['june']);
+    });
+
+    testWidgets('the pipe lists the agents that read it, to clear on '
+        'purpose', (tester) async {
+      final harness = await show(tester, limits());
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      expect(find.text('Has read this pipe', findRichText: true), findsNothing);
+      expect(
+        find.textContaining('Has read this pipe', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Clear conversation…'));
+      await settle(tester);
+      expect(find.text("Clear Omar's conversation?"), findsOneWidget);
+      await tester.tap(find.text('Clear conversation'));
+      await settle(tester);
+      final clear = harness.last.runCommand;
+      expect((clear.agentId, clear.name), ('omar', 'clear'));
+    });
+
+    testWidgets("a limited agent's mark names its pipes", (tester) async {
+      final snapshot = limits();
+      final harness = Harness(snapshot);
+      final omar = snapshot.agents[1];
+      await harness.show(tester, home: PipeLimitMark(agent: omar));
+      expect(
+        find.text("Limited to the pipe with Ana's Claktory"),
+        findsOneWidget,
+      );
+      expect(pipesLimiting(snapshot, 'june'), isEmpty);
+      // In the agent's header.
+      final shown = Harness(
+        limits()
+          ..selectedPipeId = ''
+          ..selectedAgentId = 'omar',
+      );
+      await shown.show(tester);
+      await settle(tester);
+      expect(
+        find.text("Limited to the pipe with Ana's Claktory"),
+        findsOneWidget,
+      );
+      final second = _pipe(id: 'pipe2', members: ['omar'], limited: ['omar'])
+        ..peer.claktoryName = "Lea's Claktory";
+      expect(
+        pipeLimitText([snapshot.pipes.single, second]),
+        "Limited to the pipes with Ana's Claktory and Lea's Claktory",
+      );
+    });
+  });
+
+  group('taint label', () {
+    final pipes = [_pipe()];
+    PipeTaint read(List<String> via, {String pipe = 'pipe1'}) =>
+        PipeTaint(pipeId: pipe, pipeName: 'Acme launch', viaNames: via);
+
+    test('who read which pipe, and through whom', () {
+      expect(taintLines([read(const [])], agent: 'June', pipes: pipes), [
+        "from June, which reads the pipe with Ana's Claktory",
+      ]);
+      expect(
+        taintLines(
+          [
+            read(const ['Liaison']),
+          ],
+          agent: 'June',
+          pipes: pipes,
+        ),
+        ["from Liaison, which reads the pipe with Ana's Claktory"],
+      );
+      expect(
+        taintLines(
+          [
+            read(const ['Liaison', 'Bruno', 'Lea']),
+          ],
+          agent: 'June',
+          pipes: pipes,
+        ),
+        [
+          "from Lea, which heard from the pipe with Ana's Claktory via "
+              'Liaison → Bruno',
+        ],
+      );
+      // A pipe that's gone, by its name.
+      expect(
+        taintLines(
+          [read(const [], pipe: 'gone')],
+          agent: 'June',
+          pipes: pipes,
+        ),
+        ['from June, which reads the pipe “Acme launch”'],
+      );
+    });
+
+    testWidgets('a line per pipe; nothing when none', (tester) async {
+      final harness = Harness(_workspace([_pipe()]));
+      await harness.show(
+        tester,
+        home: Column(
+          children: [
+            TaintLabel(
+              taint: [
+                read(const ['Liaison']),
+                read(const [], pipe: 'gone'),
+              ],
+              agent: 'June',
+            ),
+            const TaintLabel(taint: [], agent: 'June'),
+          ],
+        ),
+      );
+      expect(
+        find.text("from Liaison, which reads the pipe with Ana's Claktory"),
+        findsOneWidget,
+      );
+      expect(
+        find.text('from June, which reads the pipe “Acme launch”'),
+        findsOneWidget,
+      );
+      expect(find.byType(PortalGlyph), findsNWidgets(2));
+    });
   });
 }

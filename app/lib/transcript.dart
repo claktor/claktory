@@ -16,6 +16,7 @@ import 'avatar.dart';
 import 'chats.dart' show ChatScope, chatTitle;
 import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
+import 'conversation_scrollbar.dart';
 import 'explorer.dart' show openFile;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
@@ -153,6 +154,37 @@ class _TranscriptViewState extends State<TranscriptView>
     with SingleTickerProviderStateMixin {
   final _liveKey = GlobalKey();
   late final _controller = _FollowController(_liveExtent);
+
+  /// Every item's height once laid out, for the scrollbar
+  /// ([ConversationScrollbar]).
+  final _heights = ItemHeights();
+
+  /// An item's id among [_heights]: an entry's seq, a queued message's
+  /// place after them, or the earlier entries' row.
+  Object _idOf(int index) {
+    final transcript = widget.transcript;
+    return index < transcript.length
+        ? transcript[index].seq
+        : ('queued', index - transcript.length);
+  }
+
+  /// The items' ids, top to bottom.
+  List<Object> _order() {
+    final transcript = widget.transcript;
+    return [
+      if (transcript.hasEarlier && widget.loadEarlier != null) 'earlier',
+      for (var i = 0; i < transcript.length + _waiting.length; i++) _idOf(i),
+    ];
+  }
+
+  /// About how many entries come before the first held: seqs count the
+  /// conversation's entries from 0.
+  int _unseen() {
+    final transcript = widget.transcript;
+    if (!transcript.hasEarlier || transcript.length == 0) return 0;
+    return transcript[0].seq;
+  }
+
   late int _split;
 
   /// Moves the view during a glide, a frame at a time.
@@ -571,6 +603,7 @@ class _TranscriptViewState extends State<TranscriptView>
     }
     _glide.dispose();
     _controller.dispose();
+    _heights.dispose();
     super.dispose();
   }
 
@@ -774,6 +807,9 @@ class _TranscriptViewState extends State<TranscriptView>
       _expanded.remove(seq);
     }
   }
+
+  Widget _measured(int index) =>
+      MeasuredItem(id: _idOf(index), heights: _heights, child: _item(index));
 
   Widget _item(int index) {
     final transcript = widget.transcript;
@@ -1051,40 +1087,51 @@ class _TranscriptViewState extends State<TranscriptView>
                 child: _ReplyScope(
                   pointed: _pointed,
                   reply: _reply,
-                  child: CustomScrollView(
+                  child: ConversationScrollbar(
                     controller: _controller,
-                    center: _liveKey,
-                    // On a phone, scrolling the conversation tucks the
-                    // keyboard away, as Messages does.
-                    keyboardDismissBehavior: isPhoneLayout(context)
-                        ? ScrollViewKeyboardDismissBehavior.onDrag
-                        : ScrollViewKeyboardDismissBehavior.manual,
-                    slivers: [
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, index) => index == split
-                              ? _EarlierRow(
-                                  failed: _earlierFailed,
-                                  onRetry: () {
-                                    setState(() => _earlierFailed = null);
-                                    _maybeLoadEarlier();
-                                  },
-                                )
-                              : _item(split - 1 - index),
-                          childCount: split + (hasEarlier ? 1 : 0),
-                        ),
-                      ),
-                      SliverPadding(
-                        key: _liveKey,
-                        padding: const EdgeInsets.only(bottom: Space.xl),
-                        sliver: SliverList(
+                    heights: _heights,
+                    order: _order,
+                    unseen: _unseen,
+                    after: Space.xl,
+                    child: CustomScrollView(
+                      controller: _controller,
+                      center: _liveKey,
+                      // On a phone, scrolling the conversation tucks the
+                      // keyboard away, as Messages does.
+                      keyboardDismissBehavior: isPhoneLayout(context)
+                          ? ScrollViewKeyboardDismissBehavior.onDrag
+                          : ScrollViewKeyboardDismissBehavior.manual,
+                      slivers: [
+                        SliverList(
                           delegate: SliverChildBuilderDelegate(
-                            (context, index) => _item(split + index),
-                            childCount: length - split + _waiting.length,
+                            (context, index) => index == split
+                                ? MeasuredItem(
+                                    id: 'earlier',
+                                    heights: _heights,
+                                    child: _EarlierRow(
+                                      failed: _earlierFailed,
+                                      onRetry: () {
+                                        setState(() => _earlierFailed = null);
+                                        _maybeLoadEarlier();
+                                      },
+                                    ),
+                                  )
+                                : _measured(split - 1 - index),
+                            childCount: split + (hasEarlier ? 1 : 0),
                           ),
                         ),
-                      ),
-                    ],
+                        SliverPadding(
+                          key: _liveKey,
+                          padding: const EdgeInsets.only(bottom: Space.xl),
+                          sliver: SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => _measured(split + index),
+                              childCount: length - split + _waiting.length,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1599,7 +1646,11 @@ class _EntryViewState extends State<EntryView> {
       Entry_Kind.assistant => (
         entry.assistant.text.isEmpty
             ? const SizedBox.shrink()
-            : _OwnReply(entry.assistant.text),
+            : _OwnReply(
+                entry.assistant.text,
+                answers: repliedTo(entry),
+                seq: seq,
+              ),
         Space.l,
       ),
       Entry_Kind.thinking => (
@@ -2442,20 +2493,248 @@ class _Repliable extends StatelessWidget {
 /// over it: it's whose conversation this is. Others' messages, filled with
 /// their color under their name, stand apart from it at a glance.
 class _OwnReply extends StatelessWidget {
-  const _OwnReply(this.text);
+  const _OwnReply(this.text, {this.answers, this.seq = 0});
 
   final String text;
+
+  /// The seq of the message this reply answers ([repliedTo]), if any, for
+  /// its quote over the bubble.
+  final int? answers;
+
+  /// This reply's own seq.
+  final int seq;
 
   @override
   Widget build(BuildContext context) {
     final own = AgentTints.of(context)?.own ?? Palette.of(context).textFaint;
-    return Bubble(
+    final bubble = Bubble(
       color: own.withValues(alpha: 0.14),
       edge: own.withValues(alpha: 0.5),
       outgoing: false,
       wide: true,
       child: Markdown(text),
     );
+    final answers = this.answers;
+    if (answers == null) return bubble;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ReplyQuote(answers: answers, seq: seq),
+        bubble,
+      ],
+    );
+  }
+}
+
+/// The seq of the person's message [entry] answers (`Entry.replied_to`: the
+/// first text of a run's reply carries it), or null. Seq 0 is a message
+/// too, the conversation's first, so it's whether it's set, not whether
+/// it's 0.
+int? repliedTo(Entry entry) =>
+    entry.hasRepliedTo() ? entry.repliedTo.toInt() : null;
+
+/// Over an agent's reply, the message it answers, as chat apps quote what's
+/// replied to: a bar in its sender's color, who sent it ("You") and its
+/// first line, faint. A click or tap goes to that message, loading back to
+/// it if it's older than what's held. Where nothing came between the two
+/// (the reply right under its question) it's left out: there it's plain
+/// which message it answers. It follows the transcript, so a message paged
+/// in later, or one that comes between, shows it.
+class ReplyQuote extends StatefulWidget {
+  const ReplyQuote({super.key, required this.answers, required this.seq});
+
+  /// The seq of the message answered.
+  final int answers;
+
+  /// The reply's own seq.
+  final int seq;
+
+  @override
+  State<ReplyQuote> createState() => _ReplyQuoteState();
+}
+
+/// What a [ReplyQuote] shows: the message answered when it's held, and
+/// whether anything came between it and the reply.
+typedef _Quoted = ({Entry? message, bool apart});
+
+class _ReplyQuoteState extends State<ReplyQuote> {
+  TranscriptStore? _store;
+  _Quoted _quoted = (message: null, apart: true);
+  var _hovered = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final store = ToolViewScope.of(context)?.transcript;
+    if (store != _store) {
+      _store?.removeListener(_changed);
+      _store = store?..addListener(_changed);
+      _quoted = _find();
+    }
+  }
+
+  @override
+  void didUpdateWidget(ReplyQuote old) {
+    super.didUpdateWidget(old);
+    if (old.answers != widget.answers || old.seq != widget.seq) {
+      _quoted = _find();
+    }
+  }
+
+  @override
+  void dispose() {
+    _store?.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final quoted = _find();
+    if (quoted != _quoted) setState(() => _quoted = quoted);
+  }
+
+  /// Where an entry is in [store], by its seq; null when it isn't held.
+  static int? _indexOf(TranscriptStore store, int seq) {
+    var low = 0;
+    var high = store.length - 1;
+    while (low <= high) {
+      final middle = (low + high) >> 1;
+      final at = store[middle].seq;
+      if (at == seq) return middle;
+      if (at < seq) {
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return null;
+  }
+
+  _Quoted _find() {
+    final store = _store;
+    if (store == null) return (message: null, apart: true);
+    final from = _indexOf(store, widget.answers);
+    if (from == null) return (message: null, apart: true);
+    final to = _indexOf(store, widget.seq) ?? store.length;
+    var apart = false;
+    for (var i = from + 1; i < to && !apart; i++) {
+      final entry = store[i].entry;
+      apart = switch (entry.whichKind()) {
+        Entry_Kind.user => true,
+        Entry_Kind.assistant => entry.assistant.text.isNotEmpty,
+        Entry_Kind.event =>
+          entry.event.source == EventSource.EVENT_SOURCE_AGENT,
+        _ => false,
+      };
+    }
+    return (message: store[from].entry, apart: apart);
+  }
+
+  void _go() {
+    final agentId = ToolViewScope.of(context)?.agentId ?? '';
+    if (agentId.isEmpty) return;
+    AppScope.of(context).reveal.reachSeq(agentId, widget.answers);
+  }
+
+  void _hover(bool hovered) {
+    if (hovered != _hovered) setState(() => _hovered = hovered);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (:message, :apart) = _quoted;
+    if (!apart) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    final tints = AgentTints.of(context);
+    final type = TypeScale.of(context);
+    // Who sent it: the person (in the agent's color, as their bubbles are),
+    // or another agent; one not held yet is "Earlier message".
+    final (String? name, Color color) = switch (message?.whichKind()) {
+      Entry_Kind.user => ('You', tints?.own ?? palette.textMuted),
+      Entry_Kind.event => (
+        message!.event.from,
+        tints?.byId[message.event.fromId] ?? palette.textMuted,
+      ),
+      _ => (null, palette.textFaint),
+    };
+    final words = message == null ? '' : _excerpt(message);
+    final style = type.caption;
+    final line = Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: name ?? 'Earlier message',
+            style: TextStyle(
+              color: name == null ? palette.textMuted : color,
+              fontWeight: FontWeight.w600,
+              decoration: _hovered ? TextDecoration.underline : null,
+              decorationColor: name == null ? palette.textMuted : color,
+            ),
+          ),
+          if (words.isNotEmpty)
+            TextSpan(
+              text: '  $words',
+              style: TextStyle(color: palette.textMuted),
+            ),
+        ],
+      ),
+      style: style,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+    final quote = Container(
+      padding: const EdgeInsets.only(left: Space.s, top: 1, bottom: 1),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: color, width: 2)),
+      ),
+      child: line,
+    );
+    return Padding(
+      // Over the bubble's text, a little apart from it.
+      padding: const EdgeInsets.only(left: Space.m, bottom: Space.xs),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FractionallySizedBox(
+          widthFactor: isPhoneLayout(context) ? 0.94 : 0.9,
+          alignment: Alignment.centerLeft,
+          child: Unselectable(
+            child: Semantics(
+              button: true,
+              label:
+                  'In reply to ${name ?? 'an earlier message'}'
+                  '${words.isEmpty ? '' : ': $words'}. Go to that message',
+              excludeSemantics: true,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _go,
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  onEnter: (_) => _hover(true),
+                  onExit: (_) => _hover(false),
+                  child: Align(alignment: Alignment.centerLeft, child: quote),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A message's words on one line: its text, or for one without any, its
+  /// files' names or that it's a voice message.
+  static String _excerpt(Entry message) {
+    final text = switch (message.whichKind()) {
+      Entry_Kind.user => message.user.text,
+      Entry_Kind.event => splitAlsoSentTo(message.event.text).$1,
+      _ => '',
+    };
+    final words = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (words.isNotEmpty || !message.hasUser()) return words;
+    final user = message.user;
+    if (user.attachments.isNotEmpty) {
+      return [for (final file in user.attachments) file.name].join(', ');
+    }
+    return user.hasVoice() ? 'Voice message' : '';
   }
 }
 

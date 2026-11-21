@@ -43,6 +43,8 @@ class MainFlutterWindow: NSWindow {
     Setup.register(with: flutterViewController.engine.binaryMessenger)
     // Links the app opens, such as claktory://add?code=… (AppDelegate.swift).
     Links.register(with: flutterViewController.engine.binaryMessenger)
+    // A Claktory to connect to, from an agent setting it up (SetupLink.swift).
+    SetupLink.register(with: flutterViewController.engine.binaryMessenger)
     // Voice messages' microphone (Recorder.swift).
     Recorder.register(with: flutterViewController.engine.binaryMessenger)
     // And playing them back (AudioPlayer.swift).
@@ -84,10 +86,32 @@ class MainFlutterWindow: NSWindow {
         UserDefaults.standard.set(call.arguments as? [String: String] ?? [:], forKey: Self.draftsKey)
         result(nil)
       case "connections":
-        result(Self.connections.read())
+        do {
+          result(try Self.connections.read())
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_unavailable", message: "\(error)", details: nil))
+        }
       case "setConnections":
-        Self.connections.write(call.arguments as? [String: Any] ?? [:])
-        result(nil)
+        do {
+          try Self.connections.write(call.arguments as? [String: Any] ?? [:])
+          result(nil)
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_write_failed", message: "\(error)", details: nil))
+        }
+      case "resetConnections":
+        // Only when the person chooses Start over.
+        do {
+          try Self.connections.reset()
+          result(nil)
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_reset_failed", message: "\(error)", details: nil))
+        }
       case "qrCode":
         result(Self.qrCode(call.arguments as? String ?? ""))
       case "webAuth":

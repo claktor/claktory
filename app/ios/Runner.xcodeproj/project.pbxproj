@@ -13,8 +13,11 @@
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C636F3 /* Scanner.swift */; };
+		7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63712 /* Capabilities.swift */; };
+		7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8822EC3CC0400C63732 /* CommandMenu.swift */; };
 		7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */; };
 		7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C636FA /* AudioPlayer.swift */; };
+		7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63722 /* ConnectionStore.swift */; };
 		7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63702 /* NetworkPath.swift */; };
 		7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8742EC3CC0400C636F8 /* Recorder.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
@@ -57,8 +60,11 @@
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C636F3 /* Scanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scanner.swift; sourceTree = "<group>"; };
+		7884E86A2EC3CC0400C63712 /* Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capabilities.swift; sourceTree = "<group>"; };
+		7884E8822EC3CC0400C63732 /* CommandMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandMenu.swift; sourceTree = "<group>"; };
 		7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VideoPlayers.swift; path = ../../macos/Runner/VideoPlayers.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C636FA /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AudioPlayer.swift; path = ../../macos/Runner/AudioPlayer.swift; sourceTree = "<group>"; };
+		7884E8762EC3CC0400C63722 /* ConnectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ConnectionStore.swift; path = ../../macos/Runner/ConnectionStore.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C63702 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NetworkPath.swift; path = ../../macos/Runner/NetworkPath.swift; sourceTree = "<group>"; };
 		7884E8742EC3CC0400C636F8 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Recorder.swift; path = ../../macos/Runner/Recorder.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
@@ -137,8 +143,11 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				7884E86A2EC3CC0400C636F3 /* Scanner.swift */,
+				7884E86A2EC3CC0400C63712 /* Capabilities.swift */,
+				7884E8822EC3CC0400C63732 /* CommandMenu.swift */,
 				7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */,
 				7884E8762EC3CC0400C636FA /* AudioPlayer.swift */,
+				7884E8762EC3CC0400C63722 /* ConnectionStore.swift */,
 				7884E8762EC3CC0400C63702 /* NetworkPath.swift */,
 				7884E8742EC3CC0400C636F8 /* Recorder.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -304,8 +313,11 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */,
+				7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */,
+				7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */,
 				7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */,
 				7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */,
+				7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */,
 				7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */,
 				7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */,
 			);

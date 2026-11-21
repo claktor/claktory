@@ -3,7 +3,7 @@
 // to connect, a connection's details, a new device's code. Nothing runs
 // off the screen or overflows.
 import 'package:factory_app/connectors.dart';
-import 'package:factory_app/devices.dart' show PairingCodeView;
+import 'package:factory_app/devices.dart' show PairingCodeView, PairingWay;
 import 'package:factory_app/login.dart' show LoginPanel;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -254,6 +254,12 @@ void main() {
     "a new device's code": () => PairingCodeView(
       code: 'factory://100.64.0.2:7443?t=abc&fp=def&name=mac%20mini',
       device: "Matthew's iPhone 16 Pro Max",
+      close: () {},
+    ),
+    "a new computer's code": () => PairingCodeView(
+      code: 'factory://100.64.0.2:7443?t=abc&fp=def&name=mac%20mini',
+      device: "Matthew's MacBook Pro 16-inch",
+      way: PairingWay.paste,
       close: () {},
     ),
     'a sign-in asking for a key': () => LoginPanel(

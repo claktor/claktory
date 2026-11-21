@@ -68,7 +68,7 @@ CREATE INDEX asks_by_agent ON asks (agent, state);
 
 const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event. Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.";
 
-const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. Ask one real question at a time, not a batch of small ones; at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation). wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. You're told their answer, or that they dismissed it, in an event; meanwhile carry on with whatever doesn't depend on it.";
+const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. Ask one real question at a time, not a batch of small ones; at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. You're told their answer, or that they dismissed it, in an event; meanwhile carry on with whatever doesn't depend on it.";
 
 pub(crate) struct Ask;
 
@@ -120,6 +120,9 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
         super::caller(&inner.config, agent)?;
         inner.config.person().to_owned()
     };
+    // Read a pipe: the card says so, and where from.
+    let routes = crate::pipes::agents::routes(factory, agent);
+    let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
     let id = {
         let db = factory.store.db();
         let waiting: i64 = db
@@ -131,8 +134,8 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
             ));
         }
         db.execute(
-            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '')",
-            params![agent, title, body, args.wants_text, now_ms()],
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', ?6)",
+            params![agent, title, body, args.wants_text, now_ms(), taint.as_ref().map(serde_json::Value::to_string)],
         )
         .map_err(|error| format!("Couldn't record the question: {error}"))?;
         db.last_insert_rowid().to_string()
@@ -140,7 +143,11 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
     let said = format!(
         "Asked {person}: they see it as a card to answer or dismiss. You'll be told which in an event; meanwhile carry on with whatever doesn't depend on it."
     );
-    Ok(ToolResult::text(said, json!({"ask": id, "title": title, "body": body, "wants_text": args.wants_text})))
+    let mut details = json!({"ask": id, "title": title, "body": body, "wants_text": args.wants_text});
+    if let Some(taint) = taint {
+        details["taint"] = taint;
+    }
+    Ok(ToolResult::text(said, details))
 }
 
 /// The entry an ask_person result shows (called directly, or through
@@ -160,6 +167,7 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
         state: State::Pending.into(),
         answer: String::new(),
         decided_ms: 0,
+        taint: details.get("taint").map(crate::pipes::agents::routes_from_json).unwrap_or_default(),
     })
 }
 
@@ -172,9 +180,11 @@ struct Row {
     state: String,
     answer: String,
     decided: Option<i64>,
+    /// JSON (`pipes::agents::routes_json`); null for none.
+    taint: Option<String>,
 }
 
-const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided";
+const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -185,6 +195,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         state: row.get(4)?,
         answer: row.get(5)?,
         decided: row.get(6)?,
+        taint: row.get(7)?,
     })
 }
 
@@ -203,6 +214,12 @@ impl Row {
             state: state.into(),
             answer: self.answer.clone(),
             decided_ms: self.decided.unwrap_or_default(),
+            taint: self
+                .taint
+                .as_deref()
+                .and_then(|taint| serde_json::from_str(taint).ok())
+                .map(|taint| crate::pipes::agents::routes_from_json(&taint))
+                .unwrap_or_default(),
         }
     }
 }
@@ -341,6 +358,7 @@ mod tests {
             state: state.to_owned(),
             answer: answer.to_owned(),
             decided: Some(1),
+            taint: None,
         }
     }
 
@@ -371,5 +389,11 @@ mod tests {
         assert!(asked(TOOL, true, &details).is_none());
         assert!(asked("bash", false, &details).is_none());
         assert!(asked("extension_call", false, &json!({})).is_none());
+    }
+
+    #[test]
+    fn a_command_to_run_goes_in_a_fenced_block_for_its_copy_button() {
+        // The card gives fenced code blocks a Copy button, not inline code (#238).
+        assert!(ABOUT.contains("a command they should run goes in a fenced code block"), "{ABOUT}");
     }
 }

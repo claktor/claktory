@@ -15,6 +15,7 @@
 //! included) can make, approve or change one: only the person, from the app.
 
 pub(crate) mod agents;
+pub(crate) mod quarantine;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,17 @@ use serde::{Deserialize, Serialize};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::pipe_link::{self, Incoming, LinkStatus, Outgoing, Peer, PipeError, Side, Via};
 use crate::transcript::now_ms;
+
+/// Where an agent's taint came from: the agents, by id, that what it read
+/// came through (JSON list), first the one that read the pipe; null or empty
+/// when it read the pipe itself. And the same on the asks and proposals of
+/// an agent that had read a pipe (`agents::routes_json`), for the person's
+/// card; null for none.
+pub(crate) const TAINT_VIA: &str = "
+ALTER TABLE pipe_taint ADD COLUMN via TEXT;
+ALTER TABLE asks ADD COLUMN taint TEXT;
+ALTER TABLE proposals ADD COLUMN taint TEXT;
+";
 
 pub(crate) const SCHEMA: &str = "
 -- Pipes to other Claktories (crate::pipes): each as JSON, by its id here.
@@ -125,6 +137,30 @@ pub(crate) struct PeerRecord {
     pub endpoint_id: String,
 }
 
+/// How long the other side's words about itself may be, in characters.
+const NAME_CHARS: usize = 80;
+const EMAIL_CHARS: usize = 120;
+const PURPOSE_CHARS: usize = 300;
+
+/// Text the other side wrote about itself, as kept: one line, no control
+/// characters, at most `cap` characters (cut with "…").
+pub(crate) fn clean(text: &str, cap: usize) -> String {
+    let mut line = String::new();
+    for character in text.chars() {
+        let character = if character.is_control() || character.is_whitespace() { ' ' } else { character };
+        if character == ' ' && (line.is_empty() || line.ends_with(' ')) {
+            continue;
+        }
+        line.push(character);
+    }
+    let line = line.trim_end();
+    if line.chars().count() <= cap {
+        return line.to_owned();
+    }
+    let cut: String = line.chars().take(cap.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
 impl PeerRecord {
     fn from_side(side: &Side, endpoint_id: &str) -> PeerRecord {
         PeerRecord {
@@ -135,6 +171,21 @@ impl PeerRecord {
             pipe_name: side.pipe_name.clone(),
             purpose: side.purpose.clone(),
             endpoint_id: endpoint_id.to_owned(),
+        }
+        .cleaned()
+    }
+
+    /// The same, its words one line each and capped (also what was kept
+    /// before they were).
+    fn cleaned(self) -> PeerRecord {
+        PeerRecord {
+            claktory: clean(&self.claktory, NAME_CHARS),
+            owner_name: clean(&self.owner_name, NAME_CHARS),
+            owner_email: clean(&self.owner_email, EMAIL_CHARS),
+            project: clean(&self.project, NAME_CHARS),
+            pipe_name: clean(&self.pipe_name, NAME_CHARS),
+            purpose: clean(&self.purpose, PURPOSE_CHARS),
+            endpoint_id: self.endpoint_id,
         }
     }
 
@@ -194,6 +245,11 @@ pub(crate) struct Record {
     /// Hashes of the latest agents' messages, to tell repeats.
     pub recent: Vec<u64>,
     pub next_seq: u64,
+    /// Members quarantined for it (`quarantine`): the person's choice alone.
+    pub quarantined: Vec<String>,
+    /// Quarantine came to this pipe: made since, or its liaisons were
+    /// quarantined once at start (a person's release after stays).
+    pub quarantine_set: bool,
 }
 
 impl Record {
@@ -215,12 +271,20 @@ impl Record {
     }
 }
 
+/// A tainted agent's pipes, each with the route it came by: pipe id → the
+/// agents, by id, what it read came through (first the one that read the
+/// pipe; empty when it read it itself). Its JSON, `{"<pipe id>": ["<agent
+/// id>", …]}`, is how it's kept with what carries it (a monitor), and stays
+/// as it is; pipe_taint.via is one route of it.
+pub(crate) type Taint = BTreeMap<String, Vec<String>>;
+
 #[derive(Default)]
 struct Data {
     pipes: BTreeMap<String, Record>,
     selected: Option<String>,
-    /// Agents that have read pipes in their current context: agent → pipes.
-    tainted: BTreeMap<String, BTreeSet<String>>,
+    /// Agents that have read pipes in their current context: agent → pipe
+    /// → the agents it came through, by id (empty when it read it itself).
+    tainted: BTreeMap<String, Taint>,
     /// Pipes whose lead has a wake coming.
     waking: BTreeSet<String>,
     loaded: bool,
@@ -255,7 +319,17 @@ impl Pipes {
 
     /// The pipes `agent` has read in its current context, by id.
     pub(crate) fn tainted(&self, agent: &str) -> Vec<String> {
-        self.data().tainted.get(agent).map(|pipes| pipes.iter().cloned().collect()).unwrap_or_default()
+        self.data().tainted.get(agent).map(|pipes| pipes.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Whether `agent` is quarantined for a pipe (`quarantine`).
+    pub(crate) fn quarantined(&self, agent: &str) -> bool {
+        self.data().pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
+    }
+
+    /// The same, with the agents each came through.
+    pub(crate) fn taint_of(&self, agent: &str) -> Taint {
+        self.data().tainted.get(agent).cloned().unwrap_or_default()
     }
 
     pub(crate) fn selected(&self) -> Option<String> {
@@ -300,9 +374,10 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     for id in expired {
         close_with(factory, &id, "The invite expired before anyone used it.");
     }
+    quarantine::upgrade(factory);
 }
 
-type Loaded = (BTreeMap<String, Record>, BTreeMap<String, BTreeSet<String>>);
+type Loaded = (BTreeMap<String, Record>, BTreeMap<String, Taint>);
 
 fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
     let db = factory.store.db();
@@ -311,17 +386,20 @@ fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
         let (id, data) = row?;
         match serde_json::from_str::<Record>(&data) {
-            Ok(record) => {
+            Ok(mut record) => {
+                record.peer = record.peer.map(PeerRecord::cleaned);
                 pipes.insert(id, record);
             }
             Err(error) => tracing::error!(pipe = %id, %error, "could not read a pipe"),
         }
     }
-    let mut tainted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut statement = db.prepare("SELECT agent, pipe FROM pipe_taint")?;
-    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
-        let (agent, pipe) = row?;
-        tainted.entry(agent).or_default().insert(pipe);
+    let mut tainted: BTreeMap<String, Taint> = BTreeMap::new();
+    let mut statement = db.prepare("SELECT agent, pipe, via FROM pipe_taint")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?;
+    for row in rows {
+        let (agent, pipe, via) = row?;
+        let via: Vec<String> = via.and_then(|via| serde_json::from_str(&via).ok()).unwrap_or_default();
+        tainted.entry(agent).or_default().insert(pipe, via);
     }
     Ok((pipes, tainted))
 }
@@ -493,6 +571,11 @@ pub(crate) struct FileRecord {
     pub name: String,
     pub size: u64,
     pub path: PathBuf,
+    /// An outgoing file's SHA-256 when it was scanned (pipe_send): what
+    /// goes must be exactly that. Empty for incoming files, and for
+    /// messages kept before it was recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
 }
 
 impl Message {
@@ -709,7 +792,6 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 peer: record.peer.as_ref().map(PeerRecord::to_proto),
                 purpose: record.purpose.clone(),
                 prompt: record.prompt.clone(),
-                member_ids: members,
                 lead_id: lead,
                 limits: Some(v1::PipeLimits {
                     messages_per_hour: record.limits.per_hour,
@@ -726,6 +808,9 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 queued: link.queued,
                 unseen: record.unseen,
                 waiting_seqs: waiting(factory, &record.id),
+                quarantined_ids: record.quarantined.iter().filter(|id| members.contains(id)).cloned().collect(),
+                can_run_commands_ids: members.iter().filter(|id| !record.quarantined.contains(id)).cloned().collect(),
+                member_ids: members,
             }
         })
         .collect();
@@ -826,14 +911,16 @@ fn over_incoming(factory: &Factory, record: &Record) -> Option<String> {
 /// How many agents' messages in a row pause the pipe.
 const LOOP_AFTER: u32 = 10;
 
-/// Counts a message towards the loop breaker: a person's resets it; ten of
-/// agents' in a row, or the same text three times lately, pause the pipe.
+/// Counts a message towards the loop breaker: this side's person's resets
+/// it (the other side's can't: it could claim any message is its
+/// person's); ten others in a row, or the same text three times lately,
+/// pause the pipe.
 pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author, text: &str) {
     use std::hash::{Hash, Hasher};
     let tripped = {
         let mut data = factory.pipes.data();
         let Some(record) = data.pipes.get_mut(pipe) else { return };
-        if matches!(author, Author::Me | Author::TheirPerson) {
+        if author == Author::Me {
             record.quiet = 0;
             record.recent.clear();
             false
@@ -909,6 +996,7 @@ fn new_record(factory: &Factory, project: &str, name: &str, purpose: &str, state
         purpose: purpose.trim().to_owned(),
         review: true,
         next_seq: 1,
+        quarantine_set: true,
         ..Record::default()
     })
 }
@@ -946,7 +1034,7 @@ pub(crate) async fn create_invite(factory: &Arc<Factory>, request: &v1::CreatePi
 pub(crate) fn read_invite(code: &str) -> Result<v1::PipeInvitePreview, RequestError> {
     let side = pipe_link::read_invite(code.trim()).map_err(pipe_error)?;
     let peer = PeerRecord::from_side(&side, "");
-    Ok(v1::PipeInvitePreview { code: code.trim().to_owned(), peer: Some(peer.to_proto()), name: side.pipe_name, expires_ms: 0 })
+    Ok(v1::PipeInvitePreview { code: code.trim().to_owned(), peer: Some(peer.to_proto()), name: peer.pipe_name, expires_ms: 0 })
 }
 
 /// AcceptPipeInvite: a pipe to `project`, JOINING and selected, then
@@ -954,16 +1042,18 @@ pub(crate) fn read_invite(code: &str) -> Result<v1::PipeInvitePreview, RequestEr
 pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> Result<(), RequestError> {
     let code = request.code.trim().to_owned();
     let side = pipe_link::read_invite(&code).map_err(pipe_error)?;
-    let name = if request.name.trim().is_empty() { side.pipe_name.clone() } else { request.name.clone() };
+    let peer = PeerRecord::from_side(&side, "");
+    let name = if request.name.trim().is_empty() { peer.pipe_name.clone() } else { request.name.clone() };
     let mut record = new_record(factory, &request.project_id, &name, &request.purpose, State::Joining)?;
-    record.peer = Some(PeerRecord::from_side(&side, ""));
+    let reaching = peer.claktory.clone();
+    record.peer = Some(peer);
     let id = record.id.clone();
     let mine = mine(factory, &record.project, &record.name, &record.purpose);
     insert(factory, record);
     factory.pipes.data().selected = Some(id.clone());
     factory.broadcast_workspace(&factory.lock());
     send_transcript(factory, &id);
-    line(factory, &id, format!("Reaching {}…", side.claktory));
+    line(factory, &id, format!("Reaching {reaching}…"));
     let factory = factory.clone();
     tokio::spawn(async move {
         match pipe_link::join(&factory, &id, &code, &mine).await {
@@ -996,12 +1086,25 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         return Ok(());
     }
     let mut members = checked_members(factory, &record, &request.member_ids)?;
+    let mut quarantined = match &request.quarantined {
+        Some(chosen) => checked_members(factory, &record, &chosen.agent_ids)?,
+        None => Vec::new(),
+    };
+    if let Some(stray) = quarantined.iter().find(|id| !members.contains(id)) {
+        return Err(RequestError::Pipe(format!("{stray} isn't one of this pipe's agents.")));
+    }
     let mut lead = request.lead_id.trim().to_owned();
     if !request.liaison_name.trim().is_empty() {
         let liaison = make_liaison(factory, &record, request.liaison_name.trim()).await?;
         if !members.contains(&liaison) {
             members.push(liaison.clone());
         }
+        // A liaison is quarantined from the moment it's made.
+        quarantined.push(liaison.clone());
+        change(factory, &record.id, |record| {
+            record.members.push(liaison.clone());
+            record.quarantined.push(liaison.clone());
+        });
         lead = liaison;
     }
     if !lead.is_empty() && !members.contains(&lead) {
@@ -1014,6 +1117,8 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     let opened = change(factory, &record.id, |record| {
         record.members = members;
         record.lead = lead;
+        // Its new liaison's already are; the others' are told just below.
+        record.quarantined.retain(|id| quarantined.contains(id));
         record.approved = true;
         record.state = if record.peer_approved { State::Open } else { State::WaitingPeer };
         record.state == State::Open
@@ -1022,6 +1127,7 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     if let Some(record) = factory.pipes.get(&record.id) {
         make_folders(factory, &record);
     }
+    quarantine::set(factory, &record.id, quarantined);
     if opened {
         line(factory, &record.id, "You approved it, and so did the other side: the pipe is open.");
     } else {
@@ -1055,14 +1161,13 @@ fn make_folders(factory: &Factory, record: &Record) {
     }
 }
 
-/// A liaison agent for the pipe: in its project, with no messaging, no web
-/// and no secrets; its id.
+/// A liaison agent for the pipe: in its project, with no messaging, no web,
+/// no secrets and no checkout of its own; its id. The caller quarantines it.
 async fn make_liaison(factory: &Arc<Factory>, record: &Record, name: &str) -> Result<String, RequestError> {
     let person = factory.lock().config.person().to_owned();
     let prompt = format!(
-        "You are the liaison for the pipe \"{}\" with {}'s Claktory: you read what comes through it and answer for this project, within what the pipe's prompt allows. Ask {person} when unsure.",
-        record.name,
-        record.peer_who()
+        "You are the liaison for the pipe \"{}\": you read what comes through it from the other Claktory and answer for this project, within what the pipe's prompt allows. Ask {person} when unsure.",
+        record.name
     );
     let before: BTreeSet<String> = factory.lock().config.agents.iter().map(|agent| agent.id.clone()).collect();
     let selected = factory.pipes.selected();
@@ -1085,7 +1190,9 @@ async fn make_liaison(factory: &Arc<Factory>, record: &Record, name: &str) -> Re
     let liaison = id.clone();
     factory
         .edit_config(move |config| {
-            for extension in [crate::extensions::agents::ID, crate::extensions::web::ID, crate::extensions::secrets::ID] {
+            for extension in
+                [crate::extensions::agents::ID, crate::extensions::web::ID, crate::extensions::secrets::ID, crate::extensions::tree::ID]
+            {
                 let change = v1::ExtensionChange { id: extension.to_owned(), enabled: Some(false), ..Default::default() };
                 crate::extensions::apply_change(config, &liaison, &change)?;
             }
@@ -1110,12 +1217,18 @@ pub(crate) async fn add_liaison(factory: &Arc<Factory>, request: &v1::AddPipeLia
         return Err(RequestError::Empty("name"));
     }
     let id = make_liaison(factory, &record, name).await?;
+    // Quarantined from the moment it's made: it's never told of it, as it
+    // never had more.
     change(factory, &record.id, |record| {
         if !record.members.contains(&id) {
             record.members.push(id.clone());
         }
+        if !record.quarantined.contains(&id) {
+            record.quarantined.push(id.clone());
+        }
         record.lead = id.clone();
     });
+    make_folders(factory, &record);
     Ok(())
 }
 
@@ -1133,6 +1246,13 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     };
     let lead = request.lead_id.as_ref().map(|lead| lead.trim().to_owned());
     let after_members = members.clone().unwrap_or_else(|| record.members.clone());
+    let quarantined = match &request.quarantined {
+        Some(chosen) => Some(checked_members(factory, &record, &chosen.agent_ids)?),
+        None => None,
+    };
+    if let Some(stray) = quarantined.iter().flatten().find(|id| !after_members.contains(id)) {
+        return Err(RequestError::Pipe(format!("{stray} isn't one of this pipe's agents.")));
+    }
     if let Some(lead) = &lead
         && !lead.is_empty()
         && !after_members.contains(lead)
@@ -1175,6 +1295,9 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     if review_off {
         line(factory, &record.id, "Review outgoing is off: agents' messages go out without waiting for you.");
     }
+    // Who's quarantined: as chosen, or as it was among the members left.
+    let now = factory.pipes.get(&record.id).map(|record| record.quarantined).unwrap_or_default();
+    quarantine::set(factory, &record.id, quarantined.unwrap_or(now));
     Ok(())
 }
 
@@ -1342,8 +1465,18 @@ pub(crate) fn not_open(record: &Record) -> String {
     }
 }
 
-/// Hands a message that passed every check to the transport.
+/// Hands a message that passed every check to the transport, once its
+/// files are checked again: each must be what was scanned when it was sent
+/// (a held one may have changed since the person saw it), and nothing in
+/// it may be a secret now. Refused otherwise, saying why.
 pub(crate) fn transmit(factory: &Arc<Factory>, pipe: &str, message: &Message, via: Via) {
+    if let Err(why) = unchanged(factory, message) {
+        set_state(factory, pipe, message.seq, MessageState::Refused, Some(&why));
+        if let Some(record) = factory.pipes.get(pipe) {
+            agents::tell(factory, &message.agent, &record, Some("Claktory"), &format!("didn't send your message: {why}"), &message.text);
+        }
+        return;
+    }
     let files = message.files.iter().map(|file| pipe_link::OutFile { name: file.name.clone(), path: file.path.clone() }).collect();
     let outgoing = Outgoing { msg_id: message.msg_id.clone(), via, text: message.text.clone(), files };
     match pipe_link::send(factory, pipe, outgoing) {
@@ -1373,13 +1506,28 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
         }
         (MessageState::Held, false) => {
             set_state(factory, &record.id, message.seq, MessageState::Discarded, None);
-            agents::tell(factory, &message.agent, &record, "discarded your message; it wasn't sent", &message.text);
+            agents::tell(factory, &message.agent, &record, None, "discarded your message; it wasn't sent", &message.text);
         }
         (MessageState::HeldIncoming, true) => {
+            // Its files go to the inbox only now.
+            if !message.files.is_empty()
+                && let Some(inbox) = folder(factory, &record).map(|folder| folder.join("inbox"))
+            {
+                let _ = std::fs::create_dir_all(&inbox);
+                let moved: Vec<FileRecord> = message
+                    .files
+                    .iter()
+                    .filter_map(|file| into_inbox(&inbox, &pipe_link::InFile { name: file.name.clone(), path: file.path.clone() }))
+                    .collect();
+                set_files(factory, &record.id, message.seq, &moved);
+                forget_held(&message);
+            }
             set_state(factory, &record.id, message.seq, MessageState::Received, Some(""));
             agents::wake(factory, &record.id);
         }
         (MessageState::HeldIncoming, false) => {
+            forget_held(&message);
+            set_files(factory, &record.id, message.seq, &[]);
             set_state(factory, &record.id, message.seq, MessageState::Discarded, None);
         }
         _ => return Err(RequestError::Pipe("This message isn't waiting for you.".to_owned())),
@@ -1387,7 +1535,76 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
     Ok(())
 }
 
+/// The message's files are as they were scanned, and nothing it carries is
+/// a secret; the reason it can't go otherwise.
+fn unchanged(factory: &Factory, message: &Message) -> Result<(), String> {
+    let mut contents = Vec::with_capacity(message.files.len());
+    for file in &message.files {
+        let bytes = std::fs::read(&file.path).map_err(|_| format!("{} is gone, so it wasn't sent.", file.name))?;
+        if !file.sha256.is_empty() && agents::sha256(&bytes) != file.sha256 {
+            return Err(format!(
+                "{} changed after it was written in, so it wasn't sent: send it again to look at the new version.",
+                file.name
+            ));
+        }
+        contents.push(bytes);
+    }
+    if let Some(secrets) = agents::secrets_in(factory, &message.text, &contents) {
+        return Err(format!("It contains your secret {secrets}, so it wasn't sent."));
+    }
+    Ok(())
+}
+
+/// Removes a held incoming message's own folder (where its files waited).
+fn forget_held(message: &Message) {
+    let folders: BTreeSet<PathBuf> = message.files.iter().filter_map(|file| file.path.parent().map(Path::to_path_buf)).collect();
+    for folder in folders {
+        // Only the message's own folder under pipes/held, never an inbox.
+        if folder.components().rev().nth(2).is_some_and(|part| part.as_os_str() == "held") {
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+    }
+}
+
 // ---- From the transport ----
+
+/// How many incoming messages may wait for the person at once; past that,
+/// more are refused, not held.
+const MAX_HELD_INCOMING: u32 = 20;
+
+/// Where an incoming message's files wait while it's held for the person:
+/// in Claktory's home, out of every agent's reach, until it's let in.
+fn held_dir(factory: &Factory, pipe: &str) -> PathBuf {
+    factory.home.root().join("pipes").join("held").join(pipe).join(random_hex(8))
+}
+
+/// The bytes of files that arrived on the pipe in the last day (let in or
+/// waiting).
+fn incoming_bytes(factory: &Factory, pipe: &str) -> u64 {
+    let db = factory.store.db();
+    let mut bytes = 0u64;
+    if let Ok(mut statement) = db.prepare(
+        "SELECT files FROM pipe_messages WHERE pipe = ?1 AND author IN ('their_agent', 'their_person') AND state IN ('received', 'held_incoming') AND created > ?2",
+    ) && let Ok(rows) = statement.query_map(params![pipe, now_ms() - 86_400_000], |row| row.get::<_, String>(0))
+    {
+        for files in rows.flatten() {
+            let files: Vec<FileRecord> = serde_json::from_str(&files).unwrap_or_default();
+            bytes += files.iter().map(|file| file.size).sum::<u64>();
+        }
+    }
+    bytes
+}
+
+/// Changes a message's files.
+fn set_files(factory: &Factory, pipe: &str, seq: u64, files: &[FileRecord]) {
+    let files = serde_json::to_string(files).unwrap_or_else(|_| "[]".to_owned());
+    let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+    if let Err(error) =
+        factory.store.db().execute("UPDATE pipe_messages SET files = ?3 WHERE pipe = ?1 AND seq = ?2", params![pipe, seq, files])
+    {
+        tracing::error!(%pipe, %error, "could not change a pipe message's files");
+    }
+}
 
 /// Moves a received file into the pipe's inbox, under a safe name.
 fn into_inbox(inbox: &Path, file: &pipe_link::InFile) -> Option<FileRecord> {
@@ -1415,7 +1632,7 @@ fn into_inbox(inbox: &Path, file: &pipe_link::InFile) -> Option<FileRecord> {
         let _ = std::fs::remove_file(&file.path);
     }
     let size = std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or_default();
-    Some(FileRecord { name: target.file_name()?.to_string_lossy().into_owned(), size, path: target })
+    Some(FileRecord { name: target.file_name()?.to_string_lossy().into_owned(), size, path: target, sha256: String::new() })
 }
 
 impl pipe_link::Store for Link {
@@ -1461,12 +1678,31 @@ impl pipe_link::Store for Link {
         if record.state != State::Open {
             return Err(not_open(&record));
         }
-        let inbox = folder(factory, &record).map(|folder| folder.join("inbox"));
+        let arriving: u64 = message
+            .files
+            .iter()
+            .take(pipe_link::MAX_FILES)
+            .filter_map(|file| std::fs::metadata(&file.path).ok())
+            .map(|meta| meta.len())
+            .sum();
+        if incoming_bytes(factory, pipe) + arriving > u64::from(record.limits.file_mb) * 1_048_576 {
+            return Err(format!("Over this side's limit of {} MB of files a day.", record.limits.file_mb));
+        }
+        let held = over_incoming(factory, &record);
+        if held.is_some()
+            && counted(factory, pipe, &[Author::TheirAgent, Author::TheirPerson], &[MessageState::HeldIncoming], i64::MAX / 2)
+                >= MAX_HELD_INCOMING
+        {
+            return Err("Too many messages already wait for this side's person.".to_owned());
+        }
+        // Held, its files wait out of every agent's reach until it's let in.
+        let place =
+            if held.is_some() { Some(held_dir(factory, pipe)) } else { folder(factory, &record).map(|folder| folder.join("inbox")) };
         let mut files = Vec::new();
-        if let Some(inbox) = &inbox {
-            let _ = std::fs::create_dir_all(inbox);
+        if let Some(place) = &place {
+            let _ = std::fs::create_dir_all(place);
             for file in message.files.iter().take(pipe_link::MAX_FILES) {
-                if let Some(kept) = into_inbox(inbox, file) {
+                if let Some(kept) = into_inbox(place, file) {
                     files.push(kept);
                 }
             }
@@ -1475,7 +1711,6 @@ impl pipe_link::Store for Link {
             Via::Person { name } => (Author::TheirPerson, name.clone(), String::new()),
             Via::Agent { name, role } => (Author::TheirAgent, name.clone(), role.clone()),
         };
-        let held = over_incoming(factory, &record);
         let state = if held.is_some() { MessageState::HeldIncoming } else { MessageState::Received };
         let kept = Message {
             msg_id: message.msg_id.clone(),
@@ -1507,10 +1742,12 @@ impl pipe_link::Store for Link {
 
     fn refused(&self, factory: &Arc<Factory>, pipe: &str, msg_id: &str, reason: &str) {
         let Some(message) = by_msg_id(factory, pipe, msg_id) else { return };
-        let note = format!("The other side refused it: {reason}");
+        // Their words: one line, capped, and quoted as theirs.
+        let reason = clean(reason, PURPOSE_CHARS);
+        let note = format!("The other side refused it. They say: \"{reason}\"");
         set_state(factory, pipe, message.seq, MessageState::Refused, Some(&note));
         if let Some(record) = factory.pipes.get(pipe) {
-            agents::tell(factory, &message.agent, &record, &format!("refused your message ({reason})"), &message.text);
+            agents::tell_refused(factory, &message.agent, &record, &reason, &message.text);
         }
     }
 
@@ -1585,6 +1822,63 @@ pub fn open_for_test(factory: &Arc<Factory>, project: &str, name: &str, members:
 #[doc(hidden)]
 pub fn receive_for_test(factory: &Arc<Factory>, pipe: &str, message: Incoming) -> Result<(), String> {
     pipe_link::Store::received(&Link, factory, pipe, message)
+}
+
+/// Tests: the other side said this about itself, as an invite or an
+/// accept would carry it.
+#[doc(hidden)]
+pub fn peer_says_for_test(factory: &Arc<Factory>, pipe: &str, side: &Side) {
+    change(factory, pipe, |record| {
+        record.peer = Some(PeerRecord::from_side(side, ""));
+        true
+    });
+}
+
+/// Tests: the other side refused a message, as the transport says.
+#[doc(hidden)]
+pub fn refused_for_test(factory: &Arc<Factory>, pipe: &str, seq: u64, reason: &str) {
+    let msg_id = message(factory, pipe, seq).expect("the message").msg_id;
+    pipe_link::Store::refused(&Link, factory, pipe, &msg_id, reason);
+}
+
+/// Tests: the pipes' section of an agent's system prompt.
+#[doc(hidden)]
+pub fn prompt_for_test(factory: &Factory, agent: &str) -> Option<String> {
+    let config = factory.lock().config.clone();
+    agents::prompt_section(factory, &config, agent)
+}
+
+/// Tests: the pipe as if kept from before quarantine came, and Claktory
+/// starting again.
+#[doc(hidden)]
+pub fn upgrade_for_test(factory: &Arc<Factory>, pipe: &str) {
+    change(factory, pipe, |record| record.quarantine_set = false);
+    quarantine::upgrade(factory);
+}
+
+/// Tests: what Claktory does with the pipes when it starts again.
+#[doc(hidden)]
+pub fn start_for_test(factory: &Arc<Factory>) {
+    quarantine::upgrade(factory);
+}
+
+/// Tests: whether `agent` is quarantined for a pipe.
+#[doc(hidden)]
+pub fn quarantined_for_test(factory: &Factory, agent: &str) -> bool {
+    factory.pipes.quarantined(agent)
+}
+
+/// Tests: `agent`'s taint as a monitor keeps it (JSON).
+#[doc(hidden)]
+pub fn taint_of_for_test(factory: &Factory, agent: &str) -> String {
+    serde_json::to_string(&factory.pipes.taint_of(agent)).expect("JSON")
+}
+
+/// Tests: what a monitor `from` set for `to` does when it fires, with the
+/// taint it kept (`taint_of_for_test`).
+#[doc(hidden)]
+pub fn taint_with_for_test(factory: &Arc<Factory>, from: &str, to: &str, taint: &str) {
+    agents::taint_with(factory, from, to, &serde_json::from_str(taint).expect("a taint"));
 }
 
 /// Tests: the lead's wakes apart by `every` at least.

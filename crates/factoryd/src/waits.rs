@@ -145,4 +145,17 @@ impl Factory {
     pub(crate) fn capacity_changed(&self) {
         self.capacity.notify_waiters();
     }
+
+    /// The person messaged an agent waiting out the provider's usage: they
+    /// may just have brought usage back in a way nothing here can see (a
+    /// reset claimed on the provider's own site, credit added), so the
+    /// accounts' spent marks are forgotten and the waiters ask the provider
+    /// itself again. A wrong guess costs one refused request, which marks
+    /// the account spent again with the provider's fresh reset time.
+    pub(crate) async fn probe_accounts(self: Arc<Self>, provider: String) {
+        if let Err(error) = self.models.forget_spent(&provider, "").await {
+            tracing::warn!(%provider, %error, "could not forget the accounts' spent marks");
+        }
+        self.capacity_changed();
+    }
 }

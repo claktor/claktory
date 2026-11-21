@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 26] = [
+const MIGRATIONS: [&str; 27] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -172,6 +172,7 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::extensions::ask::SCHEMA,
     crate::chats::SCHEMA,
     crate::move_import::SCHEMA,
+    crate::pipes::TAINT_VIA,
 ];
 
 /// A background task as recorded.

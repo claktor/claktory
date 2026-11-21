@@ -146,21 +146,69 @@ EOF
   exec "$ENGINE" exec -e CLAKTORY_QA_ROOT=/qa -e CLAKTORY_QA_COMMIT="$COMMIT" "$NAME" /opt/claktory-qa/claktory-qa "${args[@]}"
 fi
 
+# A commit's binaries are reused only when its build vouched for them:
+# $BIN/commit names the commit, written once every crate of its source was
+# compiled in that build (below). Folders without it, such as those built
+# before this check, are built again.
 BIN="$ROOT/bin/$COMMIT"
-if [[ ! -x "$BIN/claktory-qa" ]]; then
-  SRC="$ROOT/src/$COMMIT"
-  rm -rf "$SRC"
-  mkdir -p "$SRC"
-  git -C "$REPO" archive "$COMMIT" | tar -x -C "$SRC"
-  echo "claktory-qa: building $COMMIT (once per commit; the first takes a few minutes)" >&2
-  # No update channel stamped in: a sandbox never looks for releases.
-  (cd "$SRC" && env -u FACTORY_UPDATE_URL CARGO_TARGET_DIR="$ROOT/target" \
-    cargo build --quiet -p factoryd -p claktory-account -p claktory-qa) >&2
-  rm -rf "$BIN.tmp"
-  mkdir -p "$BIN.tmp"
-  cp "$ROOT/target/debug/factoryd" "$ROOT/target/debug/claktory-account" "$ROOT/target/debug/claktory-qa" "$BIN.tmp/"
-  mv "$BIN.tmp" "$BIN"
-  rm -rf "$SRC"
+built() { [[ -x "$BIN/claktory-qa" && "$(cat "$BIN/commit" 2>/dev/null)" == "$COMMIT" ]]; }
+if ! built; then
+  # One build at a time in the shared target, from cargo to the copy out
+  # of it: another commit's build in between would leave its binaries
+  # where this one copies from. A lock whose holder is gone is taken over.
+  LOCK="$ROOT/build.lock"
+  waited=""
+  until mkdir "$LOCK" 2>/dev/null; do
+    holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCK"
+      continue
+    fi
+    [[ -n "$waited" ]] || echo "claktory-qa: waiting for another build ($LOCK)" >&2
+    waited=1
+    sleep 1
+  done
+  echo $$ >"$LOCK/pid"
+  trap 'rm -rf "$LOCK"' EXIT
+  if ! built; then
+    SRC="$ROOT/src/$COMMIT"
+    rm -rf "$SRC" "$BIN"
+    mkdir -p "$SRC"
+    # -m: the files are new now. git archive stamps them with the commit's
+    # time, and cargo, judging by times, would find an older commit's
+    # source no newer than the shared target's last build: it would then
+    # rebuild nothing, or only some crates, and give another commit's
+    # binaries, or a mix of two.
+    git -C "$REPO" archive "$COMMIT" | tar -xm -C "$SRC"
+    echo "claktory-qa: building $COMMIT (once per commit; the first takes a few minutes)" >&2
+    MESSAGES="$ROOT/src/$COMMIT.json"
+    # No update channel or version stamped in: a sandbox never looks for
+    # releases.
+    (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION CARGO_TARGET_DIR="$ROOT/target" \
+      cargo build --quiet --message-format=json-render-diagnostics \
+      -p factoryd -p claktory-account -p claktory-qa) >"$MESSAGES"
+    # The proof: every crate of this source compiled in this build, none
+    # found fresh from another's, and the three binaries among them.
+    ours="$(grep '"reason":"compiler-artifact"' "$MESSAGES" | grep -F "\"package_id\":\"path+file://$SRC/" || true)"
+    stale="$(grep -F '"fresh":true' <<<"$ours" | sed -E 's/.*"package_id":"path\+file:\/\/[^"]*\/([^"#\/]+)#.*/\1/' | sort -u | tr '\n' ' ' || true)"
+    for bin in factoryd claktory-account claktory-qa; do
+      grep -F '"fresh":false' <<<"$ours" | grep -qF "\"executable\":\"$ROOT/target/debug/$bin\"" ||
+        stale="$stale$bin(not built) "
+    done
+    if [[ -n "$stale" ]]; then
+      echo "{\"ok\":false,\"error\":\"stale_build\",\"message\":\"The build of $COMMIT reused what another commit built: ${stale% }. Nothing was kept; its cargo messages are in $MESSAGES.\"}"
+      rm -rf "$SRC"
+      exit 1
+    fi
+    rm -rf "$BIN.tmp"
+    mkdir -p "$BIN.tmp"
+    cp "$ROOT/target/debug/factoryd" "$ROOT/target/debug/claktory-account" "$ROOT/target/debug/claktory-qa" "$BIN.tmp/"
+    echo "$COMMIT" >"$BIN.tmp/commit"
+    mv "$BIN.tmp" "$BIN"
+    rm -rf "$SRC" "$MESSAGES"
+  fi
+  rm -rf "$LOCK"
+  trap - EXIT
 fi
 
 export CLAKTORY_QA_ROOT="$ROOT" CLAKTORY_QA_COMMIT="$COMMIT"

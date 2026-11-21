@@ -150,6 +150,16 @@ pub(crate) fn places(home: &Home, config: &Config, agent: &AgentConfig, pipe_out
     Places { folder, extra_dirs, read_only }
 }
 
+/// Where `agent` works and what its file tools reach: its pipes' folders
+/// alone while it's quarantined for one (`pipes::quarantine`), `places`
+/// otherwise.
+pub(crate) fn placed(factory: &crate::factory::Factory, config: &Config, agent: &AgentConfig) -> Places {
+    match crate::pipes::quarantine::quarantine(factory, config, &agent.id) {
+        Some(quarantine) => quarantine.places(),
+        None => places(&factory.home, config, agent, &pipe_outboxes(factory, config, &agent.id)),
+    }
+}
+
 /// The folders of `agent`'s project, when it has any: folder id ("" for the
 /// project's own) → "Research: /path (read only)", or "(yours)" for the
 /// agent's.
@@ -171,7 +181,7 @@ fn folder_lines(config: &Config, agent: &AgentConfig) -> BTreeMap<String, String
 /// they change, the agent is told (`settings_note`); its frame follows them
 /// at the next segment, or the next model call when its model, instructions,
 /// name or where it works changed (`settings_now`).
-fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path) -> String {
+fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path, quarantined: bool) -> String {
     let mut key = serde_json::json!({
         "name": agent.name,
         "prompt": agent.prompt,
@@ -194,6 +204,10 @@ fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path) -> String {
     if let Some(name) = config.user_name() {
         key["user"] = name.into();
     }
+    // Quarantined for a pipe, the same way: its tools and places change.
+    if quarantined {
+        key["quarantined"] = true.into();
+    }
     key.to_string()
 }
 
@@ -209,6 +223,17 @@ fn model_lines(models: &[v1::Model]) -> BTreeMap<String, String> {
 
 fn enabled_extensions(agent: &AgentConfig) -> Vec<&'static dyn Extension> {
     crate::extensions::ALL.into_iter().filter(|extension| crate::extensions::active(agent, *extension)).collect()
+}
+
+/// The agent's extensions that are on, but for a quarantined agent only
+/// those its quarantine keeps (Ask's): their tools, extension_call's reach
+/// and their prompts.
+fn extensions_of(factory: &crate::factory::Factory, agent: &AgentConfig) -> Vec<&'static dyn Extension> {
+    let mut extensions = enabled_extensions(agent);
+    if factory.pipes.quarantined(&agent.id) {
+        extensions.retain(|extension| crate::pipes::quarantine::KEPT_EXTENSIONS.contains(&extension.manifest().id));
+    }
+    extensions
 }
 
 /// What changed that the agent was told otherwise, in one note; None if nothing.
@@ -496,7 +521,7 @@ fn extension_news(
     }
     let mut news = String::new();
     let mut sections = Vec::new();
-    for extension in enabled_extensions(agent) {
+    for extension in extensions_of(factory, agent) {
         let keys = std::iter::once(extension.manifest().id).chain(extension.instances().iter().map(|instance| instance.key));
         if !keys.into_iter().any(|key| turned_on.contains(&key)) {
             continue;
@@ -570,7 +595,8 @@ impl Factory {
         let (checkout, epoch, name) = {
             let inner = self.lock();
             let Some(agent) = inner.config.agent(id) else { return };
-            if !crate::extensions::enabled(agent, crate::extensions::tree::ID) {
+            // Quarantined, it works in its pipe's folder, never a checkout.
+            if !crate::extensions::enabled(agent, crate::extensions::tree::ID) || self.pipes.quarantined(id) {
                 return;
             }
             let Ok(checkout) = crate::trees::plan(&self.home, id, &source_folder(&self.home, &inner.config, agent)) else { return };
@@ -612,7 +638,7 @@ impl Factory {
         let agent = inner.config.agent(id).cloned();
         let compact_at = inner.config.compact_at_tokens;
         let models = inner.models.clone();
-        let places = agent.as_ref().map(|agent| places(&self.home, &inner.config, agent, &pipe_outboxes(self, &inner.config, &agent.id)));
+        let places = agent.as_ref().map(|agent| placed(self, &inner.config, agent));
         let cache_ttl = agent.as_ref().and_then(|agent| inner.config.cache_ttl(&agent.model)).unwrap_or_default();
         let archived = agent.as_ref().is_some_and(|agent| inner.config.archived(agent));
         let runtime = inner.agents.get_mut(id)?;
@@ -673,7 +699,7 @@ impl Factory {
         let run = if idle { None } else { self.begin_run(id, runtime) };
         runtime.taken.extend(prompts.iter().map(|queued| (queued.clone(), run)));
         let messages = runtime.transcript.as_ref().map(|transcript| transcript.messages().to_vec()).unwrap_or_default();
-        let extensions = enabled_extensions(&agent);
+        let extensions = extensions_of(self, &agent);
         self.broadcast_workspace(&inner);
         let places = places?;
         Some(Job { prompts, agent, compact_at, messages, models, extensions, frame, places, epoch, compact, cache_ttl })
@@ -688,13 +714,15 @@ impl Factory {
     pub(crate) fn take_changes(&self, inner: &mut Inner, id: &str, current: &[ToolSpec]) -> Option<Queued> {
         let agent = inner.config.agent(id)?.clone();
         let mut frame = inner.agents.get(id)?.transcript.as_ref()?.frame()?.clone();
-        let folder = places(&self.home, &inner.config, &agent, &[]).folder;
-        let key = settings_key(&inner.config, &agent, &folder);
-        let roster = crate::extensions::agents::roster(&inner.config, &agent);
-        let folders = folder_lines(&inner.config, &agent);
+        let quarantined = self.pipes.quarantined(id);
+        let folder = placed(self, &inner.config, &agent).folder;
+        let key = settings_key(&inner.config, &agent, &folder, quarantined);
+        // Quarantined, it messages no one, sees no project folder, secret or app.
+        let roster = if quarantined { BTreeMap::new() } else { crate::extensions::agents::roster(&inner.config, &agent) };
+        let folders = if quarantined { BTreeMap::new() } else { folder_lines(&inner.config, &agent) };
         let names = model_lines(&inner.models);
-        let secrets = self.vault.granted(id);
-        let apps = crate::apps::granted(self, &inner.config, id);
+        let secrets = if quarantined { BTreeMap::new() } else { self.vault.granted(id) };
+        let apps = if quarantined { BTreeMap::new() } else { crate::apps::granted(self, &inner.config, id) };
         let pipes = crate::pipes::agents::granted(self, &inner.config, id);
         // tree_land in its tools, or reached through extension_call.
         let can_land = frame.tools.iter().any(|tool| tool.name == "tree_land" || tool.name == EXTENSION_CALL);
@@ -750,18 +778,22 @@ impl Factory {
             }
             let agent = inner.config.agent(id)?.clone();
             let project = agent.project.as_deref().and_then(|project| inner.config.project(project).cloned());
-            let (sections, pinned) = self.sections(&mut inner, id, &agent, &enabled_extensions(&agent));
-            let roster = crate::extensions::agents::roster(&inner.config, &agent);
-            let folders = folder_lines(&inner.config, &agent);
-            let places = places(&self.home, &inner.config, &agent, &pipe_outboxes(self, &inner.config, id));
-            let settings = settings_key(&inner.config, &agent, &places.folder);
-            let folder_name = inner.config.agent_folder(&agent).map(|folder| folder.name.clone());
+            let quarantined = self.pipes.quarantined(id);
+            let (sections, pinned) = self.sections(&mut inner, id, &agent, &extensions_of(self, &agent));
+            // Quarantined, it messages no one and sees no project folder.
+            let roster = if quarantined { BTreeMap::new() } else { crate::extensions::agents::roster(&inner.config, &agent) };
+            let folders = if quarantined { BTreeMap::new() } else { folder_lines(&inner.config, &agent) };
+            let places = placed(self, &inner.config, &agent);
+            let settings = settings_key(&inner.config, &agent, &places.folder, quarantined);
+            let folder_name = if quarantined { None } else { inner.config.agent_folder(&agent).map(|folder| folder.name.clone()) };
             let compact_at = inner.config.compact_at_tokens;
             let user = inner.config.user_name().map(str::to_owned);
             (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user)
         };
-        let secrets = self.vault.granted(id);
-        let apps = crate::apps::granted(self, &self.lock().config, id);
+        // Quarantined, it has no secret or app.
+        let quarantined = self.pipes.quarantined(id);
+        let secrets = if quarantined { BTreeMap::new() } else { self.vault.granted(id) };
+        let apps = if quarantined { BTreeMap::new() } else { crate::apps::granted(self, &self.lock().config, id) };
         let pipes = crate::pipes::agents::granted(self, &self.lock().config, id);
         let render = Render {
             agent: &agent,
@@ -817,7 +849,9 @@ impl Factory {
                 }
             }
         }
-        sections.extend(crate::apps::sections(self, &inner.config, id));
+        if !self.pipes.quarantined(id) {
+            sections.extend(crate::apps::sections(self, &inner.config, id));
+        }
         sections.extend(crate::pipes::agents::prompt_section(self, &inner.config, id));
         let Some(transcript) = inner.agents.get_mut(id).and_then(|runtime| runtime.transcript.as_mut()) else {
             return (sections, written.into_iter().map(|(_, text)| text).collect());
@@ -925,7 +959,8 @@ impl Factory {
             compact_at: Some(job.compact_at),
             inbox: Some(self.inbox(id, job.epoch)),
             after_compaction: Some(after_compaction),
-            secrets: Some(self.secrets(id)),
+            // Quarantined for a pipe, it has none.
+            secrets: (!self.pipes.quarantined(id)).then(|| self.secrets(id)),
             fallback_model,
         });
         agent.state.cache_ttl = job.cache_ttl;
@@ -1000,6 +1035,16 @@ impl Factory {
     /// The agent's coding tools, where it works now, its extensions' tools,
     /// and extension_call.
     fn build_tools(self: &Arc<Self>, id: &str, places: &Places, extensions: &[&'static dyn Extension]) -> Vec<Tool> {
+        // Quarantined for a pipe: its kept tools only (`extensions` are
+        // already those it keeps), and extension_call reaching no more.
+        if self.pipes.quarantined(id) {
+            let mut tools = crate::pipes::quarantine::tools(self, id, places);
+            for extension in extensions {
+                tools.extend(extension.tools(self, id));
+            }
+            tools.push(self.extension_call(id));
+            return tools;
+        }
         let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, Some(self.background(id)));
         factory_agent::tools::read_only(&mut tools, &places.read_only);
         // Only agents given a secret see bash's `secrets`.
@@ -1018,7 +1063,11 @@ impl Factory {
     /// The agent's extensions' tools as its settings are now.
     fn extension_tools(self: &Arc<Self>, id: &str) -> Vec<Tool> {
         let Some(agent) = self.lock().config.agent(id).cloned() else { return Vec::new() };
-        let mut tools: Vec<Tool> = enabled_extensions(&agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
+        let mut tools: Vec<Tool> = extensions_of(self, &agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
+        if self.pipes.quarantined(id) {
+            tools.extend(crate::pipes::quarantine::pipe_tools(self, id));
+            return tools;
+        }
         tools.extend(crate::apps::tools(self, id));
         tools.extend(crate::pipes::agents::tools(self, id));
         tools
@@ -1085,16 +1134,17 @@ impl Factory {
             return settings;
         }
         let then: serde_json::Value = serde_json::from_str(&frame.settings).unwrap_or_default();
+        let quarantined = self.pipes.quarantined(id);
         let now = {
             let inner = self.lock();
-            settings_key(&inner.config, &agent, &places(&self.home, &inner.config, &agent, &[]).folder)
+            settings_key(&inner.config, &agent, &placed(self, &inner.config, &agent).folder, quarantined)
         };
         let now: serde_json::Value = serde_json::from_str(&now).unwrap_or_default();
         let changed = |keys: &[&str]| keys.iter().any(|key| then.get(key) != now.get(key));
         // Given its first secret, its bash takes `secrets` from now on.
-        let needs_secrets = !frame.tools.iter().any(takes_secrets) && !self.vault.granted(id).is_empty();
-        // Its project, folder or checkout.
-        if changed(&["project", "folder", "cwd"]) || needs_secrets {
+        let needs_secrets = !quarantined && !frame.tools.iter().any(takes_secrets) && !self.vault.granted(id).is_empty();
+        // Its project, folder or checkout, or a quarantine that came or went.
+        if changed(&["project", "folder", "cwd", "quarantined"]) || needs_secrets {
             // It works somewhere else now: its tools too.
             let Some(tools) = self.current_tools(id) else { return settings };
             let specs = tools.iter().map(|tool| tool.spec.clone()).collect();
@@ -1114,10 +1164,10 @@ impl Factory {
         let (agent, places) = {
             let inner = self.lock();
             let agent = inner.config.agent(id)?.clone();
-            let places = places(&self.home, &inner.config, &agent, &pipe_outboxes(self, &inner.config, id));
+            let places = placed(self, &inner.config, &agent);
             (agent, places)
         };
-        Some(self.build_tools(id, &places, &enabled_extensions(&agent)))
+        Some(self.build_tools(id, &places, &extensions_of(self, &agent)))
     }
 
     /// Records an agent event: updates the transcript, tells clients, saves.
@@ -1129,7 +1179,7 @@ impl Factory {
         {
             let folder = {
                 let inner = self.lock();
-                inner.config.agent(id).map(|agent| places(&self.home, &inner.config, agent, &[]).folder)
+                inner.config.agent(id).map(|agent| placed(self, &inner.config, agent).folder)
             };
             if let Some(folder) = folder {
                 crate::annotations::written(self, id, &folder, path);

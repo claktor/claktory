@@ -235,6 +235,13 @@ pub(crate) struct Change {
 }
 
 impl Vault {
+    /// Reads the changed request before invalidating the cached vault view.
+    fn changed_request(inner: &mut super::Inner, id: &str) -> Result<v1::SecretRequest, VaultError> {
+        let request = Self::db(inner)?.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(request)
+    }
+
     /// Records `agent`'s request for what `wanted` describes. Whether or
     /// not the vault has such a secret, or has given it one, makes no
     /// difference to the answer: nothing of the vault shows through. Errors
@@ -270,9 +277,7 @@ impl Vault {
             "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created, admin) VALUES (?1, ?2, '', ?3, ?4, ?5, 'pending', ?6, ?7)",
             params![id, agent, name, json, reason, now_ms(), admin],
         )?;
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [&id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, &id)
     }
 
     /// `agent`'s request `id`, if it's still waiting.
@@ -308,9 +313,7 @@ impl Vault {
         if changed == 0 {
             return Err(VaultError::Invalid("This request was decided already.".to_owned()));
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, id)
     }
 
     /// Marks whether `admin`'s add-secret card for the request is open
@@ -326,9 +329,7 @@ impl Vault {
         if changed == 0 {
             return Err(VaultError::Invalid("Only a request the person approved can be collected.".to_owned()));
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, id)
     }
 
     /// The request `id`, whoever asked, if the person approved it and it's
@@ -402,9 +403,7 @@ impl Vault {
         if changed == 0 {
             return Err(VaultError::Invalid("This request was decided already.".to_owned()));
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, id)
     }
 
     /// The requests waiting for the person, oldest first, each with when it
@@ -427,9 +426,7 @@ impl Vault {
         if changed == 0 {
             return Ok(None);
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(Some(request))
+        Self::changed_request(&mut inner, id).map(Some)
     }
 
     /// Changes `agent`'s waiting request `id`; returns it as it is now.
@@ -476,9 +473,7 @@ impl Vault {
         if changed == 0 {
             return Err(VaultError::Invalid(format!("Your request {id} isn't waiting any more.")));
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, id)
     }
 
     /// Withdraws `agent`'s waiting request `id`, with its reason (may be
@@ -496,9 +491,7 @@ impl Vault {
         if changed == 0 {
             return Err(VaultError::Invalid(format!("Your request {id} isn't waiting any more.")));
         }
-        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
-        inner.state = None;
-        Ok(request)
+        Self::changed_request(&mut inner, id)
     }
 
     /// `agent`'s own request `id`, if it's still open (waiting, or approved

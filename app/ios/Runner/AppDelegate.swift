@@ -30,6 +30,10 @@ import UniformTypeIdentifiers
     // The network path, to reconnect the moment it changes, as on the Mac
     // (app/macos/Runner/NetworkPath.swift).
     NetworkPath.register(with: messenger)
+    // A hardware keyboard coming and going (Capabilities.swift).
+    KeyboardEvents.register(with: messenger)
+    // The iPad workbench's commands in the system's menu (CommandMenu.swift).
+    CommandMenu.register(with: messenger)
     deviceChannel = FlutterMethodChannel(name: "factory/device", binaryMessenger: messenger)
     deviceChannel?.setMethodCallHandler { call, result in
       switch call.method {
@@ -39,10 +43,32 @@ import UniformTypeIdentifiers
         UserDefaults.standard.set(call.arguments as? [String: String] ?? [:], forKey: Self.draftsKey)
         result(nil)
       case "connections":
-        result(Keychain.read() ?? [:])
+        do {
+          result(try Self.connections.read())
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_unavailable", message: "\(error)", details: nil))
+        }
       case "setConnections":
-        Keychain.write(call.arguments as? [String: Any] ?? [:])
-        result(nil)
+        do {
+          try Self.connections.write(call.arguments as? [String: Any] ?? [:])
+          result(nil)
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_write_failed", message: "\(error)", details: nil))
+        }
+      case "resetConnections":
+        // Only when the person chooses Start over.
+        do {
+          try Self.connections.reset()
+          result(nil)
+        } catch let failure as StoreFailure {
+          result(FlutterError(code: failure.code, message: failure.message, details: nil))
+        } catch {
+          result(FlutterError(code: "credentials_reset_failed", message: "\(error)", details: nil))
+        }
       case "qrCode":
         result(Self.qrCode(call.arguments as? String ?? ""))
       case "cameraAccess":
@@ -59,9 +85,34 @@ import UniformTypeIdentifiers
       case "cancelWebAuth":
         WebAuth.shared.cancel()
         result(nil)
+      case "capabilities":
+        // What this device is (Capabilities.swift): the iPad's workbench
+        // follows its idiom, never its window's size.
+        result(Capabilities.current())
       default: result(FlutterMethodNotImplemented)
       }
     }
+  }
+
+  // The workbench's commands (CommandMenu.swift): at the end of the View
+  // menu and in the list shown while ⌘ is held. The app delegate ends the
+  // responder chain, so they're found wherever the focus is; a disabled one
+  // has nothing to perform it, so its keys go on to what's focused.
+  override func buildMenu(with builder: UIMenuBuilder) {
+    super.buildMenu(with: builder)
+    CommandMenu.shared.build(builder, action: #selector(runWorkbenchCommand(_:)))
+  }
+
+  override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+    if action == #selector(runWorkbenchCommand(_:)) {
+      return CommandMenu.shared.isEnabled((sender as? UICommand)?.propertyList as? String)
+    }
+    return super.canPerformAction(action, withSender: sender)
+  }
+
+  @objc func runWorkbenchCommand(_ sender: UICommand) {
+    guard let id = sender.propertyList as? String else { return }
+    CommandMenu.shared.run(id)
   }
 
   // What the app keeps on the device (app/lib/drafts.dart, connections.dart),
@@ -69,6 +120,8 @@ import UniformTypeIdentifiers
   // which Factory it shows with this device's key for each.
   private var deviceChannel: FlutterMethodChannel?
   private static let draftsKey = "Drafts"
+  /// In the keychain (app/macos/Runner/ConnectionStore.swift, the Mac's).
+  private static let connections = ConnectionStore.forThisApp()
 
   /// `text` as a QR code from Core Image: its modules row by row, 1 for dark.
   private static func qrCode(_ text: String) -> [String: Any]? {
@@ -102,39 +155,6 @@ import UniformTypeIdentifiers
       }
     }
     return ["size": size, "modules": FlutterStandardTypedData(bytes: Data(modules))]
-  }
-}
-
-/// The connections (pairing codes and this device's iroh key for each) in
-/// the Keychain, only on this device and only once it's been unlocked: the
-/// keys are what a backend knows this phone by.
-enum Keychain {
-  private static let query: [String: Any] = [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: "Claktory connections",
-    kSecAttrAccount as String: "connections",
-  ]
-
-  static func read() -> [String: Any]? {
-    var lookup = query
-    lookup[kSecReturnData as String] = true
-    lookup[kSecMatchLimit as String] = kSecMatchLimitOne
-    var item: CFTypeRef?
-    guard SecItemCopyMatching(lookup as CFDictionary, &item) == errSecSuccess,
-      let data = item as? Data
-    else { return nil }
-    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-  }
-
-  static func write(_ connections: [String: Any]) {
-    guard let data = try? JSONSerialization.data(withJSONObject: connections) else { return }
-    let update: [String: Any] = [
-      kSecValueData as String: data,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-    ]
-    if SecItemUpdate(query as CFDictionary, update as CFDictionary) == errSecItemNotFound {
-      SecItemAdd(query.merging(update) { $1 } as CFDictionary, nil)
-    }
   }
 }
 

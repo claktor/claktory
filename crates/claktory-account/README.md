@@ -51,6 +51,18 @@ new signing key makes every Claktory sign in again, and its secrets open by
 themselves after; a new `k_share` makes every Claktory open its secrets with
 its recovery key once, and they open by themselves again from then on.
 
+The account root vouches for the service key: Claktory takes claktory.com's
+key only with its statement (API.md), signed offline. Make it with
+`claktory-account service-key-statement --secrets secrets.json` (it prints
+the exact text, from now), sign those bytes with the account root (ed25519),
+then `claktory-account service-key-statement --secrets secrets.json --text
+statement.txt --signature ROOT-ID:BASE64 --out statement.json` checks it and
+writes the file `--service-key-statement statement.json` serves. After a
+deploy, `claktory-account check-statement https://account.claktory.com`
+checks what's served as a Claktory does, and fails when it's missing or
+wrong. A signing-key rotation needs a new statement before the restart:
+Claktories take the new key by itself only with one newer than the last.
+
 ## What it keeps
 
 Accounts (email, when made, last sign-in); Claktories (id, name, backend

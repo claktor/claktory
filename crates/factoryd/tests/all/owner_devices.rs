@@ -213,3 +213,18 @@ async fn a_device_paired_with_a_code_confirms_it_is_the_owners_once() {
     app.ok(mine).await;
     view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == made.id && device.confirmed)).await;
 }
+
+/// F-OK1's kill switch: once a release's floor is after the pinned service
+/// key's statement (or the key was pinned without one, as before anchoring),
+/// a leaked key's assertions let no device in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_service_key_lets_no_device_in_by_its_assertion() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, _client, _view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    factoryd::anchor_account_for_tests(&instance.url, Vec::new(), 1);
+    let device = new_device().await;
+    let (_, answer) = knock(&local, &device, "", &assertion(&instance, &account, &device)).await;
+    assert!(matches!(answer, Body::Error(_)), "turned away: {answer:?}");
+}

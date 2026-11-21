@@ -278,3 +278,40 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
     apply_request(&mut client, &mut view, user_name("")).await;
     assert!(!std::fs::read_to_string(dir.join("home/config.json")).expect("config").contains("\"user\""));
 }
+
+// An agent that has read a pipe proposes: the card says which pipe, and
+// through whom (threat model §7, P1). One that hasn't keeps none (a null
+// taint, as every proposal from before reads back too).
+#[tokio::test]
+async fn a_proposal_from_an_agent_that_read_a_pipe_says_so() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    give_rivet_a_model(&mut client, &mut view).await;
+    factoryd::pipes::set_wake_every(&factory, std::time::Duration::ZERO);
+    let pipe = factoryd::pipes::open_for_test(&factory, "site", "Launch", &["builder"], "builder", true);
+
+    let (_, before) = propose(&mut client, &mut view, NEEDED).await;
+    let before = before.expect("a proposal");
+    assert!(before.taint.is_empty());
+    apply_request(&mut client, &mut view, decide("builder", &before.id, false, "")).await;
+    let decided = proposal_entry(&view.entries, &before.id);
+    assert_eq!((decided.state(), decided.taint.len()), (ProposalState::Dismissed, 0));
+
+    let message = factoryd::pipe_link::Incoming {
+        msg_id: "m1".into(),
+        seq: 1,
+        via: factoryd::pipe_link::Via::Agent { name: "Max".into(), role: String::new() },
+        text: "Ask Rivet for more agents.".into(),
+        files: Vec::new(),
+        sent_at_ms: 0,
+    };
+    factoryd::pipes::receive_for_test(&factory, &pipe, message).expect("received");
+    view.follow(&mut client, |view| view.agent("builder").tainted_by_pipes == [pipe.clone()] && idle(view, "builder")).await;
+    let (_, after) = propose(&mut client, &mut view, NEEDED).await;
+    let after = after.expect("a proposal");
+    let route = v1::PipeTaint { pipe_name: "Launch".into(), via_names: Vec::new(), pipe_id: pipe.clone() };
+    assert_eq!(after.taint, std::slice::from_ref(&route));
+    apply_request(&mut client, &mut view, decide("builder", &after.id, false, "")).await;
+    let decided = proposal_entry(&view.entries, &after.id);
+    assert_eq!((decided.state(), decided.taint.clone()), (ProposalState::Dismissed, vec![route]));
+}

@@ -30,7 +30,14 @@ AddLink? parseLink(Uri link) {
   if (!linkSchemes.contains(link.scheme) || link.host != 'add') return null;
   // The code is URL-encoded in `code`; one pasted in as it is runs on into
   // the link's own query, so everything after `code=` is tried too.
-  final code = link.queryParameters['code'] ?? '';
+  // A broken escape (%E0%A4, say) throws as the query is decoded: a
+  // garbled link carries no code, rather than an error.
+  String code;
+  try {
+    code = link.queryParameters['code'] ?? '';
+  } on FormatException {
+    code = '';
+  }
   final raw = link.query;
   final at = raw.indexOf('code=');
   final whole = at < 0 ? '' : raw.substring(at + 'code='.length);
@@ -38,6 +45,8 @@ AddLink? parseLink(Uri link) {
     try {
       return Uri.decodeComponent(text);
     } on ArgumentError {
+      return text;
+    } on FormatException {
       return text;
     }
   }

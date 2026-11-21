@@ -311,13 +311,15 @@ async fn agents_are_arranged_and_nested_in_the_sidebar_and_folded_for_every_devi
     apply_request(&mut client, &mut view, arrange("frontend", "coordinator", "backend", None)).await;
     assert_eq!(tree(&view), ["rivet@", "coordinator@web", "frontend@web>coordinator", "backend@web>coordinator", "lead@app"]);
     let config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
-    assert_eq!(config.agent("backend").and_then(|agent| agent.parent.as_deref()), Some("coordinator"));
+    // Nested is led (#234): the nesting is the lead, kept as `lead`.
+    assert_eq!(config.agent("backend").and_then(|agent| agent.lead.as_deref()), Some("coordinator"));
+    assert_eq!(view.agent("backend").lead_id, "coordinator");
 
     // Nonsense is refused with a reason.
     match apply_request(&mut client, &mut view, arrange("coordinator", "frontend", "", None)).await {
         Body::Error(error) => {
             assert_eq!(error.code(), ErrorCode::InvalidRequest);
-            assert_eq!(error.message, "Coordinator can't go under itself or one of its own agents");
+            assert_eq!(error.message, "Frontend reports to Coordinator, so Coordinator can't report to Frontend.");
         }
         other => panic!("expected an error, got {other:?}"),
     }

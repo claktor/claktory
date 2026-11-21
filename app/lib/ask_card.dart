@@ -12,13 +12,16 @@ import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'selection.dart' show SelectableArea;
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
 /// (written, when it asks for one) or approval, or Dismiss, which leaves it
 /// to the agent's judgment. A sibling of the proposal card, in the agent's
-/// color. The backend sends the entry back answered; the card keeps
-/// nothing but what's being typed.
+/// color. Its words select and copy like the conversation's, wherever it
+/// shows, and a command in the body (a fenced code block) has Copy beside
+/// it. The backend sends the entry back answered; the card keeps nothing
+/// but what's being typed.
 class AskPersonCard extends StatefulWidget {
   const AskPersonCard(
     this.ask, {
@@ -82,7 +85,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ask.state == AskPersonState.ASK_PERSON_STATE_UNSPECIFIED;
     final dismissed = ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED;
     final decided = ask.decidedMs.toInt();
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.all(Space.l),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.06),
@@ -120,7 +123,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ),
           if (ask.body.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
-            Markdown(ask.body, color: palette.textMuted),
+            for (final (i, part) in askBodyParts(ask.body).indexed) ...[
+              if (i > 0) const SizedBox(height: Space.s),
+              part.command
+                  ? _Command(part.text)
+                  : Markdown(part.text, color: palette.textMuted),
+            ],
           ],
           const SizedBox(height: Space.m),
           if (pending)
@@ -130,6 +138,14 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ],
       ),
     );
+    // In a conversation its words are the conversation's to select; in
+    // Needs you, where nothing around it is, its own (a selection needs an
+    // overlay for its menu, which the app always has).
+    if (SelectionContainer.maybeOf(context) != null ||
+        Overlay.maybeOf(context) == null) {
+      return card;
+    }
+    return SelectableArea(child: card);
   }
 
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
@@ -232,4 +248,56 @@ class _AskPersonCardState extends State<AskPersonCard> {
       ],
     ];
   }
+}
+
+/// A part of an ask's body: Markdown, or a command (a fenced code block's
+/// contents) to show with Copy.
+typedef AskBodyPart = ({String text, bool command});
+
+/// [body] split at its fenced code blocks (``` or ~~~), in order; the
+/// Markdown between them as it is.
+List<AskBodyPart> askBodyParts(String body) {
+  final fence = RegExp(
+    r'^ {0,3}(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^ {0,3}\1[ \t]*$',
+    multiLine: true,
+  );
+  final parts = <AskBodyPart>[];
+  var at = 0;
+  for (final match in fence.allMatches(body)) {
+    final before = body.substring(at, match.start).trim();
+    if (before.isNotEmpty) parts.add((text: before, command: false));
+    final code = match.group(2)!.replaceFirst(RegExp(r'\n$'), '');
+    if (code.trim().isNotEmpty) parts.add((text: code, command: true));
+    at = match.end;
+  }
+  final rest = body.substring(at).trim();
+  if (rest.isNotEmpty) parts.add((text: rest, command: false));
+  return parts;
+}
+
+/// A command from an ask's body in a code block, with Copy at its end (on
+/// a phone at large text, under it): "Copied" once it's on the clipboard.
+class _Command extends StatefulWidget {
+  const _Command(this.command);
+
+  final String command;
+
+  @override
+  State<_Command> createState() => _CommandState();
+}
+
+class _CommandState extends State<_Command> {
+  var _copied = false;
+
+  @override
+  Widget build(BuildContext context) => ActionLine(
+    lead: CodeBlock(widget.command),
+    action: Button(
+      label: _copied ? 'Copied' : 'Copy',
+      onPressed: () {
+        Clipboard.setData(ClipboardData(text: widget.command));
+        setState(() => _copied = true);
+      },
+    ),
+  );
 }

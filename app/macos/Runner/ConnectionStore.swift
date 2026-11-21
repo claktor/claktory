@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// Where this Mac keeps its connections (app/lib/connections.dart): the
+/// Where this Mac keeps its connections (app/lib/connections.dart), and the
+/// iPhone too (its Runner builds this same file): the
 /// pairing codes, each holding a token that lets in whoever has it, this
 /// Mac's iroh key for each, which one the window shows and what the person
 /// calls them. They're in the Keychain, readable by this app only, like the
@@ -19,67 +20,147 @@ final class ConnectionStore {
 
   private let defaults: UserDefaults
   /// Nil when this build can't use the Keychain.
-  private var keychain: SecretStore?
+  private let keychain: SecretStore?
+  /// Off once the Keychain failed to write on a Mac, which then writes user
+  /// defaults until the app starts again.
+  private var keychainWorks = true
+  /// Whether a write the Keychain refuses goes to user defaults instead
+  /// (the Mac) or fails (the iPhone, where nothing secret goes in a plist).
+  private let fallsBack: Bool
+  /// The last read failed: nothing is written until one succeeds or the
+  /// person starts over, so a store that couldn't be read is never written
+  /// over with nothing (Raj's DESIGN.md §5).
+  private(set) var readFailed = false
   private let log: (String) -> Void
 
-  init(defaults: UserDefaults, keychain: SecretStore?, log: @escaping (String) -> Void) {
+  init(
+    defaults: UserDefaults, keychain: SecretStore?, fallsBack: Bool = true,
+    log: @escaping (String) -> Void
+  ) {
     self.defaults = defaults
     self.keychain = keychain
+    self.fallsBack = fallsBack
     self.log = log
   }
 
-  /// This app's: in the login keychain under its own bundle id, so
-  /// Claktory and Claktory Dev never share or ask for each other's.
-  static func forThisApp(displayName: String) -> ConnectionStore {
-    let log = { (message: String) in NSLog("Claktory connections: %@", message) }
-    guard signedByATeam() else {
-      log("this build is signed ad hoc, so they stay in user defaults: the Keychain would ask for access after every build")
-      return ConnectionStore(defaults: .standard, keychain: nil, log: log)
+  #if os(macOS)
+    /// This app's: in the login keychain under its own bundle id, so
+    /// Claktory and Claktory Dev never share or ask for each other's.
+    static func forThisApp(displayName: String) -> ConnectionStore {
+      let log = { (message: String) in NSLog("Claktory connections: %@", message) }
+      guard signedByATeam() else {
+        log("this build is signed ad hoc, so they stay in user defaults: the Keychain would ask for access after every build")
+        return ConnectionStore(defaults: .standard, keychain: nil, log: log)
+      }
+      let item = KeychainItem(
+        service: "Claktory connections",
+        account: Bundle.main.bundleIdentifier ?? "dev.factory.app",
+        label: "\(displayName) connections")
+      return ConnectionStore(defaults: .standard, keychain: item, log: log)
     }
-    let item = KeychainItem(
-      service: "Claktory connections",
-      account: Bundle.main.bundleIdentifier ?? "dev.factory.app",
-      label: "\(displayName) connections")
-    return ConnectionStore(defaults: .standard, keychain: item, log: log)
-  }
+  #else
+    /// The iPhone's: in its keychain, readable after the first unlock, on
+    /// this device only.
+    static func forThisApp() -> ConnectionStore {
+      let item = KeychainItem(
+        service: "Claktory connections", account: "connections", label: nil,
+        accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+      return ConnectionStore(
+        defaults: .standard, keychain: item, fallsBack: false,
+        log: { NSLog("Claktory connections: %@", $0) })
+    }
+  #endif
 
-  /// What's kept. Any left in user defaults (from before, or written while
-  /// the Keychain failed) is newest: it moves to the Keychain and leaves
-  /// user defaults.
-  func read() -> [String: Any] {
+  /// What's kept: empty only when nothing ever was. Any left in user
+  /// defaults (from before, or written while the Keychain failed) is
+  /// newest: it moves to the Keychain and leaves user defaults. Throws a
+  /// [StoreFailure] when it can't be read, saying why
+  /// (credentials_unavailable: locked, denied, busy, worth trying again;
+  /// credentials_unreadable: there but not what was written).
+  func read() throws -> [String: Any] {
     let kept = defaults.dictionary(forKey: Self.defaultsKey)
-    guard let keychain else { return kept ?? [:] }
-    do {
-      if let kept {
+    guard let keychain, keychainWorks else {
+      readFailed = false
+      return kept ?? [:]
+    }
+    if let kept {
+      do {
         try keychain.write(Self.encode(kept))
         defaults.removeObject(forKey: Self.defaultsKey)
         log("moved from user defaults to the Keychain")
-        return kept
+      } catch {
+        fallBack(error)
       }
-      guard let data = try keychain.read() else { return [:] }
-      return Self.decode(data) ?? [:]
-    } catch {
-      fallBack(error)
-      return kept ?? [:]
+      readFailed = false
+      return kept
     }
+    let data: Data?
+    do {
+      data = try keychain.read()
+    } catch {
+      readFailed = true
+      log("couldn't read them: \(error)")
+      throw StoreFailure(code: "credentials_unavailable", message: "\(error)")
+    }
+    guard let data else {
+      readFailed = false
+      return [:]
+    }
+    guard let connections = Self.decode(data) else {
+      readFailed = true
+      log("what's kept can't be read as connections")
+      throw StoreFailure(
+        code: "credentials_unreadable", message: "What's kept isn't readable as connections.")
+    }
+    readFailed = false
+    return connections
   }
 
-  func write(_ connections: [String: Any]) {
-    if let keychain {
+  /// Keeps [connections]; refused (credentials_read_failed) while the last
+  /// read failed, and credentials_write_failed when it can't be kept.
+  func write(_ connections: [String: Any]) throws {
+    if readFailed {
+      throw StoreFailure(
+        code: "credentials_read_failed",
+        message: "They couldn't be read, so they aren't written over.")
+    }
+    if let keychain, keychainWorks {
       do {
         try keychain.write(Self.encode(connections))
         return
       } catch {
+        guard fallsBack else {
+          log("couldn't write them: \(error)")
+          throw StoreFailure(code: "credentials_write_failed", message: "\(error)")
+        }
         fallBack(error)
       }
     }
     defaults.set(connections, forKey: Self.defaultsKey)
   }
 
-  /// The Keychain failed (denied, locked): user defaults until the app
-  /// starts again, which then moves what was written there back.
+  /// Starts over, at the person's word: whatever's kept goes, wherever it
+  /// is, and writing is allowed again. credentials_reset_failed when the
+  /// Keychain won't let it go.
+  func reset() throws {
+    defaults.removeObject(forKey: Self.defaultsKey)
+    if let keychain {
+      do {
+        try keychain.delete()
+      } catch {
+        log("couldn't remove them: \(error)")
+        throw StoreFailure(code: "credentials_reset_failed", message: "\(error)")
+      }
+    }
+    keychainWorks = true
+    readFailed = false
+    log("started over")
+  }
+
+  /// The Keychain failed to write (denied, locked): user defaults until the
+  /// app starts again, which then moves what was written there back.
   private func fallBack(_ error: Error) {
-    keychain = nil
+    keychainWorks = false
     log("the Keychain failed (\(error)), so they're kept in user defaults until Claktory starts again")
   }
 
@@ -91,21 +172,32 @@ final class ConnectionStore {
     (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
   }
 
-  /// Whether this app's signature names a team: a Developer ID or Apple
-  /// Development identity, which stays the same from build to build.
-  static func signedByATeam() -> Bool {
-    var running: SecCode?
-    var code: SecStaticCode?
-    var info: CFDictionary?
-    guard SecCodeCopySelf([], &running) == errSecSuccess, let running,
-      SecCodeCopyStaticCode(running, [], &code) == errSecSuccess, let code,
-      SecCodeCopySigningInformation(
-        code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-      let info = info as? [String: Any]
-    else { return false }
-    let team = info[kSecCodeInfoTeamIdentifier as String] as? String
-    return !(team ?? "").isEmpty
-  }
+  #if os(macOS)
+    /// Whether this app's signature names a team: a Developer ID or Apple
+    /// Development identity, which stays the same from build to build.
+    static func signedByATeam() -> Bool {
+      var running: SecCode?
+      var code: SecStaticCode?
+      var info: CFDictionary?
+      guard SecCodeCopySelf([], &running) == errSecSuccess, let running,
+        SecCodeCopyStaticCode(running, [], &code) == errSecSuccess, let code,
+        SecCodeCopySigningInformation(
+          code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+        let info = info as? [String: Any]
+      else { return false }
+      let team = info[kSecCodeInfoTeamIdentifier as String] as? String
+      return !(team ?? "").isEmpty
+    }
+  #endif
+}
+
+/// Why the connections couldn't be read, written or removed: [code] is the
+/// app's (and Android's) name for it, [message] what the system said.
+struct StoreFailure: Error, CustomStringConvertible {
+  let code: String
+  let message: String
+
+  var description: String { "\(code): \(message)" }
 }
 
 /// One secret blob, kept somewhere only this app reads.
@@ -113,6 +205,8 @@ protocol SecretStore {
   /// Nil when there's none yet; throws when it can't be read.
   func read() throws -> Data?
   func write(_ data: Data) throws
+  /// Removes it; none there is no failure.
+  func delete() throws
 }
 
 struct KeychainError: Error, CustomStringConvertible {
@@ -131,8 +225,11 @@ struct KeychainError: Error, CustomStringConvertible {
 struct KeychainItem: SecretStore {
   let service: String
   let account: String
-  /// What Keychain Access shows it as.
-  let label: String
+  /// What Keychain Access shows it as (the Mac's).
+  let label: String?
+  /// When it can be read (the iPhone's: after the first unlock, this
+  /// device only); the keychain's default when nil.
+  var accessible: CFString? = nil
 
   private var query: [String: Any] {
     [
@@ -156,19 +253,21 @@ struct KeychainItem: SecretStore {
   }
 
   func write(_ data: Data) throws {
-    let update = [kSecValueData as String: data]
+    var update: [String: Any] = [kSecValueData as String: data]
+    if let accessible { update[kSecAttrAccessible as String] = accessible }
     let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
     if status == errSecSuccess { return }
     guard status == errSecItemNotFound else { throw KeychainError(status: status) }
-    var add = query
-    add[kSecValueData as String] = data
-    add[kSecAttrLabel as String] = label
+    var add = query.merging(update) { $1 }
+    if let label { add[kSecAttrLabel as String] = label }
     let added = SecItemAdd(add as CFDictionary, nil)
     guard added == errSecSuccess else { throw KeychainError(status: added) }
   }
 
-  /// Removes it (tests).
-  func delete() {
-    SecItemDelete(query as CFDictionary)
+  func delete() throws {
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw KeychainError(status: status)
+    }
   }
 }

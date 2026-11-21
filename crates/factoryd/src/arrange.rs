@@ -1,54 +1,25 @@
 //! How agents are arranged in the sidebar: within each project (or the
-//! workspace) they come in config.json's order, and an agent can be nested
-//! under another one in the same place. Nesting is purely visual.
+//! workspace) they come in config.json's order, and an agent is nested under
+//! its lead (`lead`, #234) when the lead is in the same place. One led by an
+//! admin agent elsewhere, such as Rivet, shows at the top level.
 //!
-//! A `parent` that's missing, in another project, or part of a loop is
-//! ignored: the agent shows at the top level.
-
-use std::collections::HashSet;
+//! The nesting is the hierarchy: dropping an agent onto another makes it
+//! that agent's report. config.json's `parent`, which nested agents purely
+//! visually before, is read and kept but no longer used, so an older
+//! Claktory (a rollback) still shows what it did.
 
 use crate::config::{AgentConfig, Config};
 use crate::factory::RequestError;
 
-/// The agent `id` is nested under, if its `parent` is valid.
+/// A drop the app wouldn't make from what it shows: the list changed under
+/// the drag (on another device, or Rivet moved an agent).
+const CHANGED: &str = "The list changed while you were dragging. Try again.";
+
+/// The agent `id` is nested under: its lead, when that's in its place.
 pub(crate) fn parent_of<'a>(config: &'a Config, id: &str) -> Option<&'a str> {
     let agent = config.agent(id)?;
-    let parent = config.agent(agent.parent.as_deref()?)?;
-    if parent.project != agent.project {
-        return None;
-    }
-    // Walk up: reaching the agent again means a loop.
-    let mut seen = HashSet::from([agent.id.as_str()]);
-    let mut current = parent;
-    loop {
-        if current.id == agent.id {
-            return None;
-        }
-        if !seen.insert(current.id.as_str()) {
-            return Some(parent.id.as_str());
-        }
-        match current.parent.as_deref().and_then(|next| config.agent(next)) {
-            Some(next) if next.project == current.project => current = next,
-            _ => return Some(parent.id.as_str()),
-        }
-    }
-}
-
-/// `parent` values that are ignored, and why, for the log.
-pub(crate) fn ignored_parents(config: &Config) -> Vec<String> {
-    let mut ignored = Vec::new();
-    for agent in &config.agents {
-        let Some(parent) = agent.parent.as_deref() else { continue };
-        if parent_of(config, &agent.id).is_none() {
-            let why = match config.agent(parent) {
-                None => "there's no such agent",
-                Some(other) if other.project != agent.project => "it's in another project",
-                Some(_) => "it would nest the agent under itself",
-            };
-            ignored.push(format!("agent \"{}\": parent \"{parent}\" is ignored: {why}", agent.id));
-        }
-    }
-    ignored
+    let lead = config.lead(agent)?;
+    (lead.project == agent.project).then_some(lead.id.as_str())
 }
 
 /// The agent and everything nested under it, in config order.
@@ -81,6 +52,10 @@ fn subtree(config: &Config, id: &str) -> Vec<String> {
 /// to keep its project or take the parent's; Some("") for the workspace), and
 /// into `folder` of that project (Some("") for the project's own folder; None
 /// keeps each agent's folder, or the project's own when the project changes).
+///
+/// `parent` becomes its lead, as UpdateAgent's `lead_id` would; the top
+/// level clears a lead in the same place, and keeps an admin agent's from
+/// elsewhere. Its reports move with it, and keep reporting to it.
 pub(crate) fn arrange(
     config: &mut Config,
     id: &str,
@@ -98,7 +73,12 @@ pub(crate) fn arrange(
     if let Some(parent) = parent
         && moving.contains(&parent.id)
     {
-        return Err(RequestError::Arrange(format!("{} can't go under itself or one of its own agents", agent.name)));
+        let why = if parent.id == agent.id {
+            format!("{} can't report to itself.", agent.name)
+        } else {
+            format!("{} reports to {}, so {} can't report to {}.", parent.name, agent.name, agent.name, parent.name)
+        };
+        return Err(RequestError::Lead(why));
     }
     let destination: Option<String> = match (project, parent) {
         (Some(project), parent) => {
@@ -111,12 +91,24 @@ pub(crate) fn arrange(
             if let Some(parent) = parent
                 && parent.project != project
             {
-                return Err(RequestError::Arrange(format!("{} is in another project", parent.name)));
+                return Err(RequestError::Arrange(CHANGED.to_owned()));
             }
             project
         }
         (None, Some(parent)) => parent.project.clone(),
         (None, None) => agent.project.clone(),
+    };
+    if let Some(parent) = parent {
+        let placed = AgentConfig { project: destination.clone(), ..agent.clone() };
+        if let Some(why) = config.lead_refused(&placed, &parent.id) {
+            return Err(RequestError::Lead(why));
+        }
+    }
+    // At the top level, a lead that would nest it there goes; an admin
+    // agent's from elsewhere stays.
+    let lead = match parent {
+        Some(parent) => Some(parent.id.clone()),
+        None => agent.lead.clone().filter(|lead| config.agent(lead).is_some_and(|lead| lead.project != destination)),
     };
     let parent = parent.map(|parent| parent.id.clone());
     if let Some(folder) = folder
@@ -131,7 +123,7 @@ pub(crate) fn arrange(
             || sibling.project != destination
             || parent_of(config, before).map(str::to_owned) != parent
         {
-            return Err(RequestError::Arrange(format!("{} isn't among the agents it's going next to", sibling.name)));
+            return Err(RequestError::Arrange(CHANGED.to_owned()));
         }
     }
 
@@ -151,7 +143,7 @@ pub(crate) fn arrange(
         }
         agent.project = destination.clone();
     }
-    taken[0].parent = parent;
+    taken[0].lead = lead;
     let index = match before {
         Some(before) => config.agents.iter().position(|agent| agent.id == before).unwrap_or(config.agents.len()),
         // Last: after the last agent already where it's going.
@@ -173,13 +165,19 @@ pub(crate) fn check_folder(config: &Config, id: &str, folder: &str) -> Result<()
     }
 }
 
-/// An agent is about to go: the agents nested under it move up to its own
-/// parent.
+/// An agent is about to go: those that report to it report to its own lead
+/// instead, which led them through it already, so nothing more is granted.
 pub(crate) fn lift_children(config: &mut Config, going: &str) {
-    let grandparent = parent_of(config, going).map(str::to_owned);
-    for agent in &mut config.agents {
-        if agent.parent.as_deref() == Some(going) {
-            agent.parent = grandparent.clone();
+    let grandparent = config.agent(going).and_then(|agent| config.lead(agent)).map(|lead| lead.id.clone());
+    let reports: Vec<String> =
+        config.agents.iter().filter(|agent| agent.lead.as_deref() == Some(going)).map(|agent| agent.id.clone()).collect();
+    for id in reports {
+        let lead = grandparent.clone().filter(|lead| {
+            let agent = config.agent(&id);
+            agent.is_some_and(|agent| lead != &agent.id && config.lead_refused(agent, lead).is_none())
+        });
+        if let Some(agent) = config.agent_mut(&id) {
+            agent.lead = lead;
         }
     }
 }
@@ -189,13 +187,13 @@ mod tests {
     use super::*;
     use crate::config::ProjectConfig;
 
-    fn agent(id: &str, project: Option<&str>, parent: Option<&str>) -> AgentConfig {
+    fn agent(id: &str, project: Option<&str>, lead: Option<&str>) -> AgentConfig {
         AgentConfig {
             id: id.into(),
             color: String::new(),
             project: project.map(str::to_owned),
-            parent: parent.map(str::to_owned),
-            lead: None,
+            parent: None,
+            lead: lead.map(str::to_owned),
             name: id.to_uppercase(),
             role: String::new(),
             prompt: String::new(),
@@ -244,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn parents_that_cannot_hold_are_ignored() {
+    fn agents_nest_under_their_lead_in_their_place_only() {
         let mut config = factory();
         config.agents.push(agent("ghost", Some("web"), Some("nobody")));
         config.agents.push(agent("far", Some("app"), Some("coordinator")));
@@ -256,7 +254,35 @@ mod tests {
             assert_eq!(parent_of(&config, loose), None, "{loose}");
         }
         assert_eq!(parent_of(&config, "c"), Some("a"), "under an agent in a loop, which itself shows at the top");
-        assert_eq!(ignored_parents(&config).len(), 4);
+        // Led by an admin agent elsewhere: its lead, at the top level.
+        config.agents[0].extensions = serde_json::from_value(serde_json::json!({"agents": {"admin": true}})).unwrap();
+        config.agents.push(agent("ops", Some("web"), Some("rivet")));
+        assert_eq!(parent_of(&config, "ops"), None);
+        // `parent` is no longer read.
+        let mut visual = agent("old", Some("web"), None);
+        visual.parent = Some("coordinator".into());
+        config.agents.push(visual);
+        assert_eq!(parent_of(&config, "old"), None);
+    }
+
+    #[test]
+    fn dropping_onto_an_agent_makes_it_the_lead_and_the_top_level_clears_one_in_the_same_place() {
+        let mut config = factory();
+        arrange(&mut config, "writer", Some("backend"), None, None, None).expect("arrange");
+        assert_eq!(config.agent("writer").unwrap().lead.as_deref(), Some("backend"));
+        // A reorder among its siblings keeps it.
+        arrange(&mut config, "writer", Some("backend"), None, None, None).expect("arrange");
+        assert_eq!(config.agent("writer").unwrap().lead.as_deref(), Some("backend"));
+        arrange(&mut config, "writer", None, Some("coordinator"), None, None).expect("arrange");
+        assert_eq!(config.agent("writer").unwrap().lead, None);
+        // An admin agent's lead from elsewhere stays at the top level.
+        config.agents[0].extensions = serde_json::from_value(serde_json::json!({"agents": {"admin": true}})).unwrap();
+        config.agent_mut("writer").unwrap().lead = Some("rivet".into());
+        arrange(&mut config, "writer", None, None, None, None).expect("arrange");
+        assert_eq!(config.agent("writer").unwrap().lead.as_deref(), Some("rivet"));
+        // Cycles are refused in UpdateAgent's words.
+        let refused = arrange(&mut config, "coordinator", Some("tester"), None, None, None).expect_err("a loop");
+        assert_eq!(refused.to_string(), "TESTER reports to COORDINATOR, so COORDINATOR can't report to TESTER.");
     }
 
     #[test]
@@ -334,5 +360,9 @@ mod tests {
         lift_children(&mut config, "frontend");
         config.agents.retain(|agent| agent.id != "frontend");
         assert_eq!(parent_of(&config, "tester"), Some("coordinator"));
+        // A top-level agent's reports go to the top level.
+        lift_children(&mut config, "coordinator");
+        config.agents.retain(|agent| agent.id != "coordinator");
+        assert_eq!((config.agent("tester").unwrap().lead.clone(), config.agent("backend").unwrap().lead.clone()), (None, None));
     }
 }

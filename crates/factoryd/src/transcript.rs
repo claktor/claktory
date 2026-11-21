@@ -177,6 +177,10 @@ pub struct Transcript {
     context_tokens: u64,
     /// The entries waiting for the person's answer (see `waits`).
     waiting: BTreeSet<u64>,
+    /// The person's message the next assistant text answers (its entry seq):
+    /// set by their message, cleared by an event (the text then answers the
+    /// event, which quotes nothing) and taken by the first assistant text.
+    awaiting_reply: Option<u64>,
     live: Live,
 }
 
@@ -213,6 +217,7 @@ impl Transcript {
             frame: None,
             context_tokens: 0,
             waiting: BTreeSet::new(),
+            awaiting_reply: None,
             live: Live::default(),
         };
         let mut numbers = Vec::new();
@@ -263,6 +268,7 @@ impl Transcript {
             frame: None,
             context_tokens: 0,
             waiting: BTreeSet::new(),
+            awaiting_reply: None,
             live: Live::default(),
         };
         transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
@@ -396,8 +402,19 @@ impl Transcript {
     }
 
     /// Shows a device an agent adds as it is now (added, say); the changed
-    /// entry, or None if the conversation doesn't show it.
-    pub fn set_device_pairing(&mut self, pairing: v1::DevicePairing) -> Option<Entry> {
+    /// entry, or None if the conversation doesn't show it. An update that
+    /// doesn't say what the device is keeps what the card says: the kind
+    /// comes from the devices_add call, and factory.db doesn't record it.
+    pub fn set_device_pairing(&mut self, mut pairing: v1::DevicePairing) -> Option<Entry> {
+        if pairing.kind() == v1::DeviceKind::Unspecified {
+            let shown = self.entries.iter().rev().find_map(|entry| match &entry.kind {
+                Some(Kind::DevicePairing(shown)) if shown.id == pairing.id => Some(shown.kind),
+                _ => None,
+            });
+            if let Some(kind) = shown {
+                pairing.kind = kind;
+            }
+        }
         self.replace_shown(Kind::DevicePairing(pairing))
     }
 
@@ -559,7 +576,13 @@ impl Transcript {
     /// Shows a complete message, reusing the entries its stream already created.
     fn show(&mut self, message: &Message) -> Vec<Entry> {
         match message {
-            Message::User(user) => vec![self.push(user.timestamp as i64, user_kind(user))],
+            Message::User(user) => {
+                let entry = self.push(user.timestamp as i64, user_kind(user));
+                // The next assistant text answers the latest prompt: the
+                // person's message is quoted by it; an event's reply isn't.
+                self.awaiting_reply = user.event.is_none().then_some(entry.seq);
+                vec![entry]
+            }
             Message::Assistant(assistant) => self.show_assistant(assistant),
             Message::ToolResult(result) => {
                 let state = if result.is_error { ToolCallState::Failed } else { ToolCallState::Done };
@@ -639,7 +662,15 @@ impl Transcript {
                     seq
                 }
                 None => {
-                    let entry = self.push_part(timestamp, kind);
+                    let mut entry = self.push_part(timestamp, kind);
+                    // Shown whole (a reload, a response that didn't stream):
+                    // the first text after the person's message answers it.
+                    if matches!(part, AssistantPart::Text { .. })
+                        && let Some(from) = self.awaiting_reply.take()
+                    {
+                        entry.replied_to = Some(from);
+                        self.entries[entry.seq as usize].replied_to = Some(from);
+                    }
                     let seq = entry.seq;
                     changed.push(entry);
                     seq
@@ -695,7 +726,14 @@ impl Transcript {
         match event {
             StreamEvent::TextStart { content_index, partial } => {
                 let kind = Kind::Assistant(v1::AssistantText::default());
-                changes.push(Change::Entry(self.start_part(content_index, partial.timestamp as i64, kind)));
+                let mut entry = self.start_part(content_index, partial.timestamp as i64, kind);
+                // The first text after the person's message answers it, from
+                // its first streamed word on.
+                if let Some(from) = self.awaiting_reply.take() {
+                    entry.replied_to = Some(from);
+                    self.entries[entry.seq as usize].replied_to = Some(from);
+                }
+                changes.push(Change::Entry(entry));
             }
             StreamEvent::ThinkingStart { content_index, partial } => {
                 let kind = Kind::Thinking(v1::Thinking::default());
@@ -789,7 +827,7 @@ impl Transcript {
     }
 
     fn push(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
-        let entry = Entry { seq: self.entries.len() as u64, timestamp_ms, kind: Some(kind), reply: 0 };
+        let entry = Entry { seq: self.entries.len() as u64, timestamp_ms, kind: Some(kind), reply: 0, replied_to: None };
         self.entries.push(entry.clone());
         self.track(&entry);
         entry
@@ -799,7 +837,7 @@ impl Transcript {
     fn push_part(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
         let seq = self.entries.len() as u64;
         let reply = *self.live.reply.get_or_insert(seq);
-        let entry = Entry { seq, timestamp_ms, kind: Some(kind), reply };
+        let entry = Entry { seq, timestamp_ms, kind: Some(kind), reply, replied_to: None };
         self.entries.push(entry.clone());
         entry
     }

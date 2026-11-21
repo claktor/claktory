@@ -100,11 +100,14 @@ async fn a_lead_sees_how_its_team_is_set_up_and_no_one_else_does() {
     // Leads that can't be: in another project (not an admin), itself, a loop, no one.
     assert_eq!(
         refused(apply_request(&mut client, &mut view, lead("sam", "scout")).await),
-        "Scout is in another project; a lead is in the same project, or an admin agent"
+        "Scout is in another project, so Sam can't report to Scout. Choose an agent in Sam's project, or an admin agent."
     );
-    assert_eq!(refused(apply_request(&mut client, &mut view, lead("sam", "sam")).await), "Sam can't lead itself");
-    assert_eq!(refused(apply_request(&mut client, &mut view, lead("mike", "lena")).await), "Lena reports to Mike, so it can't lead it");
-    assert_eq!(refused(apply_request(&mut client, &mut view, lead("mike", "nobody")).await), "no agent with id \"nobody\"");
+    assert_eq!(refused(apply_request(&mut client, &mut view, lead("sam", "sam")).await), "Sam can't report to itself.");
+    assert_eq!(
+        refused(apply_request(&mut client, &mut view, lead("mike", "lena")).await),
+        "Lena reports to Mike, so Mike can't report to Lena."
+    );
+    assert_eq!(refused(apply_request(&mut client, &mut view, lead("mike", "nobody")).await), "That agent no longer exists.");
     assert_eq!(view.agent("mike").lead_id, "rivet", "unchanged");
 
     // Mike's team: itself, Sam, and Lena through Sam.
@@ -227,11 +230,13 @@ async fn leads_that_no_longer_fit_go_when_agents_move_or_are_deleted() {
     ack(apply_request(&mut client, &mut view, lead("sam", "mike")).await);
     ack(apply_request(&mut client, &mut view, lead("lena", "sam")).await);
 
-    // Sam moves to Lab: its lead stays in Site, and Lena's lead left it.
+    // Sam moves to Lab: its lead stays in Site, and Lena, who reports to
+    // it, goes with it, nested under it there (#234).
     let moved = v1::UpdateAgent { agent_id: "sam".into(), project_id: Some("lab".into()), ..Default::default() };
     ack(apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(moved)).await);
-    assert_eq!((view.agent("sam").lead_id.as_str(), view.agent("lena").lead_id.as_str()), ("", ""));
-    assert_eq!((lead_in_config(&dir, "sam"), lead_in_config(&dir, "lena")), (None, None));
+    assert_eq!((view.agent("sam").lead_id.as_str(), view.agent("lena").lead_id.as_str()), ("", "sam"));
+    assert_eq!((view.agent("lena").project_id.as_str(), view.agent("lena").parent_id.as_str()), ("lab", "sam"));
+    assert_eq!((lead_in_config(&dir, "sam"), lead_in_config(&dir, "lena")), (None, Some("sam".to_owned())));
     assert_eq!(view.agent("omar").lead_id, "mike", "the rest stay");
 
     // Mike is deleted: no one reports to it any more.
@@ -270,4 +275,75 @@ async fn a_lead_written_by_hand_that_cant_be_is_ignored_and_kept() {
     let no = call(&mut client, &mut view, "mike", "agents_inspect", r#"{"agent":"sam"}"#).await;
     assert!(no.starts_with("Sam isn't on your team"), "{no}");
     assert_eq!(lead_in_config(&dir, "mike").as_deref(), Some("sam"));
+}
+
+/// #234: the sidebar's nesting is the lead. Dropping an agent onto another
+/// makes it its report, a reorder among siblings changes no lead, a lead
+/// set in config.json nests it, and `parent` (the old, visual nesting) is
+/// no longer read: agents nested that way are at the top level.
+#[tokio::test]
+async fn nesting_in_the_sidebar_is_the_lead() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    for name in ["Mike", "Sam", "Lena", "Omar"] {
+        apply_request(&mut client, &mut view, create_agent("site", name, "")).await;
+    }
+    let arrange = |agent: &str, parent: &str, before: &str| {
+        client_message::Body::ArrangeAgent(v1::ArrangeAgent {
+            agent_id: agent.into(),
+            parent_id: parent.into(),
+            before_id: before.into(),
+            project_id: None,
+            folder_id: None,
+        })
+    };
+    let placed = |view: &View, agent: &str| (view.agent(agent).parent_id.clone(), view.agent(agent).lead_id.clone());
+
+    // Dropped onto Mike: Sam reports to it, nested under it.
+    ack(apply_request(&mut client, &mut view, arrange("sam", "mike", "")).await);
+    ack(apply_request(&mut client, &mut view, arrange("lena", "mike", "")).await);
+    assert_eq!(placed(&view, "sam"), ("mike".to_owned(), "mike".to_owned()));
+    assert_eq!(lead_in_config(&dir, "sam").as_deref(), Some("mike"));
+    // A reorder among Mike's reports changes no lead.
+    ack(apply_request(&mut client, &mut view, arrange("lena", "mike", "sam")).await);
+    assert_eq!(placed(&view, "lena"), ("mike".to_owned(), "mike".to_owned()));
+    let order: Vec<&str> = view.workspace.agents.iter().map(|agent| agent.id.as_str()).filter(|id| ["sam", "lena"].contains(id)).collect();
+    assert_eq!(order, ["lena", "sam"]);
+    // A loop is refused in UpdateAgent's words, with nothing changed.
+    assert_eq!(
+        refused(apply_request(&mut client, &mut view, arrange("mike", "sam", "")).await),
+        "Sam reports to Mike, so Mike can't report to Sam."
+    );
+    // Back to the top level: no lead.
+    ack(apply_request(&mut client, &mut view, arrange("lena", "", "")).await);
+    assert_eq!(placed(&view, "lena"), (String::new(), String::new()));
+
+    // Sam is deleted: Omar, who reported to it, reports to Mike, which led it through Sam.
+    ack(apply_request(&mut client, &mut view, lead("omar", "sam")).await);
+    assert_eq!(placed(&view, "omar"), ("sam".to_owned(), "sam".to_owned()));
+    ack(apply_request(&mut client, &mut view, client_message::Body::DeleteAgent(v1::DeleteAgent { agent_id: "sam".into() })).await);
+    assert_eq!(placed(&view, "omar"), ("mike".to_owned(), "mike".to_owned()));
+
+    // In config.json (as Rivet sets it): a lead nests, a parent doesn't, and stays written.
+    let path = dir.join("home/config.json");
+    let mut written = config(&dir);
+    for agent in written["agents"].as_array_mut().expect("agents") {
+        match agent["id"].as_str() {
+            Some("lena") => agent["lead"] = "omar".into(),
+            Some("omar") => {
+                agent["parent"] = "lena".into();
+                agent.as_object_mut().expect("agent").remove("lead");
+            }
+            _ => {}
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&written).expect("json")).expect("write");
+    view.follow(&mut client, |view| view.agent("lena").parent_id == "omar").await;
+    assert_eq!(placed(&view, "omar"), (String::new(), String::new()), "a parent alone nests nothing");
+    let written = config(&dir);
+    let omar = written["agents"].as_array().expect("agents").iter().find(|agent| agent["id"] == "omar").expect("omar").clone();
+    assert_eq!(omar["parent"], "lena", "kept, for an older Claktory");
 }

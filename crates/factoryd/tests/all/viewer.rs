@@ -163,6 +163,56 @@ async fn an_agent_shows_the_person_a_file_once() {
     assert!(said(&view).expect("said").starts_with("No such file: "));
 }
 
+/// show opens at most 5 files beside the conversation: a sixth is refused,
+/// saying the way out; a file already open still shows, and once the person
+/// closes panes there's room again.
+#[tokio::test]
+async fn show_refuses_a_sixth_file_until_one_closes() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let site = dir.join("site");
+    apply_request(&mut client, &mut view, create_project("Site", &site)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    for number in 1..=6 {
+        std::fs::write(site.join(format!("f{number}.md")), "notes\n").expect("write");
+    }
+    let show = |number: usize| send_message("builder", &format!(r#"call show {{"path":"f{number}.md"}}"#));
+    let said = |view: &View| {
+        view.entries.iter().rev().find_map(|entry| match &entry.kind {
+            Some(Kind::ToolCall(call)) => Some(call.output.clone()),
+            _ => None,
+        })
+    };
+    for number in 1..=5 {
+        apply_request(&mut client, &mut view, show(number)).await;
+        view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == number + 1).await;
+    }
+
+    // The sixth is refused, saying the way out, and the layout stands.
+    apply_request(&mut client, &mut view, show(6)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    let refused = said(&view).expect("said");
+    assert!(refused.contains("5 files open beside it") && refused.contains("close one"), "{refused}");
+    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 6);
+
+    // A file already open still shows: its pane, not a new one.
+    let glows = view.highlights.len();
+    apply_request(&mut client, &mut view, show(3)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && view.highlights.len() > glows).await;
+    assert!(said(&view).expect("said").starts_with("Showing "));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 6);
+
+    // The person closes panes; there's room again.
+    let f1 = std::fs::canonicalize(site.join("f1.md")).expect("path").display().to_string();
+    let smaller = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", &f1)]);
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(smaller))).await, Body::Ack(_)));
+    apply_request(&mut client, &mut view, show(6)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 3).await;
+    assert!(said(&view).expect("said").starts_with("Showing "));
+}
+
 #[tokio::test]
 async fn a_video_is_shown_and_played_a_range_at_a_time() {
     const CHUNK: u64 = 8 * 1024 * 1024;

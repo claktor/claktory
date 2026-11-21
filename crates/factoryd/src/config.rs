@@ -799,18 +799,21 @@ impl Config {
     /// another agent, in its project or an admin agent, and not one that
     /// reports to `agent`.
     pub fn lead_refused(&self, agent: &AgentConfig, lead: &str) -> Option<String> {
-        let Some(lead) = self.agent(lead) else { return Some(format!("no agent with id \"{lead}\"")) };
+        let Some(lead) = self.agent(lead) else { return Some("That agent no longer exists.".to_owned()) };
         if lead.id == agent.id {
-            return Some(format!("{} can't lead itself", agent.name));
+            return Some(format!("{} can't report to itself.", agent.name));
         }
         if lead.project != agent.project && !crate::proposals::is_admin(lead) {
-            return Some(format!("{} is in another project; a lead is in the same project, or an admin agent", lead.name));
+            return Some(format!(
+                "{} is in another project, so {} can't report to {}. Choose an agent in {}'s project, or an admin agent.",
+                lead.name, agent.name, lead.name, agent.name
+            ));
         }
         let mut seen = HashSet::new();
         let mut next = Some(lead);
         while let Some(current) = next {
             if current.id == agent.id {
-                return Some(format!("{} reports to {}, so it can't lead it", lead.name, agent.name));
+                return Some(format!("{} reports to {}, so {} can't report to {}.", lead.name, agent.name, agent.name, lead.name));
             }
             if !seen.insert(current.id.as_str()) {
                 break;

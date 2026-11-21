@@ -643,7 +643,7 @@ message UpdateAgent {
   // (INVALID_REQUEST) unless it's another agent, in the same project or an
   // admin agent, that doesn't report to this one, directly or through
   // others. Moving the agent to another project drops a lead that no
-  // longer fits, and the leads of agents that reported to it.
+  // longer fits; the agents that report to it move with it.
   optional string lead_id = 15;
   // The model a step its model refused is retried on (see
   // Agent.fallback_model); empty falls back to the Claktory-wide default
@@ -945,8 +945,12 @@ message ShowAllFiles {
 
 // Moves an agent in the sidebar: to a place among its siblings, under another
 // agent, or into another project. Its children (and theirs) come with it.
-// Refused, with nothing changed, if an id is unknown or it would be placed
-// under itself or one of its own children.
+// Nesting is the lead: under another agent, the agent reports to it
+// (Agent.lead_id), refused as UpdateAgent.lead_id is; at the top level, a
+// lead in the same place is cleared, and an admin agent's from elsewhere
+// kept. Among the same parent's agents, only the order changes. Refused, with
+// nothing changed, if an id is unknown or it would be placed under itself or
+// one of its own children.
 message ArrangeAgent {
   string agent_id = 1;
   // The agent to nest it under; empty for the top level. In another project,
@@ -2505,8 +2509,9 @@ message Agent {
   bool unseen = 13;
   // One per extension in `Workspace.extensions`, in that order.
   repeated AgentExtension extensions = 14;
-  // The agent it's nested under in the sidebar, in the same project or
-  // workspace; empty at the top level. Purely visual. Agents come in sidebar
+  // The agent it's nested under in the sidebar: its lead (lead_id) when that
+  // is in the same project or workspace; empty at the top level, including
+  // for an agent led by an admin agent elsewhere. Agents come in sidebar
   // order: within a project (or the workspace), siblings in list order.
   string parent_id = 15;
   // Its children are folded away in the sidebar.
@@ -2601,6 +2606,12 @@ message Agent {
   // the Claktory-wide default (Settings.default_fallback_model), and with
   // both empty a refusal just ends the step.
   string fallback_model = 37;
+  // Quarantined for a pipe (Pipe.quarantined_ids): it can only read and
+  // answer the pipe (pipe_read, pipe_send, pipe_status), read its inbox,
+  // write in its outbox and ask the person. It has no commands, no other
+  // files, no secrets, web or messaging, and no other extension's tools.
+  // Only the person lifts it (UpdatePipe.quarantined).
+  bool quarantined = 38;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -2777,6 +2788,13 @@ message Entry {
   // them. 0 for entries that don't come from a response (the person's
   // messages, events, notices, compaction dividers).
   uint64 reply = 10;
+  // The person's message this answers: the seq of the latest UserText the
+  // agent took before this text, set on the first assistant text that
+  // follows it (while it streams too) and absent everywhere else. Check
+  // presence, not 0: seq 0 is a real entry. It can point before a
+  // compaction divider or an unloaded page. Replies to events and monitors
+  // carry nothing.
+  optional uint64 replied_to = 17;
 }
 
 // Something other than the person prompting the agent: Factory itself,
@@ -2810,6 +2828,10 @@ message Proposal {
   string comment = 4;
   // When it was approved or dismissed, in ms since 1970; 0 while pending.
   int64 decided_at_ms = 5;
+  // The pipes the agent had read when it proposed (Agent.tainted_by_pipes),
+  // each with the agents it came through: what it proposes may come from
+  // the other side. Empty when it had read none.
+  repeated PipeTaint taint = 6;
 }
 
 // A device an agent adds for the person (an admin agent's devices_add tool,
@@ -2840,6 +2862,11 @@ message DevicePairing {
   // When the device was added or the pairing ended, in ms since 1970; 0
   // while WAITING or ASKING.
   int64 ended_ms = 7;
+  // What the device is, as the agent said when it started the pairing
+  // (devices_add's kind): the card leads with scanning for a phone or
+  // tablet and pasting for a computer. UNSPECIFIED when it didn't say:
+  // the card offers both ways.
+  DeviceKind kind = 8;
 }
 
 enum DevicePairingState {
@@ -4364,6 +4391,16 @@ message Pipe {
   // Messages waiting for the person's decision (held outgoing, held
   // incoming), by PipeMessage.seq: like Agent.waiting_seqs, for "Needs you".
   repeated uint64 waiting_seqs = 20;
+  // Members quarantined for it (Agent.quarantined): they can only read and
+  // answer it and draft files in its outbox. A liaison agent is, from the
+  // moment it's made; so is each member whose role was "Liaison" when
+  // quarantine came.
+  repeated string quarantined_ids = 21;
+  // Members that can run commands on this computer (every member not
+  // quarantined): the approval and settings screens warn about each, since
+  // a misleading message from the other side could make it reach the
+  // person's files, keys and network.
+  repeated string can_run_commands_ids = 22;
 }
 
 enum PipeState {
@@ -4548,6 +4585,9 @@ message ApprovePipe {
   // Makes a liaison agent of that name in the pipe's project (see
   // AddPipeLiaison), a member and the lead.
   string liaison_name = 5;
+  // Members to quarantine (Pipe.quarantined_ids), among member_ids; unset
+  // quarantines none of them. The liaison is quarantined either way.
+  PipeMembers quarantined = 6;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -4560,6 +4600,12 @@ message UpdatePipe {
   optional string lead_id = 6;
   PipeLimits limits = 7;
   optional bool review_outgoing = 8;
+  // The members quarantined for it (Pipe.quarantined_ids), all of them;
+  // ids that aren't members are refused. A member left out is released:
+  // it gets its usual tools back, though it has read the pipe until its
+  // conversation is cleared (Agent.tainted_by_pipes). Only the person can
+  // send this: no agent tool reaches it.
+  PipeMembers quarantined = 9;
 }
 
 message PipeMembers {
@@ -4630,7 +4676,8 @@ message PipeMessagePage {
 }
 
 // Makes a liaison agent for a pipe: in the pipe's project, with no secrets,
-// no web and no messaging, a member and the lead. Answered with Ack; the
+// no web and no messaging, a member and the lead, quarantined for it
+// (Agent.quarantined). Answered with Ack; the
 // agent shows in Pipe.member_ids and lead_id.
 message AddPipeLiaison {
   string pipe_id = 1;
@@ -4653,6 +4700,21 @@ message SecretApproval {
   int64 decided_ms = 6;
   // Its id, for Claktory's records.
   string id = 7;
+  // Where what it read came from: for each pipe it has read, the agents it
+  // came through (pipe_names lists the same pipes, for older apps).
+  repeated PipeTaint taint = 8;
+}
+
+// A pipe an agent has read, and how: `via_names` are the agents, by name
+// when it asked, that what it read came through, first the one that read
+// the pipe itself (each messaged the next); empty when the agent read the
+// pipe itself. "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read
+// it, told Bruno, and Bruno told this agent.
+message PipeTaint {
+  string pipe_name = 1;
+  repeated string via_names = 2;
+  // The pipe's Pipe.id, to find who's at its other end; it may be gone.
+  string pipe_id = 3;
 }
 
 enum SecretApprovalState {
@@ -4695,6 +4757,11 @@ message AskPerson {
   string answer = 6;
   // When it was answered or dismissed, in ms since 1970; 0 while pending.
   int64 decided_ms = 7;
+  // The pipes the agent had read when it asked (Agent.tainted_by_pipes),
+  // each with the agents it came through: what it asks may come from the
+  // other side ("from Liaison, which reads the pipe with Ana's Claktory").
+  // Empty when it had read none.
+  repeated PipeTaint taint = 8;
 }
 
 enum AskPersonState {

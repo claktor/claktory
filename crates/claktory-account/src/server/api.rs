@@ -38,8 +38,10 @@ pub(super) async fn start(service: &Service, mut request: db::Request, code: &st
     request.expires = service.now() + CODE_LIFETIME;
     db::insert_request(&service.db(), &request)?;
     let mail = match (request.kind.as_str(), &request.name) {
-        ("device", Some(device)) => mail::device_code_mail(&service.config.mail_domain, &request.email, code, device),
-        _ => mail::code_mail(&service.config.mail_domain, &request.email, code),
+        ("device", Some(device)) => {
+            mail::device_code_mail(&service.config.mail_domain, &service.config.public_url, &request.email, code, device)
+        }
+        _ => mail::code_mail(&service.config.mail_domain, &service.config.public_url, &request.email, code),
     };
     if service.send(&mail, true).await.is_err() {
         db::delete_request(&service.db(), &request.id)?;
@@ -76,6 +78,7 @@ pub(super) fn well_known(service: &Service) -> Result<Reply, ApiError> {
         api: API,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         service_key: service.service_key(),
+        service_key_statement: service.config.service_key_statement.clone(),
     }))
 }
 

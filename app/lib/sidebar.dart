@@ -466,6 +466,15 @@ class _Place extends StatelessWidget {
   /// How far this place's agents sit in from its header.
   final double indent;
 
+  /// The request that puts [agent] at this place's top level, last: out of
+  /// any folder, and from under its lead.
+  ArrangeAgent _toPlace(Agent agent) {
+    final arrange = ArrangeAgent(agentId: agent.id);
+    if (agent.projectId != projectId) arrange.projectId = projectId;
+    if (agent.folderId.isNotEmpty) arrange.folderId = '';
+    return arrange;
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -494,9 +503,13 @@ class _Place extends StatelessWidget {
     void select(Agent agent, {bool reach = false}) =>
         _selectAgent(context, agent, reach: reach);
 
-    Widget branch(_Node node, List<_Node> siblings) {
+    // Reports sit in under their lead, up to a few levels: deeper ones
+    // line up with the last, so names keep their room.
+    final cap = touchFirst(context) ? 3 : 4;
+    Widget branch(_Node node, List<_Node> siblings, [int depth = 0]) {
       final children = node.children;
       final open = children.isNotEmpty && !node.agent.collapsed;
+      final inset = depth < cap ? Space.l : 0.0;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -512,6 +525,7 @@ class _Place extends StatelessWidget {
             gutter: gutter,
             children: children,
             siblings: [for (final sibling in siblings) sibling.agent.id],
+            inset: inset,
           ),
           if (children.isNotEmpty)
             AnimatedSize(
@@ -520,11 +534,12 @@ class _Place extends StatelessWidget {
               alignment: Alignment.topCenter,
               child: open
                   ? Padding(
-                      padding: const EdgeInsets.only(left: Space.l),
+                      padding: EdgeInsets.only(left: inset),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          for (final child in children) branch(child, children),
+                          for (final child in children)
+                            branch(child, children, depth + 1),
                         ],
                       ),
                     )
@@ -543,15 +558,20 @@ class _Place extends StatelessWidget {
                 agent.parentId.isNotEmpty ||
                 agent.folderId.isNotEmpty);
       },
-      onAcceptWithDetails: (details) {
+      onMove: (details) {
         final agent = backend.workspace.agent(details.data);
-        final arrange = ArrangeAgent(agentId: details.data);
-        if (agent != null && agent.projectId != projectId) {
-          arrange.projectId = projectId;
-        }
-        // Out of any folder, into the project's own.
-        if (agent != null && agent.folderId.isNotEmpty) arrange.folderId = '';
-        fireAndLog(backend.arrangeAgent(arrange));
+        if (agent == null) return;
+        _dropSays.value = _sayDrop(
+          backend.workspace.workspace,
+          agent,
+          _toPlace(agent),
+        );
+      },
+      onLeave: (_) => _dropSays.value = null,
+      onAcceptWithDetails: (details) {
+        _dropSays.value = null;
+        final agent = backend.workspace.agent(details.data);
+        if (agent != null) _arrangeOrSay(context, agent, _toPlace(agent));
       },
       builder: (context, candidates, _) => AnimatedContainer(
         duration: Motion.fast,
@@ -623,6 +643,16 @@ class _FolderGroup extends StatefulWidget {
 }
 
 class _FolderGroupState extends State<_FolderGroup> {
+  /// The request that puts [agent] at the top of this folder's agents,
+  /// last, and from under its lead.
+  ArrangeAgent _toFolder(Agent agent) {
+    final arrange = ArrangeAgent(agentId: agent.id, folderId: widget.folder.id);
+    if (agent.projectId != widget.projectId) {
+      arrange.projectId = widget.projectId;
+    }
+    return arrange;
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -641,16 +671,20 @@ class _FolderGroupState extends State<_FolderGroup> {
                 agent.projectId != widget.projectId ||
                 agent.parentId.isNotEmpty);
       },
-      onAcceptWithDetails: (details) {
+      onMove: (details) {
         final agent = backend.workspace.agent(details.data);
-        final arrange = ArrangeAgent(
-          agentId: details.data,
-          folderId: folder.id,
+        if (agent == null) return;
+        _dropSays.value = _sayDrop(
+          backend.workspace.workspace,
+          agent,
+          _toFolder(agent),
         );
-        if (agent != null && agent.projectId != widget.projectId) {
-          arrange.projectId = widget.projectId;
-        }
-        fireAndLog(backend.arrangeAgent(arrange));
+      },
+      onLeave: (_) => _dropSays.value = null,
+      onAcceptWithDetails: (details) {
+        _dropSays.value = null;
+        final agent = backend.workspace.agent(details.data);
+        if (agent != null) _arrangeOrSay(context, agent, _toFolder(agent));
       },
       builder: (context, candidates, _) => AnimatedContainer(
         duration: Motion.fast,
@@ -1197,9 +1231,13 @@ class _AgentRow extends StatefulWidget {
     required this.gutter,
     required this.children,
     required this.siblings,
+    this.inset = Space.l,
   });
 
   final Agent agent;
+
+  /// How far in its reports sit (none past the deepest level shown).
+  final double inset;
 
   /// The place it's in: a project's id, or empty for the workspace.
   final String projectId;
@@ -1314,6 +1352,7 @@ class _AgentRowState extends State<_AgentRow> {
     final draggable = _SidebarDraggable<String>(
       data: agent.id,
       dragAnchorStrategy: pointerDragAnchorStrategy,
+      onDragEnd: (_) => _dropSays.value = null,
       feedback: _DragFeedback(name: agent.name, palette: palette),
       childWhenDragging: Opacity(opacity: 0.4, child: row),
       child: row,
@@ -1322,18 +1361,31 @@ class _AgentRowState extends State<_AgentRow> {
       onWillAcceptWithDetails: (details) =>
           _accepts(details.data) || _isOwn(details.data),
       onMove: (details) {
-        if (!_accepts(details.data)) return;
+        if (!_accepts(details.data)) {
+          _dropSays.value = null;
+          return;
+        }
         final drop = _zone(details.offset);
+        final dragged = backend.workspace.agent(details.data)!;
+        _dropSays.value = _sayDrop(
+          backend.workspace.workspace,
+          dragged,
+          _arrange(dragged, drop),
+        );
         if (drop != _drop) setState(() => _drop = drop);
       },
-      onLeave: (_) => setState(() => _drop = null),
+      onLeave: (_) {
+        _dropSays.value = null;
+        setState(() => _drop = null);
+      },
       onAcceptWithDetails: (details) {
+        _dropSays.value = null;
         if (_isOwn(details.data)) return;
         final dragged = backend.workspace.agent(details.data);
         final drop = _drop ?? _zone(details.offset);
         setState(() => _drop = null);
         if (dragged != null) {
-          fireAndLog(backend.arrangeAgent(_arrange(dragged, drop)));
+          _arrangeOrSay(context, dragged, _arrange(dragged, drop));
         }
       },
       builder: (context, _, _) => Stack(
@@ -1357,7 +1409,7 @@ class _AgentRowState extends State<_AgentRow> {
           // level it would land at.
           if (_drop == _Drop.before || _drop == _Drop.after)
             Positioned(
-              left: _drop == _Drop.after && _open ? Space.l : 0,
+              left: _drop == _Drop.after && _open ? widget.inset : 0,
               right: 0,
               top: _drop == _Drop.before ? -1 : null,
               bottom: _drop == _Drop.after ? -1 : null,
@@ -1412,8 +1464,8 @@ class _AgentRowState extends State<_AgentRow> {
                   : Semantics(
                       button: true,
                       label: agent.collapsed
-                          ? 'Show agents under ${agent.name}'
-                          : 'Hide agents under ${agent.name}',
+                          ? "Show ${agent.name}'s reports"
+                          : "Hide ${agent.name}'s reports",
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => fireAndLog(
@@ -1465,6 +1517,13 @@ class _AgentRowState extends State<_AgentRow> {
                   : palette.textFaint,
             ),
           ),
+          // Whom it reports to, for VoiceOver: what the nesting shows, and
+          // an admin lead (Rivet) the nesting can't.
+          if (backend.workspace.agent(agent.leadId) case final lead?)
+            Semantics(
+              label: 'reports to ${lead.name}',
+              child: const SizedBox(),
+            ),
           if (agent.queuedMessages > 0)
             Text(
               '${agent.queuedMessages}',
@@ -1562,24 +1621,125 @@ class _DragFeedback extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final type = TypeScale.of(context);
     return Transform.translate(
       offset: const Offset(8, -14),
-      child: Container(
-        height: 28,
-        padding: const EdgeInsets.symmetric(horizontal: Space.m),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: palette.sidebar,
-          borderRadius: BorderRadius.circular(Radii.control),
-          border: Border.all(color: palette.hairline),
-          boxShadow: floatingShadow,
-        ),
-        child: Text(
-          name,
-          style: TypeScale.of(context).body
-              .copyWith(color: palette.text, decoration: TextDecoration.none),
+      // What letting go there does, under the name, while it changes who
+      // the agent reports to ("Reports to Mike", "Reports to no one"); nothing for
+      // a plain reorder.
+      child: ValueListenableBuilder<String?>(
+        valueListenable: _dropSays,
+        builder: (context, says, _) => Container(
+          constraints: const BoxConstraints(minHeight: 28),
+          padding: EdgeInsets.symmetric(
+            horizontal: Space.m,
+            vertical: says == null ? 0 : Space.xs,
+          ),
+          decoration: BoxDecoration(
+            color: palette.sidebar,
+            borderRadius: BorderRadius.circular(Radii.control),
+            border: Border.all(
+              color: says == null ? palette.hairline : palette.signal,
+            ),
+            boxShadow: floatingShadow,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                name,
+                style: type.body.copyWith(
+                  color: palette.text,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+              if (says != null)
+                Text(
+                  says,
+                  style: type.caption.copyWith(
+                    color: palette.signal,
+                    fontWeight: FontWeight.w500,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+/// What the drop under the dragged agent would do to its lead, for its
+/// feedback; null while it only reorders.
+final _dropSays = ValueNotifier<String?>(null);
+
+/// What [arrange] does to [dragged]'s place in the hierarchy, said plainly:
+/// "Reports to Mike" when it nests it, "Reports to no one" when it takes it out from
+/// under its lead, "Moves to Claktory" into another project's top level;
+/// null when it's only a reorder among the same agents.
+String? _sayDrop(Workspace workspace, Agent dragged, ArrangeAgent arrange) {
+  String nameOf(String id) =>
+      workspace.agents.where((a) => a.id == id).firstOrNull?.name ?? '';
+  if (arrange.parentId.isNotEmpty) {
+    return arrange.parentId == dragged.parentId && !arrange.hasProjectId()
+        ? null
+        : 'Reports to ${nameOf(arrange.parentId)}';
+  }
+  if (arrange.hasProjectId()) {
+    final project = workspace.projects
+        .where((p) => p.id == arrange.projectId)
+        .firstOrNull;
+    return 'Moves to ${project?.name ?? 'the workspace'}';
+  }
+  return dragged.parentId.isEmpty ? null : 'Reports to no one';
+}
+
+/// Sends [arrange]; a refusal (a lead the backend won't take) says why.
+void _arrangeOrSay(BuildContext context, Agent dragged, ArrangeAgent arrange) {
+  final backend = AppScope.of(context);
+  backend.arrangeAgent(arrange).catchError((Object error) {
+    if (!context.mounted || error is! RequestFailure) return;
+    unawaited(
+      showModal(
+        context,
+        (context, close) => _Refused(
+          title: "Couldn't move ${dragged.name}",
+          why: error.message,
+          close: close,
+        ),
+      ),
+    );
+  }, test: (error) => error is RequestFailure);
+}
+
+/// A drop the backend refused: what didn't happen, why, and OK.
+class _Refused extends StatelessWidget {
+  const _Refused({required this.title, required this.why, required this.close});
+
+  final String title;
+  final String why;
+  final VoidCallback close;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(title, style: type.emphasis.copyWith(color: palette.text)),
+        const SizedBox(height: Space.s),
+        Text(why, style: type.body.copyWith(color: palette.textMuted)),
+        const SizedBox(height: Space.l),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Button(label: 'OK', primary: true, onPressed: close),
+        ),
+      ],
     );
   }
 }
@@ -2831,6 +2991,7 @@ class _SidebarDraggable<T extends Object> extends Draggable<T> {
     super.data,
     super.childWhenDragging,
     super.dragAnchorStrategy,
+    super.onDragEnd,
   });
 
   @override

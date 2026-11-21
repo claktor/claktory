@@ -48,6 +48,38 @@ String pipePeerName(Pipe pipe) {
   return 'the other side';
 }
 
+/// The other side of [pipe] as its Claktory is called ("Ana's Claktory"),
+/// else its person's name: the words for what an agent read or is limited
+/// to.
+String pipePeerClaktory(Pipe pipe) => pipe.peer.claktoryName.isNotEmpty
+    ? pipe.peer.claktoryName
+    : pipePeerName(pipe);
+
+/// The pipes [agentId] is limited to (Pipe.quarantined_ids).
+List<Pipe> pipesLimiting(Workspace workspace, String agentId) => [
+  for (final pipe in workspace.pipes)
+    if (pipe.quarantinedIds.contains(agentId)) pipe,
+];
+
+/// "Limited to the pipe with Ana's Claktory", or to several: "…the pipes
+/// with Ana's Claktory and Lea's Claktory".
+String pipeLimitText(List<Pipe> pipes) {
+  final peers = [for (final pipe in pipes) pipePeerClaktory(pipe)];
+  final names = peers.length < 2
+      ? peers.join()
+      : '${peers.sublist(0, peers.length - 1).join(', ')} and ${peers.last}';
+  return peers.length < 2
+      ? 'Limited to the pipe with $names'
+      : 'Limited to the pipes with $names';
+}
+
+/// The agents that have read [pipe] (Agent.tainted_by_pipes), in the
+/// sidebar's order.
+List<Agent> pipeReaders(Workspace workspace, Pipe pipe) => [
+  for (final agent in workspace.agents)
+    if (agent.taintedByPipes.contains(pipe.id)) agent,
+];
+
 /// How many things in [pipe] wait for the person: messages held for them,
 /// its approval, and the loop breaker's Continue.
 int pipeWaiting(Pipe pipe) =>
@@ -167,6 +199,7 @@ class PipeView extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _PipeHeader(pipe: pipe, project: project, onMenu: onMenu),
+          _Readers(pipe: pipe),
           Expanded(child: body),
           _PipeFoot(pipe: pipe),
         ],
@@ -235,6 +268,13 @@ class _PipeHeader extends StatelessWidget {
                   _Mark(text: 'Not verified', color: palette.textMuted),
                   const SizedBox(width: Space.s),
                 ],
+                if (pipe.canRunCommandsIds.isNotEmpty) ...[
+                  _Mark(
+                    text: canRunCommandsText(pipe.canRunCommandsIds.length),
+                    color: palette.textMuted,
+                  ),
+                  const SizedBox(width: Space.s),
+                ],
                 if (pipe.state == PipeState.PIPE_STATE_OPEN) ...[
                   Dot(
                     color: pipe.online ? pipeColor : palette.textFaint,
@@ -258,6 +298,190 @@ class _PipeHeader extends StatelessWidget {
     );
   }
 }
+
+/// Under a pipe's header, the agents that have read it
+/// (Agent.tainted_by_pipes): each with "Has read this pipe" and Clear
+/// conversation…, so the person can start one afresh on purpose. Nothing
+/// when none has.
+class _Readers extends StatelessWidget {
+  const _Readers({required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final store = AppScope.of(context).workspace;
+    final readers = pipeReaders(store.workspace, pipe);
+    if (readers.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.xl,
+        vertical: Space.xs,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: palette.hairline)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final agent in readers)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  AgentCharacter(agent: agent, size: 20),
+                  const SizedBox(width: Space.s),
+                  Expanded(
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: agent.name,
+                            style: TextStyle(
+                              color: palette.text,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          TextSpan(
+                            text: '  Has read this pipe',
+                            style: TextStyle(color: palette.textMuted),
+                          ),
+                        ],
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyles.caption,
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  Button(
+                    label: 'Clear conversation…',
+                    onPressed: () => showModal(
+                      context,
+                      (context, close) =>
+                          _ClearConversation(agent: agent, close: close),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Asks before clearing [agent]'s conversation (its /clear), which starts
+/// it afresh with nothing it read of a pipe.
+class _ClearConversation extends StatefulWidget {
+  const _ClearConversation({required this.agent, required this.close});
+
+  final Agent agent;
+  final VoidCallback close;
+
+  @override
+  State<_ClearConversation> createState() => _ClearConversationState();
+}
+
+class _ClearConversationState extends State<_ClearConversation> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _clear() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context).runCommand(widget.agent.id, 'clear', '');
+      widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = widget.agent.name;
+    return FormFrame(
+      title: "Clear $name's conversation?",
+      body:
+          "$name stops what it's doing and starts a new, empty "
+          'conversation, without anything it read from pipes. Its checklist '
+          'and memory stay.',
+      error: _error,
+      fields: const [],
+      submitLabel: 'Clear conversation',
+      onSubmit: _busy ? null : _clear,
+      onCancel: widget.close,
+    );
+  }
+}
+
+/// Beside an agent's name, while it's limited to pipes (Agent.quarantined):
+/// a portal and "Limited to the pipe with Ana's Claktory" in a hairline
+/// capsule, like "Not verified". Nothing otherwise.
+class PipeLimitMark extends StatelessWidget {
+  const PipeLimitMark({super.key, required this.agent});
+
+  final Agent agent;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!agent.quarantined) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    final pipes = pipesLimiting(
+      AppScope.of(context).workspace.workspace,
+      agent.id,
+    );
+    final text = pipes.isEmpty ? 'Limited to a pipe' : pipeLimitText(pipes);
+    return Semantics(
+      label: text,
+      excludeSemantics: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Space.s - 2,
+          vertical: 1,
+        ),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.control),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const PortalGlyph(size: 12),
+            const SizedBox(width: Space.xs),
+            Flexible(
+              child: Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "1 agent can run commands", "2 agents can run commands": the pipe's
+/// members that aren't limited to it.
+String canRunCommandsText(int count) =>
+    '$count ${count == 1 ? 'agent' : 'agents'} can run commands';
+
+/// What a member that can run commands could do if the other side misled
+/// it, under its switch.
+String canRunCommandsWarning(String agent, Pipe pipe) =>
+    '$agent can run commands on this computer. If a message from '
+    '${pipePeerClaktory(pipe)} misleads it, it could reach your files, '
+    'secrets and network before you see anything. Turn this off unless it '
+    'needs to run commands.';
 
 /// A quiet mark in a hairline capsule, such as "Not verified".
 class _Mark extends StatelessWidget {
@@ -443,6 +667,10 @@ const _liaison = '\u0000liaison';
 
 class _PipeApprovalCardState extends State<PipeApprovalCard> {
   final _members = <String>{};
+
+  /// Each member's "Can run commands on this computer", once the person
+  /// turned it; else [_canRunByDefault].
+  final _canRun = <String, bool>{};
   var _lead = _liaison;
   final _liaisonName = TextEditingController(text: 'Liaison');
   var _busy = false;
@@ -472,6 +700,17 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           memberIds: approve ? _members : const <String>[],
           leadId: approve && !liaison ? _lead : '',
           liaisonName: approve && liaison ? _liaisonName.text.trim() : '',
+          quarantined: approve
+              ? PipeMembers(
+                  agentIds: [
+                    for (final agent in AppScope.of(
+                      context,
+                    ).workspace.agentsIn(widget.pipe.projectId))
+                      if (_members.contains(agent.id) && !_canRunOf(agent))
+                        agent.id,
+                  ],
+                )
+              : null,
         ),
       );
     } on RequestFailure catch (failure) {
@@ -480,6 +719,13 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  /// A liaison is limited to the pipe unless the person says otherwise;
+  /// every other member can run commands, with the warning.
+  static bool _canRunByDefault(Agent agent) =>
+      agent.role.trim().toLowerCase() != 'liaison';
+
+  bool _canRunOf(Agent agent) => _canRun[agent.id] ?? _canRunByDefault(agent);
 
   @override
   Widget build(BuildContext context) {
@@ -573,26 +819,35 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           for (final agent in agents)
             Padding(
               padding: const EdgeInsets.only(top: Space.xs),
-              child: _MemberLine(
-                agent: agent,
-                value: _members.contains(agent.id),
-                onChanged: (on) => setState(() {
-                  if (on) {
-                    _members.add(agent.id);
-                  } else {
-                    _members.remove(agent.id);
-                  }
-                }),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _MemberLine(
+                    agent: agent,
+                    value: _members.contains(agent.id),
+                    onChanged: (on) => setState(() {
+                      if (on) {
+                        _members.add(agent.id);
+                      } else {
+                        _members.remove(agent.id);
+                      }
+                    }),
+                  ),
+                  if (_members.contains(agent.id))
+                    _CommandsLine(
+                      agent: agent,
+                      pipe: pipe,
+                      value: _canRunOf(agent),
+                      onChanged: (on) => setState(() => _canRun[agent.id] = on),
+                    ),
+                ],
               ),
             ),
           const SizedBox(height: Space.m),
           Field(
             label: 'Lead',
             note: _lead == _liaison
-                ? 'Safest: a new agent just for this pipe, told of '
-                      'each message. It has no secrets, web or '
-                      "messaging, and works only in the project's "
-                      'folder.'
+                ? liaisonNote
                 : 'Told of each message that comes in. The others '
                       'read the pipe when they choose.',
             child: Select<String>(
@@ -1287,6 +1542,10 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   late final _purpose = TextEditingController(text: _start.purpose);
   late final _prompt = TextEditingController(text: _start.prompt);
   late final _members = {..._start.memberIds};
+
+  /// The members limited to the pipe (Pipe.quarantined_ids), as the form
+  /// has them.
+  late final _limited = {..._start.quarantinedIds};
   late var _lead = _start.leadId;
   late var _review = _start.reviewOutgoing;
   late final _perHour = TextEditingController(
@@ -1301,6 +1560,9 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
 
   /// What the form is showing instead of the settings.
   var _confirmingClose = false;
+
+  /// The member the person turned on "Can run commands", to confirm.
+  Agent? _letting;
   var _addingLiaison = false;
   final _liaisonName = TextEditingController(text: 'Liaison');
 
@@ -1358,6 +1620,11 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     if (!_sameSet(_members, pipe.memberIds)) {
       update.members = PipeMembers(agentIds: _members);
     }
+    // All of them: a member left out is let run commands again.
+    final limited = _limited.intersection(_members);
+    if (!_sameSet(limited, pipe.quarantinedIds)) {
+      update.quarantined = PipeMembers(agentIds: limited);
+    }
     if (_lead != pipe.leadId) update.leadId = _lead;
     if (_review != pipe.reviewOutgoing) update.reviewOutgoing = _review;
     final limits = PipeLimits(
@@ -1413,12 +1680,33 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         onCancel: () => setState(() => _confirmingClose = false),
       );
     }
+    if (_letting case final agent?) {
+      final read = agent.taintedByPipes.contains(pipe.id);
+      return FormFrame(
+        title: 'Let ${agent.name} run commands on this computer?',
+        body: [
+          'It will be able to reach your files, secrets and network.',
+          if (read)
+            'It has read messages from ${pipePeerClaktory(pipe)}, so clear '
+                'its conversation first to start it afresh.',
+        ].join(' '),
+        error: null,
+        fields: const [],
+        submitLabel: 'Let it run commands',
+        onSubmit: () => setState(() {
+          _limited.remove(agent.id);
+          _letting = null;
+        }),
+        onCancel: () => setState(() => _letting = null),
+      );
+    }
     if (_addingLiaison) {
       return FormFrame(
         title: 'Add a liaison agent',
         body:
-            'A new agent just for this pipe, its lead: it has no secrets, no '
-            "web and no messaging, and works only in the project's folder.",
+            'A new agent to lead this pipe and do nothing else. It can only '
+            "read and answer the pipe: it can't run commands, reach your "
+            'files or secrets, use the web or message your other agents.',
         error: _error,
         fields: [
           Field(
@@ -1489,16 +1777,42 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
               for (final agent in agents)
                 Padding(
                   padding: const EdgeInsets.only(bottom: Space.xs),
-                  child: _MemberLine(
-                    agent: agent,
-                    value: _members.contains(agent.id),
-                    onChanged: (on) => setState(() {
-                      if (on) {
-                        _members.add(agent.id);
-                      } else {
-                        _members.remove(agent.id);
-                      }
-                    }),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _MemberLine(
+                        agent: agent,
+                        value: _members.contains(agent.id),
+                        onChanged: (on) => setState(() {
+                          if (on) {
+                            _members.add(agent.id);
+                            // A liaison is limited unless the person
+                            // lets it run commands.
+                            if (!pipe.memberIds.contains(agent.id) &&
+                                agent.role.trim().toLowerCase() == 'liaison') {
+                              _limited.add(agent.id);
+                            }
+                          } else {
+                            _members.remove(agent.id);
+                          }
+                        }),
+                      ),
+                      if (_members.contains(agent.id))
+                        _CommandsLine(
+                          agent: agent,
+                          pipe: pipe,
+                          value: !_limited.contains(agent.id),
+                          onChanged: (on) => setState(() {
+                            if (on) {
+                              // Letting it out of the pipe is asked first.
+                              _letting = agent;
+                              _error = null;
+                            } else {
+                              _limited.add(agent.id);
+                            }
+                          }),
+                        ),
+                    ],
                   ),
                 ),
               if (open)
@@ -1585,6 +1899,60 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// What a new liaison agent is, beside the choice that makes one.
+const liaisonNote =
+    'Safest. A new agent just for this pipe, which can only read and answer '
+    "it: it can't run commands, reach your files or secrets, use the web or "
+    'message your other agents.';
+
+/// Under a member's line: whether it can run commands on this computer
+/// (off, it's limited to the pipe), indented to its name, with what that
+/// risks while it's on.
+class _CommandsLine extends StatelessWidget {
+  const _CommandsLine({
+    required this.agent,
+    required this.pipe,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final Agent agent;
+  final Pipe pipe;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      // Under the name, past the 20px character and its gap.
+      padding: const EdgeInsets.only(left: 20 + Space.s, top: Space.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _SwitchLine(
+            label: 'Can run commands on this computer',
+            value: value,
+            onChanged: onChanged,
+            child: Text(
+              'Can run commands on this computer',
+              style: TextStyles.caption.copyWith(color: palette.text),
+            ),
+          ),
+          if (value)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, right: Space.xl),
+              child: Text(
+                canRunCommandsWarning(agent.name, pipe),
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

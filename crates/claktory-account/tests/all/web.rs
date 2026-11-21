@@ -204,3 +204,21 @@ async fn delete_account_has_a_page_of_its_own_that_signs_in_first() {
     let page = instance.send("GET", "/account", Vec::new(), &[]).await.text();
     assert!(!page.contains("name=\"next\""), "{page}");
 }
+
+#[tokio::test]
+async fn the_mark_sign_in_emails_show_is_served_to_any_number_of_image_proxies() {
+    let instance = start().await;
+    let mut claktory = Claktory::new("203.0.113.7");
+    instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    let mail = instance.mail.sent().into_iter().last().expect("the code's email");
+    assert!(mail.html.contains("<img src=\"https://account.claktory.com/mark.png\""), "{}", mail.html);
+    assert!(mail.html.contains(&format!(">{}</div>", instance.last_code("matt@example.com"))), "the code, large");
+
+    // More than an IP's requests a minute: mail providers fetch it through few proxies.
+    for _ in 0..40 {
+        let mark = instance.send("GET", "/mark.png", Vec::new(), &[("x-forwarded-for", "192.0.2.80".into())]).await;
+        assert_eq!(mark.status, 200);
+        assert_eq!(mark.headers.get("content-type").and_then(|value| value.to_str().ok()), Some("image/png"));
+        assert!(mark.body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+}

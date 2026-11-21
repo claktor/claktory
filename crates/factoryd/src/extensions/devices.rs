@@ -66,7 +66,7 @@ CREATE INDEX device_pairings_by_agent ON device_pairings (agent, id);
 CREATE INDEX device_pairings_by_state ON device_pairings (state);
 ";
 
-const ADD: &str = "Add a device of the person's (a phone, a laptop) to Claktory, as Settings → Devices → Add a device does. name: what to call it, such as \"Matt's iPhone\". The person sees its pairing code in a card in your conversation, for 10 minutes, and scans or pastes it on the device; then they allow the device on this computer themselves. You never see the code. You're told when the device is added, or when the code ends first.";
+const ADD: &str = "Add a device of the person's (a phone, a laptop) to Claktory, as Settings → Devices → Add a device does. name: what to call it, such as \"Matt's iPhone\". kind: phone, tablet, laptop or desktop, when you know what the device is, so the card leads with the right way to connect (scanning for a phone or tablet, pasting for a computer); leave it out when you don't. The person sees its pairing code in a card in your conversation, for 10 minutes, and scans or pastes it on the device; then they allow the device on this computer themselves. You never see the code. You're told when the device is added, or when the code ends first.";
 const LIST: &str = "List the person's devices: those added, with whether they're connected, those waiting for the person to allow them, and codes not used yet.";
 const REMOVE: &str = "Remove one of the person's devices, by id or name, only when they ask: it can't connect to Claktory any more, and its open connections close. A device not added yet has its code cancelled.";
 
@@ -93,7 +93,10 @@ impl Extension for Devices {
         let name = json!({
             "type": "object",
             "required": ["name"],
-            "properties": {"name": {"type": "string", "minLength": 1}},
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "kind": {"type": "string", "enum": KINDS},
+            },
             "additionalProperties": false,
         });
         let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
@@ -145,6 +148,22 @@ where
 #[derive(Deserialize)]
 struct AddArgs {
     name: String,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// What a device can be said to be (devices_add's kind), as the agent
+/// writes it and as `details` carry it.
+const KINDS: [&str; 4] = ["phone", "tablet", "laptop", "desktop"];
+
+fn device_kind(word: &str) -> v1::DeviceKind {
+    match word {
+        "phone" => v1::DeviceKind::Phone,
+        "tablet" => v1::DeviceKind::Tablet,
+        "laptop" => v1::DeviceKind::Laptop,
+        "desktop" => v1::DeviceKind::Desktop,
+        _ => v1::DeviceKind::Unspecified,
+    }
 }
 
 #[derive(Deserialize)]
@@ -169,6 +188,11 @@ async fn add(factory: Arc<Factory>, agent: String, args: AddArgs) -> Result<Tool
     if name.chars().count() > MAX_NAME {
         return Err(format!("That name is too long: keep it to {MAX_NAME} characters."));
     }
+    let kind = match args.kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty()) {
+        Some(kind) if KINDS.contains(&kind) => Some(kind.to_owned()),
+        Some(kind) => return Err(format!("kind is \"phone\", \"tablet\", \"laptop\" or \"desktop\", or left out; got \"{kind}\".")),
+        None => None,
+    };
     let person = {
         let inner = factory.lock();
         super::caller(&inner.config, &agent)?;
@@ -201,10 +225,11 @@ async fn add(factory: Arc<Factory>, agent: String, args: AddArgs) -> Result<Tool
         device.name,
         remote::machine_name()
     );
-    Ok(ToolResult::text(
-        said,
-        json!({"device_pairing": id, "agent": agent, "device": device.id, "name": device.name, "expires_ms": expires}),
-    ))
+    let mut details = json!({"device_pairing": id, "agent": agent, "device": device.id, "name": device.name, "expires_ms": expires});
+    if let Some(kind) = kind {
+        details["kind"] = kind.into();
+    }
+    Ok(ToolResult::text(said, details))
 }
 
 /// The card a devices_add result shows (called directly, or through
@@ -223,6 +248,7 @@ pub(crate) fn started(tool: &str, is_error: bool, details: &Value) -> Option<v1:
         state: State::Waiting.into(),
         expires_ms: details.get("expires_ms").and_then(Value::as_i64).unwrap_or_default(),
         ended_ms: 0,
+        kind: device_kind(&text("kind")).into(),
     })
 }
 
@@ -329,6 +355,9 @@ impl Row {
             state: self.state.into(),
             expires_ms: self.expires,
             ended_ms: self.ended.unwrap_or_default(),
+            // Not recorded here: the shown card keeps what the call said
+            // (`Transcript::set_device_pairing` inherits it).
+            kind: v1::DeviceKind::Unspecified.into(),
         }
     }
 

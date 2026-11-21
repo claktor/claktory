@@ -5868,7 +5868,7 @@ class UpdateAgent extends $pb.GeneratedMessage {
   /// (INVALID_REQUEST) unless it's another agent, in the same project or an
   /// admin agent, that doesn't report to this one, directly or through
   /// others. Moving the agent to another project drops a lead that no
-  /// longer fits, and the leads of agents that reported to it.
+  /// longer fits; the agents that report to it move with it.
   @$pb.TagNumber(15)
   $core.String get leadId => $_getSZ(14);
   @$pb.TagNumber(15)
@@ -8250,8 +8250,12 @@ class ShowAllFiles extends $pb.GeneratedMessage {
 
 /// Moves an agent in the sidebar: to a place among its siblings, under another
 /// agent, or into another project. Its children (and theirs) come with it.
-/// Refused, with nothing changed, if an id is unknown or it would be placed
-/// under itself or one of its own children.
+/// Nesting is the lead: under another agent, the agent reports to it
+/// (Agent.lead_id), refused as UpdateAgent.lead_id is; at the top level, a
+/// lead in the same place is cleared, and an admin agent's from elsewhere
+/// kept. Among the same parent's agents, only the order changes. Refused, with
+/// nothing changed, if an id is unknown or it would be placed under itself or
+/// one of its own children.
 class ArrangeAgent extends $pb.GeneratedMessage {
   factory ArrangeAgent({
     $core.String? agentId,
@@ -18153,6 +18157,7 @@ class Agent extends $pb.GeneratedMessage {
     $fixnum.Int64? usageWaitUntilMs,
     $core.Iterable<$core.String>? taintedByPipes,
     $core.String? fallbackModel,
+    $core.bool? quarantined,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -18195,6 +18200,7 @@ class Agent extends $pb.GeneratedMessage {
     if (usageWaitUntilMs != null) result.usageWaitUntilMs = usageWaitUntilMs;
     if (taintedByPipes != null) result.taintedByPipes.addAll(taintedByPipes);
     if (fallbackModel != null) result.fallbackModel = fallbackModel;
+    if (quarantined != null) result.quarantined = quarantined;
     return result;
   }
 
@@ -18260,6 +18266,7 @@ class Agent extends $pb.GeneratedMessage {
     ..aInt64(35, _omitFieldNames ? '' : 'usageWaitUntilMs')
     ..pPS(36, _omitFieldNames ? '' : 'taintedByPipes')
     ..aOS(37, _omitFieldNames ? '' : 'fallbackModel')
+    ..aOB(38, _omitFieldNames ? '' : 'quarantined')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -18417,8 +18424,9 @@ class Agent extends $pb.GeneratedMessage {
   @$pb.TagNumber(14)
   $pb.PbList<AgentExtension> get extensions => $_getList(13);
 
-  /// The agent it's nested under in the sidebar, in the same project or
-  /// workspace; empty at the top level. Purely visual. Agents come in sidebar
+  /// The agent it's nested under in the sidebar: its lead (lead_id) when that
+  /// is in the same project or workspace; empty at the top level, including
+  /// for an agent led by an admin agent elsewhere. Agents come in sidebar
   /// order: within a project (or the workspace), siblings in list order.
   @$pb.TagNumber(15)
   $core.String get parentId => $_getSZ(14);
@@ -18680,6 +18688,20 @@ class Agent extends $pb.GeneratedMessage {
   $core.bool hasFallbackModel() => $_has(36);
   @$pb.TagNumber(37)
   void clearFallbackModel() => $_clearField(37);
+
+  /// Quarantined for a pipe (Pipe.quarantined_ids): it can only read and
+  /// answer the pipe (pipe_read, pipe_send, pipe_status), read its inbox,
+  /// write in its outbox and ask the person. It has no commands, no other
+  /// files, no secrets, web or messaging, and no other extension's tools.
+  /// Only the person lifts it (UpdatePipe.quarantined).
+  @$pb.TagNumber(38)
+  $core.bool get quarantined => $_getBF(37);
+  @$pb.TagNumber(38)
+  set quarantined($core.bool value) => $_setBool(37, value);
+  @$pb.TagNumber(38)
+  $core.bool hasQuarantined() => $_has(37);
+  @$pb.TagNumber(38)
+  void clearQuarantined() => $_clearField(38);
 }
 
 class SlashCommand extends $pb.GeneratedMessage {
@@ -19581,6 +19603,7 @@ class Entry extends $pb.GeneratedMessage {
     DevicePairing? devicePairing,
     SecretApproval? secretApproval,
     AskPerson? askPerson,
+    $fixnum.Int64? repliedTo,
   }) {
     final result = Entry._();
     if (seq != null) result.seq = seq;
@@ -19599,6 +19622,7 @@ class Entry extends $pb.GeneratedMessage {
     if (devicePairing != null) result.devicePairing = devicePairing;
     if (secretApproval != null) result.secretApproval = secretApproval;
     if (askPerson != null) result.askPerson = askPerson;
+    if (repliedTo != null) result.repliedTo = repliedTo;
     return result;
   }
 
@@ -19663,6 +19687,9 @@ class Entry extends $pb.GeneratedMessage {
         subBuilder: SecretApproval.$_createMessage)
     ..aOM<AskPerson>(16, _omitFieldNames ? '' : 'askPerson',
         subBuilder: AskPerson.$_createMessage)
+    ..a<$fixnum.Int64>(
+        17, _omitFieldNames ? '' : 'repliedTo', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -19897,6 +19924,21 @@ class Entry extends $pb.GeneratedMessage {
   void clearAskPerson() => $_clearField(16);
   @$pb.TagNumber(16)
   AskPerson ensureAskPerson() => $_ensure(15);
+
+  /// The person's message this answers: the seq of the latest UserText the
+  /// agent took before this text, set on the first assistant text that
+  /// follows it (while it streams too) and absent everywhere else. Check
+  /// presence, not 0: seq 0 is a real entry. It can point before a
+  /// compaction divider or an unloaded page. Replies to events and monitors
+  /// carry nothing.
+  @$pb.TagNumber(17)
+  $fixnum.Int64 get repliedTo => $_getI64(16);
+  @$pb.TagNumber(17)
+  set repliedTo($fixnum.Int64 value) => $_setInt64(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasRepliedTo() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearRepliedTo() => $_clearField(17);
 }
 
 /// Something other than the person prompting the agent: Factory itself,
@@ -20023,6 +20065,7 @@ class Proposal extends $pb.GeneratedMessage {
     ProposalState? state,
     $core.String? comment,
     $fixnum.Int64? decidedAtMs,
+    $core.Iterable<PipeTaint>? taint,
   }) {
     final result = Proposal._();
     if (id != null) result.id = id;
@@ -20030,6 +20073,7 @@ class Proposal extends $pb.GeneratedMessage {
     if (state != null) result.state = state;
     if (comment != null) result.comment = comment;
     if (decidedAtMs != null) result.decidedAtMs = decidedAtMs;
+    if (taint != null) result.taint.addAll(taint);
     return result;
   }
 
@@ -20052,6 +20096,8 @@ class Proposal extends $pb.GeneratedMessage {
         enumValues: ProposalState.values)
     ..aOS(4, _omitFieldNames ? '' : 'comment')
     ..aInt64(5, _omitFieldNames ? '' : 'decidedAtMs')
+    ..pPM<PipeTaint>(6, _omitFieldNames ? '' : 'taint',
+        subBuilder: PipeTaint.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -20122,6 +20168,12 @@ class Proposal extends $pb.GeneratedMessage {
   $core.bool hasDecidedAtMs() => $_has(4);
   @$pb.TagNumber(5)
   void clearDecidedAtMs() => $_clearField(5);
+
+  /// The pipes the agent had read when it proposed (Agent.tainted_by_pipes),
+  /// each with the agents it came through: what it proposes may come from
+  /// the other side. Empty when it had read none.
+  @$pb.TagNumber(6)
+  $pb.PbList<PipeTaint> get taint => $_getList(5);
 }
 
 /// A device an agent adds for the person (an admin agent's devices_add tool,
@@ -20143,6 +20195,7 @@ class DevicePairing extends $pb.GeneratedMessage {
     DevicePairingState? state,
     $fixnum.Int64? expiresMs,
     $fixnum.Int64? endedMs,
+    DeviceKind? kind,
   }) {
     final result = DevicePairing._();
     if (id != null) result.id = id;
@@ -20152,6 +20205,7 @@ class DevicePairing extends $pb.GeneratedMessage {
     if (state != null) result.state = state;
     if (expiresMs != null) result.expiresMs = expiresMs;
     if (endedMs != null) result.endedMs = endedMs;
+    if (kind != null) result.kind = kind;
     return result;
   }
 
@@ -20176,6 +20230,8 @@ class DevicePairing extends $pb.GeneratedMessage {
         enumValues: DevicePairingState.values)
     ..aInt64(6, _omitFieldNames ? '' : 'expiresMs')
     ..aInt64(7, _omitFieldNames ? '' : 'endedMs')
+    ..aE<DeviceKind>(8, _omitFieldNames ? '' : 'kind',
+        enumValues: DeviceKind.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -20272,6 +20328,19 @@ class DevicePairing extends $pb.GeneratedMessage {
   $core.bool hasEndedMs() => $_has(6);
   @$pb.TagNumber(7)
   void clearEndedMs() => $_clearField(7);
+
+  /// What the device is, as the agent said when it started the pairing
+  /// (devices_add's kind): the card leads with scanning for a phone or
+  /// tablet and pasting for a computer. UNSPECIFIED when it didn't say:
+  /// the card offers both ways.
+  @$pb.TagNumber(8)
+  DeviceKind get kind => $_getN(7);
+  @$pb.TagNumber(8)
+  set kind(DeviceKind value) => $_setField(8, value);
+  @$pb.TagNumber(8)
+  $core.bool hasKind() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearKind() => $_clearField(8);
 }
 
 class UserText extends $pb.GeneratedMessage {
@@ -29716,6 +29785,8 @@ class Pipe extends $pb.GeneratedMessage {
     $core.int? queued,
     $core.bool? unseen,
     $core.Iterable<$fixnum.Int64>? waitingSeqs,
+    $core.Iterable<$core.String>? quarantinedIds,
+    $core.Iterable<$core.String>? canRunCommandsIds,
   }) {
     final result = Pipe._();
     if (id != null) result.id = id;
@@ -29738,6 +29809,9 @@ class Pipe extends $pb.GeneratedMessage {
     if (queued != null) result.queued = queued;
     if (unseen != null) result.unseen = unseen;
     if (waitingSeqs != null) result.waitingSeqs.addAll(waitingSeqs);
+    if (quarantinedIds != null) result.quarantinedIds.addAll(quarantinedIds);
+    if (canRunCommandsIds != null)
+      result.canRunCommandsIds.addAll(canRunCommandsIds);
     return result;
   }
 
@@ -29779,6 +29853,8 @@ class Pipe extends $pb.GeneratedMessage {
     ..aOB(19, _omitFieldNames ? '' : 'unseen')
     ..p<$fixnum.Int64>(
         20, _omitFieldNames ? '' : 'waitingSeqs', $pb.PbFieldType.KU6)
+    ..pPS(21, _omitFieldNames ? '' : 'quarantinedIds')
+    ..pPS(22, _omitFieldNames ? '' : 'canRunCommandsIds')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -29995,6 +30071,20 @@ class Pipe extends $pb.GeneratedMessage {
   /// incoming), by PipeMessage.seq: like Agent.waiting_seqs, for "Needs you".
   @$pb.TagNumber(20)
   $pb.PbList<$fixnum.Int64> get waitingSeqs => $_getList(19);
+
+  /// Members quarantined for it (Agent.quarantined): they can only read and
+  /// answer it and draft files in its outbox. A liaison agent is, from the
+  /// moment it's made; so is each member whose role was "Liaison" when
+  /// quarantine came.
+  @$pb.TagNumber(21)
+  $pb.PbList<$core.String> get quarantinedIds => $_getList(20);
+
+  /// Members that can run commands on this computer (every member not
+  /// quarantined): the approval and settings screens warn about each, since
+  /// a misleading message from the other side could make it reach the
+  /// person's files, keys and network.
+  @$pb.TagNumber(22)
+  $pb.PbList<$core.String> get canRunCommandsIds => $_getList(21);
 }
 
 /// The other side of a pipe, as it describes itself.
@@ -30960,6 +31050,7 @@ class ApprovePipe extends $pb.GeneratedMessage {
     $core.Iterable<$core.String>? memberIds,
     $core.String? leadId,
     $core.String? liaisonName,
+    PipeMembers? quarantined,
   }) {
     final result = ApprovePipe._();
     if (pipeId != null) result.pipeId = pipeId;
@@ -30967,6 +31058,7 @@ class ApprovePipe extends $pb.GeneratedMessage {
     if (memberIds != null) result.memberIds.addAll(memberIds);
     if (leadId != null) result.leadId = leadId;
     if (liaisonName != null) result.liaisonName = liaisonName;
+    if (quarantined != null) result.quarantined = quarantined;
     return result;
   }
 
@@ -30988,6 +31080,8 @@ class ApprovePipe extends $pb.GeneratedMessage {
     ..pPS(3, _omitFieldNames ? '' : 'memberIds')
     ..aOS(4, _omitFieldNames ? '' : 'leadId')
     ..aOS(5, _omitFieldNames ? '' : 'liaisonName')
+    ..aOM<PipeMembers>(6, _omitFieldNames ? '' : 'quarantined',
+        subBuilder: PipeMembers.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -31052,6 +31146,19 @@ class ApprovePipe extends $pb.GeneratedMessage {
   $core.bool hasLiaisonName() => $_has(4);
   @$pb.TagNumber(5)
   void clearLiaisonName() => $_clearField(5);
+
+  /// Members to quarantine (Pipe.quarantined_ids), among member_ids; unset
+  /// quarantines none of them. The liaison is quarantined either way.
+  @$pb.TagNumber(6)
+  PipeMembers get quarantined => $_getN(5);
+  @$pb.TagNumber(6)
+  set quarantined(PipeMembers value) => $_setField(6, value);
+  @$pb.TagNumber(6)
+  $core.bool hasQuarantined() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearQuarantined() => $_clearField(6);
+  @$pb.TagNumber(6)
+  PipeMembers ensureQuarantined() => $_ensure(5);
 }
 
 /// Changes a pipe's settings; unset fields stay as they are.
@@ -31065,6 +31172,7 @@ class UpdatePipe extends $pb.GeneratedMessage {
     $core.String? leadId,
     PipeLimits? limits,
     $core.bool? reviewOutgoing,
+    PipeMembers? quarantined,
   }) {
     final result = UpdatePipe._();
     if (pipeId != null) result.pipeId = pipeId;
@@ -31075,6 +31183,7 @@ class UpdatePipe extends $pb.GeneratedMessage {
     if (leadId != null) result.leadId = leadId;
     if (limits != null) result.limits = limits;
     if (reviewOutgoing != null) result.reviewOutgoing = reviewOutgoing;
+    if (quarantined != null) result.quarantined = quarantined;
     return result;
   }
 
@@ -31101,6 +31210,8 @@ class UpdatePipe extends $pb.GeneratedMessage {
     ..aOM<PipeLimits>(7, _omitFieldNames ? '' : 'limits',
         subBuilder: PipeLimits.$_createMessage)
     ..aOB(8, _omitFieldNames ? '' : 'reviewOutgoing')
+    ..aOM<PipeMembers>(9, _omitFieldNames ? '' : 'quarantined',
+        subBuilder: PipeMembers.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -31198,6 +31309,22 @@ class UpdatePipe extends $pb.GeneratedMessage {
   $core.bool hasReviewOutgoing() => $_has(7);
   @$pb.TagNumber(8)
   void clearReviewOutgoing() => $_clearField(8);
+
+  /// The members quarantined for it (Pipe.quarantined_ids), all of them;
+  /// ids that aren't members are refused. A member left out is released:
+  /// it gets its usual tools back, though it has read the pipe until its
+  /// conversation is cleared (Agent.tainted_by_pipes). Only the person can
+  /// send this: no agent tool reaches it.
+  @$pb.TagNumber(9)
+  PipeMembers get quarantined => $_getN(8);
+  @$pb.TagNumber(9)
+  set quarantined(PipeMembers value) => $_setField(9, value);
+  @$pb.TagNumber(9)
+  $core.bool hasQuarantined() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearQuarantined() => $_clearField(9);
+  @$pb.TagNumber(9)
+  PipeMembers ensureQuarantined() => $_ensure(8);
 }
 
 class PipeMembers extends $pb.GeneratedMessage {
@@ -31847,7 +31974,8 @@ class PipeMessagePage extends $pb.GeneratedMessage {
 }
 
 /// Makes a liaison agent for a pipe: in the pipe's project, with no secrets,
-/// no web and no messaging, a member and the lead. Answered with Ack; the
+/// no web and no messaging, a member and the lead, quarantined for it
+/// (Agent.quarantined). Answered with Ack; the
 /// agent shows in Pipe.member_ids and lead_id.
 class AddPipeLiaison extends $pb.GeneratedMessage {
   factory AddPipeLiaison({
@@ -31930,6 +32058,7 @@ class SecretApproval extends $pb.GeneratedMessage {
     SecretApprovalState? state,
     $fixnum.Int64? decidedMs,
     $core.String? id,
+    $core.Iterable<PipeTaint>? taint,
   }) {
     final result = SecretApproval._();
     if (agentId != null) result.agentId = agentId;
@@ -31939,6 +32068,7 @@ class SecretApproval extends $pb.GeneratedMessage {
     if (state != null) result.state = state;
     if (decidedMs != null) result.decidedMs = decidedMs;
     if (id != null) result.id = id;
+    if (taint != null) result.taint.addAll(taint);
     return result;
   }
 
@@ -31963,6 +32093,8 @@ class SecretApproval extends $pb.GeneratedMessage {
         enumValues: SecretApprovalState.values)
     ..aInt64(6, _omitFieldNames ? '' : 'decidedMs')
     ..aOS(7, _omitFieldNames ? '' : 'id')
+    ..pPM<PipeTaint>(8, _omitFieldNames ? '' : 'taint',
+        subBuilder: PipeTaint.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -32042,6 +32174,90 @@ class SecretApproval extends $pb.GeneratedMessage {
   $core.bool hasId() => $_has(6);
   @$pb.TagNumber(7)
   void clearId() => $_clearField(7);
+
+  /// Where what it read came from: for each pipe it has read, the agents it
+  /// came through (pipe_names lists the same pipes, for older apps).
+  @$pb.TagNumber(8)
+  $pb.PbList<PipeTaint> get taint => $_getList(7);
+}
+
+/// A pipe an agent has read, and how: `via_names` are the agents, by name
+/// when it asked, that what it read came through, first the one that read
+/// the pipe itself (each messaged the next); empty when the agent read the
+/// pipe itself. "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read
+/// it, told Bruno, and Bruno told this agent.
+class PipeTaint extends $pb.GeneratedMessage {
+  factory PipeTaint({
+    $core.String? pipeName,
+    $core.Iterable<$core.String>? viaNames,
+    $core.String? pipeId,
+  }) {
+    final result = PipeTaint._();
+    if (pipeName != null) result.pipeName = pipeName;
+    if (viaNames != null) result.viaNames.addAll(viaNames);
+    if (pipeId != null) result.pipeId = pipeId;
+    return result;
+  }
+
+  PipeTaint._();
+
+  factory PipeTaint.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeTaint()..mergeFromBuffer(data, registry);
+  factory PipeTaint.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeTaint()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeTaint',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeTaint.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeName')
+    ..pPS(2, _omitFieldNames ? '' : 'viaNames')
+    ..aOS(3, _omitFieldNames ? '' : 'pipeId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeTaint clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeTaint copyWith(void Function(PipeTaint) updates) =>
+      super.copyWith((message) => updates(message as PipeTaint)) as PipeTaint;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeTaint() / PipeTaint.new instead')
+  static PipeTaint create() => PipeTaint._();
+  static $pb.GeneratedMessage $_createMessage() => PipeTaint._();
+  @$core.override
+  PipeTaint createEmptyInstance() => PipeTaint._();
+  @$core.pragma('dart2js:noInline')
+  static PipeTaint getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PipeTaint>(PipeTaint.$_createMessage);
+  static PipeTaint? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get pipeName => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeName($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get viaNames => $_getList(1);
+
+  /// The pipe's Pipe.id, to find who's at its other end; it may be gone.
+  @$pb.TagNumber(3)
+  $core.String get pipeId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set pipeId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasPipeId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPipeId() => $_clearField(3);
 }
 
 /// The person's decision on a SecretApproval entry in an agent's conversation.
@@ -32146,6 +32362,7 @@ class AskPerson extends $pb.GeneratedMessage {
     AskPersonState? state,
     $core.String? answer,
     $fixnum.Int64? decidedMs,
+    $core.Iterable<PipeTaint>? taint,
   }) {
     final result = AskPerson._();
     if (id != null) result.id = id;
@@ -32155,6 +32372,7 @@ class AskPerson extends $pb.GeneratedMessage {
     if (state != null) result.state = state;
     if (answer != null) result.answer = answer;
     if (decidedMs != null) result.decidedMs = decidedMs;
+    if (taint != null) result.taint.addAll(taint);
     return result;
   }
 
@@ -32179,6 +32397,8 @@ class AskPerson extends $pb.GeneratedMessage {
         enumValues: AskPersonState.values)
     ..aOS(6, _omitFieldNames ? '' : 'answer')
     ..aInt64(7, _omitFieldNames ? '' : 'decidedMs')
+    ..pPM<PipeTaint>(8, _omitFieldNames ? '' : 'taint',
+        subBuilder: PipeTaint.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -32270,6 +32490,13 @@ class AskPerson extends $pb.GeneratedMessage {
   $core.bool hasDecidedMs() => $_has(6);
   @$pb.TagNumber(7)
   void clearDecidedMs() => $_clearField(7);
+
+  /// The pipes the agent had read when it asked (Agent.tainted_by_pipes),
+  /// each with the agents it came through: what it asks may come from the
+  /// other side ("from Liaison, which reads the pipe with Ana's Claktory").
+  /// Empty when it had read none.
+  @$pb.TagNumber(8)
+  $pb.PbList<PipeTaint> get taint => $_getList(7);
 }
 
 /// The person's answer to an AskPerson entry in an agent's conversation, or

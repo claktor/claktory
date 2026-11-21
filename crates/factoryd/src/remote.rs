@@ -599,9 +599,14 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
 /// it: on a Mac, its Computer Name (System Settings → General → Sharing,
 /// such as "Lee's Mac mini"); elsewhere, its host name without the
 /// network's domain ("lees-mini", not "lees-mini.lan" or ".local").
+/// `FACTORY_MACHINE_NAME` overrides it, for QA sandboxes, which must never
+/// show the real machine's name (claktory-qa sets it).
 pub(crate) fn machine_name() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
+        if let Some(name) = chosen_machine_name(std::env::var_os("FACTORY_MACHINE_NAME")) {
+            return name;
+        }
         let mac = if cfg!(target_os = "macos") {
             std::process::Command::new("/usr/sbin/scutil")
                 .args(["--get", "ComputerName"])
@@ -626,6 +631,13 @@ pub(crate) fn machine_name() -> &'static str {
         let name = name.split('.').next().unwrap_or_default().to_owned();
         if name.is_empty() { "factory".to_owned() } else { name }
     })
+}
+
+/// The name `FACTORY_MACHINE_NAME` gives, when it's one: trimmed, not
+/// empty, with no control characters, and at most 64 characters.
+fn chosen_machine_name(value: Option<std::ffi::OsString>) -> Option<String> {
+    let name = value?.to_string_lossy().trim().to_owned();
+    (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.chars().take(64).collect::<String>().trim_end().to_owned())
 }
 
 /// Percent-encodes all but letters, digits, '-', '.', '_' and '~'.
@@ -2074,6 +2086,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sandbox_chooses_the_machine_name_shown() {
+        let chosen = |value: &str| chosen_machine_name(Some(value.into()));
+        assert_eq!(chosen("  qa-video ").as_deref(), Some("qa-video"));
+        assert_eq!(chosen("Studio").as_deref(), Some("Studio"));
+        assert_eq!(chosen_machine_name(None), None, "unset: the machine's own");
+        assert_eq!(chosen("   "), None);
+        assert_eq!(chosen("Mac\nmini"), None, "no control characters");
+        assert_eq!(chosen(&"x".repeat(100)).map(|name| name.chars().count()), Some(64));
+    }
 
     #[test]
     fn values_in_pairing_codes_are_percent_encoded() {

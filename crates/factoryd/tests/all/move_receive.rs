@@ -560,3 +560,87 @@ async fn receive_lets_in_one_source_by_its_digits_and_never_writes_outside_what_
     assert!(text.contains("Old Mac called the move off. The person changed their mind. Nothing changed here."), "{text}");
     assert!(!here.root().join("import").exists() && factoryd::move_import::unfinished(&here).is_none());
 }
+
+/// The lines `factoryd receive --json` has written so far, once one of
+/// them is `event`'s (or its `nth`, counting from 1).
+async fn json_line(lines: &Mutex<Vec<serde_json::Value>>, event: &str, nth: usize) -> serde_json::Value {
+    for _ in 0..1500 {
+        let found = lines.lock().unwrap().iter().filter(|line| line["event"] == event).nth(nth - 1).cloned();
+        if let Some(line) = found {
+            return line;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no {event} line {nth}: {:?}", lines.lock().unwrap());
+}
+
+fn keys(line: &serde_json::Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = line.as_object().expect("an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// #245: an agent drives `factoryd receive --json` by its lines, whose
+/// shape stays as it is: the code, progress, the digits to ask the person
+/// about (their yes or no on stdin), and the last line.
+#[tokio::test]
+async fn receive_json_says_each_step_in_a_line_and_takes_the_persons_answer_on_stdin() {
+    use factoryd::cli::receive_json;
+    use factoryd::move_import::ImportError;
+    let target = temp_dir();
+    let here = Home::new(target.join("home"));
+    let lines = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let (stdin, typed) = mpsc::unbounded_channel::<String>();
+    let emit = {
+        let lines = lines.clone();
+        Arc::new(move |line| lines.lock().unwrap().push(line))
+    };
+    let ui = receive_json::ui(emit, Arc::new(tokio::sync::Mutex::new(typed)));
+    let home = here.clone();
+    let task = tokio::spawn(async move {
+        let options = Options { committed: false, local_only: true };
+        let nowhere = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
+        factoryd::move_import::receive::receive(&home, nowhere, &options, &ui).await
+    });
+
+    let line = json_line(&lines, "code", 1).await;
+    assert_eq!(keys(&line), ["code", "event", "machine", "message", "platform", "version"], "{line}");
+    let code = ReceiveCode::parse(line["code"].as_str().expect("the code")).expect("a code that parses");
+    assert_eq!(line["platform"], format!("{}-{}", code.os, code.arch));
+    assert!(line["message"].as_str().is_some_and(|message| message.contains("Move to another computer")), "{line}");
+
+    // The source shows its digits: the person is asked, through the agent.
+    let key = endpoint().await;
+    let (mut wire, welcome) = Wire::again(&key, &code).await;
+    assert!(matches!(welcome, Frame::Welcome { .. }), "{welcome:?}");
+    let asked = json_line(&lines, "confirm", 1).await;
+    assert_eq!(keys(&asked), ["digits", "event", "machine", "message", "platform"], "{asked}");
+    let digits = move_wire::digits(&code.endpoint, &key.id().to_string(), &code.secret);
+    assert_eq!(
+        (asked["digits"].as_str(), asked["machine"].as_str(), asked["platform"].as_str()),
+        (Some(digits.as_str()), Some("Old Mac"), Some("macOS arm64"))
+    );
+    // Anything but yes or no asks again; no turns the source down, and a new code follows.
+    stdin.send("maybe".to_owned()).expect("typed");
+    assert_eq!(json_line(&lines, "confirm", 2).await, asked);
+    stdin.send("no".to_owned()).expect("typed");
+    let Frame::Failed { why } = wire.next().await else { panic!("declined") };
+    assert!(why.contains("digits weren't confirmed"), "{why}");
+    let again = json_line(&lines, "code", 2).await;
+    assert_ne!(again["code"], line["code"]);
+    assert!(lines.lock().unwrap().iter().all(|line| ["code", "confirm", "progress"].contains(&line["event"].as_str().unwrap_or_default())));
+    if let Some(progress) = lines.lock().unwrap().iter().find(|line| line["event"] == "progress") {
+        assert_eq!(keys(progress), ["event", "message"]);
+    }
+    wire.connection.close(0u32.into(), b"gone");
+    task.abort();
+
+    // The last line, by how it ended, and its exit code.
+    let (done, exit) = receive_json::end(&Ok("Moved.".to_owned()));
+    assert_eq!((done, exit), (serde_json::json!({"ok": true, "event": "done", "message": "Moved."}), 0));
+    let (refused, exit) = receive_json::end(&Err(ImportError::Refused("Not here.".to_owned())));
+    assert_eq!((refused, exit), (serde_json::json!({"ok": false, "error": "refused", "message": "Not here."}), 3));
+    let (failed, exit) = receive_json::end(&Err(ImportError::Failed("Broke.".to_owned())));
+    assert_eq!((failed, exit), (serde_json::json!({"ok": false, "error": "failed", "message": "Broke."}), 1));
+    assert_eq!(keys(&receive_json::stopped()), ["error", "message", "ok"]);
+}

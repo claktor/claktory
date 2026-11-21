@@ -57,6 +57,9 @@ mod usage_report;
 pub mod vault;
 mod waits;
 
+/// For tests: anchors a test's own account service to roots of its own.
+#[doc(hidden)]
+pub use account::anchor::anchor_for_tests as anchor_account_for_tests;
 pub use connection::{ConnectionError, serve};
 pub use factory::Factory;
 pub use runner::set_filter_executable;

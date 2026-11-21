@@ -58,6 +58,9 @@ fn a_sandbox_comes_up_is_driven_and_goes() {
     assert!(up["account_service"].as_str().is_some_and(|url| url.starts_with("http://127.0.0.1:")), "{up}");
     assert!(refused(root, &["up", "one"]).contains("already a sandbox called one"));
     assert!(refused(root, &["up", "two", "--port", "7420"]).contains("real Claktory's"));
+    // It never shows this computer's name: devices and the footer read qa-one.
+    assert_eq!(up["machine_name"], "qa-one");
+    assert_eq!(ok(root, &["workspace", "one", "remote.machine"])["value"], "qa-one");
 
     // Fresh, and asking to sign in, at its own service; then signed in.
     let state = ok(root, &["workspace", "one", "account.state"]);
@@ -123,8 +126,9 @@ fn agents_in_a_sandbox_run_on_the_scripted_model() {
     assert_eq!(code, 2, "{json}");
     assert!(json["message"].as_str().is_some_and(|message| message.contains("says nothing")), "{json}");
 
-    let up = ok(root, &["up", "two", "--no-account", "--script", script.to_str().expect("path")]);
+    let up = ok(root, &["up", "two", "--no-account", "--script", script.to_str().expect("path"), "--machine-name", "Studio"]);
     assert_eq!(up["model"], "openrouter/openai/gpt-4.1-mini");
+    assert_eq!(ok(root, &["workspace", "two", "remote.machine"])["value"], "Studio", "the name chosen, for a video");
     ok(root, &["send", "two", "CreateProject", r#"{"name": "Site"}"#]);
     ok(root, &["send", "two", "CreateAgent", r#"{"project_id": "site", "name": "Lea"}"#]);
     assert_eq!(ok(root, &["workspace", "two", "agents[name=Lea].model_available"])["value"], true);

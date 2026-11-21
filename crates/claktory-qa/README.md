@@ -29,6 +29,9 @@ claktory-qa refuses rather than reaching anything real:
   below).
 - **Environment:** factoryd starts with an empty environment (no API keys, no
   `FACTORY_*` but its own) and a home folder of its own.
+- **Machine name:** a sandbox never shows this computer's name (on a device
+  pairing with it, in the app's footer, in move codes): it's `qa-<name>`, or
+  what `up --machine-name NAME` chooses (for a screenshot or a video, say).
 
 ## Start
 
@@ -42,7 +45,12 @@ scripts/qa.sh --rev factory/frontend-2 up kenji   # a branch or commit instead o
 The first run for a commit exports it with `git archive` and builds factoryd,
 claktory-account and claktory-qa into the QA root. That takes a few minutes;
 after that the build is reused. It builds only what's committed, never
-uncommitted changes. The QA root is `CLAKTORY_QA_ROOT`, or `claktory-qa` in the
+uncommitted changes. Every commit shares one cargo build, so the script makes
+sure each commit's binaries really are its own. It builds one commit at a time
+and checks that every crate of the commit was compiled in that build. A commit's
+binaries are reused only with the `bin/<commit>/commit` file the check writes.
+A build that reused another commit's work fails with `stale_build` and keeps
+nothing. The QA root is `CLAKTORY_QA_ROOT`, or `claktory-qa` in the
 temporary folder. It holds the build (about 4 GB) and each commit's binaries
 in `bin/<commit>`. Delete old ones there, or the whole root, when you're done.
 

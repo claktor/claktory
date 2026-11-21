@@ -676,6 +676,39 @@ fn restore_helpers(home: &Home) -> std::io::Result<()> {
     failed
 }
 
+/// At start: each helper the running version's release carries that
+/// `bin` lacks is copied in beside this backend. An update is made by the
+/// backend before it, which puts in only the helpers it knows: v0.1.13,
+/// which knew no speech host, updated to v0.1.14 without one. Only when
+/// this backend runs from `bin`, as installed; one already there is left
+/// alone (the update put it there, with its `.previous` for a roll-back).
+pub fn heal_helpers(home: &Home) {
+    let bin = home.root().join("bin");
+    let running = std::env::current_exe().ok().and_then(|exe| exe.parent()?.canonicalize().ok());
+    if running.is_none() || running != bin.canonicalize().ok() {
+        return;
+    }
+    for name in heal(home, &home.releases().join(VERSION)) {
+        tracing::warn!(helper = name, version = VERSION, "put in a helper the update to this version left out");
+    }
+}
+
+/// The helpers `release` carries that `bin` lacks, copied in; their names.
+fn heal(home: &Home, release: &Path) -> Vec<&'static str> {
+    let mut healed = Vec::new();
+    for name in HELPERS {
+        let (new, current) = (release.join(name), helper(home, name));
+        if !new.is_file() || current.exists() {
+            continue;
+        }
+        match std::fs::read(&new).and_then(|bytes| write_executable(&current, &bytes)) {
+            Ok(()) => healed.push(name),
+            Err(error) => tracing::error!(%error, helper = name, "could not put in a helper the update left out"),
+        }
+    }
+    healed
+}
+
 /// For the supervisor, when the backend keeps failing to start outside an
 /// update's trial (a backend a power cut left broken, say): puts the
 /// previous one back, once, when there is one that differs. True if it did.
@@ -793,6 +826,29 @@ mod helpers_tests {
 
     fn read(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+
+    /// An update made by v0.1.13's backend, which knew no speech host: the
+    /// release has one, `bin` doesn't. The next start puts it in, and leaves
+    /// the helpers that are there alone.
+    #[test]
+    fn a_helper_an_older_backends_update_left_out_goes_in_at_the_next_start() {
+        let (home, dir) = home("heal");
+        std::fs::write(home.backend(), "backend 2").expect("backend");
+        std::fs::write(helper(&home, APPS_HOST), "host 1").expect("host");
+        std::fs::write(dir.join("release/factoryd"), "backend 2").expect("release backend");
+        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("release host");
+        std::fs::write(dir.join("release/claktory-speech"), "speech 2").expect("release speech");
+        assert_eq!(heal(&home, &dir.join("release")), [SPEECH_HOST]);
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 2"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"), "left alone");
+        assert!(!previous_helper(&home, SPEECH_HOST).exists(), "nothing to roll back to");
+        // Once in, the next start has nothing to do; no release, nothing either.
+        assert!(heal(&home, &dir.join("release")).is_empty());
+        assert!(heal(&home, &dir.join("nowhere")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

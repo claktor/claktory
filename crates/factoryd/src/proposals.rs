@@ -103,17 +103,24 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
         }
         inner.config.person().to_owned()
     };
+    // Read a pipe: the card says so, and where from.
+    let routes = crate::pipes::agents::routes(factory, agent);
+    let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
     let id = {
         let db = factory.store.db();
         db.execute(
-            "INSERT INTO proposals (agent, text, created, state, comment) VALUES (?1, ?2, ?3, 'pending', '')",
-            params![agent, text, now_ms()],
+            "INSERT INTO proposals (agent, text, created, state, comment, taint) VALUES (?1, ?2, ?3, 'pending', '', ?4)",
+            params![agent, text, now_ms(), taint.as_ref().map(serde_json::Value::to_string)],
         )
         .map_err(|error| format!("Couldn't record the proposal: {error}"))?;
         db.last_insert_rowid().to_string()
     };
     let said = format!("Proposed; {person} will approve or dismiss it.");
-    Ok(ToolResult::text(said, json!({"proposal": id, "text": text})))
+    let mut details = json!({"proposal": id, "text": text});
+    if let Some(taint) = taint {
+        details["taint"] = taint;
+    }
+    Ok(ToolResult::text(said, details))
 }
 
 /// The entry a propose_to_rivet result shows (called directly, or through
@@ -125,7 +132,8 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
     }
     let id = details.get("proposal")?.as_str()?.to_owned();
     let text = details.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), comment: String::new(), decided_at_ms: 0 })
+    let taint = details.get("taint").map(crate::pipes::agents::routes_from_json).unwrap_or_default();
+    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), comment: String::new(), decided_at_ms: 0, taint })
 }
 
 /// A proposal as recorded.
@@ -135,6 +143,14 @@ struct Row {
     state: String,
     comment: String,
     decided: Option<i64>,
+    /// JSON (`pipes::agents::routes_json`); null for none.
+    taint: Option<String>,
+}
+
+const COLUMNS: &str = "id, text, state, comment, decided, taint";
+
+fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+    Ok(Row { id: row.get(0)?, text: row.get(1)?, state: row.get(2)?, comment: row.get(3)?, decided: row.get(4)?, taint: row.get(5)? })
 }
 
 impl Row {
@@ -150,6 +166,12 @@ impl Row {
             state: state.into(),
             comment: self.comment.clone(),
             decided_at_ms: self.decided.unwrap_or_default(),
+            taint: self
+                .taint
+                .as_deref()
+                .and_then(|taint| serde_json::from_str(taint).ok())
+                .map(|taint| crate::pipes::agents::routes_from_json(&taint))
+                .unwrap_or_default(),
         }
     }
 }
@@ -157,11 +179,8 @@ impl Row {
 /// Shows the agent's decided proposals as decided in its just-loaded conversation.
 pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = store.db();
-    let mut statement =
-        db.prepare("SELECT id, text, state, comment, decided FROM proposals WHERE agent = ?1 AND state != 'pending' ORDER BY id")?;
-    let rows = statement.query_map([agent], |row| {
-        Ok(Row { id: row.get(0)?, text: row.get(1)?, state: row.get(2)?, comment: row.get(3)?, decided: row.get(4)? })
-    })?;
+    let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND state != 'pending' ORDER BY id"))?;
+    let rows = statement.query_map([agent], row)?;
     for row in rows {
         transcript.set_proposal(row?.to_proto());
     }
@@ -192,9 +211,7 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     let found = factory
         .store
         .db()
-        .query_row("SELECT id, text, state, comment, decided FROM proposals WHERE id = ?1 AND agent = ?2", params![number, agent], |row| {
-            Ok(Row { id: row.get(0)?, text: row.get(1)?, state: row.get(2)?, comment: row.get(3)?, decided: row.get(4)? })
-        })
+        .query_row(&format!("SELECT {COLUMNS} FROM proposals WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
         .optional()?;
     let Some(mut row) = found else { return Err(unknown()) };
     if row.state != "pending" {

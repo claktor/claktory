@@ -277,6 +277,89 @@ pub struct WellKnown {
     pub api: u32,
     pub version: String,
     pub service_key: String,
+    /// An offline root's word that `service_key` is the service's
+    /// (`KeyStatement`); left out by a service that has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_key_statement: Option<SignedStatement>,
+}
+
+/// The first line of a service-key statement.
+pub const STATEMENT_HEAD: &str = "claktory-account-service-key/1";
+
+/// The offline keys that vouch for an account service's signing key, by id:
+/// raw ed25519 public keys, in standard base64 (as OpenSSL writes them).
+/// The account root, taken out at each rotation of the service's key, and
+/// the release recovery key as its backup. Never the release working key
+/// (`claktory-release-1`), and the account root is never a release key, so
+/// neither can stand in for the other (factoryd's tests hold both).
+/// The account root is added once it's made.
+pub const ACCOUNT_ROOTS: &[(&str, &str)] = &[("claktory-release-recovery-1", "aGdAkbnB7pkB/dRRfPnkFKfKyWzPs+cF7FVHMlb7JpM=")];
+
+/// An offline root's word that `key` is `service`'s signing key from
+/// `from` (unix seconds) on. Signed as exactly its `text()`: four lines,
+/// each ending in LF, nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyStatement {
+    pub service: String,
+    /// The service key as the API writes it (base64url, no padding).
+    pub key: String,
+    pub from: i64,
+}
+
+impl KeyStatement {
+    pub fn text(&self) -> String {
+        format!("{STATEMENT_HEAD}\nservice: {}\nkey: {}\nfrom: {}\n", self.service, self.key, self.from)
+    }
+
+    /// Reads exactly what `text()` writes, and nothing else: no CR, no
+    /// spaces but the ones after each colon, a canonical 32-byte key, and
+    /// `from` as digits with no sign or leading zero.
+    pub fn parse(text: &str) -> Option<KeyStatement> {
+        let body = text.strip_suffix('\n')?;
+        let lines: Vec<&str> = body.split('\n').collect();
+        let [head, service, key, from] = lines.as_slice() else { return None };
+        if *head != STATEMENT_HEAD {
+            return None;
+        }
+        let service = service.strip_prefix("service: ")?;
+        if service.is_empty() || !service.chars().all(|character| character.is_ascii_graphic()) {
+            return None;
+        }
+        let key = key.strip_prefix("key: ")?;
+        if b64(unb64_32(key)?) != key {
+            return None;
+        }
+        let from = from.strip_prefix("from: ")?;
+        let digits = !from.is_empty() && from.len() <= 18 && from.bytes().all(|byte| byte.is_ascii_digit());
+        if !digits || from.starts_with('0') {
+            return None;
+        }
+        Some(KeyStatement { service: service.to_owned(), key: key.to_owned(), from: from.parse().ok()? })
+    }
+}
+
+/// A statement and its signature, `<root id>:<base64 ed25519 signature>`
+/// over the statement's exact bytes (as releases' `latest.json.sig`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedStatement {
+    pub text: String,
+    pub signature: String,
+}
+
+/// The statement, if one of `roots` signed exactly it and it reads as one.
+pub fn verify_statement(signed: &SignedStatement, roots: &[(&str, &str)]) -> Result<KeyStatement, String> {
+    use base64::engine::general_purpose::STANDARD;
+    let (id, signature) = signed.signature.trim().split_once(':').ok_or_else(|| "its signature names no key".to_owned())?;
+    let shown: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+    let Some((_, root)) = roots.iter().find(|(known, _)| *known == id) else {
+        return Err(format!("it's signed with a key that vouches for no service ({shown})"));
+    };
+    let root: [u8; 32] = STANDARD.decode(root).ok().and_then(|bytes| bytes.try_into().ok()).ok_or("a root isn't a key")?;
+    let root = VerifyingKey::from_bytes(&root).map_err(|_| "a root isn't a key".to_owned())?;
+    let bytes = STANDARD.decode(signature.trim()).map_err(|_| "its signature isn't base64".to_owned())?;
+    let signature = Signature::from_slice(&bytes).map_err(|_| "its signature isn't an ed25519 one".to_owned())?;
+    root.verify_strict(signed.text.as_bytes(), &signature).map_err(|_| format!("its signature by {shown} doesn't match it"))?;
+    KeyStatement::parse(&signed.text).ok_or_else(|| "it isn't a service-key statement".to_owned())
 }
 
 /// `POST /v1/sign-in/start`.
@@ -634,6 +717,84 @@ pub fn verify_device_assertion(service_key: &VerifyingKey, text: &str, now: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn statement() -> KeyStatement {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        KeyStatement { service: "https://account.claktory.com".into(), key: b64(key.verifying_key().to_bytes()), from: 1_795_000_000 }
+    }
+
+    /// A root of the test's own, and a statement signed by it.
+    fn signed(text: &str) -> (SignedStatement, Vec<(String, String)>) {
+        use base64::engine::general_purpose::STANDARD;
+        let root = SigningKey::from_bytes(&[9; 32]);
+        let signature = format!("test-root:{}", STANDARD.encode(root.sign(text.as_bytes()).to_bytes()));
+        let roots = vec![("test-root".to_owned(), STANDARD.encode(root.verifying_key().to_bytes()))];
+        (SignedStatement { text: text.to_owned(), signature }, roots)
+    }
+
+    fn roots(owned: &[(String, String)]) -> Vec<(&str, &str)> {
+        owned.iter().map(|(id, key)| (id.as_str(), key.as_str())).collect()
+    }
+
+    #[test]
+    fn a_statement_reads_back_exactly_and_nothing_near_it_does() {
+        let good = statement();
+        assert_eq!(KeyStatement::parse(&good.text()), Some(good.clone()));
+        let text = good.text();
+        let short_key = b64([1u8; 31]);
+        let refused = [
+            text.replace('\n', "\r\n"),
+            text.replace("from: ", "from:  "),
+            text.replacen('\n', " \n", 1),
+            format!("{text}extra: line\n"),
+            text.trim_end().to_owned(),
+            text.replace(&good.key, &short_key),
+            text.replace(&good.key, &format!("{}=", good.key)),
+            text.replace("1795000000", "01795000000"),
+            text.replace("1795000000", "+1795000000"),
+            text.replace("1795000000", "0"),
+            text.replace("/1", "/2"),
+            text.replace("service: https", "service: https x"),
+        ];
+        for text in refused {
+            assert_eq!(KeyStatement::parse(&text), None, "{text:?}");
+        }
+    }
+
+    /// Made exactly as the root ceremony makes one: `openssl genpkey
+    /// -algorithm ed25519`, the text by `printf`, signed with `openssl
+    /// pkeyutl -sign -rawin`, then `base64 | tr -d '\n'`.
+    #[test]
+    fn a_statement_signed_with_openssl_as_the_ceremony_does_holds() {
+        let text = "claktory-account-service-key/1\nservice: https://account.claktory.com\nkey: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nfrom: 1795300000\n";
+        let signature = "claktory-account-root-1:iBD3uqw76yVG254wYT9BoX98gKaz9sB7AsyO/9gsWJ808qXho3RjFP6KMQMCVEUJBd/cXiCRiLv+50wOHHuBBQ==";
+        let roots = [("claktory-account-root-1", "LYUS3gEWXD9LKqGeb7YJJ40Og7N87Qo/PQCxNSM00N8=")];
+        let signed = SignedStatement { text: text.to_owned(), signature: signature.to_owned() };
+        let statement = verify_statement(&signed, &roots).expect("it holds");
+        assert_eq!((statement.from, statement.key.as_str()), (1_795_300_000, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"));
+    }
+
+    #[test]
+    fn a_statement_counts_only_signed_by_a_root_over_its_exact_bytes() {
+        let text = statement().text();
+        let (signed, owned) = signed(&text);
+        assert_eq!(verify_statement(&signed, &roots(&owned)), Ok(statement()));
+        // Another root's key under the same id, the text changed, an unknown id.
+        let other = vec![("test-root", "aGdAkbnB7pkB/dRRfPnkFKfKyWzPs+cF7FVHMlb7JpM=")];
+        assert!(verify_statement(&signed, &other).is_err());
+        let changed = SignedStatement { text: text.replace("1795000000", "1795000001"), ..signed.clone() };
+        assert!(verify_statement(&changed, &roots(&owned)).is_err());
+        let renamed = SignedStatement { signature: signed.signature.replacen("test-root", "other", 1), ..signed.clone() };
+        assert!(verify_statement(&renamed, &roots(&owned)).is_err());
+        // Signed, but not a statement: refused all the same.
+        let (json, owned) = self::signed("{\"version\":\"v0.1.14\"}");
+        assert!(verify_statement(&json, &roots(&owned)).is_err());
+        // Every pinned root is a key.
+        for (id, key) in ACCOUNT_ROOTS {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(key).expect(id);
+            assert!(VerifyingKey::from_bytes(&bytes.try_into().expect(id)).is_ok(), "{id}");
+        }
+    }
 
     #[test]
     fn a_sealed_share_opens_only_for_its_key_claktory_and_epoch() {

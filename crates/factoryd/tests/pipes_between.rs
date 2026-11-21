@@ -114,19 +114,24 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert_eq!(knocked.digits.len(), 4);
     assert_eq!(knocked.peer.expect("peer").purpose, "copy");
     assert_eq!(b.view.workspace.selected_pipe_id, joined.id);
-    let approve = |pipe: &str, agent: &str| {
+    let approve = |pipe: &str, agent: &str, quarantined: bool| {
         Request::ApprovePipe(v1::ApprovePipe {
             pipe_id: pipe.into(),
             approve: true,
             member_ids: vec![agent.into()],
             lead_id: agent.into(),
             liaison_name: String::new(),
+            quarantined: quarantined.then(|| v1::PipeMembers { agent_ids: vec![agent.into()] }),
         })
     };
-    assert!(matches!(b.request(approve(&joined.id, "max")).await, Body::Ack(_)));
+    assert!(matches!(b.request(approve(&joined.id, "max", false)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::WaitingPeer).await;
-    assert!(matches!(a.request(approve(&knocked.id, "lea")).await, Body::Ack(_)));
-    a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    assert_eq!(b.pipe().expect("pipe").can_run_commands_ids, ["max"]);
+    // A's person quarantines its lead as they approve.
+    assert!(matches!(a.request(approve(&knocked.id, "lea", true)).await, Body::Ack(_)));
+    let opened = a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    assert_eq!(opened.quarantined_ids, ["lea"]);
+    assert!(opened.can_run_commands_ids.is_empty());
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 
     // A's person writes; B's lead hears it, fenced, from A's person.
