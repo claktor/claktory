@@ -152,7 +152,7 @@ pub fn secret_key(home: &Home) -> Result<SecretKey, RemoteError> {
 }
 
 /// A device paired with this Factory.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -195,6 +195,24 @@ pub struct Device {
     /// its own (`Hello.device_name`). False once it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unnamed: bool,
+    /// It came without a code, found through the person's account: it
+    /// connects by its key alone, and its token is the SHA-256 of the
+    /// assertion it first showed (for the four digits), never a code's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discovered: bool,
+    /// The account it's confirmed as the owner's for: it showed an
+    /// assertion for it, or the person confirmed it from a confirmed
+    /// device. Empty if neither.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub confirmed_as: String,
+    /// When its grace to confirm ends, in ms since 1970: set at its first
+    /// Hello from an app that can confirm while this Claktory is signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_by: Option<i64>,
+    /// The device waiting with it showed a valid assertion for this
+    /// Claktory's account.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_signed_in: bool,
 }
 
 /// What a device made without a name is called until one uses its code.
@@ -285,6 +303,21 @@ fn token_hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))
 }
 
+/// An id for a new device called `name` (trimmed), unused in `devices`,
+/// and the name it shows (its id's base when `name` has nothing to show).
+fn new_id(devices: &[Device], name: &str) -> (String, String) {
+    let base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let base = base.trim_matches('-');
+    let base = if base.is_empty() || base == LOCAL_DEVICE { "device" } else { base };
+    let mut id = base.to_owned();
+    let mut n = 2;
+    while devices.iter().any(|device| device.id == id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    (id, if name.is_empty() { base.to_owned() } else { name.to_owned() })
+}
+
 /// Pairs a new device: makes its token, good for `CODE_LIFETIME` until the
 /// device first connects. Returns the token, which its pairing code holds,
 /// so it's shown once and never again, and the device.
@@ -295,19 +328,11 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
     // Without a name, the device that uses the code names itself.
     let unnamed = name.trim().is_empty();
     let name = if unnamed { UNNAMED } else { name.trim() };
-    let base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let base = base.trim_matches('-');
-    let base = if base.is_empty() || base == LOCAL_DEVICE { "device" } else { base };
-    let mut id = base.to_owned();
-    let mut n = 2;
-    while devices.iter().any(|device| device.id == id) {
-        id = format!("{base}-{n}");
-        n += 1;
-    }
+    let (id, name) = new_id(&devices, name);
     let now = now_ms();
     let device = Device {
         id,
-        name: if name.is_empty() { base.to_owned() } else { name.to_owned() },
+        name,
         token_sha256: token_hash(&token),
         created: now,
         last_seen: None,
@@ -319,6 +344,7 @@ pub fn pair(home: &Home, name: &str) -> Result<(String, Device), RemoteError> {
         pending_kind: 0,
         pending_since: None,
         unnamed,
+        ..Device::default()
     };
     devices.push(device.clone());
     save_devices(home, &devices)?;
@@ -456,6 +482,7 @@ fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<Device, Rem
     allowed.endpoint_id = std::mem::take(&mut allowed.pending_endpoint_id);
     allowed.pending_kind = 0;
     allowed.pending_since = None;
+    allowed.pending_signed_in = false;
     allowed.code_expires = None;
     let allowed = allowed.clone();
     save_devices(home, &devices)?;
@@ -495,7 +522,7 @@ fn local_pairing_path(home: &Home) -> PathBuf {
 }
 
 /// The values of `name` in a pairing code.
-fn code_values<'a>(code: &'a str, name: &'a str) -> impl Iterator<Item = String> + 'a {
+pub(crate) fn code_values<'a>(code: &'a str, name: &'a str) -> impl Iterator<Item = String> + 'a {
     code.trim().split(['?', '&']).filter_map(move |part| part.strip_prefix(name)?.strip_prefix('=')).map(decode)
 }
 
@@ -552,6 +579,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
                 pending_kind: 0,
                 pending_since: None,
                 unnamed: false,
+                ..Device::default()
             };
             match local {
                 Some(index) => devices[index] = device,
@@ -601,7 +629,7 @@ pub(crate) fn machine_name() -> &'static str {
 }
 
 /// Percent-encodes all but letters, digits, '-', '.', '_' and '~'.
-fn encode(text: &str) -> String {
+pub(crate) fn encode(text: &str) -> String {
     text.bytes()
         .map(
             |byte| {
@@ -661,16 +689,30 @@ pub(crate) struct Peer {
 
 /// Turns away, right after the handshake, a key that isn't a paired
 /// device's, unless a code is waiting for its device (no other key once a
-/// device used it) or it comes from this machine (whose app proves itself
-/// with the local pairing code's token).
+/// device used it), it comes from this machine (whose app proves itself
+/// with the local pairing code's token), or this Claktory is signed in to
+/// an account (`open`), whose devices find it and prove themselves with an
+/// assertion in their Hello.
 #[derive(Debug)]
 struct Gate {
     home: Home,
+    /// Who may use pipes (`pipe_link`): only they get its ALPN, and only it.
+    pipes: Arc<crate::pipe_link::Admits>,
+    /// This Claktory is signed in: its account's devices prove themselves
+    /// in their Hello, so unknown keys get past the handshake.
+    open: Arc<AtomicBool>,
 }
 
 impl Gate {
     fn admits(&self, connection: &Connection) -> bool {
-        if from_this_machine(path_of(connection).1) {
+        // Ours: Factory dialed a pipe's peer.
+        if connection.side().is_client() {
+            return true;
+        }
+        if connection.alpn() == crate::pipe_link::ALPN_PIPE {
+            return self.pipes.admits(&connection.remote_id().to_string(), now_ms());
+        }
+        if from_this_machine(path_of(connection).1) || self.open.load(Ordering::Relaxed) {
             return true;
         }
         let id = connection.remote_id().to_string();
@@ -764,9 +806,14 @@ pub(crate) struct State {
     /// Notified whenever devices may have changed, for agents' pairings to
     /// show it (`extensions::devices::monitor`).
     pub(crate) changed: Arc<tokio::sync::Notify>,
+    /// This Claktory is signed in to an account: the gate lets in keys it
+    /// doesn't know, for the person's devices to find it (see `admit`).
+    account_open: Arc<AtomicBool>,
     /// The port Claktory's own listener has (7420), which devices may not
     /// forward to; 0 until it listens.
     listener_port: AtomicU64,
+    /// Pipes to other Claktories, their transport's (`pipe_link`).
+    pub(crate) pipes: crate::pipe_link::State,
 }
 
 impl State {
@@ -795,9 +842,263 @@ impl Drop for Waiting {
 /// What became of a device's Hello with its token.
 pub(crate) enum Authorized {
     Connected(Connected),
-    /// It used a pairing code first and waits for the person to allow it.
+    /// It used a pairing code first, or came through the account, and waits
+    /// for the person to allow it.
     Pending(Device),
     Refused,
+    /// Turned away for a reason it can act on: the code to answer with and
+    /// what to tell it.
+    Turned(v1::ErrorCode, String),
+}
+
+/// What a device's Hello says of who it is (`Factory::authorize`).
+pub(crate) struct Knock<'a> {
+    /// Its pairing code's token, or this machine's app's; empty for a
+    /// device found through the account.
+    pub token: &'a str,
+    /// A device assertion from the account service (Hello.assertion): it's
+    /// signed in to the person's account. Empty without one.
+    pub assertion: &'a str,
+    /// Its app can sign in to the account and confirm (Hello.can_confirm).
+    pub can_confirm: bool,
+    pub kind: v1::DeviceKind,
+    /// Its own name (Hello.device_name), for a device that names itself.
+    pub name: &'a str,
+}
+
+/// How long a device has to confirm it's the owner's, from its first Hello
+/// from an app that can while this Claktory is signed in.
+pub const CONFIRM_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How long after this Claktory signs in its first device may join through
+/// the account alone, without Allow: the fresh server's case.
+pub const FIRST_DEVICE_WINDOW: Duration = Duration::from_secs(30 * 60);
+
+/// This Claktory's account, for `admit`.
+pub(crate) struct Owner {
+    pub account_id: String,
+    /// When it signed in, in ms since 1970; 0 if before that was kept.
+    pub signed_in_ms: i64,
+}
+
+/// What `admit` decided, by the device's place in the list.
+enum Admission {
+    Connected {
+        index: usize,
+        confirm_by: i64,
+    },
+    Pending(usize),
+    /// The same, taken out of the list once it's saved.
+    Found(Device, i64),
+    Waits(Device),
+    Turned(v1::ErrorCode, String),
+    Unknown,
+}
+
+/// What an assertion that doesn't count means to the device showing it.
+fn refusal(refused: crate::account::AssertionRefusal) -> (v1::ErrorCode, String) {
+    use crate::account::AssertionRefusal as Refused;
+    match refused {
+        Refused::Expired => (v1::ErrorCode::SignInRequired, "This device's sign-in ran out. Connect again to sign in afresh.".to_owned()),
+        Refused::OtherAccount => (v1::ErrorCode::Unauthorized, "This Claktory belongs to another account.".to_owned()),
+        Refused::NotSignedIn => (
+            v1::ErrorCode::Unauthorized,
+            "This Claktory isn't signed in to an account, so it can't be found this way. Add this device with a code from its Settings → Devices.".to_owned(),
+        ),
+        Refused::Invalid | Refused::OtherKey => {
+            (v1::ErrorCode::Unauthorized, "This device's sign-in couldn't be checked. Sign out and in again on it.".to_owned())
+        }
+    }
+}
+
+/// A device's own name, as it gives it: whitespace squeezed, at most
+/// `NAME_CHARS`.
+fn own_name(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect()
+}
+
+/// Who may come in, changing `devices` as that says (a key bound, a device
+/// added or waiting, a grace started). `shown`: what the device's assertion
+/// showed, if it brought one (the account it's signed in as, which
+/// `check_assertion` already matched with `owner`'s), or why it doesn't
+/// count.
+///
+/// - A pairing code's token: as before, its device, or the first key to
+///   use the code waits to be allowed; with an assertion for the owner's
+///   account too, it's in at once (a code and the account: two factors).
+/// - A device found through the account: the first device, while this
+///   Claktory signed in less than `FIRST_DEVICE_WINDOW` ago and has no
+///   device yet (this machine's app aside), is in at once; any other
+///   waits to be allowed. Every Hello shows a fresh assertion, first and
+///   later ones alike: its key alone is never enough, because anything
+///   that borrows the device's tunnel shares its key (another process on
+///   the device dialling the app's forwarded port, say).
+/// - While this Claktory is signed in, a paired device that isn't
+///   confirmed as the owner's is asked to: its grace starts at its first
+///   Hello from an app that can confirm, and once it's over the device is
+///   turned away until it does. An assertion confirms it.
+fn admit(
+    devices: &mut Vec<Device>,
+    knock: &Knock<'_>,
+    peer: &Peer,
+    owner: Option<&Owner>,
+    shown: Option<Result<String, (v1::ErrorCode, String)>>,
+    now: i64,
+) -> Admission {
+    let signed_in = matches!(&shown, Some(Ok(_)));
+    let digest = token_hash(knock.token);
+    let mut found = None;
+    let mut pending = None;
+    for (index, device) in devices.iter_mut().enumerate() {
+        // Compared in full every time, whatever matches.
+        let known = device.token_sha256.as_bytes();
+        let same = known.len() == digest.len() && known.iter().zip(digest.as_bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0;
+        // On the loopback port only this machine's app's token counts; a
+        // device found through the account has no code.
+        if !same || knock.token.is_empty() || (peer.endpoint_id.is_empty() && !device.local) || device.discovered {
+            continue;
+        }
+        if device.local {
+            if peer.loopback || device.endpoint_id == peer.endpoint_id {
+                found = Some(index);
+            }
+        } else if !device.endpoint_id.is_empty() {
+            if device.endpoint_id == peer.endpoint_id {
+                found = Some(index);
+            }
+        } else if device.awaiting(now) {
+            if device.pending_endpoint_id.is_empty() {
+                device.pending_endpoint_id.clone_from(&peer.endpoint_id);
+                device.pending_since = Some(now);
+                let name = own_name(knock.name);
+                if device.unnamed && !name.is_empty() {
+                    device.name = name;
+                    device.unnamed = false;
+                }
+            }
+            if device.pending_endpoint_id == peer.endpoint_id {
+                device.pending_kind = knock.kind.into();
+                if let Some(Ok(account)) = &shown {
+                    // A code and the owner's account: in without Allow.
+                    device.confirmed_as.clone_from(account);
+                    device.pending_endpoint_id.clear();
+                    device.pending_kind = 0;
+                    device.pending_since = None;
+                    device.pending_signed_in = false;
+                    device.code_expires = None;
+                    found = Some(index);
+                } else {
+                    pending = Some(index);
+                }
+            }
+        }
+    }
+    // A device found through the account (through the tunnel: the loopback
+    // port has none). Its key alone is never enough: it shows a fresh
+    // assertion on every Hello, since anything that borrows the device's
+    // tunnel shares its key.
+    if found.is_none() && pending.is_none() && !peer.endpoint_id.is_empty() {
+        let mut known = false;
+        for (index, device) in devices.iter_mut().enumerate().filter(|(_, device)| device.discovered && !device.local) {
+            if device.endpoint_id == peer.endpoint_id {
+                known = true;
+                if signed_in {
+                    found = Some(index);
+                }
+            } else if device.endpoint_id.is_empty() && device.awaiting(now) && device.pending_endpoint_id == peer.endpoint_id {
+                known = true;
+                if signed_in {
+                    device.pending_kind = knock.kind.into();
+                    pending = Some(index);
+                }
+            }
+        }
+        if known && !signed_in {
+            return match shown {
+                Some(Err((code, reason))) => Admission::Turned(code, reason),
+                _ => Admission::Turned(
+                    v1::ErrorCode::SignInRequired,
+                    "Sign in to your Claktory account on this device to connect.".to_owned(),
+                ),
+            };
+        }
+        if found.is_none() && pending.is_none() {
+            match &shown {
+                Some(Ok(account)) => {
+                    let fresh = owner
+                        .is_some_and(|owner| owner.signed_in_ms > 0 && now - owner.signed_in_ms < FIRST_DEVICE_WINDOW.as_millis() as i64);
+                    let first = fresh && !devices.iter().any(|device| !device.local && !device.endpoint_id.is_empty());
+                    let name = own_name(knock.name);
+                    let (id, name) = new_id(devices, if name.is_empty() { UNNAMED } else { &name });
+                    let mut device = Device {
+                        id,
+                        name,
+                        // For the four digits both sides show (PendingDevice.number).
+                        token_sha256: token_hash(knock.assertion),
+                        created: now,
+                        discovered: true,
+                        ..Device::default()
+                    };
+                    if first {
+                        device.endpoint_id.clone_from(&peer.endpoint_id);
+                        device.confirmed_as.clone_from(account);
+                        found = Some(devices.len());
+                    } else {
+                        device.code_expires = Some(now + CODE_LIFETIME.as_millis() as i64);
+                        device.pending_endpoint_id.clone_from(&peer.endpoint_id);
+                        device.pending_kind = knock.kind.into();
+                        device.pending_since = Some(now);
+                        device.pending_signed_in = true;
+                        pending = Some(devices.len());
+                    }
+                    devices.push(device);
+                }
+                Some(Err((code, reason))) => return Admission::Turned(*code, reason.clone()),
+                None if knock.token.is_empty() && owner.is_some() => {
+                    return Admission::Turned(
+                        v1::ErrorCode::SignInRequired,
+                        "Sign in to your Claktory account on this device to connect.".to_owned(),
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+    if let Some(index) = pending {
+        return Admission::Pending(index);
+    }
+    let Some(index) = found else { return Admission::Unknown };
+    let device = &mut devices[index];
+    // Is it the owner's?
+    let mut confirm_by = 0;
+    if let Some(owner) = owner
+        && !device.local
+    {
+        if signed_in {
+            device.confirmed_as.clone_from(&owner.account_id);
+            device.confirm_by = None;
+        } else if device.confirmed_as != owner.account_id {
+            match device.confirm_by {
+                Some(by) if by <= now => {
+                    return Admission::Turned(
+                        v1::ErrorCode::SignInRequired,
+                        "Sign in to your Claktory account on this device to keep using it here.".to_owned(),
+                    );
+                }
+                Some(by) => confirm_by = by,
+                None if knock.can_confirm => {
+                    confirm_by = now + CONFIRM_GRACE.as_millis() as i64;
+                    device.confirm_by = Some(confirm_by);
+                }
+                None => {}
+            }
+        }
+    }
+    if !peer.endpoint_id.is_empty() {
+        device.endpoint_id.clone_from(&peer.endpoint_id);
+    }
+    device.last_seen = Some(now);
+    device.last_address = peer.address.map(|address| address.ip().to_canonical().to_string()).unwrap_or_default();
+    Admission::Connected { index, confirm_by }
 }
 
 /// Where a device waiting to be allowed stands.
@@ -848,6 +1149,9 @@ fn default_relays() -> Vec<String> {
 /// One of a device's sessions; it counts as connected while this lives.
 pub(crate) struct Connected {
     pub device: Device,
+    /// When it has to confirm it's the owner's by (Welcome.confirm_by_ms);
+    /// 0 when it needn't.
+    pub confirm_by: i64,
     /// Notified when the device is unpaired: the session closes.
     pub closed: Arc<tokio::sync::Notify>,
     factory: Weak<Factory>,
@@ -870,102 +1174,138 @@ impl Drop for Connected {
 }
 
 impl Factory {
-    /// The paired device whose token this is, if `peer` may use it: the key
-    /// bound to it; for this machine's app, any key from this machine.
-    /// Connected until the returned `Connected` goes. The first key to use a
-    /// code waits for the person to allow it (`Pending`), and no other key
-    /// can use the code. A wrong token is answered no sooner than a second
-    /// after the key's last wrong one.
-    /// A device whose code was made without a name takes `name`, its own,
-    /// when it first uses the code.
-    pub(crate) async fn authorize(self: &Arc<Self>, token: &str, peer: &Peer, kind: v1::DeviceKind, name: &str) -> Authorized {
-        let digest = token_hash(token);
+    /// Who may come in with `knock`, and how: the paired device whose token
+    /// it brings, if `peer` may use it (the key bound to it; for this
+    /// machine's app, any key from this machine), or one found through the
+    /// person's account (see `admit`). Connected until the returned
+    /// `Connected` goes. A key turned away is answered no sooner than a
+    /// second after its last.
+    pub(crate) async fn authorize(self: &Arc<Self>, knock: &Knock<'_>, peer: &Peer) -> Authorized {
         let now = now_ms();
-        let mut found = None;
-        let mut pending = None;
+        let account = self.lock().config.account.clone();
+        let owner =
+            crate::account::owner(self, &account).map(|owner| Owner { account_id: owner.account_id, signed_in_ms: owner.signed_in_ms });
+        // What its assertion shows, if it brought one through the tunnel.
+        let shown = (!knock.assertion.is_empty() && !peer.endpoint_id.is_empty()).then(|| {
+            crate::account::check_assertion(self, &account, knock.assertion, &peer.endpoint_id)
+                .map(|assertion| assertion.account_id)
+                .map_err(refusal)
+        });
+        let mut admission = Admission::Unknown;
         let changing = devices_lock();
         match devices(&self.home) {
             Ok(mut devices) => {
-                for device in &mut devices {
-                    // Compared in full every time, whatever matches.
-                    let known = device.token_sha256.as_bytes();
-                    let same =
-                        known.len() == digest.len() && known.iter().zip(digest.as_bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0;
-                    // On the loopback port only this machine's app's token counts.
-                    if !same || token.is_empty() || (peer.endpoint_id.is_empty() && !device.local) {
-                        continue;
-                    }
-                    let allowed = if device.local {
-                        peer.loopback || device.endpoint_id == peer.endpoint_id
-                    } else if !device.endpoint_id.is_empty() {
-                        device.endpoint_id == peer.endpoint_id
-                    } else if device.awaiting(now) {
-                        if device.pending_endpoint_id.is_empty() {
-                            device.pending_endpoint_id.clone_from(&peer.endpoint_id);
-                            device.pending_since = Some(now);
-                            let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect();
-                            if device.unnamed && !name.is_empty() {
-                                device.name = name;
-                                device.unnamed = false;
-                            }
-                        }
-                        if device.pending_endpoint_id == peer.endpoint_id {
-                            device.pending_kind = kind.into();
-                            pending = Some(device.clone());
-                        }
-                        false
-                    } else {
-                        false
-                    };
-                    if allowed {
-                        if !peer.endpoint_id.is_empty() {
-                            device.endpoint_id.clone_from(&peer.endpoint_id);
-                        }
-                        device.last_seen = Some(now);
-                        device.last_address = peer.address.map(|address| address.ip().to_canonical().to_string()).unwrap_or_default();
-                        found = Some(device.clone());
-                    }
-                }
-                if (found.is_some() || pending.is_some())
+                admission = admit(&mut devices, knock, peer, owner.as_ref(), shown, now);
+                if matches!(admission, Admission::Connected { .. } | Admission::Pending(_))
                     && let Err(error) = save_devices(&self.home, &devices)
                 {
                     tracing::warn!(%error, "could not note when a device connected");
-                    pending = None;
+                    admission = Admission::Unknown;
                 }
+                admission = match admission {
+                    Admission::Connected { index, confirm_by } => Admission::Found(devices.swap_remove(index), confirm_by),
+                    Admission::Pending(index) => Admission::Waits(devices.swap_remove(index)),
+                    other => other,
+                };
             }
             Err(error) => tracing::error!(%error, "could not read the paired devices"),
         }
         drop(changing);
-        if let Some(device) = pending {
-            tracing::info!(device = %device.id, endpoint = %peer.endpoint_id, "a device used its pairing code and waits to be allowed");
-            // An earlier code's device by the same id ended some way: not this one.
-            lock(&self.remote.ended).remove(&device.id);
-            self.refresh_remote();
-            return Authorized::Pending(device);
-        }
-        let Some(device) = found else {
-            let wait = {
-                let now = Instant::now();
-                let last = lock(&self.remote.failures).insert(peer.endpoint_id.clone(), now);
-                last.map(|last| FAILURE_PAUSE.saturating_sub(now.duration_since(last))).unwrap_or_default()
-            };
-            // The loopback port's refusals are logged where they're known.
-            if !peer.endpoint_id.is_empty() {
-                tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
+        let (device, confirm_by) = match admission {
+            Admission::Found(device, confirm_by) => (device, confirm_by),
+            Admission::Waits(device) => {
+                tracing::info!(device = %device.id, endpoint = %peer.endpoint_id, discovered = device.discovered, "a device waits to be allowed");
+                // An earlier code's device by the same id ended some way: not this one.
+                lock(&self.remote.ended).remove(&device.id);
+                self.refresh_remote();
+                return Authorized::Pending(device);
             }
-            tokio::time::sleep(wait).await;
-            return Authorized::Refused;
+            Admission::Turned(code, reason) => {
+                tracing::warn!(endpoint = %peer.endpoint_id, ?code, "turned a device away");
+                self.pause_after_refusal(peer).await;
+                return Authorized::Turned(code, reason);
+            }
+            Admission::Unknown | Admission::Connected { .. } | Admission::Pending(_) => {
+                // The loopback port's refusals are logged where they're known.
+                if !peer.endpoint_id.is_empty() {
+                    tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
+                }
+                self.pause_after_refusal(peer).await;
+                return Authorized::Refused;
+            }
         };
         let closed = Arc::new(tokio::sync::Notify::new());
         let session = Session { closed: closed.clone(), endpoint_id: peer.endpoint_id.clone() };
         lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
         self.refresh_remote();
-        Authorized::Connected(Connected { device, closed, factory: Arc::downgrade(self) })
+        Authorized::Connected(Connected { device, confirm_by, closed, factory: Arc::downgrade(self) })
+    }
+
+    /// ConfirmDevice, from `asker` (its device id; `LOCAL_DEVICE` for this
+    /// machine's app), connected with key `endpoint_id`: with an assertion,
+    /// the asker confirms itself; with a device id, the person confirms that
+    /// device from this one, which must be confirmed itself.
+    pub async fn confirm_device(&self, asker: &str, endpoint_id: &str, request: &v1::ConfirmDevice) -> Result<(), RequestError> {
+        let account = self.lock().config.account.clone();
+        let Some(owner) = crate::account::owner(self, &account) else {
+            return Err(RequestError::Account(
+                v1::ErrorCode::InvalidRequest,
+                "This Claktory isn't signed in to an account, so there's nothing to confirm.".to_owned(),
+            ));
+        };
+        let target = if request.assertion.is_empty() {
+            let trusted = asker == LOCAL_DEVICE
+                || devices(&self.home)
+                    .map_err(|error| RequestError::Remote(error.to_string()))?
+                    .iter()
+                    .any(|device| device.id == asker && device.confirmed_as == owner.account_id);
+            if !trusted {
+                return Err(RequestError::Account(
+                    v1::ErrorCode::Unauthorized,
+                    "Confirm this device first: sign in to your account on it. Then you can confirm others from it.".to_owned(),
+                ));
+            }
+            request.device_id.clone()
+        } else {
+            // This computer's app is the owner's already.
+            if asker == LOCAL_DEVICE {
+                return Ok(());
+            }
+            crate::account::check_assertion(self, &account, &request.assertion, endpoint_id).map_err(|refused| {
+                let (code, reason) = refusal(refused);
+                RequestError::Account(code, reason)
+            })?;
+            asker.to_owned()
+        };
+        {
+            let _changing = devices_lock();
+            let mut devices = devices(&self.home).map_err(|error| RequestError::Remote(error.to_string()))?;
+            let Some(device) = devices.iter_mut().find(|device| device.id == target && !device.local && !device.endpoint_id.is_empty())
+            else {
+                return Err(RequestError::UnknownDevice(target));
+            };
+            device.confirmed_as.clone_from(&owner.account_id);
+            device.confirm_by = None;
+            save_devices(&self.home, &devices).map_err(|error| RequestError::Remote(error.to_string()))?;
+        }
+        tracing::info!(device = %target, by = %asker, "a device was confirmed as the owner's");
+        self.refresh_remote();
+        Ok(())
+    }
+
+    /// Waits until a second after `peer`'s last refusal.
+    async fn pause_after_refusal(&self, peer: &Peer) {
+        let wait = {
+            let now = Instant::now();
+            let last = lock(&self.remote.failures).insert(peer.endpoint_id.clone(), now);
+            last.map(|last| FAILURE_PAUSE.saturating_sub(now.duration_since(last))).unwrap_or_default()
+        };
+        tokio::time::sleep(wait).await;
     }
 
     /// Where the device `id`, waiting with key `endpoint_id`, stands.
-    pub(crate) fn pairing(&self, id: &str, endpoint_id: &str) -> Pairing {
-        let now = now_ms();
+    pub(crate) fn pairing(&self, waiting: &Device, endpoint_id: &str) -> Pairing {
+        let (id, now) = (waiting.id.as_str(), now_ms());
         let device = devices(&self.home).ok().and_then(|devices| devices.into_iter().find(|device| device.id == id));
         let ended = match &device {
             Some(device) if device.endpoint_id == endpoint_id => return Pairing::Allowed,
@@ -974,6 +1314,14 @@ impl Factory {
             _ => lock(&self.remote.ended).get(id).copied(),
         };
         let machine = machine_name();
+        // One that came through the account asks again by connecting again.
+        if waiting.discovered {
+            return Pairing::Ended(match ended {
+                Some(Ended::Expired) => format!("No one allowed this device on {machine} in time. Connect again to ask again."),
+                Some(Ended::Cancelled) => format!("Connecting this device was cancelled on {machine}. Connect again to ask again."),
+                Some(Ended::Denied) | None => format!("{machine} didn't allow this device."),
+            });
+        }
         Pairing::Ended(match ended {
             Some(Ended::Expired) => {
                 format!("The code expired before this device was allowed. Add it again on {machine} in Settings → Devices.")
@@ -1062,6 +1410,15 @@ impl Factory {
         }
     }
 
+    /// Whether this Claktory is signed in to an account, so the person's
+    /// devices may find it; the gate follows.
+    pub(crate) fn account_open(&self) -> bool {
+        let account = self.lock().config.account.clone();
+        let open = crate::account::owner(self, &account).is_some();
+        self.remote.account_open.store(open, Ordering::Relaxed);
+        open
+    }
+
     /// Re-reads what the Workspace shows of remote access, and sends it if
     /// it changed. Devices unpaired meanwhile (by `factoryd unpair`) are
     /// disconnected.
@@ -1077,7 +1434,7 @@ impl Factory {
             self.close_device(&id, "");
         }
         let relays = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
-        let on = remote_on(&devices, now);
+        let on = remote_on(&devices, now) || self.account_open();
         let endpoint = lock(&self.remote.endpoint).clone();
         let (home_relay, relay_connected) = match &endpoint {
             Some(endpoint) if on => {
@@ -1137,7 +1494,8 @@ impl Factory {
     }
 
     /// The Workspace's remote access.
-    pub(crate) fn remote_view(&self, _inner: &Inner) -> v1::RemoteAccess {
+    pub(crate) fn remote_view(&self, inner: &Inner) -> v1::RemoteAccess {
+        let owner = crate::account::owner(self, &inner.config.account);
         let shown = lock(&self.remote.shown).clone();
         let connected = lock(&self.remote.connected);
         let now = now_ms();
@@ -1152,8 +1510,8 @@ impl Factory {
                 number: approval_number(&shown.endpoint_id, &device.pending_endpoint_id, &device.token_sha256),
                 requested_ms: device.pending_since.unwrap_or_default(),
                 expires_ms: device.code_expires.unwrap_or_default(),
-                signed_in: false,
-                discovered: false,
+                signed_in: device.pending_signed_in,
+                discovered: device.discovered,
             })
             .collect();
         pending.sort_by_key(|device| device.requested_ms);
@@ -1170,6 +1528,12 @@ impl Factory {
                 .filter(|device| !device.local)
                 .map(|device| {
                     let connected = connected.contains_key(&device.id);
+                    // Whether it's the owner's: only asked while signed in.
+                    let confirmed = owner.as_ref().is_some_and(|owner| device.confirmed_as == owner.account_id);
+                    let confirm_by_ms = match &owner {
+                        Some(_) if !confirmed => device.confirm_by.unwrap_or_default(),
+                        _ => 0,
+                    };
                     let path =
                         if connected { shown.paths.get(&device.id).copied().unwrap_or(v1::DevicePath::None) } else { v1::DevicePath::None };
                     v1::PairedDevice {
@@ -1183,8 +1547,8 @@ impl Factory {
                         paired_ms: device.created,
                         last_seen_ms: device.last_seen.unwrap_or_default(),
                         last_address: device.last_address,
-                        confirmed: false,
-                        confirm_by_ms: 0,
+                        confirmed,
+                        confirm_by_ms,
                     }
                 })
                 .collect(),
@@ -1219,6 +1583,14 @@ impl Factory {
     /// names the relay the tunnel reaches and the addresses it can be
     /// dialled at.
     async fn code_with(self: &Arc<Self>, token: &str) -> Result<String, RequestError> {
+        let (endpoint, relays, addresses) = self.reachable().await?;
+        Ok(pairing_code(token, &endpoint.id().to_string(), &relays, &addresses, &self.identity()))
+    }
+
+    /// The endpoint other machines reach, once remote access is on (as what
+    /// asks for it wants), and where they reach it: its relays and its
+    /// addresses. Waits a moment for a relay.
+    pub(crate) async fn reachable(self: &Arc<Self>) -> Result<(Endpoint, Vec<String>, Vec<SocketAddr>), RequestError> {
         sync_tunnel(self).await;
         self.refresh_remote();
         let Some(endpoint) = lock(&self.remote.endpoint).clone() else {
@@ -1227,6 +1599,13 @@ impl Factory {
         };
         let wait = lock(&self.remote.online_wait).unwrap_or(ONLINE_WAIT);
         let _ = tokio::time::timeout(wait, endpoint.online()).await;
+        let (relays, addresses) = self.reached_at(&endpoint);
+        Ok((endpoint, relays, addresses))
+    }
+
+    /// Where other machines reach `endpoint` now: its relays (config.json's
+    /// too) and its addresses but 127.0.0.1's.
+    pub(crate) fn reached_at(&self, endpoint: &Endpoint) -> (Vec<String>, Vec<SocketAddr>) {
         let addr = endpoint.addr();
         let mut relays: Vec<String> = addr.relay_urls().map(ToString::to_string).collect();
         for relay in self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default() {
@@ -1235,7 +1614,12 @@ impl Factory {
             }
         }
         let addresses: Vec<SocketAddr> = addr.ip_addrs().filter(|address| !address.ip().is_loopback()).copied().collect();
-        Ok(pairing_code(token, &endpoint.id().to_string(), &relays, &addresses, &self.identity()))
+        (relays, addresses)
+    }
+
+    /// The endpoint other machines reach, while remote access is on.
+    pub(crate) fn remote_endpoint(&self) -> Option<Endpoint> {
+        lock(&self.remote.endpoint).clone()
     }
 
     /// Keeps the token of an agent's pairing in memory while its code waits.
@@ -1387,6 +1771,9 @@ fn plain_error(error: &std::io::Error) -> String {
 /// within a second of a change. Also keeps what the Workspace shows of it
 /// current, and forgets codes that ran out.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    if let Some(strong) = factory.upgrade() {
+        crate::pipe_link::reload(&strong);
+    }
     while let Some(strong) = factory.upgrade() {
         match forget_expired(&strong.home) {
             Ok(expired) => {
@@ -1415,7 +1802,9 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
         });
         let relays = factory.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
         let waiting = factory.remote.waiting.load(Ordering::Relaxed) > 0;
-        let wanted = Wanted { on: remote_on(&devices, now_ms()) || waiting, relays };
+        let pipes = factory.remote.pipes.wants_tunnel(now_ms());
+        let open = factory.account_open();
+        let wanted = Wanted { on: remote_on(&devices, now_ms()) || waiting || pipes || open, relays };
         let mut tunnel = factory.remote.tunnel.lock().await;
         let remote_as_wanted = match &tunnel.remote {
             Some((relays, ..)) => wanted.on && *relays == wanted.relays,
@@ -1445,7 +1834,7 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
                 tracing::info!("remote access stopped");
             }
             if wanted.on {
-                match start_remote(&factory.home, &wanted).await {
+                match start_remote(&factory.home, &wanted, &factory.remote.pipes.admits, &factory.remote.account_open).await {
                     Ok(endpoint) => {
                         tracing::info!(endpoint = %endpoint.id(), "remote access started");
                         let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
@@ -1478,7 +1867,10 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
         let home = home.clone();
         tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
     };
-    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, local_port(&home)).await?;
+    let pipes = factory.remote.pipes.admits.clone();
+    // Local connections are this machine's whoever is signed in.
+    let closed = Arc::new(AtomicBool::new(false));
+    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, local_port(&home), &pipes, &closed).await?;
     let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
     let written = tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
     if let Err(error) = written {
@@ -1490,14 +1882,19 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
 
 /// The endpoint for devices on other machines, on the port it had before
 /// when it's free, so the addresses in their codes stay right.
-async fn start_remote(home: &Home, wanted: &Wanted) -> Result<Endpoint, RemoteError> {
+async fn start_remote(
+    home: &Home,
+    wanted: &Wanted,
+    pipes: &Arc<crate::pipe_link::Admits>,
+    open: &Arc<AtomicBool>,
+) -> Result<Endpoint, RemoteError> {
     let key = {
         let home = home.clone();
         tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
     };
     let path = dir(home).join("remote-port");
     let port = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
-    let endpoint = bind(home, key, wanted, port).await?;
+    let endpoint = bind(home, key, wanted, port, pipes, open).await?;
     if let Some(bound) = loopback_port(&endpoint)
         && bound != port
         && let Err(error) = write_private(&path, format!("{bound}\n").as_bytes())
@@ -1515,14 +1912,22 @@ fn loopback_port(endpoint: &Endpoint) -> Option<u16> {
 
 /// An endpoint as `wanted` says, on `port` (the local pairing code's) if it's
 /// free. Without remote access: 127.0.0.1 only, no relays, nothing published.
-/// With it: every address, the relays, and n0's address lookup with the
-/// default relays (with config.json's own relays, nothing goes to n0).
+/// With it: every address, the relays (n0's, or config.json's own), and
+/// n0's address lookup either way: where this Claktory can be reached (its
+/// key, home relay and addresses, never data) stays published, so every
+/// already-paired device follows a relay change without re-pairing.
 /// Never a port mapping (no portmapper).
-async fn bind(home: &Home, key: SecretKey, wanted: &Wanted, port: u16) -> Result<Endpoint, RemoteError> {
+async fn bind(
+    home: &Home,
+    key: SecretKey,
+    wanted: &Wanted,
+    port: u16,
+    pipes: &Arc<crate::pipe_link::Admits>,
+    open: &Arc<AtomicBool>,
+) -> Result<Endpoint, RemoteError> {
     let failed = |error: &dyn std::fmt::Display| RemoteError::Tunnel(error.to_string());
     let builder = |port: u16| -> Result<Builder, RemoteError> {
-        let builder =
-            if wanted.on && wanted.relays.is_empty() { Endpoint::builder(presets::N0) } else { Endpoint::builder(presets::Minimal) };
+        let builder = if wanted.on { Endpoint::builder(presets::N0) } else { Endpoint::builder(presets::Minimal) };
         let relay_mode = if !wanted.on {
             RelayMode::Disabled
         } else if wanted.relays.is_empty() {
@@ -1539,8 +1944,8 @@ async fn bind(home: &Home, key: SecretKey, wanted: &Wanted, port: u16) -> Result
         let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
         let mut builder = builder
             .secret_key(key.clone())
-            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec(), ALPN_FORWARD.to_vec()])
-            .hooks(Gate { home: home.clone() })
+            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec(), ALPN_FORWARD.to_vec(), crate::pipe_link::ALPN_PIPE.to_vec()])
+            .hooks(Gate { home: home.clone(), pipes: pipes.clone(), open: open.clone() })
             .relay_mode(relay_mode)
             .clear_ip_transports()
             .bind_addr(SocketAddr::new(ip, port))
@@ -1593,6 +1998,11 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
         lock(&strong.remote.links).entry(endpoint_id.clone()).or_default().push((number, connection.clone()));
         number
     };
+    if connection.alpn() == crate::pipe_link::ALPN_PIPE {
+        crate::pipe_link::serve(connection, factory.clone()).await;
+        forget_link(&factory, &endpoint_id, number);
+        return;
+    }
     if connection.alpn() == ALPN_FORWARD {
         crate::forward::serve(connection, factory.clone(), endpoint_id.clone()).await;
         forget_link(&factory, &endpoint_id, number);
@@ -1709,6 +2119,158 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn knock<'a>(token: &'a str, assertion: &'a str, can_confirm: bool) -> Knock<'a> {
+        Knock { token, assertion, can_confirm, kind: v1::DeviceKind::Phone, name: "Matt's  iPhone" }
+    }
+
+    fn tunnel(key: &str) -> Peer {
+        Peer { endpoint_id: key.to_owned(), loopback: false, address: None }
+    }
+
+    fn owner(signed_in_ms: i64) -> Owner {
+        Owner { account_id: "acct".to_owned(), signed_in_ms }
+    }
+
+    fn ours() -> Option<Result<String, (v1::ErrorCode, String)>> {
+        Some(Ok("acct".to_owned()))
+    }
+
+    const MINUTE: i64 = 60_000;
+
+    #[test]
+    fn the_first_device_through_the_account_is_in_at_once_only_while_the_sign_in_is_fresh() {
+        let now = 100 * MINUTE;
+        // Fresh: in at once, named after itself, connecting by its key from then on.
+        let mut devices = Vec::new();
+        let Admission::Connected { index, confirm_by } =
+            admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now)
+        else {
+            panic!("in at once")
+        };
+        let first = &devices[index];
+        assert_eq!(
+            (first.name.as_str(), first.endpoint_id.as_str(), first.confirmed_as.as_str(), confirm_by),
+            ("Matt's iPhone", "k1", "acct", 0)
+        );
+        assert!(first.discovered && first.code_expires.is_none());
+        let again = admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now + 1);
+        assert!(matches!(again, Admission::Connected { index: 0, .. }), "back with a fresh assertion");
+        // Its key alone is never enough: anything that borrows the device's
+        // tunnel shares its key.
+        let alone = admit(&mut devices, &knock("", "", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), None, now + 1);
+        assert!(matches!(alone, Admission::Turned(v1::ErrorCode::SignInRequired, _)), "not by its key alone");
+        let expired = Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
+        let stale = admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), expired, now + 1);
+        assert!(
+            matches!(stale, Admission::Turned(v1::ErrorCode::SignInRequired, reason) if reason.contains("ran out")),
+            "an assertion that ran out asks for a fresh sign-in"
+        );
+
+        // Not the first: it waits to be allowed, its digits from the assertion.
+        let Admission::Pending(index) =
+            admit(&mut devices, &knock("", "A2", true), &tunnel("k2"), Some(&owner(now - 29 * MINUTE)), ours(), now)
+        else {
+            panic!("waits")
+        };
+        let second = devices[index].clone();
+        assert!(second.discovered && second.pending_signed_in && second.endpoint_id.is_empty());
+        assert_eq!((second.pending_endpoint_id.as_str(), second.token_sha256.clone()), ("k2", token_hash("A2")));
+        assert!(
+            matches!(admit(&mut devices, &knock("", "A2", true), &tunnel("k2"), None, ours(), now), Admission::Pending(i) if i == index),
+            "still waiting"
+        );
+        assert!(
+            matches!(
+                admit(&mut devices, &knock("", "", true), &tunnel("k2"), None, None, now),
+                Admission::Turned(v1::ErrorCode::SignInRequired, _)
+            ),
+            "waiting, but never by its key alone"
+        );
+        // Its assertion is no token: nobody gets in with it.
+        assert!(matches!(admit(&mut devices, &knock("A2", "", true), &tunnel("k3"), None, None, now), Admission::Unknown));
+
+        // An old sign-in: even the first device waits.
+        let mut devices = Vec::new();
+        assert!(matches!(
+            admit(&mut devices, &knock("", "A", true), &tunnel("k1"), Some(&owner(now - 31 * MINUTE)), ours(), now),
+            Admission::Pending(0)
+        ));
+        let mut devices = Vec::new();
+        assert!(
+            matches!(admit(&mut devices, &knock("", "A", true), &tunnel("k1"), Some(&owner(0)), ours(), now), Admission::Pending(0)),
+            "signed in before it was kept"
+        );
+    }
+
+    #[test]
+    fn a_device_without_a_good_assertion_is_told_what_to_do() {
+        let mut devices = Vec::new();
+        let now = 1_000;
+        let turned = admit(&mut devices, &knock("", "", true), &tunnel("k"), Some(&owner(now)), None, now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        let refused = Some(Err(refusal(crate::account::AssertionRefusal::OtherAccount)));
+        assert!(
+            matches!(admit(&mut devices, &knock("", "A", true), &tunnel("k"), Some(&owner(now)), refused, now), Admission::Turned(v1::ErrorCode::Unauthorized, reason) if reason.contains("another account"))
+        );
+        assert!(
+            matches!(admit(&mut devices, &knock("", "", true), &tunnel("k"), None, None, now), Admission::Unknown),
+            "not signed in: as before"
+        );
+        assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn a_code_and_the_account_need_no_allow_and_paired_devices_confirm_once() {
+        let now = 1_000_000;
+        let mut devices = vec![Device {
+            id: "phone".into(),
+            name: "Phone".into(),
+            token_sha256: token_hash("T"),
+            code_expires: Some(now + MINUTE),
+            ..Device::default()
+        }];
+        let Admission::Connected { confirm_by, .. } =
+            admit(&mut devices, &knock("T", "A", true), &tunnel("k"), Some(&owner(1)), ours(), now)
+        else {
+            panic!("in without Allow")
+        };
+        assert_eq!(
+            (devices[0].endpoint_id.as_str(), devices[0].confirmed_as.as_str(), devices[0].code_expires, confirm_by),
+            ("k", "acct", None, 0)
+        );
+
+        // A device from before: an old app keeps working as it did…
+        let mut devices = vec![Device { id: "mac".into(), token_sha256: token_hash("M"), endpoint_id: "m".into(), ..Device::default() }];
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "", false), &tunnel("m"), Some(&owner(1)), None, now),
+            Admission::Connected { confirm_by: 0, .. }
+        ));
+        assert_eq!(devices[0].confirm_by, None);
+        // …and one that can confirm gets a week, once…
+        let grace = now + CONFIRM_GRACE.as_millis() as i64;
+        assert!(
+            matches!(admit(&mut devices, &knock("M", "", true), &tunnel("m"), Some(&owner(1)), None, now), Admission::Connected { confirm_by, .. } if confirm_by == grace)
+        );
+        assert!(
+            matches!(admit(&mut devices, &knock("M", "", true), &tunnel("m"), Some(&owner(1)), None, now + MINUTE), Admission::Connected { confirm_by, .. } if confirm_by == grace)
+        );
+        // …then has to.
+        let after = admit(&mut devices, &knock("M", "", false), &tunnel("m"), Some(&owner(1)), None, grace + 1);
+        assert!(matches!(after, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "A", true), &tunnel("m"), Some(&owner(1)), ours(), grace + 1),
+            Admission::Connected { confirm_by: 0, .. }
+        ));
+        assert_eq!((devices[0].confirmed_as.as_str(), devices[0].confirm_by), ("acct", None));
+        // Not signed in, nothing is asked.
+        let mut devices = vec![Device { id: "mac".into(), token_sha256: token_hash("M"), endpoint_id: "m".into(), ..Device::default() }];
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "", true), &tunnel("m"), None, None, now),
+            Admission::Connected { confirm_by: 0, .. }
+        ));
+        assert_eq!(devices[0].confirm_by, None);
+    }
+
     /// The example the app checks its side against.
     #[test]
     fn the_approval_number_is_four_digits_both_sides_work_out() {
@@ -1734,6 +2296,7 @@ mod tests {
             pending_kind: 0,
             pending_since: None,
             unnamed: false,
+            ..Device::default()
         };
         assert!(!remote_on(&[], 100));
         assert!(!remote_on(&[device("k", None, true)], 100), "this machine's app alone");

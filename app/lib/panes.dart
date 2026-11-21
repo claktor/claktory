@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
@@ -15,8 +16,11 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'pane_chrome.dart';
 import 'map.dart';
+import 'mobile/haptics.dart';
+import 'mobile/metrics.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
+import 'inbox.dart' show InboxView;
 import 'usage_view.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
@@ -28,8 +32,61 @@ const paneMinHeight = 120.0;
 /// which its rows are laid out for.
 const pagePaneMinWidth = 320.0;
 
-/// A pane's header.
+/// A pane's header on a Mac.
 const paneHeaderHeight = 32.0;
+
+/// A pane's header: [paneHeaderHeight] with a pointer, at least a finger's
+/// height on touch, growing with its text there.
+double paneHeaderHeightOf(BuildContext context) =>
+    touchFirst(context) ? Touch.target : paneHeaderHeight;
+
+/// How a window presents an agent's layout when it hasn't room for all of
+/// it: on an iPad, the panes that fit ([shown]) and the rest ([hidden]),
+/// without changing the layout itself. The iPad's projection implements it
+/// (ipad/columns.dart), so this file knows nothing of the iPad.
+abstract interface class PaneView {
+  /// The tree to lay out: the layout without its hidden leaves, splits and
+  /// leaves keeping their ids.
+  ViewNode get shown;
+
+  /// The ids of the leaves not shown, in the layout's order.
+  List<String> get hidden;
+
+  /// The leaf the person is reading, whose header is marked on touch.
+  String get focused;
+
+  /// The whole layout after the person dragged the divider of [shown]'s
+  /// split [splitId] to [shownShares]; an empty list resets it to equal
+  /// shares among the shown.
+  ViewNode resized(ViewNode full, String splitId, List<double> shownShares);
+
+  /// The least [node] measures across ([row]) or down, as this window
+  /// keeps it.
+  double minExtent(ViewNode node, bool row);
+}
+
+/// Hands [PaneLayout] a way to present the layout in the room it has; with
+/// none (the Mac), it lays out the whole layout. [project] is asked on
+/// every build, with the room the panes have; [focus] is told of the pane
+/// the person touches or clicks, and of one they just moved.
+class PaneProjection extends InheritedWidget {
+  const PaneProjection({
+    super.key,
+    required this.project,
+    required this.focus,
+    required super.child,
+  });
+
+  final PaneView Function(ViewNode full, Size room) project;
+  final void Function(String leafId) focus;
+
+  static PaneProjection? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<PaneProjection>();
+
+  @override
+  bool updateShouldNotify(PaneProjection old) =>
+      old.project != project || old.focus != focus;
+}
 
 /// Settings, the Marketplace and What's new open as panes in the selected
 /// agent's layout on a Mac, right of its conversation, so it can be read
@@ -40,6 +97,7 @@ const pageKinds = {
   AppPage.changelog: 'changelog',
   AppPage.map: 'map',
   AppPage.usage: 'usage',
+  AppPage.inbox: 'inbox',
 };
 
 /// The page a leaf of [kind] shows, or null for a file's viewer or the
@@ -178,8 +236,15 @@ class _PaneLayoutState extends State<PaneLayout> {
   /// The tree after a change, until the backend has it.
   ViewNode? _sent;
 
-  /// The tree while a split's divider is dragged.
+  /// The tree laid out while a split's divider is dragged: the shown one,
+  /// when a [PaneView] presents the layout.
   ViewNode? _dragged;
+
+  /// The dragged split's shares, as last moved.
+  List<double> _dragShares = const [];
+
+  /// Who's told of the pane the person touches ([PaneProjection.focus]).
+  void Function(String leafId)? _focus;
 
   /// Each pane keeps its state (scroll, zoom, a draft) as it moves.
   final _chatKey = GlobalKey();
@@ -188,7 +253,8 @@ class _PaneLayoutState extends State<PaneLayout> {
   /// A divider's drag: the split's shares when it began, and its room.
   List<double> _from = const [];
 
-  ViewNode get _root => _dragged ?? _sent ?? layoutOf(widget.agent);
+  /// The whole layout: as last changed here until the backend has it.
+  ViewNode get _full => _sent ?? layoutOf(widget.agent);
 
   @override
   void didUpdateWidget(PaneLayout old) {
@@ -217,19 +283,42 @@ class _PaneLayoutState extends State<PaneLayout> {
 
   @override
   Widget build(BuildContext context) {
-    final root = _root;
+    final full = _full;
     final chat = KeyedSubtree(key: _chatKey, child: widget.chat);
-    if (isChatOnly(root)) {
+    if (isChatOnly(full)) {
       _keys.clear();
       return chat;
     }
-    final ids = {for (final leaf in leaves(root)) leaf.id};
+    // Every leaf of the layout keeps its key, shown or not, so a pane the
+    // projection moves to another split keeps its state. A hidden pane
+    // isn't built: it comes back as it opens (a video stopped, not
+    // playing unseen).
+    final ids = {for (final leaf in leaves(full)) leaf.id};
     _keys.removeWhere((id, _) => !ids.contains(id));
-    return _node(root, root, chat);
+    final projection = PaneProjection.maybeOf(context);
+    _focus = projection?.focus;
+    if (projection == null) return _laid(full, null, _dragged ?? full, chat);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Asked every time: what fits follows the room and the focus.
+        final view = projection.project(full, constraints.biggest);
+        return _laid(full, view, _dragged ?? view.shown, chat);
+      },
+    );
   }
 
-  Widget _node(ViewNode root, ViewNode node, Widget chat) {
-    if (!node.hasSplit()) return _pane(root, node, chat);
+  /// [laid], the tree shown, presenting [full] through [view] if any.
+  Widget _laid(ViewNode full, PaneView? view, ViewNode laid, Widget chat) =>
+      isChatOnly(laid) ? chat : _node(full, view, laid, laid, chat);
+
+  Widget _node(
+    ViewNode full,
+    PaneView? view,
+    ViewNode laid,
+    ViewNode node,
+    Widget chat,
+  ) {
+    if (!node.hasSplit()) return _pane(full, view, node, chat);
     final split = node.split;
     final row = split.axis != ViewAxis.VIEW_AXIS_COLUMN;
     final shares = sharesOf(split);
@@ -244,7 +333,7 @@ class _PaneLayoutState extends State<PaneLayout> {
         final handles = <Widget>[];
         var at = 0.0;
         for (var i = 0; i < count; i++) {
-          final child = _node(root, split.children[i], chat);
+          final child = _node(full, view, laid, split.children[i], chat);
           if (i == count - 1) {
             children.add(Expanded(child: child));
             break;
@@ -265,7 +354,7 @@ class _PaneLayoutState extends State<PaneLayout> {
             ),
           );
           at += extent;
-          final edge = at + 0.5 - ResizeHandle.width / 2;
+          final edge = at + 0.5 - ResizeHandle.widthOf(context) / 2;
           handles.add(
             Positioned(
               left: row ? edge : 0,
@@ -276,15 +365,20 @@ class _PaneLayoutState extends State<PaneLayout> {
                 key: ValueKey('divider-${node.id}-$i'),
                 axis: row ? Axis.horizontal : Axis.vertical,
                 onDragStart: () => _from = shares,
-                onDrag: (delta) => setState(
-                  () => _dragged = resize(
-                    root,
-                    node.id,
-                    _dividerMoved(split, i, delta, room, row),
-                  ),
+                onDrag: (delta) => setState(() {
+                  _dragShares = _dividerMoved(view, split, i, delta, room, row);
+                  _dragged = resize(laid, node.id, _dragShares);
+                }),
+                onDragEnd: () => _change(
+                  _dragged == null || view == null
+                      ? _dragged
+                      : view.resized(full, node.id, _dragShares),
                 ),
-                onDragEnd: () => _change(_dragged),
-                onReset: () => _change(resize(root, node.id, const [])),
+                onReset: () => _change(
+                  view == null
+                      ? resize(full, node.id, const [])
+                      : view.resized(full, node.id, const []),
+                ),
               ),
             ),
           );
@@ -310,6 +404,7 @@ class _PaneLayoutState extends State<PaneLayout> {
   /// its drag began: only the two beside it change, each kept at least its
   /// smallest size.
   List<double> _dividerMoved(
+    PaneView? view,
     ViewSplit split,
     int i,
     double delta,
@@ -318,9 +413,10 @@ class _PaneLayoutState extends State<PaneLayout> {
   ) {
     final shares = [..._from];
     if (room <= 0 || shares.length != split.children.length) return shares;
+    final least = view?.minExtent ?? minExtent;
     final pair = shares[i] + shares[i + 1];
-    final low = minExtent(split.children[i], row) / room;
-    final high = pair - minExtent(split.children[i + 1], row) / room;
+    final low = least(split.children[i], row) / room;
+    final high = pair - least(split.children[i + 1], row) / room;
     if (low > high) return shares;
     final moved = (shares[i] + delta / room).clamp(low, high);
     shares[i] = moved;
@@ -328,7 +424,8 @@ class _PaneLayoutState extends State<PaneLayout> {
     return shares;
   }
 
-  Widget _pane(ViewNode root, ViewNode node, Widget chat) {
+  /// The pane for leaf [node]; Close and Move change [full], by id.
+  Widget _pane(ViewNode full, PaneView? view, ViewNode node, Widget chat) {
     final agent = widget.agent;
     final leaf = node.leaf;
     final isChat = leaf.kind == chatKind;
@@ -343,6 +440,7 @@ class _PaneLayoutState extends State<PaneLayout> {
               // A canvas pans by itself: no sideways scroll around it.
               AppPage.map => const InPane(child: MapView()),
               AppPage.usage => const _PagePane(child: UsageView()),
+              AppPage.inbox => const _PagePane(child: InboxView()),
               _ when leaf.kind == filesKind => FilesPane(
                 projectId: leaf.path,
                 paneId: node.id,
@@ -354,8 +452,14 @@ class _PaneLayoutState extends State<PaneLayout> {
       key: ValueKey('pane-${node.id}'),
       agent: agent,
       node: node,
-      onClose: isChat ? null : () => _change(close(root, node.id)),
-      onDrop: (id, edge) => _change(move(root, id, node.id, edge)),
+      onClose: isChat ? null : () => _change(close(full, node.id)),
+      onDrop: (id, edge) {
+        _change(move(full, id, node.id, edge));
+        // The pane moved is the one being read.
+        if (view != null) _focus?.call(id);
+      },
+      focused: view != null && view.focused == node.id,
+      onFocus: view == null ? null : () => _focus?.call(node.id),
       child: content,
     );
   }
@@ -412,11 +516,21 @@ class Pane extends StatefulWidget {
     required this.child,
     required this.onDrop,
     this.onClose,
+    this.focused = false,
+    this.onFocus,
   });
 
   final Agent agent;
   final ViewNode node;
   final Widget child;
+
+  /// The pane being read, among those a window shows (an iPad's): its
+  /// header is marked on touch.
+  final bool focused;
+
+  /// Told when the pane is touched or clicked anywhere, without taking the
+  /// touch from what's in it; null on a Mac.
+  final VoidCallback? onFocus;
 
   /// The pane [paneId] dropped at [edge] of this one.
   final void Function(String paneId, DropEdge edge) onDrop;
@@ -504,6 +618,7 @@ class _PaneState extends State<Pane> {
       details: details,
       controls: controls,
       onClose: widget.onClose,
+      focused: widget.focused,
     );
     final body = ownHeader
         ? Column(
@@ -514,7 +629,7 @@ class _PaneState extends State<Pane> {
             ],
           )
         : PaneChrome(header: header, reloads: _reloads, child: widget.child);
-    return DragTarget<PaneDrag>(
+    final target = DragTarget<PaneDrag>(
       onWillAcceptWithDetails: (details) =>
           details.data.agentId == agent.id && details.data.paneId != node.id,
       onMove: (details) {
@@ -553,6 +668,13 @@ class _PaneState extends State<Pane> {
         ),
       ),
     );
+    final onFocus = widget.onFocus;
+    if (onFocus == null) return target;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => onFocus(),
+      child: target,
+    );
   }
 }
 
@@ -566,6 +688,7 @@ String paneTitle(ViewLeaf leaf) {
     AppPage.changelog => "What's new",
     AppPage.map => 'Map',
     AppPage.usage => 'Usage',
+    AppPage.inbox => 'Needs you',
     _ => viewerTitle(leaf),
   };
 }
@@ -601,12 +724,19 @@ Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
       color: color,
       size: 14,
     ),
+    AppPage.inbox => ExtensionGlyph(
+      icon: 'inbox',
+      name: 'Needs you',
+      color: color,
+      size: 14,
+    ),
     _ => viewerIcon(leaf, color),
   };
 }
 
-/// A pane's 32px header: glyph, title, details, the viewer's controls and
-/// its ×. It's the pane's handle: dragging it moves the pane.
+/// A pane's 32px header (at least 44 on touch): glyph, title, details, the
+/// viewer's controls and its ×. It's the pane's handle: dragging it moves
+/// the pane; on touch after a hold, so a swipe across it still scrolls.
 class PaneHeader extends StatelessWidget {
   const PaneHeader({
     super.key,
@@ -616,6 +746,7 @@ class PaneHeader extends StatelessWidget {
     this.details = '',
     this.controls = const [],
     this.onClose,
+    this.focused = false,
   });
 
   final PaneDrag drag;
@@ -625,9 +756,15 @@ class PaneHeader extends StatelessWidget {
   final List<Widget> controls;
   final VoidCallback? onClose;
 
+  /// The pane being read: on touch its header takes `selected`, so moving
+  /// between panes (⌃Tab) visibly goes somewhere.
+  final bool focused;
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final touch = touchFirst(context);
+    final height = paneHeaderHeightOf(context);
     final titleStyle = TextStyles.label.copyWith(color: palette.text);
     Widget named({required bool withDetails}) => Row(
       children: [
@@ -660,7 +797,7 @@ class PaneHeader extends StatelessWidget {
         opacity: 0.8,
         child: Container(
           width: 240,
-          height: paneHeaderHeight,
+          height: height,
           padding: const EdgeInsets.symmetric(horizontal: Space.m),
           decoration: BoxDecoration(
             color: palette.sidebar,
@@ -672,45 +809,56 @@ class PaneHeader extends StatelessWidget {
         ),
       ),
     );
-    return Draggable<PaneDrag>(
-      data: drag,
-      dragAnchorStrategy: pointerDragAnchorStrategy,
-      feedback: Transform.translate(
-        offset: const Offset(-Space.l, -paneHeaderHeight / 2),
-        child: chip,
-      ),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.grab,
-        child: Container(
-          height: paneHeaderHeight,
-          padding: const EdgeInsets.only(left: Space.m, right: Space.xs),
-          decoration: BoxDecoration(
-            color: palette.sidebar,
-            border: Border(bottom: BorderSide(color: palette.hairline)),
-          ),
-          child: Row(
-            children: [
-              Expanded(child: named(withDetails: true)),
-              for (final control in controls)
-                Padding(
-                  padding: const EdgeInsets.only(left: 2),
-                  child: control,
+    final feedback = Transform.translate(
+      offset: Offset(-Space.l, -height / 2),
+      child: chip,
+    );
+    final bar = MouseRegion(
+      cursor: SystemMouseCursors.grab,
+      child: Container(
+        height: touch ? null : height,
+        constraints: touch ? BoxConstraints(minHeight: height) : null,
+        padding: const EdgeInsets.only(left: Space.m, right: Space.xs),
+        decoration: BoxDecoration(
+          color: touch && focused ? palette.selected : palette.sidebar,
+          border: Border(bottom: BorderSide(color: palette.hairline)),
+        ),
+        child: Row(
+          children: [
+            Expanded(child: named(withDetails: true)),
+            for (final control in controls)
+              Padding(padding: const EdgeInsets.only(left: 2), child: control),
+            if (onClose != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 2),
+                child: GlyphButton(
+                  label: 'Close',
+                  active: false,
+                  onTap: onClose!,
+                  glyph: (color) =>
+                      ExtensionGlyph(icon: 'x', name: 'Close', color: color),
                 ),
-              if (onClose != null)
-                Padding(
-                  padding: const EdgeInsets.only(left: 2),
-                  child: GlyphButton(
-                    label: 'Close',
-                    active: false,
-                    onTap: onClose!,
-                    glyph: (color) =>
-                        ExtensionGlyph(icon: 'x', name: 'Close', color: color),
-                  ),
-                ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
+    );
+    if (!touch) {
+      return Draggable<PaneDrag>(
+        data: drag,
+        dragAnchorStrategy: pointerDragAnchorStrategy,
+        feedback: feedback,
+        child: bar,
+      );
+    }
+    return LongPressDraggable<PaneDrag>(
+      data: drag,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: feedback,
+      // The lift, felt: the iPhone's selection tap, Android's own elsewhere.
+      hapticFeedbackOnStart: defaultTargetPlatform != TargetPlatform.iOS,
+      onDragStarted: () => fireAndLog(Haptics.selection()),
+      child: bar,
     );
   }
 }

@@ -40,6 +40,8 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "7d935762bff903785cbbc4d3b57f605b213ddbd4628b6074fa641978c4c88bb7",
     // Connected services.
     "d36d20a71ddcb3df22e8bc47fcd49b3e3e663af41041aef7167b6514924507c8",
+    // Approved secret requests (#223).
+    "7d84d2855daa56e7a63dae5da9571ee5dd12213651d1541dd0cc773eb47857ae",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -83,6 +85,10 @@ pub struct Config {
     pub default_model: String,
     #[serde(default = "default_effort")]
     pub default_effort: String,
+    /// The model a refused step is retried on for agents that name no
+    /// `fallback_model` of their own; empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_fallback_model: String,
     #[serde(default)]
     pub projects: Vec<ProjectConfig>,
     #[serde(default)]
@@ -136,8 +142,7 @@ pub struct Config {
 pub struct AccountConfig {
     /// Signing in is on (the default): the app asks for it, and a signed-in
     /// Claktory calls the service. Off, nothing calls the service and the app
-    /// doesn't ask. A Claktory from before it was on may skip the step
-    /// (`crate::account`).
+    /// doesn't ask. Every Claktory with it on must sign in (`crate::account`).
     pub enabled: bool,
     /// The service to sign in at next; empty for claktory.com's
     /// (`crate::account::DEFAULT_SERVICE`).
@@ -227,6 +232,10 @@ pub struct AvatarConfig {
     /// colours come from this Claktory's key.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub seed: String,
+    /// The pair the person picked from the palette (`crate::person::PAIRS`,
+    /// an index), used over the seed while set. A plain shuffle clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<u32>,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }
@@ -436,6 +445,11 @@ pub struct AgentConfig {
     pub prompt: String,
     pub model: String,
     pub effort: String,
+    /// The model a step `model` refused is retried on, once per refused
+    /// turn; empty uses `default_fallback_model`, and with both empty a
+    /// refusal just ends the step.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fallback_model: String,
     /// What its message box says when empty; empty for "Message <name>".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub placeholder: String,
@@ -532,6 +546,7 @@ impl Default for Config {
             folder: String::new(),
             extensions: rivet_extensions(),
             avatar: Avatar { shape: "hexagon".to_owned(), face: String::new() },
+            fallback_model: String::new(),
         };
         Config {
             name: String::new(),
@@ -552,6 +567,7 @@ impl Default for Config {
             prompt_cache: BTreeMap::new(),
             account: AccountConfig::default(),
             apps: Vec::new(),
+            default_fallback_model: String::new(),
         }
     }
 }
@@ -674,6 +690,9 @@ impl Config {
         }
         check_model(&self.default_model)?;
         check_effort(&self.default_effort)?;
+        if !self.default_fallback_model.is_empty() {
+            check_model(&self.default_fallback_model)?;
+        }
         let mut ids = HashSet::new();
         for project in &self.projects {
             check_entry(&project.id, &project.name, &mut ids)?;
@@ -704,6 +723,9 @@ impl Config {
             }
             check_model(&agent.model)?;
             check_effort(&agent.effort)?;
+            if !agent.fallback_model.is_empty() {
+                check_model(&agent.fallback_model)?;
+            }
             if !agent.color.is_empty() && !AGENT_COLORS.contains(&agent.color.as_str()) {
                 return Err(Invalid::BadColor(agent.color.clone()));
             }
@@ -1092,5 +1114,21 @@ mod tests {
         assert!(shipped_default(&format!("{}\n\n \t", RIVET_PROMPT.trim_end())), "trailing whitespace aside");
         assert!(!shipped_default(&format!("{} Be brief.", RIVET_PROMPT.trim_end())));
         assert!(!Config::default().follow_default_prompts(), "a new Claktory's is this version's");
+    }
+
+    /// The fallback-model fields (#225) are checked like any other model
+    /// name, and empty means none.
+    #[test]
+    fn fallback_models_are_validated_and_optional() {
+        let mut config = Config::default();
+        assert!(config.validate().is_ok(), "empty fallbacks are fine");
+        config.default_fallback_model = "not-a-model".into();
+        assert!(config.validate().is_err());
+        config.default_fallback_model = "anthropic/claude-haiku-4-5".into();
+        assert!(config.validate().is_ok());
+        config.agents[0].fallback_model = "nope".into();
+        assert!(config.validate().is_err());
+        config.agents[0].fallback_model = "anthropic/claude-sonnet-4-5".into();
+        assert!(config.validate().is_ok());
     }
 }

@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use claktory_account::protocol::{
-    self as api, CheckIn, CheckedIn, Endpoints, Ephemeral, ErrorBody, Share, ShareRequest, SignInStart, SignInStarted, SignInVerify,
-    SignedIn, WellKnown,
+    self as api, CheckIn, CheckedIn, Endpoints, Ephemeral, ErrorBody, MoveDone, MoveRequest, Share, ShareRequest, SignInStart,
+    SignInStarted, SignInVerify, SignedIn, WellKnown,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use factory_protocol::v1::{self, ErrorCode};
@@ -95,20 +95,22 @@ struct Saved {
     /// hour; 0 before the first sign-in).
     periods: Vec<api::Period>,
     periods_until: i64,
-    /// The first launch's sign-in step: "asked" in a Claktory made since
-    /// signing in is on, which asks until it's signed in; "offered" in one
-    /// from before, which may skip it; "skipped" once it has. Set once, at
-    /// its first start with this field (`State::new`).
+    /// The sign-in step: "asked", which asks until it's signed in. Every
+    /// Claktory must sign in (#195), so a start with signing in on makes it
+    /// "asked" (`State::new`), also over "offered" (a Claktory from before
+    /// sign-in, which could skip it) and "skipped" (one that did), which
+    /// earlier versions wrote; kept so a rollback to one still asks.
     step: String,
     /// When it last signed in (the code was given), in ms since 1970; 0 for
     /// a sign-in from before this was kept, which is never new.
     signed_in_ms: i64,
+    /// The move epoch (`<home>/move-epoch`, #217) its token and backend key
+    /// were last changed for: a Claktory that moved here changes them once
+    /// (`after_move`), so the copy it moved from can't use them.
+    move_epoch: u64,
 }
 
 const ASKED: &str = "asked";
-/// Empty is the same: signing in was off when this Claktory started.
-const OFFERED: &str = "offered";
-const SKIPPED: &str = "skipped";
 
 /// Where codes come from when the service doesn't say: claktory.com's.
 const DEFAULT_CODE_FROM: &str = "code@auth.claktory.com";
@@ -159,6 +161,10 @@ struct Inner {
     next_check_in: Instant,
     /// The endpoints last registered, so they're sent only when changed.
     endpoints_sent: Option<Endpoints>,
+    /// The vault was opened by hand (passphrase or recovery key) while
+    /// signed in: when to seal it under the account's current share, so it
+    /// opens by itself after the next restart.
+    reseal_due: Option<Instant>,
 }
 
 /// The account's state, held by `Factory`.
@@ -179,6 +185,10 @@ enum Failure {
     Unreachable(String),
     /// It answered with an error.
     Refused(u16, ErrorBody),
+    /// An answer signed, but not by the key pinned at sign-in: the service
+    /// changed its key (a rotation), or someone else answered. Either way
+    /// nothing it says is used, and asking again won't help.
+    OtherKey,
 }
 
 impl std::fmt::Display for Failure {
@@ -186,6 +196,7 @@ impl std::fmt::Display for Failure {
         match self {
             Failure::Unreachable(why) => write!(f, "unreachable: {why}"),
             Failure::Refused(status, body) => write!(f, "{status} {}: {}", body.error, body.message),
+            Failure::OtherKey => write!(f, "an answer signed by another key than the service's"),
         }
     }
 }
@@ -265,6 +276,10 @@ fn try_again(seconds: i64, now: &jiff::ZonedDateTime) -> String {
 fn sign_in_error(service: &str, failure: Failure) -> RequestError {
     let name = service_name(service);
     match failure {
+        Failure::OtherKey => {
+            tracing::warn!(service, "an answer to the sign-in wasn't signed by the service's key");
+            refused(ErrorCode::Unreachable, format!("Can't reach {name}. Check your internet connection and try again."))
+        }
         Failure::Unreachable(why) => {
             tracing::warn!(service, why, "the account service can't be reached");
             refused(ErrorCode::Unreachable, format!("Can't reach {name}. Check your internet connection and try again."))
@@ -289,11 +304,10 @@ fn sign_in_error(service: &str, failure: Failure) -> RequestError {
 }
 
 impl State {
-    /// The account as `<home>/account` keeps it. `created`: this Claktory
-    /// is new, so it asks to sign in; one from before only offers it. That's
-    /// decided at the first start with signing in on (`enabled`); while it's
-    /// off, nothing is written.
-    pub(crate) fn new(home: &crate::home::Home, created: bool, enabled: bool) -> State {
+    /// The account as `<home>/account` keeps it. With signing in on
+    /// (`enabled`), the step is "asked", whatever it was; while it's off,
+    /// nothing is written.
+    pub(crate) fn new(home: &crate::home::Home, enabled: bool) -> State {
         let dir = home.root().join("account");
         let mut saved: Saved = match std::fs::read(dir.join("account.json")) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
@@ -302,9 +316,9 @@ impl State {
             }),
             Err(_) => Saved::default(),
         };
-        let first = saved.step.is_empty() && enabled;
+        let first = enabled && saved.step != ASKED;
         if first {
-            saved.step = if created { ASKED } else { OFFERED }.to_owned();
+            saved.step = ASKED.to_owned();
         }
         let now = Instant::now();
         let inner = Inner {
@@ -318,6 +332,7 @@ impl State {
             share_asked: None,
             next_check_in: now,
             endpoints_sent: None,
+            reseal_due: None,
         };
         let http = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
@@ -409,7 +424,7 @@ impl State {
     /// Sends a request and checks the answer is the service's: signed with
     /// `service_key` (None: the key the answer itself holds, for the
     /// well-known one). `signer`: a signed request, with the machine token
-    /// and backend key; signed again with the service's time after
+    /// (none when it's empty) and backend key; signed again with the service's time after
     /// `clock_skew`, or a second later after `replayed`.
     async fn send(
         &self,
@@ -429,8 +444,10 @@ impl State {
             }
             if let Some((token, key)) = signer {
                 let time = now_s() + self.lock().clock_offset;
+                if !token.is_empty() {
+                    request = request.bearer_auth(token);
+                }
                 request = request
-                    .bearer_auth(token)
                     .header(api::TIME_HEADER, time.to_string())
                     .header(api::SIGNATURE_HEADER, api::sign_request(key, method, path, time, &body));
             }
@@ -445,9 +462,15 @@ impl State {
                     .and_then(|known| api::verifying_key(&known.service_key))
                     .ok_or_else(|| unreachable(format!("{status}: not an account service")))?,
             };
-            let signed = signature.is_some_and(|signature| api::verify_response(&key, status, method, path, &body, &answer, &signature));
-            if !signed {
+            let Some(signature) = signature else {
                 return Err(unreachable(format!("{status}: an answer not signed by the service's key")));
+            };
+            if !api::verify_response(&key, status, method, path, &body, &answer, &signature) {
+                return Err(if service_key.is_some() {
+                    Failure::OtherKey
+                } else {
+                    unreachable(format!("{status}: an answer not signed by the service's key"))
+                });
             }
             self.lock().saved.last_contact_ms = now_ms();
             if status == 200 {
@@ -506,6 +529,16 @@ impl State {
         self.call(&service, Some(&key), "POST", path, body, Some((&token, &backend_key))).await
     }
 
+    /// A signed call with a token and backend key of its choosing.
+    async fn signed_as<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize, token: &str, key: &SigningKey) -> Result<T, Failure> {
+        let (service, service_key) = {
+            let inner = self.lock();
+            (inner.saved.service.clone(), inner.saved.service_key.clone())
+        };
+        let service_key = api::verifying_key(&service_key).ok_or_else(|| Failure::Unreachable("no service key kept".to_owned()))?;
+        self.call(&service, Some(&service_key), "POST", path, body, Some((token, key))).await
+    }
+
     /// The share S at `epoch` (None: the current one), opened.
     async fn share(&self, epoch: Option<u64>) -> Result<(u64, Zeroizing<[u8; 32]>), Failure> {
         let ephemeral = Ephemeral::new();
@@ -546,8 +579,6 @@ impl State {
             v1::ClaktoryAccountState::Revoked
         } else if saved.signed_in() {
             v1::ClaktoryAccountState::SignedIn
-        } else if saved.step == SKIPPED {
-            v1::ClaktoryAccountState::Skipped
         } else {
             v1::ClaktoryAccountState::SignedOut
         };
@@ -569,7 +600,9 @@ impl State {
             last_check_in_json: saved.last_check_in_json.clone(),
             last_sign_in_ms: saved.last_sign_in_ms,
             last_check_in_ms: saved.last_check_in_ms,
-            skippable: state != v1::ClaktoryAccountState::Skipped && skippable(saved, inner.pending.is_some()),
+            // Every Claktory must sign in (#195): only an unreachable
+            // service lets the app go on without it, for now.
+            skippable: false,
             code_from: inner.pending.as_ref().map(|pending| pending.code_from.clone()).unwrap_or_default(),
         })
     }
@@ -591,12 +624,9 @@ impl State {
 
 /// The account this Claktory is signed in to, as devices are checked
 /// against it (onboarding slice 6).
-// Used by pairing (remote.rs), which comes next.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct Owner {
     pub account_id: String,
-    pub email: String,
     /// The service's key, pinned at sign-in: device assertions are checked
     /// with it.
     pub service_key: VerifyingKey,
@@ -608,7 +638,6 @@ pub(crate) struct Owner {
 /// The account it's signed in to, while signing in is on (`config`, so it
 /// can be called with the Factory locked) and it's signed in and not
 /// removed at the service.
-#[allow(dead_code)]
 pub(crate) fn owner(factory: &Factory, config: &AccountConfig) -> Option<Owner> {
     if !config.enabled {
         return None;
@@ -620,14 +649,12 @@ pub(crate) fn owner(factory: &Factory, config: &AccountConfig) -> Option<Owner> 
     }
     Some(Owner {
         account_id: saved.account_id.clone(),
-        email: saved.email.clone(),
         service_key: api::verifying_key(&saved.service_key)?,
         signed_in_ms: saved.signed_in_ms,
     })
 }
 
 /// Why a device assertion doesn't let a device in.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssertionRefusal {
     /// This Claktory isn't signed in (or signing in is off, or it was
@@ -646,7 +673,6 @@ pub(crate) enum AssertionRefusal {
 /// What a device's assertion says, if it lets the device with tunnel key
 /// `endpoint_id` in as this Claktory's owner: the service's, working now,
 /// for this Claktory's account and that key.
-#[allow(dead_code)]
 pub(crate) fn check_assertion(
     factory: &Factory,
     config: &AccountConfig,
@@ -665,13 +691,6 @@ pub(crate) fn check_assertion(
         return Err(AssertionRefusal::OtherKey);
     }
     Ok(said)
-}
-
-/// Whether the sign-in step may be skipped: in a Claktory from before
-/// signing in was on (or turned on since it started), while it isn't signed
-/// in (or is waiting for a code).
-fn skippable(saved: &Saved, pending: bool) -> bool {
-    saved.step != ASKED && (pending || !saved.signed_in())
 }
 
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -782,7 +801,12 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), Req
     let code: String = code.chars().filter(|character| !character.is_whitespace() && *character != '-').collect();
     let ephemeral = Ephemeral::new();
     let asked = SignInVerify { request_id: pending.request_id.clone(), code, eph_pub: ephemeral.public_b64() };
-    let signed_in: SignedIn = match account.call(&pending.service, Some(&verifying), "POST", "/v1/sign-in/verify", &asked, None).await {
+    // Signed with the backend key, which proves to the service that it's
+    // this Claktory: signed out of another account, it moves to this one
+    // with this code, rather than being turned away as taken.
+    let (_, key) = account.identity()?;
+    let signer = Some(("", &key));
+    let signed_in: SignedIn = match account.call(&pending.service, Some(&verifying), "POST", "/v1/sign-in/verify", &asked, signer).await {
         Ok(signed_in) => signed_in,
         Err(Failure::Refused(_, body)) if body.error == "claktory_taken" => {
             account.lock().pending = None;
@@ -834,8 +858,15 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), Req
                 Ok((_, old)) => {
                     let shares = Zeroizing::new([local.as_slice(), old.as_slice()].concat());
                     if !factory.vault.open_with_account(&shares)? {
+                        // The service's shares changed (a key rotation): asking
+                        // again would only spend its one share a minute.
                         tracing::warn!("the last epoch's share doesn't open the vault");
+                        account.lock().unlock_stopped = true;
                     }
+                }
+                Err(Failure::Refused(_, body)) if body.error == "rate_limited" => {
+                    let wait = Duration::from_secs(body.retry_after.unwrap_or(60).clamp(1, 3600) as u64);
+                    account.lock().next_unlock = Instant::now() + wait;
                 }
                 Err(failure) => tracing::warn!(%failure, "could not fetch the last epoch's share"),
             },
@@ -886,27 +917,13 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
     Ok(())
 }
 
-/// SkipAccountSignIn: the person chose Not now on the sign-in step, which a
-/// Claktory from before signing in was on may. It isn't asked again; it can
-/// still sign in from Settings → Account. A code waiting is dropped.
-pub(crate) async fn skip(factory: &Arc<Factory>) -> Result<(), RequestError> {
+/// SkipAccountSignIn, from apps that offered Not now: refused, since every
+/// Claktory must sign in (#195).
+pub(crate) fn skip(factory: &Arc<Factory>) -> Result<(), RequestError> {
     enabled(factory)?;
-    let account = &factory.account;
-    let _busy = account.busy.lock().await;
-    {
-        let mut inner = account.lock();
-        let pending = inner.pending.is_some();
-        if !skippable(&inner.saved, pending) {
-            let why = if inner.saved.signed_in() { "This Claktory is already signed in." } else { "Sign in to use this Claktory." };
-            return Err(refused(ErrorCode::InvalidRequest, why));
-        }
-        inner.pending = None;
-        inner.saved.step = SKIPPED.to_owned();
-    }
-    account.save();
-    tracing::info!("the sign-in step was skipped");
-    changed(factory);
-    Ok(())
+    let why =
+        if factory.account.lock().saved.signed_in() { "This Claktory is already signed in." } else { "Sign in to use this Claktory." };
+    Err(refused(ErrorCode::InvalidRequest, why))
 }
 
 /// SetAccountService: where the next sign-in goes; empty for claktory.com.
@@ -937,18 +954,20 @@ pub(crate) async fn set_service(factory: &Arc<Factory>, url: &str) -> Result<(),
 /// the service, unless the service was asked a moment ago: an app
 /// connected, or an agent asks for a secret.
 pub(crate) async fn unlock_now(factory: &Arc<Factory>) {
-    if factory.vault.is_open() || !factory.vault.exists() || !factory.lock().config.account.enabled {
-        return;
-    }
-    {
+    let due = || {
+        if factory.vault.is_open() || !factory.vault.exists() || !factory.lock().config.account.enabled {
+            return false;
+        }
         let inner = factory.account.lock();
         let asked_lately = inner.share_asked.is_some_and(|asked| asked.elapsed() < SHARE_GAP);
-        if !inner.saved.signed_in() || inner.saved.revoked || inner.unlock_stopped || asked_lately {
-            return;
-        }
+        inner.saved.signed_in() && !inner.saved.revoked && !inner.unlock_stopped && !asked_lately
+    };
+    if !due() {
+        return;
     }
     let _busy = factory.account.busy.lock().await;
-    if !factory.vault.is_open() {
+    // Again: what held it may have opened the vault, or stopped asking.
+    if due() {
         try_unlock(factory).await;
     }
 }
@@ -994,6 +1013,9 @@ async fn try_unlock(factory: &Arc<Factory>) {
             account.lock().saved.revoked = true;
             stop(String::new());
         }
+        // Asking again would only spend the service's one share a minute,
+        // which signing in again then needs.
+        Err(Failure::OtherKey) if new_service_key(account).await => stop(changed_key(&name)),
         Err(Failure::Refused(_, body)) if body.error == "rate_limited" => {
             let wait = Duration::from_secs(body.retry_after.unwrap_or(60).clamp(1, 3600) as u64);
             account.lock().next_unlock = Instant::now() + wait;
@@ -1014,6 +1036,27 @@ async fn try_unlock(factory: &Arc<Factory>) {
     }
     account.save();
     factory.vault_changed();
+}
+
+/// Whether the service now says it has another key than the one pinned at
+/// sign-in (it rotated it): the answer signed by another key was its own.
+async fn new_service_key(account: &State) -> bool {
+    let (service, pinned) = {
+        let inner = account.lock();
+        (inner.saved.service.clone(), inner.saved.service_key.clone())
+    };
+    match account.well_known(&service).await {
+        Ok(key) if key != pinned => {
+            tracing::warn!("the account service changed its key since this Claktory signed in");
+            true
+        }
+        _ => false,
+    }
+}
+
+/// What the person reads when the service changed its key.
+fn changed_key(name: &str) -> String {
+    format!("{name} changed its key. Sign in again, and your secrets open by themselves.")
 }
 
 /// Checks in; reseals the vault when the service moved to a new epoch, and
@@ -1075,6 +1118,11 @@ async fn check_in(factory: &Arc<Factory>) {
             inner.saved.revoked = true;
             inner.next_check_in = Instant::now() + next;
         }
+        Err(Failure::OtherKey) if new_service_key(account).await => {
+            let mut inner = account.lock();
+            inner.problem = changed_key(&service_name(&inner.saved.service));
+            inner.next_check_in = Instant::now() + next;
+        }
         Err(Failure::Refused(401, body)) => {
             tracing::warn!(error = body.error, "the account service doesn't know this Claktory's token");
             let mut inner = account.lock();
@@ -1093,6 +1141,82 @@ async fn check_in(factory: &Arc<Factory>) {
     }
     account.save();
     changed(factory);
+}
+
+/// The vault was opened by hand, with its passphrase or recovery key: while
+/// signed in, it's sealed under the account's current share at once (by
+/// `monitor`), rather than at the next check-in. Its account protector may
+/// no longer open (the service's share changed, as after a key rotation),
+/// and a restart before then would lock it again.
+pub(crate) fn opened_by_hand(factory: &Arc<Factory>) {
+    if !factory.lock().config.account.enabled || !factory.vault.is_open() {
+        return;
+    }
+    let account = &factory.account;
+    {
+        let mut inner = account.lock();
+        if !inner.saved.signed_in() || inner.saved.revoked {
+            return;
+        }
+        inner.reseal_due = Some(Instant::now());
+    }
+    account.wake.notify_one();
+}
+
+/// Seals the open vault under the account's current share; tried again
+/// when the service can't be asked yet (its one share a minute, say).
+async fn reseal_now(factory: &Arc<Factory>) {
+    let account = &factory.account;
+    let retry = |wait: Duration| account.lock().reseal_due = Some(Instant::now() + wait);
+    let (got, share) = match account.share(None).await {
+        Ok(share) => share,
+        Err(Failure::Refused(_, body)) if body.error == "rate_limited" => {
+            return retry(Duration::from_secs(body.retry_after.unwrap_or(60).clamp(1, 3600) as u64 + 1));
+        }
+        Err(Failure::Refused(status, body)) => {
+            // It doesn't know this Claktory, or removed it: signing in
+            // again seals the vault anyway.
+            tracing::warn!(status, error = body.error, "the account service refused the share to reseal the vault");
+            account.lock().reseal_due = None;
+            return;
+        }
+        Err(failure) => {
+            tracing::info!(%failure, "could not fetch the share to reseal the vault; trying again");
+            return retry(Duration::from_secs(60));
+        }
+    };
+    let params = {
+        let mut inner = account.lock();
+        inner.saved.epoch = got;
+        Params {
+            service: inner.saved.service.clone(),
+            account_id: inner.saved.account_id.clone(),
+            claktory_id: inner.saved.claktory_id.clone(),
+            epoch: got,
+            service_key: inner.saved.service_key.clone(),
+        }
+    };
+    let sealed = (|| {
+        let local = account.local_share().map_err(|error| error.to_string())?;
+        let shares = Zeroizing::new([local.as_slice(), share.as_slice()].concat());
+        let text = serde_json::to_string(&params).map_err(|error| error.to_string())?;
+        factory.vault.protect_with_account(&params.account_id, &text, &shares).map_err(|error| error.to_string())
+    })();
+    match sealed {
+        Ok(()) => {
+            tracing::info!(epoch = got, "the vault, opened by hand, is sealed under the account's share");
+            let mut inner = account.lock();
+            inner.reseal_due = None;
+            inner.unlock_stopped = false;
+            inner.unlock_tries = 0;
+            inner.problem.clear();
+        }
+        Err(error) => {
+            tracing::warn!(error, "could not seal the vault under the account's share; trying again");
+            retry(Duration::from_secs(60));
+        }
+    }
+    account.save();
 }
 
 /// The service moved to `epoch`: the open vault is sealed under its share.
@@ -1128,7 +1252,14 @@ async fn reseal(factory: &Arc<Factory>, epoch: u64) {
         factory.vault.protect_with_account(&params.account_id, &text, &shares).map_err(|error| error.to_string())
     })();
     match result {
-        Ok(()) => tracing::info!(epoch, "the vault is sealed under the account's new share"),
+        Ok(()) => {
+            tracing::info!(epoch, "the vault is sealed under the account's new share");
+            // It opens by itself again: nothing waits for the recovery key.
+            let mut inner = account.lock();
+            inner.reseal_due = None;
+            inner.unlock_stopped = false;
+            inner.problem.clear();
+        }
         Err(error) => tracing::warn!(error, epoch, "could not reseal the vault under the account's new share"),
     }
 }
@@ -1187,6 +1318,113 @@ async fn register_endpoints(factory: &Arc<Factory>) {
     }
 }
 
+/// How soon a move's change of credentials is tried again.
+const MOVE_RETRY: Duration = Duration::from_secs(300);
+
+/// The new pair a move's change asked for, kept until the service took it,
+/// so a lost answer can be checked (`<account>/moving.json`).
+#[derive(Serialize, Deserialize)]
+struct MovingPair {
+    epoch: u64,
+    /// The new backend key's seed, hex.
+    key: String,
+    token: String,
+}
+
+/// After Claktory moved here (#217): asks the account service to replace
+/// this Claktory's token and backend key with new ones (`POST /v1/move`),
+/// so the copy on the old computer can't use them. Once per move: true when
+/// done or nothing to do, false to try again later (the service couldn't be
+/// reached). Called with `busy` held.
+async fn after_move(factory: &Arc<Factory>) -> bool {
+    let account = &factory.account;
+    let home = account.dir.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let epoch: u64 = std::fs::read_to_string(home.join("move-epoch")).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+    if epoch <= account.lock().saved.move_epoch {
+        return true;
+    }
+    let done = |account: &State| {
+        account.lock().saved.move_epoch = epoch;
+        account.save();
+        let _ = std::fs::remove_file(account.dir.join("moving.json"));
+    };
+    // The pair asked for, the same on every try for this move.
+    let path = account.dir.join("moving.json");
+    let kept =
+        std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<MovingPair>(&bytes).ok()).filter(|pair| pair.epoch == epoch);
+    let pair = match kept {
+        Some(pair) => pair,
+        None => {
+            let key = api::new_signing_key();
+            let pair = MovingPair { epoch, key: hex(key.as_bytes()), token: api::b64(*api::random_32()) };
+            let written = serde_json::to_vec(&pair).map_err(std::io::Error::other).and_then(|json| {
+                create_private_dir(&account.dir)?;
+                crate::remote::write_private(&path, &json)
+            });
+            if let Err(error) = written {
+                tracing::error!(%error, "could not keep the new account credentials for the move; trying again later");
+                return false;
+            }
+            pair
+        }
+    };
+    let Some(new_key) =
+        unhex(&pair.key).and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok()).map(|seed| SigningKey::from_bytes(&seed))
+    else {
+        let _ = std::fs::remove_file(&path);
+        return false;
+    };
+    let from: String = factory
+        .store
+        .db()
+        .query_row("SELECT machine FROM moves WHERE epoch = ?1 ORDER BY imported DESC LIMIT 1", [epoch as i64], |row| row.get(0))
+        .unwrap_or_default();
+    let request = MoveRequest {
+        backend_key: api::b64(new_key.verifying_key().as_bytes()),
+        machine_token: pair.token.clone(),
+        name: computer_name(),
+        version: crate::update::VERSION.to_owned(),
+        platform: platform(),
+        from,
+    };
+    let adopt = |account: &State| -> std::io::Result<()> {
+        crate::remote::write_private(&account.dir.join("claktory.key"), format!("{}\n", hex(new_key.as_bytes())).as_bytes())?;
+        account.lock().saved.machine_token = pair.token.clone();
+        account.save();
+        Ok(())
+    };
+    match account.signed::<MoveDone>("/v1/move", &request).await {
+        Ok(_) => {}
+        // Moved already, its answer lost (or a crash before it was kept):
+        // the new pair works if the service took it.
+        Err(Failure::Refused(401, _)) => {
+            let probe = CheckIn { version: crate::update::VERSION.to_owned(), platform: platform(), counts: None, periods: Vec::new() };
+            if account.signed_as::<CheckedIn>("/v1/check-in", &probe, &pair.token, &new_key).await.is_err() {
+                tracing::warn!("the account service didn't take this Claktory's new credentials after its move; it keeps the old ones");
+                done(account);
+                return true;
+            }
+        }
+        Err(Failure::Refused(status, body)) => {
+            tracing::warn!(status, error = body.error, "the account service refused the move's new credentials; it keeps the old ones");
+            done(account);
+            return true;
+        }
+        Err(failure @ (Failure::Unreachable(_) | Failure::OtherKey)) => {
+            tracing::info!(%failure, "couldn't reach the account service to change credentials after the move; trying again later");
+            return false;
+        }
+    }
+    if let Err(error) = adopt(account) {
+        tracing::error!(%error, "could not keep the new account credentials; trying again later");
+        return false;
+    }
+    tracing::info!(epoch, "the account service has this Claktory's new credentials; the old copy's no longer work");
+    done(account);
+    changed(factory);
+    true
+}
+
 /// Runs the account while Claktory runs: after a restart, opens the vault
 /// with the service's share (trying again while it can't be reached); checks
 /// in at start and every hour.
@@ -1219,6 +1457,8 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     if !signed_in || revoked {
         return IDLE;
     }
+    // Moved here: new credentials first, so nothing more goes out with the old.
+    let rotating = !after_move(factory).await;
     let locked = factory.vault.exists() && !factory.vault.is_open() && State::params(factory).is_some();
     let (unlock_due, stopped) = {
         let inner = account.lock();
@@ -1226,6 +1466,11 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     };
     if locked && unlock_due && !stopped {
         try_unlock(factory).await;
+    }
+    let reseal_due = account.lock().reseal_due.is_some_and(|due| due <= Instant::now());
+    if reseal_due && factory.vault.is_open() {
+        reseal_now(factory).await;
+        changed(factory);
     }
     let check_in_due = {
         let inner = account.lock();
@@ -1239,6 +1484,12 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     let mut next = inner.next_check_in.saturating_duration_since(now);
     if factory.vault.exists() && !factory.vault.is_open() && !inner.unlock_stopped && !inner.saved.revoked {
         next = next.min(inner.next_unlock.saturating_duration_since(now));
+    }
+    if rotating {
+        next = next.min(MOVE_RETRY);
+    }
+    if let Some(due) = inner.reseal_due {
+        next = next.min(due.saturating_duration_since(now));
     }
     next.max(Duration::from_millis(100))
 }

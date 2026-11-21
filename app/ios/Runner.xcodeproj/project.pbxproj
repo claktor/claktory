@@ -14,6 +14,9 @@
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C636F3 /* Scanner.swift */; };
 		7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */; };
+		7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C636FA /* AudioPlayer.swift */; };
+		7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63702 /* NetworkPath.swift */; };
+		7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8742EC3CC0400C636F8 /* Recorder.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
@@ -55,6 +58,9 @@
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C636F3 /* Scanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scanner.swift; sourceTree = "<group>"; };
 		7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VideoPlayers.swift; path = ../../macos/Runner/VideoPlayers.swift; sourceTree = "<group>"; };
+		7884E8762EC3CC0400C636FA /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AudioPlayer.swift; path = ../../macos/Runner/AudioPlayer.swift; sourceTree = "<group>"; };
+		7884E8762EC3CC0400C63702 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NetworkPath.swift; path = ../../macos/Runner/NetworkPath.swift; sourceTree = "<group>"; };
+		7884E8742EC3CC0400C636F8 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Recorder.swift; path = ../../macos/Runner/Recorder.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
@@ -132,6 +138,9 @@
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				7884E86A2EC3CC0400C636F3 /* Scanner.swift */,
 				7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */,
+				7884E8762EC3CC0400C636FA /* AudioPlayer.swift */,
+				7884E8762EC3CC0400C63702 /* NetworkPath.swift */,
+				7884E8742EC3CC0400C636F8 /* Recorder.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -296,6 +305,9 @@
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */,
 				7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */,
+				7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */,
+				7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */,
+				7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

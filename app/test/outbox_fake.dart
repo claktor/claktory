@@ -16,6 +16,9 @@ class FakeOutboxBackend implements OutboxBackend {
   /// What each send carried.
   final sent = <List<SentFile>>[];
 
+  /// Whether each send was a voice message.
+  final voices = <bool>[];
+
   /// The bytes of each upload, by upload id.
   final uploads = <String, List<int>>{};
 
@@ -30,9 +33,11 @@ class FakeOutboxBackend implements OutboxBackend {
     String agentId,
     String text,
     String clientId,
-    List<SentFile> files,
-  ) {
+    List<SentFile> files, {
+    bool voice = false,
+  }) {
     ids.add(clientId);
+    voices.add(voice);
     sent.add(files);
     final answer = Completer<void>();
     answers.add(answer);

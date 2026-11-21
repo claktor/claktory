@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "channel": "factory/commands",
+  "direction": "dart_to_native",
+  "method": "setCommands",
+  "note": "Sent whenever the commands change (titles, enabled). Native answers true when it shows them as UIKeyCommands (the iPadOS menu bar's View menu and the list shown while ⌘ is held) and runs them itself; Flutter then stops binding their keys. input is UIKeyCommand's input (a lowercase letter, or a tab character); modifiers are UIKeyModifierFlags' names. Titles are in title case, as the system's menus are.",
+  "arguments": {
+    "schema_version": 1,
+    "commands": [
+      {
+        "id": "sidebar",
+        "title": "Hide Sidebar",
+        "input": "s",
+        "modifiers": ["command", "control"],
+        "enabled": true
+      },
+      {
+        "id": "next-pane",
+        "title": "Next Pane",
+        "input": "\t",
+        "modifiers": ["control"],
+        "enabled": true
+      },
+      {
+        "id": "previous-pane",
+        "title": "Previous Pane",
+        "input": "\t",
+        "modifiers": ["control", "shift"],
+        "enabled": true
+      },
+      {
+        "id": "panes",
+        "title": "Panes…",
+        "input": "p",
+        "modifiers": ["command", "alternate"],
+        "enabled": true
+      }
+    ]
+  },
+  "result": true
+}

@@ -544,20 +544,14 @@ fn tool<R: super::Reply>(
     parameters: Value,
     run: fn(&Arc<Factory>, &str, Value) -> Result<R, String>,
 ) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     super::tool(
         name,
         label,
         description,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                run(&factory, &agent, args).map(super::Reply::result).map_err(factory_agent::Error::Other)
-            })
+        super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            run(&factory, &agent, args).map(super::Reply::result).map_err(factory_agent::Error::Other)
         }),
     )
 }
@@ -574,7 +568,7 @@ fn whose(config: &Config, asker: &str, agent: Option<&str>) -> Result<String, St
         let id = agent.ok_or("Say whose monitors.")?;
         return config.agent(id).map(|agent| agent.id.clone()).ok_or_else(|| format!("No agent has the id \"{id}\"."));
     }
-    let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let me = super::caller(config, asker)?;
     let Some(wanted) = agent.filter(|wanted| *wanted != asker && !me.name.eq_ignore_ascii_case(wanted)) else {
         return Ok(asker.to_owned());
     };
@@ -645,7 +639,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
             if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT {
                 return Err(fail(format!("prompt must be 1 to {MAX_PROMPT} characters; got {}.", prompt.chars().count())));
             }
-            let folder = crate::runner::places(&factory.home, &inner.config, config).folder;
+            let folder = crate::runner::places(&factory.home, &inner.config, config, &[]).folder;
             let (when, next_due) = when::parse(&one.when, &folder, now).map_err(fail)?;
             let until = one.until.as_deref().map(|until| when::parse_time(until, now)).transpose().map_err(fail)?;
             if until.is_some_and(|until| until <= now) {

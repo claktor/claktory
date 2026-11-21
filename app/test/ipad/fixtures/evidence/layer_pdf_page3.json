@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "ink_layer_id": "layer-paper-p3",
+  "revision": 2,
+  "parent_revision": 1,
+  "source": {
+    "absolute_path": "/Users/me/papers/paper.pdf",
+    "sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "mime": "application/pdf",
+    "size": 482113
+  },
+  "coordinate_space": {
+    "kind": "pdf_page",
+    "page_1based": 3,
+    "box": "crop",
+    "crop_box": [
+      0,
+      0,
+      612,
+      792
+    ],
+    "media_box": [
+      0,
+      0,
+      612,
+      792
+    ],
+    "rotation": 0,
+    "width": 612,
+    "height": 792,
+    "units": "pt"
+  },
+  "drawing": {
+    "format": "pencilkit",
+    "content_version": 1,
+    "blob_id": "blob-paper-p3-r2-drawing",
+    "sha256": "7d2e5d40b5e85149b38abc651cf980b8e20cc9455c4295682d873926702ee511",
+    "bytes": 5812,
+    "space": "page_overlay",
+    "drawing_to_document": [
+      1,
+      0,
+      0,
+      -1,
+      0,
+      792
+    ]
+  },
+  "ink_preview": {
+    "png_blob_id": "blob-paper-p3-r2-preview",
+    "sha256": "c9596fab0f525f519cad2c2200cac2a2a430ff8c671fdec0a8fcbfec5080cd6f",
+    "pixel_width": 1224,
+    "pixel_height": 1584,
+    "bytes": 48211
+  },
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

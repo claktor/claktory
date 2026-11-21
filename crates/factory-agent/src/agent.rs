@@ -16,12 +16,20 @@ use crate::secrets::Secrets;
 use crate::stream::{BoxFuture, CacheTtl, LlmContext, StreamFn, StreamOptions, ThinkingLevel};
 use crate::tools::Tool;
 use crate::types::{
-    AgentEvent, AssistantMessage, AssistantPart, Message, Model, StopReason, StreamEvent, ToolResult, ToolResultMessage, Usage, UserMessage,
+    AgentEvent, AssistantMessage, AssistantPart, Event, EventSource, Message, Model, StopReason, StreamEvent, ToolResult,
+    ToolResultMessage, Usage, UserContent, UserMessage,
 };
+
+/// Refused turns retried on the fallback model in one run, at most: past
+/// it the refusal stands, so a conversation whose content keeps tripping
+/// the classifiers doesn't pay for two models every turn.
+const MAX_REFUSAL_RETRIES: u32 = 2;
 
 pub struct Block {
     pub reason: Option<String>,
     pub terminate: bool,
+    /// The refused call's result's details, for whoever shows it; null for none.
+    pub details: Value,
 }
 
 pub type BeforeToolCall = Arc<dyn Fn(String, Value) -> BoxFuture<Option<Block>> + Send + Sync>;
@@ -80,6 +88,26 @@ fn assistant(message: AssistantMessage) -> Message {
     Message::Assistant(message)
 }
 
+/// The event telling the agent a fallback model answered a refused step:
+/// transient, since it describes this context's turn only.
+fn fallback_note(text: String) -> UserMessage {
+    UserMessage {
+        content: UserContent::Text(text),
+        timestamp: now_ms(),
+        event: Some(Event {
+            source: EventSource::Host,
+            from: "Claktory".into(),
+            id: String::new(),
+            summary: "Another model answered a step this agent's model declined.".into(),
+            transient: true,
+        }),
+        sent_from: None,
+        client_id: String::new(),
+        attachments: Vec::new(),
+        voice: None,
+    }
+}
+
 pub struct AgentOptions {
     pub system_prompt: String,
     pub model: Model,
@@ -99,6 +127,10 @@ pub struct AgentOptions {
     /// Secrets for bash's commands, and what hides their values: every
     /// tool result, streamed or final, goes through its redaction.
     pub secrets: Option<Secrets>,
+    /// The model a step `model` refused is retried on, once per refused
+    /// turn (at most `MAX_REFUSAL_RETRIES` a run), the next turn back on
+    /// `model`; None lets the refusal end the run.
+    pub fallback_model: Option<Model>,
 }
 
 pub struct AgentState {
@@ -171,6 +203,14 @@ pub struct Agent {
     active: AbortHandle,
     detaching: DetachHandle,
     policy: ResponsePolicy,
+    /// See `AgentOptions::fallback_model`.
+    fallback_model: Option<Model>,
+    /// Refused turns retried on the fallback this run.
+    refusals_retried: u32,
+    /// A note for the agent after a fallback answered, appended once the
+    /// turn's tool results are in (never between a tool call and its
+    /// result).
+    pending_fallback_note: Option<String>,
 }
 
 enum Prepared {
@@ -217,6 +257,9 @@ impl Agent {
             active: AbortHandle::default(),
             detaching: DetachHandle::default(),
             policy,
+            fallback_model: options.fallback_model,
+            refusals_retried: 0,
+            pending_fallback_note: None,
         }
     }
 
@@ -283,6 +326,8 @@ impl Agent {
         *self.active.0.lock() = Some(token.clone());
         let _active = ActiveRun(self.active.clone());
         self.state.error_message = None;
+        self.refusals_retried = 0;
+        self.pending_fallback_note = None;
         let outcome = self.run_loop(prompts, &token).await;
         if let Err(error) = outcome {
             self.handle_run_failure(error, token.is_cancelled()).await?;
@@ -379,6 +424,12 @@ impl Agent {
                 }
                 terminate = stop;
             }
+            if let Some(note) = self.pending_fallback_note.take() {
+                let note = Message::User(fallback_note(note));
+                context.push(note.clone());
+                produced.push(note.clone());
+                self.emit_message(note).await?;
+            }
             self.emit(AgentEvent::TurnEnd { message: assistant(message.clone()), tool_results }).await?;
             if terminate || self.should_stop_after_turn.as_ref().is_some_and(|stop| stop(&message)) {
                 self.emit(AgentEvent::AgentEnd { messages: produced }).await?;
@@ -459,6 +510,13 @@ impl Agent {
         }
     }
 
+    /// The fallback model a step `current` refused is retried on, while
+    /// the run's cap allows and it isn't the model that just refused.
+    fn fallback_to_try(&self, current: &Model) -> Option<Model> {
+        let fallback = self.fallback_model.as_ref()?;
+        (self.refusals_retried < MAX_REFUSAL_RETRIES && fallback.id != current.id).then(|| fallback.clone())
+    }
+
     /// How long to wait before sending a failed request again, if its failure is transient and retries remain.
     fn retry_delay(&self, response: &AssistantMessage, attempt: u32, token: &CancellationToken) -> Option<Duration> {
         let transient = response.stop_reason == StopReason::Error && response.error_message.as_deref().is_some_and(recoverable_response);
@@ -492,10 +550,14 @@ impl Agent {
         token: &CancellationToken,
     ) -> Result<AssistantMessage, Error> {
         let mut attempt = 0;
+        let mut model = self.state.model.clone();
         loop {
-            let message = self.stream_assistant_response(context, token).await?;
+            let message = self.stream_assistant_response(&model, context, token).await?;
             attempt += 1;
-            if let (Some(_), Some(until_ms)) = (&self.wait_out, crate::accounts::none_left(&message))
+            // Limits are waited out only on the agent's own model: a
+            // fallback attempt without capacity lets the refusal stand.
+            if model.id == self.state.model.id
+                && let (Some(_), Some(until_ms)) = (&self.wait_out, crate::accounts::none_left(&message))
                 && !token.is_cancelled()
             {
                 context.pop();
@@ -508,7 +570,36 @@ impl Agent {
                 }
                 context.push(assistant(message.clone()));
             }
+            // The model declined the step (its safety classifiers): retry
+            // it once on the fallback model, same context, the refusal
+            // kept in the conversation but out of the model's view.
+            if let Some(refusal) = crate::refusal::of(&message)
+                && let Some(fallback) = self.fallback_to_try(&model)
+                && !token.is_cancelled()
+            {
+                self.refusals_retried += 1;
+                context.pop();
+                self.emit(AgentEvent::MessageEnd { message: assistant(message.clone()) }).await?;
+                produced.push(assistant(message.clone()));
+                tracing::info!(category = refusal.shown_category(), fallback = %fallback.id, "retrying a refused step on the fallback model");
+                self.pending_fallback_note = Some(format!(
+                    "Your model, {}, declined this step ({}): {} The answer came from {} instead; your next step runs on {} again.",
+                    self.state.model.name,
+                    refusal.shown_category(),
+                    refusal.explanation,
+                    fallback.name,
+                    self.state.model.name
+                ));
+                model = fallback;
+                attempt = 0;
+                continue;
+            }
             let Some(delay) = self.retry_delay(&message, attempt, token) else {
+                if crate::refusal::of(&message).is_some() || matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
+                    // The step ends on a failure: a note about an answer
+                    // that never came would mislead.
+                    self.pending_fallback_note = None;
+                }
                 self.emit(AgentEvent::MessageEnd { message: assistant(message.clone()) }).await?;
                 return Ok(message);
             };
@@ -638,11 +729,12 @@ impl Agent {
     /// Streams a response into the context, emitting `MessageStart` and updates; the caller ends the message.
     async fn stream_assistant_response(
         &mut self,
+        model: &Model,
         context: &mut Vec<Message>,
         token: &CancellationToken,
     ) -> Result<AssistantMessage, Error> {
         let llm = self.llm_context(context.clone())?;
-        let mut stream = (self.stream)(&self.state.model, llm, self.stream_options(token))?;
+        let mut stream = (self.stream)(model, llm, self.stream_options(token))?;
         let mut added = false;
         while let Some(event) = stream.next().await {
             match event {
@@ -713,6 +805,13 @@ impl Agent {
         let Some(index) = self.state.tools.iter().position(|tool| tool.spec.name == name) else {
             return Prepared::Immediate(ToolResult::error(format!("Tool {name} not found")));
         };
+        // Only a model that takes image input gets images: a plain refusal,
+        // never base64 passed off as text (the model can change mid-run, so
+        // it's judged here, where the current one is known).
+        if self.state.tools[index].kind == crate::tools::ToolKind::ReadImage && !self.state.model.input.iter().any(|input| input == "image")
+        {
+            return Prepared::Immediate(ToolResult::error(format!("Your model, {}, can't read images.", self.state.model.name)));
+        }
         let validated = match validate_tool_arguments(&self.state.tools[index].spec.parameters, name, arguments) {
             Ok(validated) => validated,
             Err(message) => return Prepared::Immediate(ToolResult::error(message)),
@@ -723,6 +822,9 @@ impl Agent {
         }
         if let Some(block) = block {
             let mut result = ToolResult::error(block.reason.unwrap_or_else(|| "Tool execution was blocked".into()));
+            if !block.details.is_null() {
+                result.details = block.details;
+            }
             if block.terminate {
                 result.terminate = Some(true);
             }

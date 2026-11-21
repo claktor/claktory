@@ -23,6 +23,13 @@ import UniformTypeIdentifiers
     scanner.register(ScannerFactory(messenger: scanner.messenger()), withId: "claktory/scanner")
     // The video viewer's player (app/macos/Runner/VideoPlayers.swift).
     VideoPlayers.register(with: engineBridge.pluginRegistry.registrar(forPlugin: "VideoPlayers")!)
+    // Voice messages: recording them and playing them back, as on the Mac
+    // (app/macos/Runner/Recorder.swift, AudioPlayer.swift).
+    Recorder.register(with: messenger)
+    AudioPlayer.register(with: messenger)
+    // The network path, to reconnect the moment it changes, as on the Mac
+    // (app/macos/Runner/NetworkPath.swift).
+    NetworkPath.register(with: messenger)
     deviceChannel = FlutterMethodChannel(name: "factory/device", binaryMessenger: messenger)
     deviceChannel?.setMethodCallHandler { call, result in
       switch call.method {

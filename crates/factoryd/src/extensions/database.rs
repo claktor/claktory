@@ -158,19 +158,14 @@ fn db_tool(
     parameters: Value,
     kind: Kind,
 ) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     super::tool(
         name,
         label,
         description,
         parameters,
-        Arc::new(move |args| {
-            let (factory, agent) = (factory.upgrade(), agent.clone());
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                call(&factory, &agent, kind, args).await.map_err(factory_agent::Error::Other)
-            })
+        super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            call(&factory, &agent, kind, args).await.map_err(factory_agent::Error::Other)
         }),
     )
 }

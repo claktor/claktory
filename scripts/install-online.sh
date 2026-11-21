@@ -27,6 +27,17 @@
 #                 Claktory has its port), 1 anything else ("install_failed").
 #   --app-only    on a Mac, only the app, from the release's .dmg, with no
 #                 Claktory of its own: it connects to one elsewhere
+#   --import BUNDLE [--map OLD=NEW]...
+#                 move a Claktory here (#217): install the release held (not
+#                 started), run `factoryd import BUNDLE` with the passphrase
+#                 asked on the terminal (--map translates folder paths from
+#                 the old computer), then start Claktory. Needs a terminal;
+#                 not with --json or --app-only.
+#   --receive     move a Claktory here over the network (#217): install the
+#                 release held, then run `factoryd receive`, which shows the
+#                 code to paste into the old computer's Claktory and waits;
+#                 once the move is in, start Claktory. Same constraints as
+#                 --import.
 #   FACTORY_UPDATE_URL=<manifest url>  another channel, such as a file:// one
 #   install-online.sh --download-only DIR   only download and check the
 #                                           release, into DIR/<version>
@@ -86,7 +97,8 @@ macos_number() {
 }
 
 main() {
-  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only="" app_only=false
+  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only="" app_only=false import_bundle="" receive=false
+  local import_maps=()
   while (($#)); do
     case "$1" in
       --yes) YES=true ;;
@@ -97,10 +109,40 @@ main() {
         [[ -n "$download_only" ]] || stop usage 3 "--download-only needs a folder."
         shift
         ;;
-      *) stop usage 3 "install.sh doesn't know $1. It takes --yes, --json, --app-only and --download-only DIR." ;;
+      --import)
+        import_bundle="${2:-}"
+        [[ -n "$import_bundle" ]] || stop usage 3 "--import needs the move bundle's file."
+        shift
+        ;;
+      --map)
+        [[ "${2:-}" == *=* ]] || stop usage 3 "--map takes /old/path=/new/path."
+        import_maps+=(--map "$2")
+        shift
+        ;;
+      --receive) receive=true ;;
+      *) stop usage 3 "install.sh doesn't know $1. It takes --yes, --json, --app-only, --import BUNDLE [--map OLD=NEW], --receive and --download-only DIR." ;;
     esac
     shift
   done
+  if [[ -n "$import_bundle" ]] && $receive; then
+    stop usage 3 "--import and --receive are two ways to move a Claktory here: use one."
+  fi
+  if [[ -n "$import_bundle" ]]; then
+    $JSON && stop usage 3 "--import asks for the bundle's passphrase, so it needs a person's terminal: no --json. An agent runs factoryd import itself."
+    $app_only && stop usage 3 "--import brings a whole Claktory, not only the app: no --app-only."
+    [[ -z "$download_only" ]] || stop usage 3 "--import and --download-only don't mix."
+    [[ -f "$import_bundle" ]] || refuse "there's no file at $import_bundle. Copy the move bundle here first (scp, say), then install with --import again."
+    [[ -r /dev/tty ]] || refuse "--import asks for the bundle's passphrase, which needs a terminal."
+    import_bundle="$(cd "$(dirname "$import_bundle")" && pwd)/$(basename "$import_bundle")"
+    YES=true
+  fi
+  if $receive; then
+    $JSON && stop usage 3 "--receive waits in the terminal while the move comes in: no --json. An agent runs factoryd receive itself."
+    $app_only && stop usage 3 "--receive brings a whole Claktory, not only the app: no --app-only."
+    [[ -z "$download_only" ]] || stop usage 3 "--receive and --download-only don't mix."
+    [[ -r /dev/tty ]] || refuse "--receive confirms the move's digits, which needs a terminal."
+    YES=true
+  fi
   [[ -n "$url" ]] || fail "this installer doesn't know where releases are published (set FACTORY_UPDATE_URL)."
   local os
   os="$(uname -s)"
@@ -204,6 +246,43 @@ main() {
   mv -f "$releases/latest.new" "$releases/latest"
 
   mkdir -p "$work/out"
+  if [[ -n "$import_bundle" ]] || $receive; then
+    grep -q -- --hold "$releases/$version/install-linux.sh" 2>/dev/null || grep -q -- --hold "$releases/$version/install-release.sh" 2>/dev/null ||
+      refuse "Claktory $version can't move a Claktory in yet; it needs a newer release."
+    local installer="install-linux.sh" installer_args=(--no-pair)
+    [[ "$os" == Linux ]] || { installer="install-release.sh"; installer_args=(); }
+    say "Installing Claktory $version, held: it starts once the move is in."
+    bash "$releases/$version/$installer" "$releases/$version" "${installer_args[@]+"${installer_args[@]}"}" --hold </dev/null >&2 ||
+      fail "the release's installer stopped; see above."
+  fi
+  if [[ -n "$import_bundle" ]]; then
+    local pass
+    IFS= read -r -s -p "The move bundle's passphrase: " pass </dev/tty >&2 || refuse "--import needs the passphrase."
+    echo >&2
+    local import_status=0
+    printf '%s' "$pass" | "$HOME/.factory/bin/factoryd" import "$import_bundle" --passphrase-stdin ${import_maps[@]+"${import_maps[@]}"} >&2 || import_status=$?
+    pass=""
+    if ((import_status == 3)); then
+      stop import_refused 3 "the import was refused; see above. Nothing changed." --said
+    elif ((import_status != 0)); then
+      stop import_failed 1 "the import didn't finish. Run this same install command again to resume it, or undo it with: $HOME/.factory/bin/factoryd import --abandon"
+    fi
+    say "The move bundle is in; starting Claktory."
+  elif $receive; then
+    # factoryd receive shows the move code (and a QR) and waits for the old
+    # computer; its yes/no about the digits is read from the terminal, since
+    # this script's own stdin is the curl pipe.
+    local receive_status=0
+    "$HOME/.factory/bin/factoryd" receive </dev/tty >&2 || receive_status=$?
+    if ((receive_status == 130)); then
+      stop receive_stopped 130 "Stopped before the move finished. Claktory stays installed but not started; run this same command again to carry on."
+    elif ((receive_status == 3)); then
+      stop receive_refused 3 "the move was refused; see above." --said
+    elif ((receive_status != 0)); then
+      stop receive_failed 1 "the move didn't finish; see above. Run this same command again to carry on where it stopped."
+    fi
+    say "The move is done; starting Claktory."
+  fi
   if [[ "$os" == Linux ]]; then
     local pair=() status=0
     $YES && pair=(--no-pair)

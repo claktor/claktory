@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'agent_name.dart';
 import 'characters/character.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
@@ -83,10 +84,8 @@ class _Heading extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -105,7 +104,8 @@ class _Empty extends StatelessWidget {
     ),
     child: Text(
       text,
-      style: TextStyles.body.copyWith(color: Palette.of(context).textFaint),
+      style: TypeScale.of(context).body
+          .copyWith(color: Palette.of(context).textFaint),
     ),
   );
 }
@@ -148,10 +148,22 @@ class _AgentLine extends StatelessWidget {
         : wait.isNotEmpty
         ? 'on hold'
         : 'idle';
+    // On a phone what it's doing follows its role, rather than a column
+    // too narrow for larger text; the row grows with the text.
+    final phone = isPhoneLayout(context);
+    final role = wait.isNotEmpty ? wait : agent?.role ?? '';
     return Container(
       // Taller with a role, for its line under the name, as in the sidebar.
-      height: (agent?.role ?? '').isEmpty && wait.isEmpty ? 32 : 40,
-      padding: const EdgeInsets.symmetric(horizontal: Space.s),
+      height: phone
+          ? null
+          : (agent?.role ?? '').isEmpty && wait.isEmpty
+          ? 32
+          : 40,
+      constraints: phone ? const BoxConstraints(minHeight: Touch.target) : null,
+      padding: EdgeInsets.symmetric(
+        horizontal: Space.s,
+        vertical: phone ? Space.xs : 0,
+      ),
       child: Row(
         children: [
           Padding(
@@ -163,8 +175,10 @@ class _AgentLine extends StatelessWidget {
           Expanded(
             child: NameOverRole(
               name: agent?.name ?? id,
-              role: wait.isNotEmpty ? wait : agent?.role ?? '',
-              style: TextStyles.body.copyWith(
+              role: phone
+                  ? [role, status].where((part) => part.isNotEmpty).join(' · ')
+                  : role,
+              style: TypeScale.of(context).body.copyWith(
                 color: agent == null ? palette.textFaint : palette.text,
               ),
               roleColor: palette.textFaint,
@@ -177,27 +191,27 @@ class _AgentLine extends StatelessWidget {
                           place,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
                         ),
                       ),
                     ),
             ),
           ),
-          const SizedBox(width: Space.s),
+          if (!phone) const SizedBox(width: Space.s),
           // A column of its own at the edge, so every row's status lines up.
-          SizedBox(
-            width: _statusWidth,
-            child: Text(
-              status,
-              maxLines: 1,
-              textAlign: TextAlign.right,
-              style: TextStyles.caption.copyWith(
-                color: working ? palette.textMuted : palette.textFaint,
+          if (!phone)
+            SizedBox(
+              width: _statusWidth,
+              child: Text(
+                status,
+                maxLines: 1,
+                textAlign: TextAlign.right,
+                style: TypeScale.of(context).caption.copyWith(
+                  color: working ? palette.textMuted : palette.textFaint,
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

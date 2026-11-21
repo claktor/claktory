@@ -4,6 +4,8 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/input.dart' show InputKind;
 import 'login.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -68,7 +70,8 @@ class _ProviderSettingsState extends State<ProviderSettings> {
         if (added.isEmpty) ...[
           Text(
             'Sign in to a provider so your agents can work.',
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.m),
         ] else
@@ -273,6 +276,9 @@ class _ProviderPickerState extends State<ProviderPicker> {
             controller: _query,
             focusNode: _focus,
             placeholder: widget.placeholder,
+            kind: InputKind.text,
+            textInputAction: TextInputAction.search,
+            autocorrect: false,
             autofocus: widget.autofocus,
           ),
           // The field's own padding holds the text clear of nothing: the
@@ -370,7 +376,8 @@ class _ProviderPickerState extends State<ProviderPicker> {
               widget.providers.isEmpty
                   ? 'No providers to add.'
                   : 'No provider matches “${_query.text.trim()}”.',
-              style: TextStyles.body.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textFaint),
             ),
           ),
         ),
@@ -421,7 +428,8 @@ class _ProviderPickerState extends State<ProviderPicker> {
                   method.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
               ),
               if (aside.isNotEmpty || signedIn) ...[
@@ -431,7 +439,8 @@ class _ProviderPickerState extends State<ProviderPicker> {
                     aside,
                     if (signedIn) 'Signed in',
                   ].where((part) => part.isNotEmpty).join(' · '),
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ],
             ],

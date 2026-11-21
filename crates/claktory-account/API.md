@@ -103,6 +103,12 @@ suppression list or bounced).
 ```
 Makes the account if it's new, and registers the Claktory (or, signing in
 again, gives it a new token, backend key and epoch, and undoes a removal).
+It may carry `Claktory-Time` and `Claktory-Signature` (no token), signed as
+a signed request by the backend key the Claktory has now: that proves it's
+the same Claktory, which then moves from another account it signed out of
+rather than `409 claktory_taken`. Signed with another key it proves nothing;
+a time that's off is `401 clock_skew` (with `server_time`) and a signature
+seen before `401 replayed`, each leaving the code to use again.
 `200 {"account_id", "email", "claktory_id", "machine_token", "epoch", "sealed_share", "service_key"}`.
 Errors: `400 wrong_code` (`attempts_left`), `410 code_expired` (expired, or
 out of tries: start again), `409 claktory_taken` (that id belongs to another
@@ -194,6 +200,22 @@ label (up to 40 of `A-Z a-z 0-9 . _ + -`) and relays that aren't http(s)
 URLs (200 characters at most, 8 kept) left out rather than refused.
 Errors: `401`, `403 revoked`.
 
+### `POST /v1/move` (signed)
+A Claktory moved to another computer (#217): its new copy changes its
+credentials, so the old copy's no longer work.
+```json
+{"backend_key": b64, "machine_token": b64, "name": "cloud-box", "version": "v0.1.15", "platform": "linux-x86_64", "from": "Mac mini"}
+```
+Signed with the token and backend key it has now; `backend_key` and
+`machine_token` (32 random bytes, which the Claktory chooses) replace them
+at once. The epoch, and so the share, stays the same. `name` is the new
+computer's name (tidied as at sign-in), `from` the old one's, for the email.
+`200 {"epoch"}`. The account is emailed ("Mac mini moved to cloud-box").
+A Claktory whose answer was lost tries again with the old pair, gets `401
+unauthorized`, and checks whether its new pair works with a check-in.
+Errors: `400 invalid_request` (a key or token that isn't 32 bytes, or a
+token already in use), `401`, `403 revoked`, `429 rate_limited` (10 a day).
+
 ### Devices
 
 A person's devices sign in to the account themselves, to find its
@@ -258,7 +280,7 @@ platform, last contact, recent unlocks with their IP, and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
 model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
 (name, platform, last seen), each with **Remove** (its key is unbound);
-**Delete account** (its Claktories' usage stays only in anonymous totals);
+**Delete account** (its Claktories' usage stays only in anonymous totals; `GET /account/delete` opens its confirm step directly, after the emailed-code sign-in if need be, for apps to link to);
 **Download my data** (JSON, everything kept about the account). Whoever runs
 the service (`--admin-email`) also gets **Usage counts** at `/account/admin`,
 the same report as `claktory-account stats`, including the emails the mail

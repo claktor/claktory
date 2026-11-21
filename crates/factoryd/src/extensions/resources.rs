@@ -19,14 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use factory_agent::{Event, EventSource, Tool};
+use factory_agent::Tool;
 use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Extension, Manifest, PromptKind, PromptSection, enabled, factory_tool};
 use crate::config::{AgentConfig, Config, ResourcesConfig};
-use crate::factory::{Factory, Inner};
+use crate::factory::{Factory, Inner, host_event};
 use crate::transcript::now_ms;
 
 pub(crate) const ID: &str = "resources";
@@ -358,13 +358,7 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         config.agents.iter().filter(|agent| enabled(agent, ID) && !config.archived(agent)).map(|agent| agent.id.clone()).collect();
     for (_, text) in said {
         for agent in &told {
-            let event = Event {
-                source: EventSource::Host,
-                from: "Claktory".to_owned(),
-                id: String::new(),
-                summary: String::new(),
-                transient: false,
-            };
+            let event = host_event(String::new());
             factory.deliver_event(agent, text.clone(), event);
         }
     }

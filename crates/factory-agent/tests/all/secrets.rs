@@ -303,6 +303,7 @@ async fn nothing_the_agent_sees_or_records_holds_a_value() {
         inbox: None,
         after_compaction: None,
         secrets: Some(secrets),
+        fallback_model: None,
     });
     let events = crate::support::collect(&mut agent);
     tokio::time::timeout(HANG, agent.prompt("Deploy")).await.expect("no hang").expect("ran");

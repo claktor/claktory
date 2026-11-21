@@ -79,11 +79,6 @@ class UsageCircle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final provider = meter.provider;
-    final color = providerColor(provider.id, palette);
-    final usage = meter.usage;
-    final (mark, used) = usageMark(usage);
     return Semantics(
       label: meter.name,
       child: HoverCard(
@@ -91,23 +86,48 @@ class UsageCircle extends StatelessWidget {
         // On iPhone, a touch and hold opens it.
         holdToShow: true,
         card: (context) => UsageCard(meter: meter, now: DateTime.now()),
-        child: SizedBox.square(
-          dimension: 24,
-          child: ResetCue(
-            shown: resetCue(meter),
-            child: Center(
-              child: Opacity(
-                // Numbers from before a failed read are shown, but faded.
-                opacity: usage != null && usage.error.isNotEmpty ? 0.5 : 1,
-                child: CustomPaint(
-                  size: const Size.square(20),
-                  painter: _CirclePainter(
-                    color: color,
-                    mark: mark,
-                    used: used,
-                    logo: providerMark(provider.id),
-                  ),
-                ),
+        child: UsageRing(meter: meter),
+      ),
+    );
+  }
+}
+
+/// An account's ring alone: [size] across in a [cell] a little larger,
+/// with the reset cue at the cell's corner. The circle's, and a phone's
+/// Usage page's rows'.
+class UsageRing extends StatelessWidget {
+  const UsageRing({
+    super.key,
+    required this.meter,
+    this.size = 20,
+    this.cell = 24,
+  });
+
+  final UsageMeter meter;
+  final double size;
+  final double cell;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final provider = meter.provider;
+    final usage = meter.usage;
+    final (mark, used) = usageMark(usage);
+    return SizedBox.square(
+      dimension: cell,
+      child: ResetCue(
+        shown: resetCue(meter),
+        child: Center(
+          child: Opacity(
+            // Numbers from before a failed read are shown, but faded.
+            opacity: usage != null && usage.error.isNotEmpty ? 0.5 : 1,
+            child: CustomPaint(
+              size: Size.square(size),
+              painter: _CirclePainter(
+                color: providerColor(provider.id, palette),
+                mark: mark,
+                used: used,
+                logo: providerMark(provider.id),
               ),
             ),
           ),

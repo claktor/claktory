@@ -243,3 +243,73 @@ async fn a_release_with_nothing_for_this_machine_is_skipped() {
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Skipped("2026.11.20-1012".into()));
     assert_eq!(latest(&dir), "");
 }
+
+/// Signs the channel's manifest in `dir` as `scripts/publish.sh` does:
+/// `latest.json.sig` beside it, `<key id>:<base64 ed25519 signature>`.
+fn sign(dir: &Path, id: &str, key: &ed25519_dalek::SigningKey) {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+    let manifest = std::fs::read(dir.join("latest.json")).expect("manifest");
+    let signature = base64::engine::general_purpose::STANDARD.encode(key.sign(&manifest).to_bytes());
+    std::fs::write(dir.join("latest.json.sig"), format!("{id}:{signature}\n")).expect("signature");
+}
+
+fn release_key(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+fn pinned() -> Vec<(String, ed25519_dalek::VerifyingKey)> {
+    vec![("claktory-release-1".into(), release_key(1).verifying_key()), ("claktory-recovery-1".into(), release_key(2).verifying_key())]
+}
+
+#[tokio::test]
+async fn a_signed_channel_takes_a_release_only_with_its_keys_signature() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    let mut channel = Channel::new(home(&dir), url).signed_by(pinned());
+
+    // No signature beside it: nothing is downloaded, and it's not given up on.
+    let error = channel.check().await.expect_err("unsigned");
+    assert!(matches!(error, ChannelError::Unsigned(_)), "{error}");
+    assert_eq!(release_files(&dir), Vec::<String>::new());
+
+    // Signed by a key nobody pinned.
+    sign(&dir, "claktory-release-1", &release_key(9));
+    assert!(matches!(channel.check().await, Err(ChannelError::Unsigned(_))));
+    assert_eq!(latest(&dir), "");
+
+    // Signed, then the manifest changed (another tarball's hash, say).
+    sign(&dir, "claktory-release-1", &release_key(1));
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("latest.json")).expect("manifest")).expect("json");
+    manifest["sha256"] = "0".repeat(64).into();
+    write_manifest(&dir, &manifest);
+    assert!(matches!(channel.check().await, Err(ChannelError::Unsigned(_))));
+    assert_eq!(release_files(&dir), Vec::<String>::new());
+
+    // Published again and signed by the release key: taken.
+    publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    sign(&dir, "claktory-release-1", &release_key(1));
+    assert_eq!(channel.check().await.expect("signed"), Checked::Downloaded("v0.1.10".into()));
+    assert_eq!(latest(&dir), "v0.1.10");
+}
+
+#[tokio::test]
+async fn the_recovery_key_signs_a_release_too() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    sign(&dir, "claktory-recovery-1", &release_key(2));
+    let checked = Channel::new(home(&dir), url).signed_by(pinned()).check().await;
+    assert_eq!(checked.expect("signed by the recovery key"), Checked::Downloaded("v0.1.10".into()));
+}
+
+/// A channel in a folder (how dev and local channels are tried) needs no
+/// signature; an online one always does.
+#[tokio::test]
+async fn only_a_channel_in_a_folder_is_taken_unsigned() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    assert!(!factoryd::channel::requires_signature(&url));
+    assert_eq!(Channel::new(home(&dir), url).check().await.expect("a folder's"), Checked::Downloaded("v0.1.10".into()));
+    assert!(factoryd::channel::requires_signature("https://github.com/claktor/claktory/releases/latest/download/latest.json"));
+}

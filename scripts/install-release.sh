@@ -6,6 +6,8 @@
 # from the repo.
 #   ~/.factory/bin/factoryd     the backend, which updates replace
 #   ~/.factory/bin/claktory-apps  the apps host beside it, which runs apps
+#   ~/.factory/bin/claktory-speech  the speech host, which writes what voice
+#                               messages say
 #   ~/.factory/bin/Claktory Agents.app  the supervisor, which keeps it
 #                               running and undoes updates that don't start; a
 #                               LaunchAgent runs it. An app, so it can be added
@@ -20,9 +22,18 @@
 # The backend restarts, which interrupts every agent mid-run.
 set -euo pipefail
 
-RELEASE="${1:?usage: install-release.sh RELEASE_DIR [--open]}"
+RELEASE="${1:?usage: install-release.sh RELEASE_DIR [--open] [--hold]}"
 OPEN=false
-[[ "${2:-}" == "--open" ]] && OPEN=true
+HOLD=false
+for flag in "${@:2}"; do
+  case "$flag" in
+    --open) OPEN=true ;;
+    # Installed but not started: the online installer's --import runs
+    # `factoryd import` first, then installs again without --hold.
+    --hold) HOLD=true ;;
+    *) echo "install-release.sh doesn't know $flag" >&2; exit 1 ;;
+  esac
+done
 HOME_DIR="$HOME/.factory"
 BIN="$HOME_DIR/bin/factoryd"
 APP="$HOME/Applications/Factory.app"
@@ -58,6 +69,12 @@ if [[ -f "$RELEASE/claktory-apps" ]]; then
   cp "$RELEASE/claktory-apps" "$HOME_DIR/bin/claktory-apps.new"
   chmod 755 "$HOME_DIR/bin/claktory-apps.new"
   mv -f "$HOME_DIR/bin/claktory-apps.new" "$HOME_DIR/bin/claktory-apps"
+fi
+# The speech host, beside them (releases before voice have none).
+if [[ -f "$RELEASE/claktory-speech" ]]; then
+  cp "$RELEASE/claktory-speech" "$HOME_DIR/bin/claktory-speech.new"
+  chmod 755 "$HOME_DIR/bin/claktory-speech.new"
+  mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
 fi
 SUPERVISOR_APP="$HOME_DIR/bin/Claktory Agents.app"
 if [[ -d "$RELEASE/supervisor/Claktory Agents.app" ]]; then
@@ -116,6 +133,10 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 while launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; do sleep 0.1; done
 # The supervisor that ran before, when it's now the app.
 [[ "$SUPERVISOR" == "$BIN-supervisor" ]] || rm -f "$BIN-supervisor"
+if $HOLD; then
+  echo "Claktory installed but not started (--hold)."
+  exit 0
+fi
 launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
 if $OPEN; then
   open "$APP"

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "thread": {
+    "id": "t-41",
+    "status": "OUTDATED",
+    "anchored_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "current_sha256": "a4b9149c7ff314aff27d59b78af001dce3b22194c0e8bc97aab8f4acac6f6306"
+  },
+  "item": {
+    "annotation_id": "ann-41",
+    "ink_layer_id": "layer-paper-p3",
+    "layer_revision": 2,
+    "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb"
+  }
+}

@@ -135,6 +135,33 @@ pub struct UserMessage {
     /// after the text (images, when it takes them, are in `content` too).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The person said it: a voice message, `attachments[0]` its recording,
+    /// the text what was heard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
+}
+
+/// A voice message, transcribed on the computer Claktory runs on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Voice {
+    /// How long the recording is.
+    pub duration_ms: u64,
+    /// The language heard, such as "pl", when the model said.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub language: String,
+}
+
+impl Voice {
+    /// How the model reads its length: "42s", "3m 5s".
+    fn length(&self) -> String {
+        let seconds = self.duration_ms.div_ceil(1000).max(1);
+        match (seconds / 60, seconds % 60) {
+            (0, seconds) => format!("{seconds}s"),
+            (minutes, 0) => format!("{minutes}m"),
+            (minutes, seconds) => format!("{minutes}m {seconds}s"),
+        }
+    }
 }
 
 /// A file the person attached to a message, uploaded to the agent's uploads
@@ -212,12 +239,21 @@ pub struct SentFrom {
     pub kind: String,
 }
 
-impl SentFrom {
-    /// `<sent from="Matt's iPhone" device="phone">`: how the model reads it.
-    fn tag(&self) -> String {
-        let kind = if self.kind.is_empty() { String::new() } else { format!(" device=\"{}\"", attribute(&self.kind)) };
-        format!("<sent from=\"{}\"{kind}>\n", attribute(&self.device))
+/// `<sent from="Matt's iPhone" device="phone">`, with `voice="42s"` when
+/// they said it: how the model reads who sent the person's message.
+fn sent_tag(sent_from: Option<&SentFrom>, voice: Option<&Voice>) -> String {
+    let mut tag = String::from("<sent");
+    if let Some(sent_from) = sent_from {
+        tag.push_str(&format!(" from=\"{}\"", attribute(&sent_from.device)));
+        if !sent_from.kind.is_empty() {
+            tag.push_str(&format!(" device=\"{}\"", attribute(&sent_from.kind)));
+        }
     }
+    if let Some(voice) = voice {
+        tag.push_str(&format!(" voice=\"{}\"", voice.length()));
+    }
+    tag.push_str(">\n");
+    tag
 }
 
 /// A value as it goes between an attribute's quotes in a tag the model
@@ -270,6 +306,7 @@ impl UserMessage {
             sent_from: None,
             client_id: String::new(),
             attachments: Vec::new(),
+            voice: None,
         }
     }
 
@@ -279,9 +316,12 @@ impl UserMessage {
 
     /// What the model reads: an event comes wrapped in a tag naming where it's
     /// from, so it's never mistaken for the person; the person's message, in
-    /// one naming the device they sent it from, when known, with a tag for
-    /// each file attached after its text.
+    /// one naming the device they sent it from, when known, and saying when
+    /// they said it (a voice message), with a tag for each file attached
+    /// after its text. A voice message's recording isn't one: the agent reads
+    /// its words.
     pub fn for_model(&self) -> UserMessage {
+        let attachments = self.attachments.get(usize::from(self.voice.is_some())..).unwrap_or_default();
         let (open, close) = match (&self.event, &self.sent_from) {
             (Some(event), _) => {
                 // An agent's id too, when its name doesn't say it, so a reply reaches it.
@@ -289,14 +329,16 @@ impl UserMessage {
                     if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", attribute(&event.id)) };
                 (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), attribute(&event.from)), "\n</event>")
             }
-            (None, Some(sent_from)) => (sent_from.tag(), "\n</sent>"),
-            (None, None) if self.attachments.is_empty() => return self.clone(),
-            (None, None) => (String::new(), ""),
+            (None, sent_from) if sent_from.is_some() || self.voice.is_some() => {
+                (sent_tag(sent_from.as_ref(), self.voice.as_ref()), "\n</sent>")
+            }
+            (None, _) if attachments.is_empty() => return self.clone(),
+            (None, _) => (String::new(), ""),
         };
-        let tags = if self.attachments.is_empty() {
+        let tags = if attachments.is_empty() {
             None
         } else {
-            let tags: Vec<String> = self.attachments.iter().map(Attachment::tag).collect();
+            let tags: Vec<String> = attachments.iter().map(Attachment::tag).collect();
             let written = match &self.content {
                 UserContent::Text(text) => !text.is_empty(),
                 UserContent::Parts(parts) => parts.iter().any(|part| matches!(part, UserPart::Text { text } if !text.is_empty())),
@@ -363,6 +405,8 @@ pub enum EventSource {
     Monitor,
     /// An app the agent hears (its events).
     App,
+    /// A pipe to another Claktory: its messages, for its lead.
+    Pipe,
 }
 
 impl EventSource {
@@ -373,6 +417,7 @@ impl EventSource {
             EventSource::Task => "task",
             EventSource::Monitor => "monitor",
             EventSource::App => "app",
+            EventSource::Pipe => "pipe",
         }
     }
 }

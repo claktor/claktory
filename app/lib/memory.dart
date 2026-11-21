@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'extensions.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -22,7 +23,7 @@ class MemoryView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final faint = TextStyles.body.copyWith(color: palette.textFaint);
+    final faint = TypeScale.of(context).body.copyWith(color: palette.textFaint);
     // A read-only memory (such as the Factory manual) is only its notes:
     // nothing it learned, and nothing that changes.
     final readOnly = memory.readOnly;
@@ -81,10 +82,8 @@ class _Heading extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -102,6 +101,9 @@ class _Preference extends StatelessWidget {
     final learned = _date(preference.learned.toInt());
     final changed =
         preference.updated.toInt() - preference.learned.toInt() > 60000;
+    // On a phone its number leads the line under it: a column of its own
+    // would leave the rule little room at larger text.
+    final phone = isPhoneLayout(context);
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: Space.s,
@@ -110,38 +112,41 @@ class _Preference extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: Space.xl,
-            child: Text(
-              '#${preference.id}',
-              style: TextStyles.body.copyWith(
-                color: palette.textFaint,
-                fontFeatures: const [FontFeature.tabularFigures()],
+          if (!phone)
+            SizedBox(
+              width: Space.xl,
+              child: Text(
+                '#${preference.id}',
+                style: TypeScale.of(context).body.copyWith(
+                  color: palette.textFaint,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
             ),
-          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   preference.rule,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
                 if (preference.why.isNotEmpty)
                   Text(
                     'Why: ${preference.why}',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
                   ),
                 Text(
                   [
+                    if (phone) '#${preference.id}',
                     'Learned ${_when(learned, now)}',
                     if (changed)
                       'changed ${_when(_date(preference.updated.toInt()), now)}',
                   ].join(' · '),
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ],
             ),
@@ -171,80 +176,86 @@ class _NoteState extends State<_Note> {
     final palette = Palette.of(context);
     final note = widget.note;
     final edited = note.updated.toInt() - note.created.toInt() > 60000;
-    return Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s,
-          vertical: Space.s - 2,
-        ),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 5),
-                  child: Chevron(color: palette.textFaint, down: _open),
-                ),
-                const SizedBox(width: Space.s),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        note.slug,
-                        style: TextStyles.code.copyWith(
-                          color: palette.textMuted,
-                        ),
-                      ),
-                      if (note.summary.isNotEmpty)
+    return Semantics(
+      container: true,
+      expanded: _open,
+      child: Pressable(
+        onTap: () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(
+            minHeight: isPhoneLayout(context) ? Touch.target : 0,
+          ),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.s,
+            vertical: Space.s - 2,
+          ),
+          decoration: BoxDecoration(
+            color: hovered ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: Chevron(color: palette.textFaint, down: _open),
+                  ),
+                  const SizedBox(width: Space.s),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Text(
-                          note.summary,
-                          style: TextStyles.body.copyWith(color: palette.text),
+                          note.slug,
+                          style: TypeScale.of(context).code
+                              .copyWith(color: palette.textMuted),
+                        ),
+                        if (note.summary.isNotEmpty)
+                          Text(
+                            note.summary,
+                            style: TypeScale.of(context).body
+                                .copyWith(color: palette.text),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              if (_open)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Space.s + 10,
+                    Space.s,
+                    0,
+                    Space.xs,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (note.body.isNotEmpty) Markdown(note.body),
+                      // Notes that were never written by anyone (a read-only
+                      // memory's) have no times.
+                      if (note.created > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(top: Space.xs),
+                          child: Text(
+                            [
+                              'Written ${_when(_date(note.created.toInt()), widget.now)}',
+                              if (edited)
+                                'edited ${_when(_date(note.updated.toInt()), widget.now)}',
+                            ].join(' · '),
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textFaint),
+                          ),
                         ),
                     ],
                   ),
                 ),
-              ],
-            ),
-            if (_open)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  Space.s + 10,
-                  Space.s,
-                  0,
-                  Space.xs,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (note.body.isNotEmpty) Markdown(note.body),
-                    // Notes that were never written by anyone (a read-only
-                    // memory's) have no times.
-                    if (note.created > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(top: Space.xs),
-                        child: Text(
-                          [
-                            'Written ${_when(_date(note.created.toInt()), widget.now)}',
-                            if (edited)
-                              'edited ${_when(_date(note.updated.toInt()), widget.now)}',
-                          ].join(' · '),
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -295,7 +306,7 @@ class _Change extends StatelessWidget {
             ),
           ],
         ),
-        style: TextStyles.caption,
+        style: TypeScale.of(context).caption,
       ),
     );
   }

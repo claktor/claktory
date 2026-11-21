@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "kind": "creation_params",
+  "view_type": "claktory/ink",
+  "arguments": {
+    "schema_version": 1,
+    "leaf_id": "leaf-7f3a",
+    "surface": "excerpt",
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/notes/derivation.md",
+      "sha256": "4d967f33427815e06ce250dc49ab7cf4545ac738e5f98cc6aa1efcbe94b1c427",
+      "mime": "text/markdown",
+      "size": 9120
+    },
+    "document": {
+      "excerpt": {
+        "text": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0.",
+        "selectors": [
+          {
+            "type": "TextQuoteSelector",
+            "exact": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0.",
+            "prefix": "activations.\n\n",
+            "suffix": "\n\nIn practice"
+          },
+          {
+            "type": "TextPositionSelector",
+            "start": 1804,
+            "end": 1890
+          }
+        ],
+        "rendition": {
+          "width": 640,
+          "font": "Geist",
+          "font_size": 17,
+          "line_height": 1.5,
+          "padding": 24
+        }
+      }
+    },
+    "layers": [],
+    "drawing_policy": "default",
+    "persistence": {
+      "mode": "online"
+    },
+    "active": true,
+    "ink": {
+      "paper": "#FFFFFFFF",
+      "appearance": "light"
+    }
+  }
+}

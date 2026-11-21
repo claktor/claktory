@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "channel": "factory/commands",
+  "direction": "native_to_dart",
+  "method": "run",
+  "note": "The person chose a command in the menu or pressed its keys; Dart runs it if it's still enabled and answers whether it ran.",
+  "arguments": {
+    "id": "sidebar"
+  },
+  "result": true
+}

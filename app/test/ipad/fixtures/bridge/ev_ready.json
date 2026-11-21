@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "ready",
+  "arguments": {
+    "surface": "pdf",
+    "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "sha256_verified": true,
+    "page_count": 12,
+    "pages": [
+      {
+        "page_1based": 1,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 2,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 3,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 4,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 5,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 90
+      },
+      {
+        "page_1based": 6,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 7,
+        "crop_box": [
+          72,
+          144,
+          432,
+          504
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 8,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 9,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 10,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 11,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 12,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      }
+    ],
+    "drawing_space": "page_overlay"
+  }
+}

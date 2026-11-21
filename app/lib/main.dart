@@ -6,27 +6,44 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'connections.dart';
 import 'drafts.dart';
+import 'drop.dart';
 import 'identity.dart';
+import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'links.dart' show appLinks;
+import 'mobile/device.dart' show loadDeviceCapabilities;
+import 'mobile/platform_policy.dart';
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
 import 'shell.dart';
 import 'state.dart';
+import 'unreadable.dart';
 import 'update.dart';
 import 'zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // What this device is (an iPad, a phone), before the first frame: so
+  // nothing lays out as another device first.
+  await loadDeviceCapabilities();
   final drafts = await DeviceDrafts.load(DeviceDraftStorage());
-  final connections = await Connections.load(DeviceConnectionStorage());
-  runApp(
+  final storage = DeviceConnectionStorage();
+  final localBackend = await runsClaktoryHere();
+  void start(Connections connections) => runApp(
     FactoryApp(
       drafts: drafts,
       connections: connections,
-      localBackend: await runsClaktoryHere(),
+      localBackend: localBackend,
     ),
   );
+  final connections = await Connections.load(storage);
+  // What this device keeps can't be read: it says so, rather than start
+  // looking unpaired and then save that over what it keeps.
+  if (connections.readFailure case final failure?) {
+    runApp(UnreadableApp(storage: storage, failure: failure, onRead: start));
+  } else {
+    start(connections);
+  }
   // Links that opened the app, such as claktory://add?code=… (links.dart).
   unawaited(appLinks.listen());
 }
@@ -145,6 +162,8 @@ class _FactoryAppState extends State<FactoryApp> {
     );
     // The device's key for each Claktory, kept with its pairing.
     backend.deviceKey = widget.connections.deviceKey;
+    // Signed in to the person's account, it shows each Claktory it's theirs.
+    backend.account = widget.connections.account;
     backend.connectTo(target);
     unawaited(backend.run());
     return backend;
@@ -156,7 +175,29 @@ class _FactoryAppState extends State<FactoryApp> {
     _window.dispose();
     _setup?.dispose();
     _claktories.dispose();
+    for (final focus in _focuses.values) {
+      focus.dispose();
+    }
     super.dispose();
+  }
+
+  /// What the person reads in each Claktory's window (an iPad's focused
+  /// pane, ipad/workbench.dart), for this session: one each, since agent
+  /// ids repeat across Claktories.
+  final _focuses = <Claktory, WorkbenchFocus>{};
+
+  WorkbenchFocus _focusFor(Claktories claktories, Claktory shown) {
+    // Those of Claktories gone go with them.
+    final open = claktories.all.toSet();
+    final gone = [
+      for (final claktory in _focuses.keys)
+        if (!open.contains(claktory)) claktory,
+    ];
+    for (final claktory in gone) {
+      final focus = _focuses.remove(claktory)!;
+      WidgetsBinding.instance.addPostFrameCallback((_) => focus.dispose());
+    }
+    return _focuses.putIfAbsent(shown, WorkbenchFocus.new);
   }
 
   Widget _buildWindow(BuildContext context) {
@@ -164,11 +205,15 @@ class _FactoryAppState extends State<FactoryApp> {
     final shown = claktories.selected;
     // Each Claktory gets a window of its own: nothing of one carries over
     // to the next, and its stores are already live, so it shows at once.
-    // The rail sits inside it, so its dialogs cover the whole window.
-    if (isPhoneLayout(context)) {
-      return PhoneClaktories(shell: Shell(key: ObjectKey(shown)));
-    }
-    return Shell(key: ObjectKey(shown), rail: const ClaktoryRail());
+    // The rail sits inside it, so its dialogs cover the whole window. Its
+    // focus sits above both, so a window narrowed to the phone's routes
+    // and widened again keeps what was being read.
+    return WorkbenchScope(
+      focus: _focusFor(claktories, shown),
+      child: isPhoneLayout(context)
+          ? PhoneClaktories(shell: Shell(key: ObjectKey(shown)))
+          : Shell(key: ObjectKey(shown), rail: const ClaktoryRail()),
+    );
   }
 
   @override
@@ -176,6 +221,8 @@ class _FactoryAppState extends State<FactoryApp> {
     return WidgetsApp(
       title: 'Claktory',
       color: signal,
+      // The words of the iPhone's text selection menu (Copy, Paste…).
+      localizationsDelegates: PhonePlatformPolicy.current.localizations,
       debugShowCheckedModeBanner: false,
       builder: (context, _) => ClaktoriesScope(
         claktories: _claktories,
@@ -193,7 +240,27 @@ class _FactoryAppState extends State<FactoryApp> {
               child: ScrollConfiguration(
                 behavior: const _ScrollBehavior(),
                 child: DevMark(
-                  child: AppZoom(child: Overlay(initialEntries: [_window])),
+                  child: AppZoom(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Overlay(initialEntries: [_window]),
+                        ),
+                        // Files dragged over the window from the Finder.
+                        const Positioned.fill(child: WindowDropOverlay()),
+                        // A change to what this device keeps that wasn't
+                        // saved says so.
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: Center(
+                            child: UnsavedNote(connections: widget.connections),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             );

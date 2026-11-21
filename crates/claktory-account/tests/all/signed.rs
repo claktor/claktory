@@ -157,3 +157,45 @@ async fn endpoints_make_the_relay_allowlist() {
     let answer = instance.signed(&claktory, "PUT", "/v1/endpoints", &endpoints, None).await;
     assert_eq!((answer.status, answer.error().as_str()), (403, "revoked"));
 }
+
+#[tokio::test]
+async fn a_moved_claktory_takes_a_new_token_and_key_and_the_old_ones_stop_working() {
+    let instance = start().await;
+    let mut old = Claktory::new("203.0.113.7");
+    instance.sign_in(&mut old, "matt@example.com", "Mac mini").await;
+    let check_in = CheckIn { version: "v0.1.9".into(), platform: "macos-arm64".into(), ..Default::default() };
+
+    let moved =
+        Claktory { id: old.id.clone(), key: new_signing_key(), token: b64(*random_32()), epoch: old.epoch, ip: "198.51.100.9".into() };
+    let request = MoveRequest {
+        backend_key: b64(moved.key.verifying_key().as_bytes()),
+        machine_token: moved.token.clone(),
+        name: "cloud-box".into(),
+        version: "v0.1.15".into(),
+        platform: "linux-x86_64".into(),
+        from: "Mac mini".into(),
+    };
+    // Signed by the new pair, it's refused: only the old pair can move it.
+    assert_eq!(instance.signed(&moved, "POST", "/v1/move", &request, None).await.error(), "unauthorized");
+    let answer = instance.signed(&old, "POST", "/v1/move", &request, None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert_eq!(answer.json::<MoveDone>().epoch, 1, "the epoch, and so the share, stays");
+
+    let notice = instance.mail.sent().pop().expect("a notice");
+    assert_eq!(notice.subject, "Mac mini moved to cloud-box");
+    assert!(notice.text.contains("From: 203.0.113.7"), "the request came from the old pair's sender: {}", notice.text);
+
+    // The old pair no longer works; the new one does, and opens the same share.
+    assert_eq!(instance.signed(&old, "POST", "/v1/check-in", &check_in, None).await.error(), "unauthorized");
+    assert_eq!(instance.share(&old, None).await.expect_err("the old copy").error(), "unauthorized");
+    assert_eq!(instance.signed(&moved, "POST", "/v1/check-in", &check_in, None).await.status, 200);
+    assert_eq!(instance.share(&moved, None).await.ok(), Some((1, instance.expected_share(&old, 1))));
+
+    // Retried with the old pair (its answer was lost): refused, nothing changes.
+    assert_eq!(instance.signed(&old, "POST", "/v1/move", &request, None).await.error(), "unauthorized");
+    // A token that isn't 32 bytes, or one in use, is refused.
+    let short = MoveRequest { machine_token: "abc".into(), ..request.clone() };
+    assert_eq!(instance.signed(&moved, "POST", "/v1/move", &short, None).await.error(), "invalid_request");
+    let same = MoveRequest { backend_key: b64(new_signing_key().verifying_key().as_bytes()), ..request };
+    assert_eq!(instance.signed(&moved, "POST", "/v1/move", &same, None).await.error(), "invalid_request");
+}

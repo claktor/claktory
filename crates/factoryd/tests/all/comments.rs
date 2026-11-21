@@ -284,6 +284,45 @@ async fn agents_comment_on_files_for_the_person_and_send_now_goes_at_once() {
     assert!(prompt.contains("commented on notes.txt") && prompt.contains("Reply: Why?"), "{prompt}");
 }
 
+#[tokio::test]
+async fn the_persons_drafts_reach_no_agent_until_sent_not_even_through_claktorys_records() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    turn_on_comments(&mut client, &mut view).await;
+    // Writer reads Claktory's records too, as admin agents do.
+    let records = v1::ExtensionChange { id: "database:factory".into(), enabled: Some(true), ..Default::default() };
+    let change = v1::UpdateAgent { agent_id: "writer".into(), extension: Some(records), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(change)).await;
+    std::fs::write(dir.join("site/notes.txt"), "one\ntwo\nthree\n").expect("write");
+    let path = std::fs::canonicalize(dir.join("site/notes.txt")).expect("path").display().to_string();
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
+    let Body::FileContent(content) = read.body else { panic!("expected the file") };
+    let made = client.request(create(&path, "text", &content.sha256, vec![quote("two", "one\n", "\nthree")], "Half-formed thought.")).await;
+    assert!(matches!(made.body, Body::Thread(ref thread) if thread.comments[0].draft), "{:?}", made.body);
+
+    // A draft: not in the Comments tools, and no table of comments in the records.
+    assert_eq!(call(&mut client, &mut view, "writer", "call comments_list {}").await, "tool comments_list: No open comment threads.");
+    for sql in ["SELECT body FROM thread_comments", "SELECT quote FROM threads", "SELECT text FROM thread_files"] {
+        let query = serde_json::json!({ "sql": sql }).to_string();
+        let refused = call(&mut client, &mut view, "writer", &format!("call db_query {query}")).await;
+        assert!(refused.contains("comments on files (threads, thread_) aren't readable"), "{sql}: {refused}");
+        assert!(!refused.contains("Half-formed"), "{refused}");
+    }
+    let tables = call(&mut client, &mut view, "writer", "call db_schema {}").await;
+    assert!(tables.contains("messages (") && !tables.contains("thread"), "{tables}");
+
+    // Sent, it reaches the agent as before, and the Comments tools have it.
+    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone() };
+    apply_request(&mut client, &mut view, client_message::Body::SendComments(send)).await;
+    view.follow(&mut client, |view| idle(view, "writer")).await;
+    let listed = call(&mut client, &mut view, "writer", "call comments_list {}").await;
+    assert!(listed.contains("[t-1]") && listed.contains("Half-formed thought."), "{listed}");
+}
+
 fn decide(thread: &str, accept: bool) -> client_message::Body {
     client_message::Body::DecideSuggestion(v1::DecideSuggestion { thread_id: thread.into(), accept })
 }

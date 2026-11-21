@@ -19,7 +19,7 @@ use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use factory_agent::{Event, EventSource, Tool, ToolResult};
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1::{self, DevicePairingState as State};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 
 use super::{Extension, Manifest, PromptKind, PromptSection};
 use crate::config::AgentConfig;
-use crate::factory::{Factory, Inner, RequestError};
+use crate::factory::{Factory, Inner, RequestError, host_event};
 use crate::remote::{self, Device};
 use crate::store::Store;
 use crate::transcript::{Transcript, now_ms};
@@ -129,21 +129,15 @@ where
     A: DeserializeOwned + Send + 'static,
     F: Future<Output = Result<ToolResult, String>> + Send + 'static,
 {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     super::tool(
         name,
         label,
         description,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let args: A = serde_json::from_value(args)?;
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                run(factory, agent, args).await.map_err(factory_agent::Error::Other)
-            })
+        super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let args: A = serde_json::from_value(args)?;
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            run(factory, agent, args).await.map_err(factory_agent::Error::Other)
         }),
     )
 }
@@ -177,9 +171,7 @@ async fn add(factory: Arc<Factory>, agent: String, args: AddArgs) -> Result<Tool
     }
     let person = {
         let inner = factory.lock();
-        if inner.config.agent(&agent).is_none() {
-            return Err("You're no longer in this Claktory.".to_owned());
-        }
+        super::caller(&inner.config, &agent)?;
         inner.config.person_capitalized().to_owned()
     };
     let home = factory.home.clone();
@@ -486,8 +478,7 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
         State::Expired => format!("The code for {name} ran out before a device was allowed with it, so it wasn't added."),
         State::Unspecified | State::Waiting | State::Asking => return,
     };
-    let event =
-        Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary: summary.clone(), transient: false };
+    let event = host_event(summary.clone());
     factory.deliver_event(&row.agent, summary, event);
 }
 

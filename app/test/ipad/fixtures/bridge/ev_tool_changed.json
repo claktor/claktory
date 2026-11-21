@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "toolChanged",
+  "arguments": {
+    "tool": "eraser",
+    "color": null,
+    "width": 12.0,
+    "source": "pencil_double_tap"
+  }
+}

@@ -44,11 +44,13 @@ fn state_of(state: &str) -> SecretRequestState {
         "dismissed" => SecretRequestState::Dismissed,
         "expired" => SecretRequestState::Expired,
         "withdrawn" => SecretRequestState::Withdrawn,
+        "approved" => SecretRequestState::Approved,
         _ => SecretRequestState::Pending,
     }
 }
 
-const COLUMNS: &str = "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name, updated";
+const COLUMNS: &str =
+    "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name, updated, approved, admin, collecting";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let new_secret: String = row.get(4)?;
@@ -75,11 +77,16 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         given_secret_id: row.get(9)?,
         given_secret_name: row.get(10)?,
         updated_ms: row.get(11)?,
+        approved_ms: row.get(12)?,
+        admin_agent_id: row.get(13)?,
+        collecting: row.get(14)?,
     })
 }
 
 /// The tool agents ask with.
 pub(crate) const TOOL: &str = "secrets_request";
+/// The tool an admin agent asks the person to add a secret with.
+pub(crate) const COLLECT_TOOL: &str = "secrets_collect";
 
 /// What a secrets_request result's details hold: the request as made.
 pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
@@ -95,16 +102,56 @@ pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
         "secret_name": request.secret_name,
         "new_secret": new_secret,
         "reason": request.reason,
+        "admin": request.admin_agent_id,
     })
+}
+
+/// What a secrets_collect result's details hold: the request, marked so
+/// the admin agent's conversation shows the add-secret card for it.
+pub(crate) fn collect_details(request: &v1::SecretRequest) -> serde_json::Value {
+    let mut details = details(request);
+    details["collect"] = true.into();
+    details["approved_ms"] = request.approved_ms.into();
+    details["comment"] = request.comment.clone().into();
+    details["collecting"] = request.collecting.into();
+    details
+}
+
+/// The card a secrets_collect result opens in the admin agent's
+/// conversation (called directly, or through extension_call): the approved
+/// request, prefilled; None for any other result.
+pub(crate) fn collected(tool: &str, is_error: bool, details: &serde_json::Value) -> Option<v1::SecretRequest> {
+    if !matches!(tool, COLLECT_TOOL | "extension_call") || is_error {
+        return None;
+    }
+    if details.get("collect").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    // Only the call that opened the card shows one; a cancel updates it.
+    if details.get("collecting").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let mut request = parsed(details)?;
+    request.set_state(SecretRequestState::Approved);
+    request.approved_ms = details.get("approved_ms").and_then(serde_json::Value::as_i64).unwrap_or_default();
+    request.comment = details.get("comment").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    request.collecting = true;
+    Some(request)
 }
 
 /// The entry a secrets_request result shows (called directly, or through
 /// extension_call), pending; None for any other result, or one that asked
-/// for nothing.
+/// for nothing. A secrets_collect result (its details say `collect`) isn't
+/// a new request: `collected` reads those.
 pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value) -> Option<v1::SecretRequest> {
-    if !matches!(tool, TOOL | "extension_call") || is_error {
+    if !matches!(tool, TOOL | "extension_call") || is_error || details.get("collect").is_some() {
         return None;
     }
+    parsed(details)
+}
+
+/// A SecretRequest from a result's details, as `details` wrote them.
+fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
     let text = |key: &str| details.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
     let id = details.get("request")?.as_str()?.to_owned();
     let new_secret =
@@ -125,11 +172,8 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
         new_secret,
         reason: text("reason"),
         state: SecretRequestState::Pending.into(),
-        decided_ms: 0,
-        comment: String::new(),
-        given_secret_id: String::new(),
-        given_secret_name: String::new(),
-        updated_ms: 0,
+        admin_agent_id: text("admin"),
+        ..v1::SecretRequest::default()
     })
 }
 
@@ -138,7 +182,7 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
 fn pending(db: &Connection) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
     let mut statement =
         db.prepare(&format!("SELECT {COLUMNS}, MAX(created, updated) FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
-    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(12)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(15)?)))?.collect::<Result<Vec<_>, _>>()?;
     Ok(requests)
 }
 
@@ -195,7 +239,7 @@ impl Vault {
     /// not the vault has such a secret, or has given it one, makes no
     /// difference to the answer: nothing of the vault shows through. Errors
     /// say what to fix.
-    pub(crate) fn ask(&self, agent: &str, wanted: Wanted, reason: &str) -> Result<v1::SecretRequest, VaultError> {
+    pub(crate) fn ask(&self, agent: &str, wanted: Wanted, reason: &str, admin: &str) -> Result<v1::SecretRequest, VaultError> {
         let reason = check_reason(reason)?;
         let name = check_name(&wanted.name).map_err(|_| {
             VaultError::Invalid(
@@ -223,8 +267,8 @@ impl Vault {
         }
         let id = format!("r{}", crypto::hex(&crypto::random::<4>()));
         db.execute(
-            "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created) VALUES (?1, ?2, '', ?3, ?4, ?5, 'pending', ?6)",
-            params![id, agent, name, json, reason, now_ms()],
+            "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created, admin) VALUES (?1, ?2, '', ?3, ?4, ?5, 'pending', ?6, ?7)",
+            params![id, agent, name, json, reason, now_ms(), admin],
         )?;
         let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [&id], row)?;
         inner.state = None;
@@ -243,11 +287,98 @@ impl Vault {
             Some(request) if request.state() == SecretRequestState::Withdrawn => {
                 Err(VaultError::Invalid("The agent withdrew this request.".to_owned()))
             }
-            Some(request) if request.state() != SecretRequestState::Pending => {
+            Some(request) if !matches!(request.state(), SecretRequestState::Pending | SecretRequestState::Approved) => {
                 Err(VaultError::Invalid("This request was decided already.".to_owned()))
             }
             Some(request) => Ok(request),
         }
+    }
+
+    /// Marks `agent`'s request `id` approved: the person approved the need
+    /// and `admin` (an admin agent) finds or collects the secret. The
+    /// person's comment, if any, shows with it. Returns it as it is now.
+    pub(crate) fn approve_request(&self, agent: &str, id: &str, admin: &str, comment: &str) -> Result<v1::SecretRequest, VaultError> {
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let changed = db.execute(
+            "UPDATE requests SET state = 'approved', approved = ?3, admin = ?4, comment = ?5
+             WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![id, agent, now_ms(), admin, comment.trim()],
+        )?;
+        if changed == 0 {
+            return Err(VaultError::Invalid("This request was decided already.".to_owned()));
+        }
+        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(request)
+    }
+
+    /// Marks whether `admin`'s add-secret card for the request is open
+    /// (secrets_collect), taking the request over for `admin`; only an
+    /// approved request can be collected. Returns it as it is now.
+    pub(crate) fn set_collecting(&self, agent: &str, id: &str, admin: &str, collecting: bool) -> Result<v1::SecretRequest, VaultError> {
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let changed = db.execute(
+            "UPDATE requests SET collecting = ?3, admin = ?4 WHERE id = ?1 AND agent = ?2 AND state = 'approved'",
+            params![id, agent, collecting, admin],
+        )?;
+        if changed == 0 {
+            return Err(VaultError::Invalid("Only a request the person approved can be collected.".to_owned()));
+        }
+        let request = db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        inner.state = None;
+        Ok(request)
+    }
+
+    /// The request `id`, whoever asked, if the person approved it and it's
+    /// with the admin agent; or why it can't be worked on.
+    pub(crate) fn approved_request(&self, id: &str) -> Result<v1::SecretRequest, VaultError> {
+        let inner = self.lock();
+        let found = Self::db(&inner)?.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id.trim()], row).optional()?;
+        match found {
+            None => Err(VaultError::Invalid(format!("There's no request {}.", id.trim()))),
+            Some(request) if request.state() == SecretRequestState::Pending => {
+                Err(VaultError::Invalid(format!("{} still waits for the person to approve the need.", request.id)))
+            }
+            Some(request) if request.state() != SecretRequestState::Approved => {
+                Err(VaultError::Invalid(format!("{} isn't open any more.", request.id)))
+            }
+            Some(request) => Ok(request),
+        }
+    }
+
+    /// Hands back the open requests `admin` held (it's being deleted):
+    /// they lose their admin and stop collecting, so the asker's card is
+    /// the person's to answer directly again. The changed requests, as
+    /// they are now.
+    pub(crate) fn forget_admin(&self, admin: &str) -> Result<Vec<v1::SecretRequest>, VaultError> {
+        let mut inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(Vec::new()) };
+        let ids: Vec<String> = {
+            let mut statement = db.prepare("SELECT id FROM requests WHERE admin = ?1 AND state IN ('pending', 'approved')")?;
+            statement.query_map([admin], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        db.execute("UPDATE requests SET admin = '', collecting = 0 WHERE admin = ?1 AND state IN ('pending', 'approved')", [admin])?;
+        let mut requests = Vec::new();
+        for id in &ids {
+            requests.push(db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?);
+        }
+        inner.state = None;
+        Ok(requests)
+    }
+
+    /// The requests `admin` was handed (approved, or decided with it set),
+    /// oldest first: to refresh its conversation's cards on load.
+    pub(crate) fn requests_with_admin(&self, admin: &str) -> Result<Vec<v1::SecretRequest>, VaultError> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(Vec::new()) };
+        let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM requests WHERE admin = ?1 ORDER BY created, id"))?;
+        let requests = statement.query_map([admin], row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
     }
 
     /// Marks the request given (the secret `given`: its id and name) or
@@ -264,8 +395,8 @@ impl Vault {
         let state = if given.is_some() { "granted" } else { "dismissed" };
         let (given, given_name) = given.unwrap_or_default();
         let changed = db.execute(
-            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7
-             WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7, collecting = 0
+             WHERE id = ?1 AND agent = ?2 AND state IN ('pending', 'approved')",
             params![id, agent, state, now_ms(), comment.trim(), given, given_name],
         )?;
         if changed == 0 {
@@ -329,6 +460,12 @@ impl Vault {
         if change.description.is_none() && change.variables.is_none() && change.reason.is_none() {
             return Err(VaultError::Invalid("Say what to change: description, reason or variables.".to_owned()));
         }
+        if current.state() == SecretRequestState::Approved {
+            return Err(VaultError::Invalid(format!(
+                "The person already approved {}; it can't be changed any more. Withdraw it with secrets_request_cancel if you no longer need it.",
+                current.id
+            )));
+        }
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
@@ -352,7 +489,8 @@ impl Vault {
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
         let changed = db.execute(
-            "UPDATE requests SET state = 'withdrawn', decided = ?3, comment = ?4 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            "UPDATE requests SET state = 'withdrawn', decided = ?3, comment = ?4, collecting = 0
+             WHERE id = ?1 AND agent = ?2 AND state IN ('pending', 'approved')",
             params![id, agent, now_ms(), reason],
         )?;
         if changed == 0 {
@@ -363,7 +501,8 @@ impl Vault {
         Ok(request)
     }
 
-    /// `agent`'s own request `id`, if it's waiting; or why not, for the agent.
+    /// `agent`'s own request `id`, if it's still open (waiting, or approved
+    /// and with the admin agent); or why not, for the agent.
     fn own_waiting(&self, agent: &str, id: &str) -> Result<v1::SecretRequest, VaultError> {
         let inner = self.lock();
         let found = Self::db(&inner)?
@@ -371,7 +510,7 @@ impl Vault {
             .optional()?;
         match found {
             None => Err(VaultError::Invalid(format!("You have no request {}. secrets_requests lists yours.", id.trim()))),
-            Some(request) if request.state() != SecretRequestState::Pending => {
+            Some(request) if !matches!(request.state(), SecretRequestState::Pending | SecretRequestState::Approved) => {
                 Err(VaultError::Invalid(format!("Your request {} isn't waiting any more.", request.id)))
             }
             Some(request) => Ok(request),

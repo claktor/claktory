@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import '../annotations.dart';
 import '../controls.dart';
 import '../identity.dart';
+import '../mobile/metrics.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
@@ -164,7 +165,78 @@ class _ImageViewerState extends State<ImageViewer>
     _commentOn(Region(Rect.fromLTWH(at.dx, at.dy, 0, 0)));
   }
 
-  void _markEnd(DragEndDetails details) {
+  void _markEnd(DragEndDetails details) => _markDone();
+
+  /// On a phone, marking: one finger marks, as a drag does, and two zoom
+  /// and move the image, so a small spot can be found first. The zoom as
+  /// the pinch began, and where its fingers were.
+  Matrix4? _pinchFrom;
+  var _pinchAt = Offset.zero;
+
+  /// Fingers have pinched since they all last lifted: nothing marks until
+  /// they have. The fingers down, to know.
+  var _pinched = false;
+  final _fingers = <int>{};
+
+  void _fingerUp(PointerEvent event) {
+    _fingers.remove(event.pointer);
+    if (_fingers.isEmpty) _pinched = false;
+  }
+
+  void _scaleStart(ScaleStartDetails details) {
+    if (details.pointerCount > 1) {
+      _pinched = true;
+      setState(() {
+        _dragFrom = _dragTo = null;
+        _fitted = false;
+      });
+      _pinchFrom = _zoom.value.clone();
+      _pinchAt = details.localFocalPoint;
+      return;
+    }
+    if (_pinched) return;
+    setState(() {
+      _dragFrom = _fraction(details.localFocalPoint);
+      _dragTo = _dragFrom;
+    });
+  }
+
+  void _scaleUpdate(ScaleUpdateDetails details) {
+    final from = _pinchFrom;
+    if (from != null) {
+      final was = from.getMaxScaleOnAxis();
+      final factor = (was * details.scale).clamp(_minScale, 8.0) / was;
+      final at = details.localFocalPoint;
+      _zoom.value = Matrix4.identity()
+        ..translateByDouble(at.dx, at.dy, 0, 1)
+        ..scaleByDouble(factor, factor, factor, 1)
+        ..translateByDouble(-_pinchAt.dx, -_pinchAt.dy, 0, 1)
+        ..multiply(from);
+      return;
+    }
+    if (_dragFrom == null) return;
+    setState(() => _dragTo = _fraction(details.localFocalPoint));
+  }
+
+  /// Fingers were added or lifted (the pinch goes on, or one is left), or
+  /// all lifted: only then does what a finger dragged across become the
+  /// comment's area.
+  void _scaleEnd(ScaleEndDetails details) {
+    _pinchFrom = null;
+    if (details.pointerCount > 0 || _dragFrom == null) return;
+    _markDone();
+  }
+
+  /// The whole image, with no gesture to draw it.
+  void _markWhole() {
+    setState(() {
+      _dragFrom = _dragTo = null;
+      _marking = false;
+    });
+    _commentOn(const Region(Rect.fromLTWH(0, 0, 1, 1)));
+  }
+
+  void _markDone() {
     final from = _dragFrom;
     final to = _dragTo;
     setState(() {
@@ -193,8 +265,9 @@ class _ImageViewerState extends State<ImageViewer>
     if (comments == null || _image == null) return;
     final at = _fraction(details.localPosition);
     String? hit;
-    // A pin first: a spot has nothing else to click.
-    var nearest = 12.0;
+    // A pin first: a spot has nothing else to click. A fingertip's
+    // reach on a phone: a 44pt target around it.
+    var nearest = isPhoneLayout(context) ? Touch.target / 2 : 12.0;
     for (final thread in comments.shown) {
       final region = comments.regions[thread.id];
       if (region == null) continue;
@@ -373,6 +446,7 @@ class _ImageViewerState extends State<ImageViewer>
       ].join(' · '),
     );
     final comments = _commentable ? this.comments : null;
+    final phone = isPhoneLayout(context);
     Widget glyphButton(String label, String icon, VoidCallback onTap) =>
         GlyphButton(
           label: label,
@@ -551,17 +625,28 @@ class _ImageViewerState extends State<ImageViewer>
                               Positioned.fill(
                                 child: MouseRegion(
                                   cursor: SystemMouseCursors.precise,
-                                  child: GestureDetector(
-                                    behavior: HitTestBehavior.opaque,
-                                    // From where the pointer went down, not
-                                    // where the drag was recognised.
-                                    dragStartBehavior: DragStartBehavior.down,
-                                    onTapUp: (details) => _markSpot(
-                                      _fraction(details.localPosition),
+                                  child: Listener(
+                                    onPointerDown: (event) =>
+                                        _fingers.add(event.pointer),
+                                    onPointerUp: _fingerUp,
+                                    onPointerCancel: _fingerUp,
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      // From where the pointer went down, not
+                                      // where the drag was recognised.
+                                      dragStartBehavior: DragStartBehavior.down,
+                                      onTapUp: (details) => _markSpot(
+                                        _fraction(details.localPosition),
+                                      ),
+                                      onPanStart: phone ? null : _markStart,
+                                      onPanUpdate: phone ? null : _markUpdate,
+                                      onPanEnd: phone ? null : _markEnd,
+                                      onScaleStart: phone ? _scaleStart : null,
+                                      onScaleUpdate: phone
+                                          ? _scaleUpdate
+                                          : null,
+                                      onScaleEnd: phone ? _scaleEnd : null,
                                     ),
-                                    onPanStart: _markStart,
-                                    onPanUpdate: _markUpdate,
-                                    onPanEnd: _markEnd,
                                   ),
                                 ),
                               ),
@@ -572,7 +657,8 @@ class _ImageViewerState extends State<ImageViewer>
                   ),
                 ),
               ),
-              if (comments != null)
+              // A phone has the bar under the image instead.
+              if (comments != null && !phone)
                 Positioned(
                   top: Space.m,
                   right: Space.m,
@@ -608,6 +694,23 @@ class _ImageViewerState extends State<ImageViewer>
     return PaneScaffold(
       details: details,
       controls: controls,
+      comments: comments == null ? null : CommentsButton(controller: comments),
+      actions: [
+        if (image != null) ...[
+          PaneAction('Fit', _fitNow),
+          PaneAction('Actual size', () => _zoomTo(1)),
+        ],
+        PaneAction('Reload', reload),
+      ],
+      toolbar: comments == null || image == null
+          ? null
+          : CommentModeBar(
+              marking: _marking,
+              onToggle: _toggleMarking,
+              hint: 'Tap a spot, or drag across an area.',
+              action: 'Whole image',
+              onAction: _markWhole,
+            ),
       body: ClipRect(
         child: ColoredBox(
           color: palette.canvas,

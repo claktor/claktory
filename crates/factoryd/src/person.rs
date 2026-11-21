@@ -11,22 +11,23 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::config::Config;
 
-/// The avatars' gradients, from (top-left) to (bottom-right). White text is
-/// at least 4.5:1 on every colour. None is the agents' or Claktories'
-/// palette, so a person never looks like either.
-pub(crate) const PAIRS: [(&str, &str); 12] = [
-    ("#4F46E5", "#7C3AED"), // indigo to violet
-    ("#7C3AED", "#C026D3"), // violet to fuchsia
-    ("#BE185D", "#7C3AED"), // pink to violet
-    ("#E11D48", "#9F1239"), // rose
-    ("#C2410C", "#BE123C"), // orange to rose
-    ("#B45309", "#C2410C"), // amber to orange
-    ("#4D7C0F", "#047857"), // lime to emerald
-    ("#047857", "#0F766E"), // emerald to teal
-    ("#0F766E", "#0369A1"), // teal to sky
-    ("#0369A1", "#4338CA"), // sky to indigo
-    ("#1D4ED8", "#0E7490"), // blue to cyan
-    ("#475569", "#334155"), // slate
+/// The avatars' gradients, from (top-left) to (bottom-right), each with the
+/// name people read (Person.avatar_choices). White text is at least 4.5:1
+/// on every colour. None is the agents' or Claktories' palette, so a person
+/// never looks like either.
+pub(crate) const PAIRS: [(&str, &str, &str); 12] = [
+    ("#4F46E5", "#7C3AED", "Indigo and violet"),
+    ("#7C3AED", "#C026D3", "Violet and fuchsia"),
+    ("#BE185D", "#7C3AED", "Pink and violet"),
+    ("#E11D48", "#9F1239", "Rose"),
+    ("#C2410C", "#BE123C", "Orange and rose"),
+    ("#B45309", "#C2410C", "Amber and orange"),
+    ("#4D7C0F", "#047857", "Lime and emerald"),
+    ("#047857", "#0F766E", "Emerald and teal"),
+    ("#0F766E", "#0369A1", "Teal and sky"),
+    ("#0369A1", "#4338CA", "Sky and indigo"),
+    ("#1D4ED8", "#0E7490", "Blue and cyan"),
+    ("#475569", "#334155", "Slate"),
 ];
 
 /// How many letters a one-word name gives ("Matt": "M").
@@ -53,9 +54,9 @@ pub(crate) fn pair(seed: &str) -> usize {
     usize::try_from(number % PAIRS.len() as u64).expect("under 12")
 }
 
-/// A new seed, giving a different pair than `seed` does.
-pub(crate) fn shuffled(seed: &str) -> String {
-    let before = pair(seed);
+/// A new seed, giving a different pair than `before`, the one the avatar
+/// shows now (see `choice`: a chosen pair, not only the seed's).
+pub(crate) fn shuffled(before: usize) -> String {
     loop {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).expect("the system's random source");
@@ -71,11 +72,22 @@ pub(crate) fn seed<'a>(config: &'a Config, key_seed: &'a str) -> &'a str {
     if config.user.avatar.seed.is_empty() { key_seed } else { &config.user.avatar.seed }
 }
 
+/// Which of `PAIRS` the avatar shows now: the one the person chose
+/// (`user.avatar.choice`), or the seed's. A choice out of range (a later
+/// backend's, say) falls back to the seed rather than breaking.
+pub(crate) fn choice(config: &Config, key_seed: &str) -> usize {
+    match config.user.avatar.choice.map(|chosen| chosen as usize) {
+        Some(chosen) if chosen < PAIRS.len() => chosen,
+        _ => pair(seed(config, key_seed)),
+    }
+}
+
 /// The person as every device shows them. `signed_in` is the account this
 /// Claktory is signed in with, if it is: its id, email and service.
 pub(crate) fn person(config: &Config, key_seed: &str, signed_in: Option<(String, String, String)>) -> v1::Person {
     let name = config.user.name.trim().to_owned();
-    let (from, to) = PAIRS[pair(seed(config, key_seed))];
+    let shown = choice(config, key_seed);
+    let (from, to, _) = PAIRS[shown];
     let (identity_id, email) = match signed_in {
         Some((account, email, service)) => {
             let host = reqwest::Url::parse(&service).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or(service);
@@ -87,7 +99,20 @@ pub(crate) fn person(config: &Config, key_seed: &str, signed_in: Option<(String,
     if letters.is_empty() {
         letters = initials(email.split('@').next().unwrap_or_default()).graphemes(true).take(1).collect();
     }
-    v1::Person { name, initials: letters, avatar_from: from.to_owned(), avatar_to: to.to_owned(), identity_id, email }
+    let choices = PAIRS
+        .iter()
+        .map(|(from, to, name)| v1::AvatarColors { from: (*from).to_owned(), to: (*to).to_owned(), name: (*name).to_owned() })
+        .collect();
+    v1::Person {
+        name,
+        initials: letters,
+        avatar_from: from.to_owned(),
+        avatar_to: to.to_owned(),
+        identity_id,
+        email,
+        avatar_choices: choices,
+        avatar_choice: i32::try_from(shown).expect("under 12"),
+    }
 }
 
 #[cfg(test)]
@@ -117,8 +142,26 @@ mod tests {
         let used: std::collections::HashSet<usize> = seeds.iter().map(|seed| pair(seed)).collect();
         assert_eq!(used.len(), PAIRS.len(), "every pair is reachable");
         for seed in ["abc", "key", ""] {
-            assert_ne!(pair(&shuffled(seed)), pair(seed));
+            assert_ne!(pair(&shuffled(pair(seed))), pair(seed));
         }
+    }
+
+    #[test]
+    fn a_chosen_pair_wins_over_the_seed_and_an_unknown_one_falls_back() {
+        let mut config = Config::default();
+        let seeds = pair("key");
+        config.user.avatar.choice = Some(u32::try_from((seeds + 1) % PAIRS.len()).unwrap());
+        let shown = person(&config, "key", None);
+        let chosen = PAIRS[(seeds + 1) % PAIRS.len()];
+        assert_eq!((shown.avatar_from.as_str(), shown.avatar_to.as_str()), (chosen.0, chosen.1));
+        assert_eq!(shown.avatar_choice as usize, (seeds + 1) % PAIRS.len());
+        config.user.avatar.choice = Some(99); // a later backend's palette
+        let shown = person(&config, "key", None);
+        assert_eq!(shown.avatar_from.as_str(), PAIRS[seeds].0, "out of range falls back to the seed");
+        assert_eq!(shown.avatar_choice as usize, seeds);
+        assert_eq!(shown.avatar_choices.len(), PAIRS.len());
+        assert_eq!(shown.avatar_choices[0].name, "Indigo and violet");
+        assert_eq!(shown.avatar_choices[11].name, "Slate");
     }
 
     #[test]
@@ -141,9 +184,10 @@ mod tests {
         config.user.name = "Matt Smith".into();
         let shown = person(&config, "key", None);
         assert_eq!((shown.name.as_str(), shown.initials.as_str()), ("Matt Smith", "MS"));
-        assert_eq!((shown.avatar_from.as_str(), shown.avatar_to.as_str()), PAIRS[pair("key")]);
+        let keyed = PAIRS[pair("key")];
+        assert_eq!((shown.avatar_from.as_str(), shown.avatar_to.as_str()), (keyed.0, keyed.1));
         assert!(shown.identity_id.is_empty() && shown.email.is_empty());
-        config.user.avatar.seed = shuffled("key");
+        config.user.avatar.seed = shuffled(pair("key"));
         assert_eq!(person(&config, "key", None).avatar_from, PAIRS[pair(&config.user.avatar.seed)].0);
         config.user.name.clear();
         let signed_in = Some(("abc123".to_owned(), "matt@example.com".to_owned(), "https://claktory.com".to_owned()));

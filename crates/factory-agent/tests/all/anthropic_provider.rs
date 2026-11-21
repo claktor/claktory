@@ -349,3 +349,76 @@ async fn an_hour_s_cache_asks_for_it_on_every_breakpoint_and_the_default_sends_n
         }
     }
 }
+
+/// A plain, successful exchange for request-shape tests.
+fn hello_chunks() -> Vec<String> {
+    serde_json::from_str::<Vec<BudgetFixture>>(include_str!("../fixtures/anthropic.json"))
+        .expect("fixture")
+        .into_iter()
+        .find(|case| case.name == "thinking off")
+        .expect("case")
+        .http
+        .chunks
+}
+
+fn hello_context() -> factory_agent::stream::LlmContext {
+    use factory_agent::types::{Message, UserMessage};
+    factory_agent::stream::LlmContext {
+        system_prompt: Some("You are a coding agent.".into()),
+        messages: vec![Message::User(UserMessage::text("hello", 1))],
+        tools: vec![],
+    }
+}
+
+#[tokio::test]
+async fn a_server_side_fallback_model_without_a_named_list_asks_for_the_default_and_others_dont() {
+    // claude-sonnet-5-5 carries `serverSideFallback` with no named list;
+    // claude-haiku-4-5 has neither and must send nothing.
+    for (id, expected) in [("claude-sonnet-5-5", Some(json!("default"))), ("claude-haiku-4-5", None)] {
+        let server = serve(vec![served(hello_chunks(), false, false)]).await;
+        let mut model = models("anthropic").into_iter().find(|model| model.id == id).unwrap();
+        model.base_url = server.base_url.clone();
+        let options = StreamOptions { api_key: Some("test-key".into()), ..Default::default() };
+        let result = stream_simple(&model, hello_context(), options).unwrap().result().await.unwrap();
+        assert_eq!(result.stop_reason, StopReason::Stop, "{:?}", result.error_message);
+        let request = server.requests.lock()[0].clone();
+        let body: Value = serde_json::from_str(&request.body.to_string()).unwrap();
+        assert_eq!(body.get("fallbacks").cloned(), expected, "{id}");
+        let betas = request.headers.iter().find(|(name, _)| name == "anthropic-beta").map(|(_, value)| value.clone()).unwrap_or_default();
+        let has_beta = betas.split(',').any(|beta| beta == "server-side-fallback-2026-07-01");
+        assert_eq!(has_beta, expected.is_some(), "{id}: {betas}");
+    }
+}
+
+#[tokio::test]
+async fn the_servers_fallback_block_marks_the_handoff_and_bills_the_serving_model() {
+    // Fable declined; the server's own fallback (opus-4-8, from Fable's
+    // named list) answers from here. The block carries no deltas.
+    let events = sse(&[
+        json!({"type": "message_start", "message": {"id": "msg_7", "model": "claude-fable-5",
+               "usage": {"input_tokens": 1000, "output_tokens": 1}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "fallback",
+               "from": {"model": "claude-fable-5"}, "to": {"model": "claude-opus-4-8"},
+               "trigger": {"type": "refusal", "category": "cyber"}}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Done."}}),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 100}}),
+        json!({"type": "message_stop"}),
+    ]);
+    let server = serve(vec![served(events, false, false)]).await;
+    let mut model = models("anthropic").into_iter().find(|model| model.id == "claude-fable-5").unwrap();
+    model.base_url = server.base_url.clone();
+    let options = StreamOptions { api_key: Some("test-key".into()), ..Default::default() };
+    let message = stream_simple(&model, hello_context(), options).unwrap().result().await.unwrap();
+    assert_eq!((message.stop_reason, message.model.as_str()), (StopReason::Stop, "claude-opus-4-8"));
+    assert!(matches!(&message.content[..], [AssistantPart::Text { text, .. }] if text == "Done."));
+    assert_eq!(
+        factory_agent::refusal::fallback_served(&message),
+        Some(("claude-fable-5".into(), "claude-opus-4-8".into(), "cyber".into()))
+    );
+    // Billed at the named fallback entry's cost ($5/$25 per Mtok), not Fable's.
+    let expected = (1000.0 * 5.0 + 100.0 * 25.0) / 1_000_000.0;
+    assert!((message.usage.cost.total - expected).abs() < 1e-9, "{:?}", message.usage.cost);
+}

@@ -1,9 +1,12 @@
 import 'package:factory_app/connection.dart';
 import 'package:factory_app/connections.dart';
-import 'package:factory_app/controls.dart' show LiveDot;
+import 'package:factory_app/controls.dart' show LiveDot, Pressable;
+import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel/api/tunnel.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -112,5 +115,55 @@ void main() {
     );
     // Reconnect's quiet spell runs out.
     await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets("the line is a whole touch target on Android, and the Mac's "
+      "and iPhone's as they were", (tester) async {
+    Future<Size> lineOn(TargetPlatform platform, {bool android = false}) async {
+      debugDefaultTargetPlatformOverride = platform;
+      PhonePlatformPolicy.debugAndroidPolicy = android;
+      try {
+        final harness = Harness(Workspace());
+        await harness.show(
+          tester,
+          // As in the sidebar's foot: a column's line.
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 240,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [ConnectionLine(backend: harness.backend)],
+              ),
+            ),
+          ),
+        );
+        await settle(tester);
+        final pressable = find.descendant(
+          of: find.byType(ConnectionLine),
+          matching: find.byType(Pressable),
+        );
+        // What a screen reader touches is the same size.
+        expect(
+          tester
+              .getSemantics(find.bySemanticsLabel('Running on this Mac'))
+              .rect
+              .size,
+          tester.getSize(pressable),
+        );
+        return tester.getSize(pressable);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        PhonePlatformPolicy.debugAndroidPolicy = false;
+      }
+    }
+
+    // A line of caption text, as before.
+    expect(await lineOn(TargetPlatform.macOS), const Size(240, 17));
+    expect(await lineOn(TargetPlatform.iOS), const Size(240, 17));
+    expect(
+      await lineOn(TargetPlatform.android, android: true),
+      const Size(240, 48),
+    );
   });
 }

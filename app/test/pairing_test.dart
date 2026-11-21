@@ -198,6 +198,9 @@ void main() {
 
   testWidgets('a Mac waiting for another Claktory shows the number in its '
       'content area', (tester) async {
+    // A Mac's words ("this Mac"); tests run as Android otherwise.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace());
     await harness.show(tester);
     harness.connections.use(parsePairingCode(_code));

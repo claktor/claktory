@@ -216,13 +216,31 @@ impl Models for Scripted {
     fn list(&self) -> BoxFuture<'_, Vec<v1::Model>> {
         let mut models = match self.current() {
             Some(_) => vec![
-                v1::Model { id: MODEL.into(), name: "Echo".into(), context_window: 10_000, efforts: vec!["off".into()] },
-                v1::Model { id: OTHER_MODEL.into(), name: "Parrot".into(), context_window: 10_000, efforts: vec!["off".into()] },
+                v1::Model {
+                    id: MODEL.into(),
+                    name: "Echo".into(),
+                    context_window: 10_000,
+                    efforts: vec!["off".into()],
+                    image_input: false,
+                },
+                v1::Model {
+                    id: OTHER_MODEL.into(),
+                    name: "Parrot".into(),
+                    context_window: 10_000,
+                    efforts: vec!["off".into()],
+                    image_input: false,
+                },
             ],
             None => Vec::new(),
         };
         if self.long && self.current().is_some() {
-            models.push(v1::Model { id: LONG_MODEL.into(), name: "Long".into(), context_window: 200_000, efforts: vec!["off".into()] });
+            models.push(v1::Model {
+                id: LONG_MODEL.into(),
+                name: "Long".into(),
+                context_window: 200_000,
+                efforts: vec!["off".into()],
+                image_input: false,
+            });
         }
         Box::pin(async move { models })
     }
@@ -452,6 +470,18 @@ impl Models for Scripted {
                     Some(r#"401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#.into());
                 let refused = factory_agent::accounts::Refused { account: "1".into(), method: "api_key".into() };
                 factory_agent::accounts::mark_refused(&mut partial, &refused);
+                sink.push(StreamEvent::Error { reason: StopReason::Error, error: partial });
+                return Ok(stream);
+            }
+            // "decline" trips Echo's safety classifiers; any other model
+            // answers it normally, so a fallback can.
+            if prompt.ends_with("decline") && model.id == "echo" {
+                partial.stop_reason = StopReason::Error;
+                partial.error_message = Some("I can't help with this.".into());
+                factory_agent::refusal::mark(
+                    &mut partial,
+                    &serde_json::json!({"category": "cyber", "explanation": "I can't help with this."}),
+                );
                 sink.push(StreamEvent::Error { reason: StopReason::Error, error: partial });
                 return Ok(stream);
             }
@@ -763,6 +793,10 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
                 format!("connect proposal {} ({:?}): {} for {}", proposal.id, proposal.state(), proposal.connector_id, proposal.purpose)
             }
             Some(Kind::DevicePairing(pairing)) => format!("device pairing {} ({:?}): {}", pairing.id, pairing.state(), pairing.name),
+            Some(Kind::SecretApproval(approval)) => {
+                format!("secret approval ({:?}): {} for {}", approval.state(), approval.secret_names.join(", "), approval.command)
+            }
+            Some(Kind::AskPerson(ask)) => format!("ask {} ({:?}): {}", ask.id, ask.state(), ask.title),
             None => "empty".into(),
         });
     }

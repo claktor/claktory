@@ -16,6 +16,7 @@
 //! protocol. The extension serves its instances with the same tools.
 
 pub(crate) mod agents;
+pub(crate) mod ask;
 pub(crate) mod checklist;
 pub(crate) mod comments;
 pub(crate) mod database;
@@ -204,8 +205,9 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 14] = [
+pub(crate) const ALL: [&dyn Extension; 15] = [
     &agents::Agents,
+    &ask::Ask,
     &checklist::Checklist,
     &comments::Comments,
     &database::Database,
@@ -237,22 +239,36 @@ pub(crate) fn tool(
     tool
 }
 
+/// The tool's calling agent, or the usual error if it was removed.
+pub(crate) fn caller<'a>(config: &'a Config, id: &str) -> Result<&'a AgentConfig, String> {
+    config.agent(id).ok_or_else(|| "You're no longer in this Claktory.".to_owned())
+}
+
+/// Captures Factory weakly, upgrading and cloning the agent at invocation, before polling.
+/// Callers keep their own validation and shutdown-check ordering.
+pub(crate) fn agent_handler<F>(
+    factory: &Arc<Factory>,
+    agent: &str,
+    run: impl Fn(Option<Arc<Factory>>, String, Value) -> F + Send + Sync + 'static,
+) -> factory_agent::Handler
+where
+    F: std::future::Future<Output = Result<ToolResult, factory_agent::Error>> + Send + 'static,
+{
+    let factory = Arc::downgrade(factory);
+    let agent = agent.to_owned();
+    Arc::new(move |args| Box::pin(run(factory.upgrade(), agent.clone(), args)))
+}
+
 /// Binds a typed handler without keeping Factory alive; validates before checking shutdown.
 pub(crate) fn typed_handler<A: serde::de::DeserializeOwned + 'static>(
     factory: &Arc<Factory>,
     agent: &str,
     run: fn(&Arc<Factory>, &str, A) -> Result<ToolResult, String>,
 ) -> factory_agent::Handler {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
-    Arc::new(move |args| {
-        let factory = factory.upgrade();
-        let agent = agent.clone();
-        Box::pin(async move {
-            let args = serde_json::from_value(args)?;
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-            run(&factory, &agent, args).map_err(factory_agent::Error::Other)
-        })
+    agent_handler(factory, agent, move |factory, agent, args| async move {
+        let args = serde_json::from_value(args)?;
+        let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+        run(&factory, &agent, args).map_err(factory_agent::Error::Other)
     })
 }
 
@@ -284,20 +300,14 @@ fn factory_tool<R: Reply>(
     parameters: Value,
     run: fn(&Factory, &str, Value) -> Result<R, String>,
 ) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     tool(
         name,
         label,
         description,
         parameters,
-        Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                run(&factory, &agent, args).map(Reply::result).map_err(factory_agent::Error::Other)
-            })
+        agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            run(&factory, &agent, args).map(Reply::result).map_err(factory_agent::Error::Other)
         }),
     )
 }

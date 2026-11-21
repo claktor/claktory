@@ -2,6 +2,7 @@ pub mod bash;
 pub mod checks;
 pub mod diff;
 pub mod fs;
+pub mod images;
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,7 @@ pub struct ToolSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKind {
     ReadFile,
+    ReadImage,
     WriteFile,
     EditFile,
     Bash,
@@ -145,7 +147,7 @@ impl Tool {
         secrets: Option<&Secrets>,
     ) -> Result<ToolResult, Error> {
         let mut cwd = &self.cwd;
-        let file = matches!(self.kind, ToolKind::ReadFile | ToolKind::WriteFile | ToolKind::EditFile);
+        let file = matches!(self.kind, ToolKind::ReadFile | ToolKind::ReadImage | ToolKind::WriteFile | ToolKind::EditFile);
         if file && !(self.extra_dirs.is_empty() && self.read_only.is_empty()) {
             let address: FilePath = serde_json::from_value(args.clone())?;
             let target = fs::resolve(&self.cwd, &address.path);
@@ -158,7 +160,7 @@ impl Tool {
                 }
             }
             if let Some((dir, can_write)) = within {
-                if !can_write && self.kind != ToolKind::ReadFile {
+                if !can_write && !matches!(self.kind, ToolKind::ReadFile | ToolKind::ReadImage) {
                     return Err(AgentError::new(AgentFailure::ReadOnly { path: address.path }).into());
                 }
                 if Path::new(&address.path).is_absolute() {
@@ -168,6 +170,7 @@ impl Tool {
         }
         match self.kind {
             ToolKind::ReadFile => fs::read_file(cwd, args, cancel).await,
+            ToolKind::ReadImage => images::read_image(cwd, args, cancel).await,
             ToolKind::WriteFile => fs::write_file(cwd, args, cancel).await,
             ToolKind::EditFile => fs::edit_file(cwd, args, cancel).await,
             ToolKind::Bash => {
@@ -210,6 +213,13 @@ pub fn coding_tools(cwd: &Path, extra_dirs: &[PathBuf], background: Option<bash:
             "read_file",
             "Read file",
             "Read numbered UTF-8 lines. offset is one-based; limit defaults to 200. Use smaller ranges when output is truncated.",
+        ),
+        Tool::new(
+            cwd,
+            ToolKind::ReadImage,
+            "read_image",
+            "Read image",
+            "Look at an image file: PNG, JPEG, GIF or WebP. It's added to the conversation as an image you see, at this point. One too big for your model is scaled down for you; the result says so. Only an agent whose model reads images can use it.",
         ),
         Tool::new(
             cwd,

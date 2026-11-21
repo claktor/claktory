@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "kind": "creation_params",
+  "view_type": "claktory/ink",
+  "arguments": {
+    "schema_version": 1,
+    "leaf_id": "leaf-7f3a",
+    "surface": "pdf",
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/papers/paper.pdf",
+      "sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+      "mime": "application/pdf",
+      "size": 482113
+    },
+    "document": {
+      "file": "<render cache>/demo-mac/2633caf4/paper.pdf",
+      "sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb"
+    },
+    "layers": [
+      {
+        "page_1based": 3,
+        "ink_layer_id": "layer-paper-p3",
+        "revision": 2
+      },
+      {
+        "page_1based": 5,
+        "ink_layer_id": "layer-paper-p5",
+        "revision": 1
+      },
+      {
+        "page_1based": 7,
+        "ink_layer_id": "layer-paper-p7",
+        "revision": 3
+      }
+    ],
+    "drawing_policy": "default",
+    "persistence": {
+      "mode": "online"
+    },
+    "active": true,
+    "ink": {
+      "paper": "#FFFFFFFF",
+      "appearance": "light"
+    },
+    "initial": {
+      "page_1based": 3
+    }
+  }
+}

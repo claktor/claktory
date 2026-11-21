@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "drawingChanged",
+  "arguments": {
+    "page_1based": 3,
+    "ink_layer_id": "layer-paper-p3",
+    "base_revision": 2,
+    "local_seq": 7,
+    "cause": "stroke",
+    "stroke_count": 5,
+    "bounds": {
+      "x": 0.1,
+      "y": 0.29,
+      "w": 0.76,
+      "h": 0.6
+    },
+    "new_bounds": {
+      "x": 0.15,
+      "y": 0.8,
+      "w": 0.3,
+      "h": 0.07
+    },
+    "drawing": {
+      "format": "pencilkit",
+      "content_version": 1,
+      "bytes_base64": "<PKDrawing.dataRepresentation, base64>",
+      "sha256": "31dce1ce4d14082f603559233e71bfd901d08b83787297e80f0001d6c7050b82"
+    },
+    "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb"
+  }
+}

@@ -1,12 +1,14 @@
 import 'dart:io';
 
-import 'package:factory_app/agent_view.dart' show FileDropOverlay;
 import 'package:factory_app/attachments.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
+import 'package:factory_app/drop.dart';
+import 'package:factory_app/scope.dart' show AppPage;
+import 'package:factory_app/shell.dart' show Shell;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart' show EditableText, IgnorePointer, Image;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'drafts_test.dart' show two;
@@ -37,6 +39,14 @@ Future<void> files(WidgetTester tester) async {
   }
   await tester.pump();
 }
+
+/// A test in the Mac's window: the only one that takes drops.
+void macWidgets(String description, WidgetTesterCallback callback) =>
+    testWidgets(
+      description,
+      callback,
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
 
 void main() {
   late Directory folder;
@@ -74,7 +84,7 @@ void main() {
     expect(isImageName('Makefile'), isFalse);
   });
 
-  testWidgets('files dropped on the window go in the message box', (
+  macWidgets('files dropped on the window go in the message box', (
     tester,
   ) async {
     final harness = Harness(two());
@@ -108,10 +118,47 @@ void main() {
     expect(harness.backend.attachments.of('a1'), isEmpty);
   });
 
-  testWidgets('files dragged over the conversation dim it and say where '
-      'they go', (tester) async {
-    final harness = Harness(two());
-    await harness.show(tester);
+  /// The app's window: the shell, with the drop overlay over it all.
+  Future<Harness> showWindow(WidgetTester tester, Workspace workspace) async {
+    final harness = Harness(workspace);
+    await harness.show(
+      tester,
+      home: const Stack(
+        children: [
+          Positioned.fill(child: Shell()),
+          Positioned.fill(child: WindowDropOverlay()),
+        ],
+      ),
+    );
+    return harness;
+  }
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets("${platform.name}'s window takes no drops: the Mac's channel "
+        "is never used, and nothing dims", (tester) async {
+      final harness = await showWindow(tester, two());
+      expect(harness.backend.workspace.selectedAgent, isNotNull);
+      expect(calls, isEmpty);
+      // Even if something said files were over it.
+      FileDrop.dragged(2);
+      await tester.pump();
+      expect(find.text('2 files'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(WindowDropOverlay),
+          matching: find.byType(IgnorePointer),
+        ),
+        findsNothing,
+      );
+      FileDrop.dragged(0);
+      await tester.pump();
+      expect(calls, isEmpty);
+    }, variant: TargetPlatformVariant.only(platform));
+  }
+
+  macWidgets('files dragged over the window dim it all and say where they '
+      'go', (tester) async {
+    await showWindow(tester, two());
     expect(find.text('Drop to add to your message to Builder'), findsNothing);
 
     // An older window says only that some are.
@@ -123,12 +170,9 @@ void main() {
     await fromWindow(tester, 'filesOver', 3);
     expect(FileDrop.over.value, isTrue);
     expect(find.text('3 files'), findsOneWidget);
-    final overlay = find.byType(FileDropOverlay);
-    // Over the conversation, and it never takes the pointer.
-    expect(
-      tester.getSize(overlay).height,
-      greaterThan(tester.getSize(find.byType(EditableText)).height * 4),
-    );
+    final overlay = find.byType(WindowDropOverlay);
+    // Over the whole window, and it never takes the pointer.
+    expect(tester.getSize(overlay), const Size(1200, 900));
     expect(
       find.descendant(of: overlay, matching: find.byType(IgnorePointer)),
       findsWidgets,
@@ -148,7 +192,64 @@ void main() {
     expect(find.text('notes.txt'), findsOneWidget);
   });
 
-  testWidgets('the paperclip opens the picker; files stay with their agent', (
+  macWidgets('after switching agents, drops still go to the one showing', (
+    tester,
+  ) async {
+    final harness = await showWindow(tester, two());
+    // The new box claims the window before the old one lets go of it.
+    await harness.apply(tester, two(selected: 'a2'));
+    await tester.pump();
+    expect(
+      calls.where((call) => call.method == 'takeFiles').last.arguments,
+      isTrue,
+    );
+    expect(FileDrop.takesFiles.value, isTrue);
+    await fromWindow(tester, 'filesOver', 1);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your message to Writer'), findsOneWidget);
+    await fromWindow(tester, 'filesDropped', [notes]);
+    expect(harness.backend.attachments.of('a2'), hasLength(1));
+    expect(harness.backend.attachments.of('a1'), isEmpty);
+  });
+
+  macWidgets("a chat takes no files, and the window says so", (tester) async {
+    final harness = await showWindow(
+      tester,
+      Workspace(
+        agents: [Agent(id: 'a1', name: 'Builder', modelAvailable: true)],
+        chats: [Chat(id: 'c1', title: 'Trains', modelAvailable: true)],
+        selectedAgentId: 'a1',
+        selectedChatId: 'c1',
+      ),
+    );
+    harness.backend.chatTranscript.load(Transcript(agentId: 'c1'));
+    await tester.pump();
+    expect(FileDrop.takesFiles.value, isFalse);
+    expect(
+      calls.where((call) => call.method == 'takeFiles').last.arguments,
+      isFalse,
+      reason: 'the window refuses the drop',
+    );
+    await fromWindow(tester, 'filesOver', 2);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text("Files can't be added to a chat"), findsOneWidget);
+    expect(find.textContaining('Drop to add'), findsNothing);
+  });
+
+  macWidgets('with no conversation open, the window says to open one', (
+    tester,
+  ) async {
+    final harness = await showWindow(tester, two());
+    harness.page.value = AppPage.settings;
+    await tester.pump();
+    await tester.pump();
+    expect(FileDrop.takesFiles.value, isNull);
+    await fromWindow(tester, 'filesOver', 1);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Open a conversation to add files'), findsOneWidget);
+  });
+
+  macWidgets('the paperclip opens the picker; files stay with their agent', (
     tester,
   ) async {
     final harness = Harness(two());
@@ -169,7 +270,7 @@ void main() {
     expect(find.text('screen.png'), findsOneWidget);
   });
 
-  testWidgets("a message's files: pictures as thumbnails, others as chips", (
+  macWidgets("a message's files: pictures as thumbnails, others as chips", (
     tester,
   ) async {
     // A 1×1 PNG.

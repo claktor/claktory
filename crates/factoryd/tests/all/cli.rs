@@ -147,7 +147,8 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
 
     // Other digits: it may be someone else's device, so nothing is allowed.
     let other = if shows == "0000" { "0001" } else { "0000" };
-    let wrong = cli(&dir, addr, &format!("allow {id} --number {other} --json"), "").await;
+    // Without --json too, the flag first or after the device (Arjun's finding).
+    let wrong = cli(&dir, addr, &format!("allow --number {other} {id}"), "").await;
     assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
     let allowed = cli(&dir, addr, &format!(r#"allow "Matt's MacBook" --number {shows} --json"#), "").await;
     assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json["number"].as_str()), (Some(id.as_str()), Some(shows.as_str())));

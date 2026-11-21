@@ -89,6 +89,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
         ids,
         [
             "agents",
+            "ask",
             "checklist",
             "comments",
             "database",
@@ -106,23 +107,23 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[8];
+    let manual = &view.workspace.extensions[9];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
-    let records = &view.workspace.extensions[4];
+    let records = &view.workspace.extensions[5];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
     let builder = view.agent("builder").extensions.clone();
-    assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[1].enabled), ("agents", true, false));
+    assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[2].enabled), ("agents", true, false));
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[6].enabled && !builder[6].enabled, "a new Factory's Rivet points at things");
-    assert!(view.agent("rivet").extensions[5].enabled && !builder[5].enabled, "admins add the person's devices");
-    assert!(builder[2].enabled, "comments on unless turned off");
+    assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[6].enabled && !builder[6].enabled, "admins add the person's devices");
+    assert!(builder[3].enabled, "comments on unless turned off");
     assert!(
-        !builder[3].enabled
-            && !view.agent("rivet").extensions[3].enabled
-            && !builder[4].enabled
-            && view.agent("rivet").extensions[4].enabled,
+        !builder[4].enabled
+            && !view.agent("rivet").extensions[4].enabled
+            && !builder[5].enabled
+            && view.agent("rivet").extensions[5].enabled,
         "a database of its own only when turned on; admins Factory's records"
     );
 
@@ -274,7 +275,7 @@ async fn a_checklist_keeps_what_the_person_asked_for_and_its_panel_follows_live(
     // Off by default: no tools until it's turned on.
     assert!(call(&mut client, &mut view, "lead", "checklist_list", "{}").await.contains("not found"));
     ack(apply_request(&mut client, &mut view, turn("lead", "checklist", true)).await);
-    assert!(view.agent("lead").extensions[1].enabled);
+    assert!(view.agent("lead").extensions[2].enabled);
     // Its tools come with its next context.
     assert!(call(&mut client, &mut view, "lead", "checklist_list", "{}").await.contains("not found"));
     fresh(&mut client, &mut view, "lead").await;

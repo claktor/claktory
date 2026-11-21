@@ -1,3 +1,4 @@
+import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/usage.dart';
 import 'package:factory_app/usage_resets.dart';
@@ -207,6 +208,11 @@ void main() {
     );
     await harness.show(tester, size: const Size(390, 844));
     await settle(tester);
+    // In the drawer.
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
+    await pumpFrames(tester);
     final usage = find.byWidgetPredicate(
       (widget) =>
           widget is Semantics &&
@@ -216,7 +222,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
     expect(find.text('Usage resets'), findsOneWidget);
     await tester.tap(find.text('Use…'));
-    await settle(tester);
+    // On a phone it rises as a sheet: every frame of its slide.
+    await pumpFrames(tester);
     expect(find.text('Use a 5-hour reset?'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await settle(tester);

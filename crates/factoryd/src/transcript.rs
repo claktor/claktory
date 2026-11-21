@@ -92,6 +92,9 @@ pub struct Frame {
     /// The apps it was given scopes of (id → "Telegram (send, read)").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
+    /// The pipes it may use (id → what its system prompt says of each).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pipes: BTreeMap<String, String>,
     /// Tools the agent was told it can call through extension_call, since
     /// they're not among `tools` (an extension turned on meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -156,6 +159,10 @@ struct Live {
 
 pub struct Transcript {
     dir: PathBuf,
+    /// Whose conversation this is (the agent's id): a secret request's
+    /// entries show in both the asker's and the admin agent's conversations,
+    /// and which one waits for the person depends on which this is.
+    owner: String,
     /// An entry's seq is its index.
     entries: Vec<Entry>,
     segment: u32,
@@ -186,16 +193,17 @@ const CLEARED: &str = "Conversation cleared";
 impl Transcript {
     /// Reads the agent's conversation from its files, off the async threads:
     /// a long one is megabytes of JSON.
-    pub async fn load(dir: PathBuf) -> Result<Transcript, TranscriptError> {
-        match tokio::task::spawn_blocking(move || Transcript::read(dir)).await {
+    pub async fn load(dir: PathBuf, owner: String) -> Result<Transcript, TranscriptError> {
+        match tokio::task::spawn_blocking(move || Transcript::read(dir, owner)).await {
             Ok(result) => result,
             Err(error) => Err(TranscriptError::Io(std::io::Error::other(error))),
         }
     }
 
-    fn read(dir: PathBuf) -> Result<Transcript, TranscriptError> {
+    fn read(dir: PathBuf, owner: String) -> Result<Transcript, TranscriptError> {
         let mut transcript = Transcript {
             dir,
+            owner,
             entries: Vec::new(),
             segment: 1,
             compaction: None,
@@ -241,10 +249,11 @@ impl Transcript {
 
     /// A new, empty conversation the person started with /clear, and its
     /// first file. The old conversation's files must be out of `dir`.
-    pub fn cleared(dir: PathBuf) -> Result<(Transcript, Persist), serde_json::Error> {
+    pub fn cleared(dir: PathBuf, owner: String) -> Result<(Transcript, Persist), serde_json::Error> {
         let now = now_ms();
         let mut transcript = Transcript {
             dir,
+            owner,
             entries: Vec::new(),
             segment: 1,
             compaction: None,
@@ -345,64 +354,69 @@ impl Transcript {
 
     /// Notes whether `entry` waits for the person now.
     fn track(&mut self, entry: &Entry) {
-        if waits(entry.kind.as_ref()) {
+        if waits(entry.kind.as_ref(), &self.owner) {
             self.waiting.insert(entry.seq);
         } else {
             self.waiting.remove(&entry.seq);
         }
     }
 
-    /// Shows a proposal to Rivet as it is now (decided, say); the changed
-    /// entry, or None if the conversation doesn't show it.
-    pub fn set_proposal(&mut self, proposal: v1::Proposal) -> Option<Entry> {
-        let entry =
-            self.entries.iter_mut().rev().find(|entry| matches!(&entry.kind, Some(Kind::Proposal(shown)) if shown.id == proposal.id))?;
-        entry.kind = Some(Kind::Proposal(proposal));
+    /// Replaces the latest shown item of the same kind and id, keeping its entry metadata.
+    fn replace_shown(&mut self, kind: Kind) -> Option<Entry> {
+        let entry = self.entries.iter_mut().rev().find(|entry| match (&entry.kind, &kind) {
+            (Some(Kind::Proposal(shown)), Kind::Proposal(updated)) => shown.id == updated.id,
+            (Some(Kind::SecretRequest(shown)), Kind::SecretRequest(updated)) => shown.id == updated.id,
+            (Some(Kind::ConnectProposal(shown)), Kind::ConnectProposal(updated)) => shown.id == updated.id,
+            (Some(Kind::DevicePairing(shown)), Kind::DevicePairing(updated)) => shown.id == updated.id,
+            (Some(Kind::AskPerson(shown)), Kind::AskPerson(updated)) => shown.id == updated.id,
+            _ => false,
+        })?;
+        entry.kind = Some(kind);
         let entry = entry.clone();
         self.track(&entry);
         Some(entry)
+    }
+
+    /// Shows a proposal to Rivet as it is now (decided, say); the changed
+    /// entry, or None if the conversation doesn't show it.
+    pub fn set_proposal(&mut self, proposal: v1::Proposal) -> Option<Entry> {
+        self.replace_shown(Kind::Proposal(proposal))
     }
 
     /// Shows an agent's request for a secret as it is now (decided, say); the
     /// changed entry, or None if the conversation doesn't show it.
     pub fn set_secret_request(&mut self, request: v1::SecretRequest) -> Option<Entry> {
-        let entry = self
-            .entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(&entry.kind, Some(Kind::SecretRequest(shown)) if shown.id == request.id))?;
-        entry.kind = Some(Kind::SecretRequest(request));
-        let entry = entry.clone();
-        self.track(&entry);
-        Some(entry)
+        self.replace_shown(Kind::SecretRequest(request))
     }
 
     /// Shows an agent's proposal to connect a service as it is now; the
     /// changed entry, or None if the conversation doesn't show it.
     pub fn set_connect_proposal(&mut self, proposal: v1::ConnectProposal) -> Option<Entry> {
-        let entry = self
-            .entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(&entry.kind, Some(Kind::ConnectProposal(shown)) if shown.id == proposal.id))?;
-        entry.kind = Some(Kind::ConnectProposal(proposal));
-        let entry = entry.clone();
-        self.track(&entry);
-        Some(entry)
+        self.replace_shown(Kind::ConnectProposal(proposal))
     }
 
     /// Shows a device an agent adds as it is now (added, say); the changed
     /// entry, or None if the conversation doesn't show it.
     pub fn set_device_pairing(&mut self, pairing: v1::DevicePairing) -> Option<Entry> {
-        let entry = self
-            .entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(&entry.kind, Some(Kind::DevicePairing(shown)) if shown.id == pairing.id))?;
-        entry.kind = Some(Kind::DevicePairing(pairing));
+        self.replace_shown(Kind::DevicePairing(pairing))
+    }
+
+    /// Shows a pipe secret approval as decided; None if it isn't shown.
+    pub fn set_secret_approval(&mut self, id: &str, state: v1::SecretApprovalState, decided_ms: i64) -> Option<Entry> {
+        let entry = self.entries.iter_mut().find(|entry| matches!(&entry.kind, Some(Kind::SecretApproval(shown)) if shown.id == id))?;
+        if let Some(Kind::SecretApproval(approval)) = &mut entry.kind {
+            approval.state = state.into();
+            approval.decided_ms = decided_ms;
+        }
         let entry = entry.clone();
         self.track(&entry);
         Some(entry)
+    }
+
+    /// Shows an agent's question for the person as it is now (answered,
+    /// say); the changed entry, or None if the conversation doesn't show it.
+    pub fn set_ask(&mut self, ask: v1::AskPerson) -> Option<Entry> {
+        self.replace_shown(Kind::AskPerson(ask))
     }
 
     /// Adds a harness notice. Notices are for display only and aren't saved.
@@ -562,9 +576,21 @@ impl Transcript {
                 if let Some(request) = crate::vault::asks::requested(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::SecretRequest(request)));
                 }
+                // And the add-secret card an admin agent opens for one.
+                if let Some(request) = crate::vault::asks::collected(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::SecretRequest(request)));
+                }
                 // And a proposal to connect a service.
                 if let Some(proposal) = crate::connectors::proposals::proposed(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::ConnectProposal(proposal)));
+                }
+                // And a secret a tainted agent asked the person for.
+                if let Some(approval) = crate::pipes::agents::asked(&result.tool_name, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::SecretApproval(approval)));
+                }
+                // And a question for the person.
+                if let Some(ask) = crate::extensions::ask::asked(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::AskPerson(ask)));
                 }
                 // And a device the agent adds, with its code.
                 if let Some(pairing) = crate::extensions::devices::started(&result.tool_name, result.is_error, &result.details) {
@@ -626,6 +652,20 @@ impl Transcript {
         self.live.parts.clear();
         self.live.reply = None;
         match message.stop_reason {
+            // A refusal is itself, not a failure: the model's safety
+            // classifiers declined the step, and the card says so.
+            StopReason::Error if let Some(refusal) = factory_agent::refusal::of(message) => {
+                let text = message.error_message.clone().unwrap_or_else(|| "The model declined this request.".to_owned());
+                changed.push(self.push(
+                    timestamp,
+                    Kind::Notice(v1::Notice {
+                        text,
+                        level: NoticeLevel::Error.into(),
+                        refused: None,
+                        refusal_category: refusal.shown_category().to_owned(),
+                    }),
+                ));
+            }
             StopReason::Error => {
                 let text = message.error_message.clone().unwrap_or_else(|| "The model request failed.".to_owned());
                 // The provider refused the credentials: whose, so the app can offer to change them.
@@ -634,10 +674,19 @@ impl Transcript {
                     account_id: refused.account,
                     method_id: refused.method,
                 });
-                changed.push(self.push(timestamp, Kind::Notice(v1::Notice { text, level: NoticeLevel::Error.into(), refused })));
+                changed.push(self.push(
+                    timestamp,
+                    Kind::Notice(v1::Notice { text, level: NoticeLevel::Error.into(), refused, refusal_category: String::new() }),
+                ));
             }
             StopReason::Aborted => changed.push(self.push(timestamp, notice("Stopped.".to_owned(), NoticeLevel::Info))),
             _ => {}
+        }
+        // The provider's own fallback answered after the model declined:
+        // say who, since the person picked the model that didn't answer.
+        if let Some((from, to, category)) = factory_agent::refusal::fallback_served(message) {
+            let text = factory_agent::refusal::handoff_text(&message.provider, &from, &to, &category);
+            changed.push(self.push(timestamp, notice(text, NoticeLevel::Info)));
         }
         changed
     }
@@ -781,13 +830,30 @@ fn context_tokens(message: &AssistantMessage) -> u64 {
     usage.input + usage.cache_read + usage.cache_write + usage.output
 }
 
-/// Whether an entry waits for the person's answer: a request for a secret
-/// or a proposal (to connect a service, or to Rivet) still pending.
-fn waits(kind: Option<&Kind>) -> bool {
+/// Whether an entry waits for the person's answer: a request for a secret,
+/// a proposal (to connect a service, or to Rivet), a device being added, a
+/// pipe secret approval or a question still pending.
+fn waits(kind: Option<&Kind>, owner: &str) -> bool {
     match kind {
-        Some(Kind::SecretRequest(request)) => request.state() == v1::SecretRequestState::Pending,
+        // An approved request waits on its admin agent, not the person, so
+        // it leaves Needs you until there's something for them to do: the
+        // admin's add-secret card while it collects, or the asker's card
+        // again when no admin holds it (it was deleted, say).
+        Some(Kind::SecretRequest(request)) => match request.state() {
+            v1::SecretRequestState::Pending => true,
+            v1::SecretRequestState::Approved => {
+                if request.admin_agent_id.is_empty() {
+                    true
+                } else {
+                    request.collecting && owner == request.admin_agent_id
+                }
+            }
+            _ => false,
+        },
         Some(Kind::ConnectProposal(proposal)) => proposal.state() == v1::ConnectProposalState::Pending,
         Some(Kind::Proposal(proposal)) => proposal.state() == v1::ProposalState::Pending,
+        Some(Kind::SecretApproval(approval)) => approval.state() == v1::SecretApprovalState::Pending,
+        Some(Kind::AskPerson(ask)) => ask.state() == v1::AskPersonState::Pending,
         Some(Kind::DevicePairing(pairing)) => {
             matches!(pairing.state(), v1::DevicePairingState::Waiting | v1::DevicePairingState::Asking)
         }
@@ -810,6 +876,12 @@ fn user_kind(message: &UserMessage) -> Kind {
             sent_from: message.sent_from.as_ref().map(sent_from),
             client_id: message.client_id.clone(),
             attachments: message.attachments.iter().map(attachment).collect(),
+            voice: message.voice.as_ref().map(|voice| v1::Transcription {
+                state: v1::TranscriptionState::Done.into(),
+                duration_ms: voice.duration_ms,
+                language: voice.language.clone(),
+                ..Default::default()
+            }),
         });
     };
     let source = match event.source {
@@ -818,6 +890,7 @@ fn user_kind(message: &UserMessage) -> Kind {
         EventSource::Task => v1::EventSource::Task,
         EventSource::Monitor => v1::EventSource::Monitor,
         EventSource::App => v1::EventSource::App,
+        EventSource::Pipe => v1::EventSource::Pipe,
     };
     Kind::Event(v1::Event {
         source: source.into(),

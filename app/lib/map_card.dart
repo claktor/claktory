@@ -4,6 +4,8 @@ import 'apps.dart' show labelInSentence;
 import 'controls.dart';
 import 'map_layout.dart' show sidebarOrder;
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// One of an agent's extensions on its card: a badge's (what gives it
@@ -164,8 +166,10 @@ class MapAgentCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final agent = details.agent;
-    final caption = TextStyles.caption.copyWith(color: palette.textMuted);
-    final faint = TextStyles.caption.copyWith(color: palette.textFaint);
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
+    final faint = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint);
     Widget names(List<MapNode> nodes, String none) => Text(
       nodes.isEmpty ? none : nodes.map((node) => node.label).join(', '),
       style: nodes.isEmpty ? faint : caption,
@@ -182,9 +186,21 @@ class MapAgentCard extends StatelessWidget {
         border: Border.all(color: palette.hairline),
         boxShadow: floatingShadow,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: _CardBody(
+        scrolls: width == null,
+        actions: actions == null || actions.isEmpty
+            ? null
+            : Padding(
+                padding: const EdgeInsets.only(top: Space.m),
+                // Side by side at the end, under each other when they
+                // don't fit (a phone's finger-sized buttons).
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: Space.s,
+                  runSpacing: Space.s,
+                  children: actions,
+                ),
+              ),
         children: [
           Row(
             children: [
@@ -195,7 +211,7 @@ class MapAgentCard extends StatelessWidget {
                   agent.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.label.copyWith(
+                  style: TypeScale.of(context).label.copyWith(
                     color: palette.text,
                     fontWeight: FontWeight.w600,
                   ),
@@ -236,7 +252,7 @@ class MapAgentCard extends StatelessWidget {
                             Flexible(
                               child: Text(
                                 extension.label,
-                                style: TextStyles.caption.copyWith(
+                                style: TypeScale.of(context).caption.copyWith(
                                   color: extension.important
                                       ? palette.text
                                       : palette.textFaint,
@@ -319,20 +335,59 @@ class MapAgentCard extends StatelessWidget {
                 ],
               ),
             ),
-          if (actions != null && actions.isNotEmpty) ...[
-            const SizedBox(height: Space.m),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                for (final (index, action) in actions.indexed) ...[
-                  if (index > 0) const SizedBox(width: Space.s),
-                  action,
-                ],
-              ],
-            ),
-          ],
         ],
       ),
+    );
+  }
+}
+
+/// The card's details, then its [actions]. Where it [scrolls] (a phone's,
+/// as wide as the screen and at most as tall as it's let be), the details
+/// scroll and the actions stay in reach under them.
+class _CardBody extends StatelessWidget {
+  const _CardBody({
+    required this.scrolls,
+    required this.children,
+    this.actions,
+  });
+
+  final bool scrolls;
+  final List<Widget> children;
+  final Widget? actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final details = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
+    final actions = this.actions;
+    if (!scrolls) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [...children, ?actions],
+      );
+    }
+    // At the largest text sizes the actions alone may fill it: they scroll
+    // with the rest.
+    if (largeText(context)) {
+      return SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [...children, ?actions],
+        ),
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(child: SingleChildScrollView(child: details)),
+        ?actions,
+      ],
     );
   }
 }
@@ -354,7 +409,7 @@ class _Section extends StatelessWidget {
         children: [
           Text(
             title,
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: palette.textFaint,
               fontWeight: FontWeight.w500,
             ),

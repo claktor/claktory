@@ -743,6 +743,11 @@ class EventSource extends $pb.ProtobufEnum {
   static const EventSource EVENT_SOURCE_APP =
       EventSource._(5, _omitEnumNames ? '' : 'EVENT_SOURCE_APP');
 
+  /// A pipe's messages for its lead (see Pipe): `from` is the pipe's name
+  /// and the other Claktory's, `from_id` "pipe:<Pipe.id>".
+  static const EventSource EVENT_SOURCE_PIPE =
+      EventSource._(6, _omitEnumNames ? '' : 'EVENT_SOURCE_PIPE');
+
   static const $core.List<EventSource> values = <EventSource>[
     EVENT_SOURCE_UNSPECIFIED,
     EVENT_SOURCE_FACTORY,
@@ -750,14 +755,100 @@ class EventSource extends $pb.ProtobufEnum {
     EVENT_SOURCE_TASK,
     EVENT_SOURCE_MONITOR,
     EVENT_SOURCE_APP,
+    EVENT_SOURCE_PIPE,
   ];
 
   static final $core.List<EventSource?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static EventSource? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const EventSource._(super.value, super.name);
+}
+
+class TranscriptionState extends $pb.ProtobufEnum {
+  static const TranscriptionState TRANSCRIPTION_STATE_UNSPECIFIED =
+      TranscriptionState._(
+          0, _omitEnumNames ? '' : 'TRANSCRIPTION_STATE_UNSPECIFIED');
+
+  /// Waiting for the speech model (Workspace.speech_model shows its
+  /// download) or being transcribed. The person's messages after it wait
+  /// behind it, so the agent reads them in the order they were sent; other
+  /// events don't.
+  static const TranscriptionState TRANSCRIPTION_STATE_PENDING =
+      TranscriptionState._(
+          1, _omitEnumNames ? '' : 'TRANSCRIPTION_STATE_PENDING');
+  static const TranscriptionState TRANSCRIPTION_STATE_DONE =
+      TranscriptionState._(2, _omitEnumNames ? '' : 'TRANSCRIPTION_STATE_DONE');
+
+  /// Not delivered, and not holding up the queue: RetryVoiceMessage or
+  /// DiscardVoiceMessage.
+  static const TranscriptionState TRANSCRIPTION_STATE_FAILED =
+      TranscriptionState._(
+          3, _omitEnumNames ? '' : 'TRANSCRIPTION_STATE_FAILED');
+
+  static const $core.List<TranscriptionState> values = <TranscriptionState>[
+    TRANSCRIPTION_STATE_UNSPECIFIED,
+    TRANSCRIPTION_STATE_PENDING,
+    TRANSCRIPTION_STATE_DONE,
+    TRANSCRIPTION_STATE_FAILED,
+  ];
+
+  static final $core.List<TranscriptionState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static TranscriptionState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const TranscriptionState._(super.value, super.name);
+}
+
+class SpeechModelState extends $pb.ProtobufEnum {
+  static const SpeechModelState SPEECH_MODEL_STATE_UNSPECIFIED =
+      SpeechModelState._(
+          0, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_UNSPECIFIED');
+
+  /// Not downloaded: InstallSpeechModel, after asking the person (it's big:
+  /// `total`).
+  static const SpeechModelState SPEECH_MODEL_STATE_ABSENT =
+      SpeechModelState._(1, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_ABSENT');
+  static const SpeechModelState SPEECH_MODEL_STATE_DOWNLOADING =
+      SpeechModelState._(
+          2, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_DOWNLOADING');
+
+  /// Downloaded; its checksum is being checked.
+  static const SpeechModelState SPEECH_MODEL_STATE_VERIFYING =
+      SpeechModelState._(
+          3, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_VERIFYING');
+  static const SpeechModelState SPEECH_MODEL_STATE_READY =
+      SpeechModelState._(4, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_READY');
+
+  /// The download failed (`error`); InstallSpeechModel tries again, from
+  /// where it stopped.
+  static const SpeechModelState SPEECH_MODEL_STATE_FAILED =
+      SpeechModelState._(5, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_FAILED');
+
+  /// This computer can't run speech recognition (`error`): grey the
+  /// microphone out.
+  static const SpeechModelState SPEECH_MODEL_STATE_UNSUPPORTED =
+      SpeechModelState._(
+          6, _omitEnumNames ? '' : 'SPEECH_MODEL_STATE_UNSUPPORTED');
+
+  static const $core.List<SpeechModelState> values = <SpeechModelState>[
+    SPEECH_MODEL_STATE_UNSPECIFIED,
+    SPEECH_MODEL_STATE_ABSENT,
+    SPEECH_MODEL_STATE_DOWNLOADING,
+    SPEECH_MODEL_STATE_VERIFYING,
+    SPEECH_MODEL_STATE_READY,
+    SPEECH_MODEL_STATE_FAILED,
+    SPEECH_MODEL_STATE_UNSUPPORTED,
+  ];
+
+  static final $core.List<SpeechModelState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static SpeechModelState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SpeechModelState._(super.value, super.name);
 }
 
 class ToolCallState extends $pb.ProtobufEnum {
@@ -839,6 +930,15 @@ class SecretRequestState extends $pb.ProtobufEnum {
       SecretRequestState._(
           5, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_WITHDRAWN');
 
+  /// The person approved the need (DecideSecretRequest.approve_only) and the
+  /// admin agent (`admin_agent_id`) finds a matching secret or collects a
+  /// new one. The card keeps its direct actions (give a secret, add one,
+  /// dismiss), so the person is never stuck on the admin agent. It doesn't
+  /// expire: only PENDING requests do.
+  static const SecretRequestState SECRET_REQUEST_STATE_APPROVED =
+      SecretRequestState._(
+          6, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_APPROVED');
+
   static const $core.List<SecretRequestState> values = <SecretRequestState>[
     SECRET_REQUEST_STATE_UNSPECIFIED,
     SECRET_REQUEST_STATE_PENDING,
@@ -846,10 +946,11 @@ class SecretRequestState extends $pb.ProtobufEnum {
     SECRET_REQUEST_STATE_DISMISSED,
     SECRET_REQUEST_STATE_EXPIRED,
     SECRET_REQUEST_STATE_WITHDRAWN,
+    SECRET_REQUEST_STATE_APPROVED,
   ];
 
   static final $core.List<SecretRequestState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static SecretRequestState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1251,6 +1352,339 @@ class AppSetupKind extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const AppSetupKind._(super.value, super.name);
+}
+
+class PipeState extends $pb.ProtobufEnum {
+  static const PipeState PIPE_STATE_UNSPECIFIED =
+      PipeState._(0, _omitEnumNames ? '' : 'PIPE_STATE_UNSPECIFIED');
+
+  /// This side made an invite; nobody has used its code yet.
+  static const PipeState PIPE_STATE_INVITED =
+      PipeState._(1, _omitEnumNames ? '' : 'PIPE_STATE_INVITED');
+
+  /// This side used a code and is reaching the other Claktory.
+  static const PipeState PIPE_STATE_JOINING =
+      PipeState._(2, _omitEnumNames ? '' : 'PIPE_STATE_JOINING');
+
+  /// Both Claktories are connected: waiting for this person to approve
+  /// (ApprovePipe), checking `digits`.
+  static const PipeState PIPE_STATE_APPROVAL =
+      PipeState._(3, _omitEnumNames ? '' : 'PIPE_STATE_APPROVAL');
+
+  /// This person approved; waiting for the other's.
+  static const PipeState PIPE_STATE_WAITING_PEER =
+      PipeState._(4, _omitEnumNames ? '' : 'PIPE_STATE_WAITING_PEER');
+
+  /// Both approved: messages flow.
+  static const PipeState PIPE_STATE_OPEN =
+      PipeState._(5, _omitEnumNames ? '' : 'PIPE_STATE_OPEN');
+
+  /// Nothing flows until it's resumed; `paused` says why.
+  static const PipeState PIPE_STATE_PAUSED =
+      PipeState._(6, _omitEnumNames ? '' : 'PIPE_STATE_PAUSED');
+
+  /// Closed by either side, denied, or its invite expired: it keeps its
+  /// history until deleted, and can't open again.
+  static const PipeState PIPE_STATE_CLOSED =
+      PipeState._(7, _omitEnumNames ? '' : 'PIPE_STATE_CLOSED');
+
+  static const $core.List<PipeState> values = <PipeState>[
+    PIPE_STATE_UNSPECIFIED,
+    PIPE_STATE_INVITED,
+    PIPE_STATE_JOINING,
+    PIPE_STATE_APPROVAL,
+    PIPE_STATE_WAITING_PEER,
+    PIPE_STATE_OPEN,
+    PIPE_STATE_PAUSED,
+    PIPE_STATE_CLOSED,
+  ];
+
+  static final $core.List<PipeState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static PipeState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeState._(super.value, super.name);
+}
+
+class PipePause extends $pb.ProtobufEnum {
+  static const PipePause PIPE_PAUSE_UNSPECIFIED =
+      PipePause._(0, _omitEnumNames ? '' : 'PIPE_PAUSE_UNSPECIFIED');
+
+  /// This person paused it.
+  static const PipePause PIPE_PAUSE_BY_ME =
+      PipePause._(1, _omitEnumNames ? '' : 'PIPE_PAUSE_BY_ME');
+
+  /// The other side paused it: only they can resume.
+  static const PipePause PIPE_PAUSE_BY_PEER =
+      PipePause._(2, _omitEnumNames ? '' : 'PIPE_PAUSE_BY_PEER');
+
+  /// The loop breaker: agents exchanged 10 messages with no person writing
+  /// on either side, or repeated themselves. Resuming is "Continue".
+  static const PipePause PIPE_PAUSE_LOOP =
+      PipePause._(3, _omitEnumNames ? '' : 'PIPE_PAUSE_LOOP');
+
+  static const $core.List<PipePause> values = <PipePause>[
+    PIPE_PAUSE_UNSPECIFIED,
+    PIPE_PAUSE_BY_ME,
+    PIPE_PAUSE_BY_PEER,
+    PIPE_PAUSE_LOOP,
+  ];
+
+  static final $core.List<PipePause?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static PipePause? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipePause._(super.value, super.name);
+}
+
+class PipeAuthorKind extends $pb.ProtobufEnum {
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_UNSPECIFIED =
+      PipeAuthorKind._(0, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_UNSPECIFIED');
+
+  /// An agent on the other side, as it says.
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_THEIR_AGENT =
+      PipeAuthorKind._(1, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_THEIR_AGENT');
+
+  /// The other side says its person wrote it: "says it's from <name>".
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_THEIR_PERSON = PipeAuthorKind._(
+      2, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_THEIR_PERSON');
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_MY_AGENT =
+      PipeAuthorKind._(3, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_MY_AGENT');
+
+  /// This Claktory's person.
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_ME =
+      PipeAuthorKind._(4, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_ME');
+
+  /// Claktory, about the pipe: shown as a line, not a bubble.
+  static const PipeAuthorKind PIPE_AUTHOR_KIND_CLAKTORY =
+      PipeAuthorKind._(5, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_CLAKTORY');
+
+  static const $core.List<PipeAuthorKind> values = <PipeAuthorKind>[
+    PIPE_AUTHOR_KIND_UNSPECIFIED,
+    PIPE_AUTHOR_KIND_THEIR_AGENT,
+    PIPE_AUTHOR_KIND_THEIR_PERSON,
+    PIPE_AUTHOR_KIND_MY_AGENT,
+    PIPE_AUTHOR_KIND_ME,
+    PIPE_AUTHOR_KIND_CLAKTORY,
+  ];
+
+  static final $core.List<PipeAuthorKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static PipeAuthorKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeAuthorKind._(super.value, super.name);
+}
+
+class PipeMessageState extends $pb.ProtobufEnum {
+  static const PipeMessageState PIPE_MESSAGE_STATE_UNSPECIFIED =
+      PipeMessageState._(
+          0, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_UNSPECIFIED');
+
+  /// Outgoing, waiting for the person's Send or Discard (DecidePipeMessage):
+  /// Review outgoing is on, or it carries files from outside the outbox.
+  static const PipeMessageState PIPE_MESSAGE_STATE_HELD =
+      PipeMessageState._(1, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_HELD');
+
+  /// Outgoing, passed: on its way (the other side may be offline).
+  static const PipeMessageState PIPE_MESSAGE_STATE_QUEUED =
+      PipeMessageState._(2, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_QUEUED');
+
+  /// Outgoing, and the other side has it.
+  static const PipeMessageState PIPE_MESSAGE_STATE_DELIVERED =
+      PipeMessageState._(
+          3, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_DELIVERED');
+
+  /// Outgoing, and stopped: by Claktory (a secret in it, too big, over the
+  /// limit) or by the other side. `note` says why. Never sent.
+  static const PipeMessageState PIPE_MESSAGE_STATE_REFUSED =
+      PipeMessageState._(4, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_REFUSED');
+
+  /// Outgoing, and the person discarded it. Never sent.
+  static const PipeMessageState PIPE_MESSAGE_STATE_DISCARDED =
+      PipeMessageState._(
+          5, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_DISCARDED');
+
+  /// Incoming, and in: the lead was told.
+  static const PipeMessageState PIPE_MESSAGE_STATE_RECEIVED =
+      PipeMessageState._(
+          6, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_RECEIVED');
+
+  /// Incoming over the rate limit: no agent sees it until the person lets
+  /// it in (DecidePipeMessage).
+  static const PipeMessageState PIPE_MESSAGE_STATE_HELD_INCOMING =
+      PipeMessageState._(
+          7, _omitEnumNames ? '' : 'PIPE_MESSAGE_STATE_HELD_INCOMING');
+
+  static const $core.List<PipeMessageState> values = <PipeMessageState>[
+    PIPE_MESSAGE_STATE_UNSPECIFIED,
+    PIPE_MESSAGE_STATE_HELD,
+    PIPE_MESSAGE_STATE_QUEUED,
+    PIPE_MESSAGE_STATE_DELIVERED,
+    PIPE_MESSAGE_STATE_REFUSED,
+    PIPE_MESSAGE_STATE_DISCARDED,
+    PIPE_MESSAGE_STATE_RECEIVED,
+    PIPE_MESSAGE_STATE_HELD_INCOMING,
+  ];
+
+  static final $core.List<PipeMessageState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static PipeMessageState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeMessageState._(super.value, super.name);
+}
+
+class PipeAction extends $pb.ProtobufEnum {
+  static const PipeAction PIPE_ACTION_UNSPECIFIED =
+      PipeAction._(0, _omitEnumNames ? '' : 'PIPE_ACTION_UNSPECIFIED');
+  static const PipeAction PIPE_ACTION_PAUSE =
+      PipeAction._(1, _omitEnumNames ? '' : 'PIPE_ACTION_PAUSE');
+  static const PipeAction PIPE_ACTION_RESUME =
+      PipeAction._(2, _omitEnumNames ? '' : 'PIPE_ACTION_RESUME');
+  static const PipeAction PIPE_ACTION_CLOSE =
+      PipeAction._(3, _omitEnumNames ? '' : 'PIPE_ACTION_CLOSE');
+  static const PipeAction PIPE_ACTION_DELETE =
+      PipeAction._(4, _omitEnumNames ? '' : 'PIPE_ACTION_DELETE');
+
+  static const $core.List<PipeAction> values = <PipeAction>[
+    PIPE_ACTION_UNSPECIFIED,
+    PIPE_ACTION_PAUSE,
+    PIPE_ACTION_RESUME,
+    PIPE_ACTION_CLOSE,
+    PIPE_ACTION_DELETE,
+  ];
+
+  static final $core.List<PipeAction?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static PipeAction? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeAction._(super.value, super.name);
+}
+
+class SecretApprovalState extends $pb.ProtobufEnum {
+  static const SecretApprovalState SECRET_APPROVAL_STATE_UNSPECIFIED =
+      SecretApprovalState._(
+          0, _omitEnumNames ? '' : 'SECRET_APPROVAL_STATE_UNSPECIFIED');
+  static const SecretApprovalState SECRET_APPROVAL_STATE_PENDING =
+      SecretApprovalState._(
+          1, _omitEnumNames ? '' : 'SECRET_APPROVAL_STATE_PENDING');
+  static const SecretApprovalState SECRET_APPROVAL_STATE_ALLOWED =
+      SecretApprovalState._(
+          2, _omitEnumNames ? '' : 'SECRET_APPROVAL_STATE_ALLOWED');
+  static const SecretApprovalState SECRET_APPROVAL_STATE_DENIED =
+      SecretApprovalState._(
+          3, _omitEnumNames ? '' : 'SECRET_APPROVAL_STATE_DENIED');
+
+  /// Left unanswered 12 hours.
+  static const SecretApprovalState SECRET_APPROVAL_STATE_EXPIRED =
+      SecretApprovalState._(
+          4, _omitEnumNames ? '' : 'SECRET_APPROVAL_STATE_EXPIRED');
+
+  static const $core.List<SecretApprovalState> values = <SecretApprovalState>[
+    SECRET_APPROVAL_STATE_UNSPECIFIED,
+    SECRET_APPROVAL_STATE_PENDING,
+    SECRET_APPROVAL_STATE_ALLOWED,
+    SECRET_APPROVAL_STATE_DENIED,
+    SECRET_APPROVAL_STATE_EXPIRED,
+  ];
+
+  static final $core.List<SecretApprovalState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static SecretApprovalState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SecretApprovalState._(super.value, super.name);
+}
+
+class AskPersonState extends $pb.ProtobufEnum {
+  static const AskPersonState ASK_PERSON_STATE_UNSPECIFIED =
+      AskPersonState._(0, _omitEnumNames ? '' : 'ASK_PERSON_STATE_UNSPECIFIED');
+  static const AskPersonState ASK_PERSON_STATE_PENDING =
+      AskPersonState._(1, _omitEnumNames ? '' : 'ASK_PERSON_STATE_PENDING');
+  static const AskPersonState ASK_PERSON_STATE_ANSWERED =
+      AskPersonState._(2, _omitEnumNames ? '' : 'ASK_PERSON_STATE_ANSWERED');
+  static const AskPersonState ASK_PERSON_STATE_DISMISSED =
+      AskPersonState._(3, _omitEnumNames ? '' : 'ASK_PERSON_STATE_DISMISSED');
+
+  static const $core.List<AskPersonState> values = <AskPersonState>[
+    ASK_PERSON_STATE_UNSPECIFIED,
+    ASK_PERSON_STATE_PENDING,
+    ASK_PERSON_STATE_ANSWERED,
+    ASK_PERSON_STATE_DISMISSED,
+  ];
+
+  static final $core.List<AskPersonState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static AskPersonState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AskPersonState._(super.value, super.name);
+}
+
+class MovePhase extends $pb.ProtobufEnum {
+  static const MovePhase MOVE_PHASE_UNSPECIFIED =
+      MovePhase._(0, _omitEnumNames ? '' : 'MOVE_PHASE_UNSPECIFIED');
+
+  /// Dialing the other computer.
+  static const MovePhase MOVE_PHASE_CONNECTING =
+      MovePhase._(1, _omitEnumNames ? '' : 'MOVE_PHASE_CONNECTING');
+
+  /// Both show `digits`: waiting for ConfirmMove here and the person there.
+  static const MovePhase MOVE_PHASE_CONFIRM =
+      MovePhase._(2, _omitEnumNames ? '' : 'MOVE_PHASE_CONFIRM');
+
+  /// The other computer checks the plan.
+  static const MovePhase MOVE_PHASE_CHECKING =
+      MovePhase._(3, _omitEnumNames ? '' : 'MOVE_PHASE_CHECKING');
+
+  /// Copying while agents keep working; FreezeMove ends it now.
+  static const MovePhase MOVE_PHASE_COPYING =
+      MovePhase._(4, _omitEnumNames ? '' : 'MOVE_PHASE_COPYING');
+
+  /// Agents are stopped and the last round goes; only `move` is served.
+  static const MovePhase MOVE_PHASE_FROZEN =
+      MovePhase._(5, _omitEnumNames ? '' : 'MOVE_PHASE_FROZEN');
+
+  /// The other computer sets it up and checks it (`step_text` says what).
+  static const MovePhase MOVE_PHASE_IMPORTING =
+      MovePhase._(6, _omitEnumNames ? '' : 'MOVE_PHASE_IMPORTING');
+
+  /// This copy is put away; telling the other computer to start. No way back.
+  static const MovePhase MOVE_PHASE_COMMITTING =
+      MovePhase._(7, _omitEnumNames ? '' : 'MOVE_PHASE_COMMITTING');
+
+  /// Moved: the other computer runs this Claktory now.
+  static const MovePhase MOVE_PHASE_DONE =
+      MovePhase._(8, _omitEnumNames ? '' : 'MOVE_PHASE_DONE');
+
+  /// It didn't go: `error` says why. Claktory runs here as before.
+  /// CancelMove dismisses it.
+  static const MovePhase MOVE_PHASE_FAILED =
+      MovePhase._(9, _omitEnumNames ? '' : 'MOVE_PHASE_FAILED');
+
+  static const $core.List<MovePhase> values = <MovePhase>[
+    MOVE_PHASE_UNSPECIFIED,
+    MOVE_PHASE_CONNECTING,
+    MOVE_PHASE_CONFIRM,
+    MOVE_PHASE_CHECKING,
+    MOVE_PHASE_COPYING,
+    MOVE_PHASE_FROZEN,
+    MOVE_PHASE_IMPORTING,
+    MOVE_PHASE_COMMITTING,
+    MOVE_PHASE_DONE,
+    MOVE_PHASE_FAILED,
+  ];
+
+  static final $core.List<MovePhase?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
+  static MovePhase? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const MovePhase._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

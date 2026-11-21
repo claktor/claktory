@@ -1,6 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'mobile/device.dart';
+import 'mobile/platform_policy.dart';
+
+export 'mobile/device.dart' show Idiom;
+
 // Design tokens from docs/IDENTITY.md. Keep the two in sync.
 
 /// Colors for the current system appearance.
@@ -58,10 +63,42 @@ class Palette {
     link: Color(0xFF1F5FD1),
   );
 
-  static Palette of(BuildContext context) =>
-      MediaQuery.platformBrightnessOf(context) == Brightness.dark
-      ? _dark
-      : _light;
+  // On a phone, faint text is read, not decoration (times, who a comment
+  // goes to, captions that mean something): at least 4.5:1 on both
+  // surfaces, as Apple asks (IDENTITY.md, Phone). The Mac keeps its own.
+  static const _darkPhone = Palette._(
+    canvas: Color(0xFF0E0E10),
+    sidebar: Color(0xFF151517),
+    hairline: Color(0xFF232327),
+    text: Color(0xFFEDEDEF),
+    textMuted: Color(0xFFA1A1AA),
+    textFaint: Color(0xFF80808A),
+    signal: Color(0xFFFF5B1F),
+    danger: Color(0xFFFF5C7A),
+    link: Color(0xFF6AA8FF),
+  );
+
+  static const _lightPhone = Palette._(
+    canvas: Color(0xFFFFFFFF),
+    sidebar: Color(0xFFF5F5F6),
+    hairline: Color(0xFFE4E4E7),
+    text: Color(0xFF18181B),
+    textMuted: Color(0xFF52525B),
+    textFaint: Color(0xFF6E6E77),
+    signal: Color(0xFFE5480F),
+    danger: Color(0xFFC8193C),
+    link: Color(0xFF1F5FD1),
+  );
+
+  /// The palette for the system's appearance; a phone's (and a touch
+  /// device's, [touchFirst]) has its own faint text. Depends only on the
+  /// appearance and the screen's size, never on what the keyboard leaves,
+  /// so the keyboard moving rebuilds nothing.
+  static Palette of(BuildContext context) {
+    final dark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    if (touchFirst(context)) return dark ? _darkPhone : _lightPhone;
+    return dark ? _dark : _light;
+  }
 }
 
 /// Agent colors, by the names the backend gives them (`Agent.color`). An
@@ -170,16 +207,51 @@ const titleBarHeight = 44.0;
 /// A Mac window never gets this narrow.
 const phoneLayoutWidth = 600.0;
 
-/// Whether [context] is laid out as on a phone: a phone's screen, upright
-/// or on its side (a tablet's isn't), or a window narrower than a phone.
+/// An iPad window shorter than this, safe area aside, takes a phone's
+/// layout too: there's no room for a header, some content and a composer
+/// (an iPhone on its side is 430 or less).
+const phoneLayoutHeight = 440.0;
+
+/// Whether [context] is laid out as on a phone: the phone's routes and
+/// drawer rather than the rail, sidebar and panes. A phone's screen,
+/// upright or on its side; an iPad's window narrower than a phone or
+/// shorter than [phoneLayoutHeight] (a Stage Manager window 1000 × 560 is
+/// a short Mac-like window, not a phone on its side); a window narrower
+/// than a phone elsewhere. For a finger's sizes and behavior, which a wide
+/// iPad window needs too, ask [touchFirst].
 bool isPhoneLayout(BuildContext context) {
   final size = MediaQuery.sizeOf(context);
   return switch (defaultTargetPlatform) {
+    TargetPlatform.iOS when deviceCapabilities.idiom == Idiom.pad =>
+      _compactPad(size, MediaQuery.viewPaddingOf(context)),
     TargetPlatform.iOS ||
     TargetPlatform.android => size.shortestSide < phoneLayoutWidth,
     _ => size.width < phoneLayoutWidth,
   };
 }
+
+/// An iPad window of [size] with [safe] around it, the safe size being
+/// what tierFor (ipad/columns.dart) reads: compact. The view's padding,
+/// not what the keyboard leaves of it, so the keyboard moving changes
+/// nothing.
+bool _compactPad(Size size, EdgeInsets safe) =>
+    size.width - safe.horizontal < phoneLayoutWidth ||
+    size.height - safe.vertical < phoneLayoutHeight;
+
+/// Whether [context] is sized and behaves for a finger: 44pt targets, the
+/// phone's 17pt reading type and palette, Return adding a line, no
+/// keyboard raised by itself, a hold for a message's actions. A phone's
+/// layout ([isPhoneLayout]), or an iPhone, iPad or Android device at any
+/// window size; not the iPad app on a Mac, which has a pointer. On every
+/// iPhone and Mac it's [isPhoneLayout]; only a wide iPad (or Android
+/// tablet) window differs: panes, with a finger's sizes.
+bool touchFirst(BuildContext context) =>
+    isPhoneLayout(context) ||
+    PhonePlatformPolicy.current.touch && !deviceCapabilities.iosAppOnMac;
+
+/// What kind of device this is (an iPad, a phone, another), from the
+/// native side, never from the window's size ([deviceCapabilities]).
+Idiom deviceIdiom(BuildContext context) => deviceCapabilities.idiom;
 
 /// How wide the transcript and composer grow as the window widens.
 const contentMaxWidth = 1520.0;

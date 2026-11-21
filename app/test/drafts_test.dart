@@ -142,6 +142,27 @@ void main() {
     expect(drafts.of('a1'), '', reason: 'no agents at all');
   });
 
+  test("a chat's draft stays while the chat does, and a Claktory being "
+      "switched to drops nothing", () async {
+    final storage = MemoryDraftStorage()
+      ..saved = {'a1': 'Keep', 'chat:c1': 'Ask', 'chat:gone': 'Lost'};
+    final drafts = await Drafts.load(storage);
+    final store = WorkspaceStore();
+    drafts.watch(store);
+    store.apply(
+      Workspace(
+        agents: [Agent(id: 'a1')],
+        chats: [Chat(id: 'c1')],
+      ),
+    );
+    expect(storage.saved, {'a1': 'Keep', 'chat:c1': 'Ask'});
+    // Another Claktory: unknown until its Workspace comes, not empty.
+    store.clear();
+    expect(store.received, isFalse);
+    expect(drafts.of('a1'), 'Keep');
+    expect(drafts.of('chat:c1'), 'Ask');
+  });
+
   testWidgets('on the device, drafts go to the native side', (tester) async {
     const channel = MethodChannel('factory/device');
     Map<Object?, Object?> kept = {'a1': 'Saved'};
@@ -168,5 +189,64 @@ void main() {
     await tester.pump();
     expect(calls, ['drafts', 'setDrafts']);
     expect(kept, {'a1': 'Saved', 'a2': 'New'});
+  });
+
+  group('Reply', () {
+    test('quotes the message, naming another agent', () {
+      expect(replyQuote('Ship it?'), '> Ship it?');
+      expect(
+        replyQuote('  The overlay covers the window.\n\nAnd says why.\n'),
+        '> The overlay covers the window.\n>\n> And says why.',
+      );
+      expect(replyQuote('Done.', from: 'Kenji'), '> Kenji wrote:\n> Done.');
+      expect(replyQuote('   '), '');
+    });
+
+    test('a long message is quoted to about 500 characters, between words', () {
+      final long = List.filled(200, 'word').join(' ');
+      final quote = replyQuote(long);
+      expect(quote.length, lessThanOrEqualTo(2 + replyQuoteLength + 1));
+      expect(quote, endsWith('word…'));
+      expect(quote, startsWith('> word word'));
+    });
+
+    test('goes above the draft, with room for the reply under it', () {
+      final drafts = Drafts(MemoryDraftStorage());
+      drafts.reply('a1', 'Ready to land?');
+      expect(drafts.of('a1'), '> Ready to land?\n\n');
+      expect(drafts.takeFocus('a1'), isTrue);
+      expect(drafts.takeFocus('a1'), isFalse, reason: 'once');
+
+      drafts.set('a1', 'Yes, after the tests.');
+      drafts.reply('a1', 'Done.', from: 'Kenji');
+      expect(
+        drafts.of('a1'),
+        '> Kenji wrote:\n> Done.\n\nYes, after the tests.',
+      );
+      // Nothing to quote: nothing changes.
+      drafts.reply('a1', ' ');
+      expect(drafts.takeFocus('a1'), isTrue);
+      expect(drafts.takeFocus('a1'), isFalse);
+    });
+
+    testWidgets('the box takes it, focused, the cursor at the end', (
+      tester,
+    ) async {
+      final harness = Harness(two());
+      await harness.show(tester);
+      await type(tester, 'Also: ');
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      harness.drafts.reply('a1', 'The build is green.');
+      await settle(tester);
+      const expected = '> The build is green.\n\nAlso:';
+      expect(box(tester), expected);
+      final field = tester.widget<EditableText>(find.byType(EditableText));
+      expect(field.focusNode.hasFocus, isTrue);
+      expect(
+        field.controller.selection,
+        const TextSelection.collapsed(offset: expected.length),
+      );
+    });
   });
 }

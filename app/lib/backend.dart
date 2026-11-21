@@ -11,9 +11,12 @@ import 'app_update.dart';
 import 'attachments.dart';
 import 'connections.dart';
 import 'loopback_forward.dart';
+import 'device_account.dart'
+    show AccountServiceError, AccountServiceUnreachable, DeviceAccount;
 import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
+import 'network.dart';
 import 'outbox.dart';
 import 'pairing.dart';
 import 'state.dart';
@@ -81,6 +84,11 @@ class RequestFailure implements Exception {
   String toString() => message;
 }
 
+/// A try given up on, to try again after the backoff: it said why.
+class _NotNow implements Exception {
+  const _NotNow();
+}
+
 /// Keeps one connection to a backend open, reconnecting with backoff when it
 /// drops, and routes what the backend sends into the stores. The app keeps
 /// one for each Claktory it's connected to, all live at once (rail.dart). Speaks the
@@ -128,6 +136,16 @@ class Backend {
   /// at what waits for the person (waiting.dart).
   final reveal = EntryReveal();
 
+  /// The selected pipe's messages (Workspace.selected_pipe_id).
+  final pipeChat = PipeChat();
+
+  /// The selected chat's conversation (Workspace.selected_chat_id), as an
+  /// agent's is in [transcript]; what waits for it, and the person's
+  /// messages on their way to it. Chat ids never meet agents' ids.
+  final chatTranscript = ChatTranscriptStore();
+  final chatQueued = QueuedStore();
+  late final chatOutbox = Outbox(_ChatOutbox(this));
+
   /// Opens a screen an agent asked to show (its show_screen tool) in the
   /// window showing this Claktory, answering whether it did
   /// (screens.dart). Null while no window shows it: the answer is no.
@@ -154,24 +172,94 @@ class Backend {
   /// When the backend last welcomed this connection; null while it's down.
   final connectedSince = ValueNotifier<DateTime?>(null);
 
-  /// True while it reconnects after the app came back from the background
-  /// or a connection that was up dropped (a network change, say), for up to
-  /// [quietReconnect]: what shows stays, and nothing says it can't connect.
+  /// True while it reconnects after the app came back from the background,
+  /// the network moved or a connection that was up dropped: what shows
+  /// stays, and nothing says it can't connect. It lasts at least
+  /// [quietReconnect], and until the first try begun since has failed, so
+  /// "can't connect" never shows while an honest try is still under way.
   final reconnecting = ValueNotifier<bool>(false);
 
-  /// How long a reconnect stays quiet before the app says it can't connect.
-  static const quietReconnect = Duration(seconds: 8);
+  /// How long a reconnect stays quiet at least.
+  Duration quietReconnect = const Duration(seconds: 8);
 
   /// How long a new connection has to open and be welcomed.
   Duration connectWithin = const Duration(seconds: 10);
 
   Timer? _quiet;
 
+  /// The try under way when the quiet reconnect began (each try counts up
+  /// [_tries]); the quiet ends with a later one.
+  var _quietFrom = 0;
+  var _tries = 0;
+  var _quietTimeUp = false;
+  var _quietTried = false;
+
   void _reconnectQuietly() {
     reconnecting.value = true;
+    _quietFrom = _tries;
+    _quietTimeUp = false;
+    _quietTried = false;
     _quiet?.cancel();
-    _quiet = Timer(quietReconnect, () => reconnecting.value = false);
+    _quiet = Timer(quietReconnect, () {
+      _quietTimeUp = true;
+      _endQuiet();
+    });
   }
+
+  /// Try [tryNumber] ended without a welcome.
+  void _triedQuietly(int tryNumber) {
+    if (tryNumber <= _quietFrom) return;
+    _quietTried = true;
+    _endQuiet();
+  }
+
+  void _endQuiet() {
+    if (_quietTimeUp && _quietTried && !_moving) reconnecting.value = false;
+  }
+
+  /// This Claktory's move to another computer, as last seen (Workspace
+  /// .move): kept while the connection is down, since the backend stops
+  /// serving other devices once the move freezes, and after it's done, it
+  /// answers no one. Null with no move, or before this Claktory's
+  /// Workspace arrives.
+  final move = ValueNotifier<Move?>(null);
+
+  void _sawMove(Workspace workspace) {
+    final next = workspace.hasMove() ? workspace.move : null;
+    if (next == move.value) return;
+    move.value = next;
+  }
+
+  /// The move is copying or past it: a dropped connection is the move's
+  /// doing (the backend serves only this computer once it freezes, and
+  /// nothing once it's done), so the reconnect stays quiet, however long
+  /// it takes, rather than saying it can't connect.
+  bool get _moving => switch (move.value?.phase) {
+    MovePhase.MOVE_PHASE_COPYING ||
+    MovePhase.MOVE_PHASE_FROZEN ||
+    MovePhase.MOVE_PHASE_IMPORTING ||
+    MovePhase.MOVE_PHASE_COMMITTING ||
+    MovePhase.MOVE_PHASE_DONE => true,
+    _ => false,
+  };
+
+  /// The device's network moved (Wi-Fi to cellular, or back after none):
+  /// a Claktory on another machine is reached afresh at once, quietly,
+  /// rather than once pings go unanswered. This Mac's own isn't on the
+  /// network.
+  void networkMoved() {
+    if (_closed ||
+        _target == null ||
+        refused.value != null ||
+        signInRequired.value != null) {
+      return;
+    }
+    _log('the network moved: connecting afresh');
+    _prefetchAssertion();
+    _restart();
+  }
+
+  StreamSubscription<NetworkPath>? _network;
 
   /// When the app went to the background, while it's there.
   DateTime? _hiddenAt;
@@ -186,9 +274,14 @@ class Backend {
   void resumed({DateTime? now}) {
     final hiddenAt = _hiddenAt;
     _hiddenAt = null;
+    // Its assertion may have lapsed meanwhile: on its way before it's
+    // needed, whether or not the connection is made afresh.
+    _prefetchAssertion();
     if (hiddenAt == null ||
         (now ?? DateTime.now()).difference(hiddenAt) <
             const Duration(seconds: 3)) {
+      // Not connected, whatever it last said is stale now: it tries again.
+      if (!connected.value) check();
       return;
     }
     _restart();
@@ -220,11 +313,17 @@ class Backend {
   /// to the front or the Mac wakes: a message the backend must answer
   /// within [answerWithin] (an empty one, which any backend answers as
   /// unknown); without an answer it reconnects. Not connected, it tries
-  /// again at once rather than after its backoff.
+  /// again at once rather than after its backoff, quietly: a failure from
+  /// before (the Mac asleep, the app away) says nothing about now, so
+  /// "can't connect" waits for a try made since to fail.
   void check() {
-    if (_closed || refused.value != null) return;
+    if (_closed || refused.value != null || signInRequired.value != null) {
+      return;
+    }
     final socket = _socket;
     if (socket == null || !connected.value) {
+      _reconnectQuietly();
+      unawaited(_tunnel?.reconnect());
       _retryDelay = _minRetryDelay;
       _wakeUp();
       return;
@@ -256,7 +355,7 @@ class Backend {
   /// clock jumps ahead of them. Then the connection is checked at once.
   Timer? _sleepWatch;
   DateTime _lastTick = DateTime.now();
-  static const _tick = Duration(seconds: 2);
+  static const _tick = Duration(seconds: 1);
 
   void _watchSleep() {
     _lastTick = DateTime.now();
@@ -289,6 +388,53 @@ class Backend {
   /// more); null while it hasn't. The app stops trying until the person
   /// picks a Factory again.
   final refused = ValueNotifier<String?>(null);
+
+  /// This Claktory needs this device to show it's the owner's before it
+  /// lets it in (ERROR_CODE_SIGN_IN_REQUIRED): its grace to confirm is
+  /// over, or it was found through the account and this device isn't
+  /// signed in to it (or no assertion could be had). What it said; null
+  /// otherwise. Like [refused], nothing's tried until [retry].
+  final signInRequired = ValueNotifier<String?>(null);
+
+  /// While this device isn't confirmed as the owner's on this Claktory,
+  /// when its grace to confirm ends (`Welcome.confirm_by_ms`); null when it
+  /// needn't confirm.
+  final confirmBy = ValueNotifier<DateTime?>(null);
+
+  /// This device's account, which gets the assertion a Hello shows a
+  /// Claktory on another machine; null where there's none (tests).
+  DeviceAccount? get account => _account;
+  DeviceAccount? _account;
+  set account(DeviceAccount? account) {
+    _account?.removeListener(_accountChanged);
+    _account = account?..addListener(_accountChanged);
+  }
+
+  /// Signed in on this device while this Claktory waits for it to
+  /// confirm: it confirms now, without connecting again.
+  void _accountChanged() {
+    final target = _target;
+    final key = _helloKey;
+    if (confirmBy.value == null ||
+        !connected.value ||
+        target == null ||
+        key == null ||
+        !(account?.signedIn ?? false)) {
+      return;
+    }
+    unawaited(() async {
+      final assertion = await _assertionFor(target, key);
+      if (assertion == null || assertion.isEmpty || target != _target) {
+        return;
+      }
+      try {
+        await confirmThisDevice(assertion);
+        if (target == _target) confirmBy.value = null;
+      } on RequestFailure catch (failure) {
+        _log("couldn't confirm this device: ${failure.message}");
+      }
+    }());
+  }
 
   /// On a Factory on another machine, the paired device this connection is
   /// (`Welcome.device_id`); empty on this Mac's.
@@ -326,6 +472,15 @@ class Backend {
   final tunnel = ValueNotifier<TunnelStatus?>(null);
 
   Tunnel? _tunnel;
+
+  /// [error] as it can be logged: without the tunnel's path, which a
+  /// failed WebSocket's message would carry in its URL.
+  String _withoutTunnelPath(Object error) {
+    final path = _tunnel?.requestPath ?? '';
+    final said = '$error';
+    return path.length > 1 ? said.replaceAll(path, '/…') : said;
+  }
+
   RemoteFactory? _tunnelTarget;
 
   /// The ports this device forwards to the backend's machine, for browser
@@ -353,14 +508,23 @@ class Backend {
 
   Future<void> run() async {
     _watchSleep();
+    _network ??= deviceNetworkMoves.listen((_) => networkMoved());
     while (!_closed) {
-      if (refused.value != null) {
+      if (refused.value != null || signInRequired.value != null) {
+        reconnecting.value = false;
         await _wake.future;
         continue;
       }
       final target = _target;
       if (target == null && !localBackend) {
         await _wake.future;
+        continue;
+      }
+      // Found through the account, it's let in only on an assertion.
+      if (target != null &&
+          target.fromAccount &&
+          !(account?.signedIn ?? false)) {
+        signInRequired.value = _signInToConnect;
         continue;
       }
       // This Mac's Factory through the tunnel too, with its own code; the
@@ -371,6 +535,12 @@ class Backend {
       final loopback = via == null || (local != null && _loopbackNext);
       if (local != null) _loopbackNext = false;
       _welcomed = false;
+      final tryNumber = ++_tries;
+      // A Claktory on another machine is shown this device's assertion:
+      // asked for now, while the tunnel dials, rather than after.
+      final assertion = target != null && target.tunnelled
+          ? _assertionAhead(target, deviceKey(target))
+          : null;
       try {
         final WebSocket socket;
         if (loopback) {
@@ -384,8 +554,13 @@ class Backend {
           // pairing code names.
           // A dead connection inside the tunnel takes the handshake with
           // it: given up on, and the tunnel dials afresh.
-          socket = await WebSocket.connect('ws://127.0.0.1:${tunnel.port}')
-              .timeout(connectWithin);
+          // At the tunnel's own path: nothing else on this device can
+          // pass for this app there.
+          socket = await _connectWithin(
+            WebSocket.connect(
+              'ws://127.0.0.1:${tunnel.port}${tunnel.requestPath}',
+            ),
+          );
         } else {
           socket = await WebSocket.connect(
             via.endpoint.toString(),
@@ -414,13 +589,41 @@ class Backend {
             : target == null
             ? _localKey
             : deviceKey(via);
+        // Not had in time (claktory.com slow or out of reach): found
+        // through the account, it tries again (what's on its way is kept
+        // for then); paired with a code, it goes without.
+        final asserted = assertion == null
+            ? ''
+            : await assertion.timeout(assertionWithin, onTimeout: () => null);
+        _helloAssertion = asserted ?? '';
+        if (_closed || target != _target) {
+          await socket.close();
+          continue;
+        }
+        if (target != null && target.fromAccount && asserted == null) {
+          _log('no device assertion in time: trying again');
+          welcome.cancel();
+          await socket.close();
+          throw const _NotNow();
+        }
+        // Found through the account, it's let in only on an assertion.
+        if (target != null && target.fromAccount && _helloAssertion.isEmpty) {
+          welcome.cancel();
+          await socket.close();
+          signInRequired.value = _signInToConnect;
+          continue;
+        }
+        _helloId = _nextId++;
         _send(
           ClientMessage(
-            id: Int64(_nextId++),
+            id: Int64(_helloId),
             hello: Hello(
               protocolVersion: _protocolVersion,
               clientVersion: _clientVersion,
               token: _helloVia?.token,
+              assertion: _helloAssertion,
+              // It can sign in and confirm it's the owner's.
+              canConfirm: true,
               deviceKind: await thisDeviceKindForHello(),
               deviceName: await thisDeviceNameForHello(),
               // Changes come as patches to the last Workspace, not whole.
@@ -449,17 +652,20 @@ class Backend {
       } on HandshakeException catch (error) {
         _log("its certificate isn't the pinned one: $error");
       } on IOException catch (error) {
-        _log('connection failed: $error');
+        _log('connection failed: ${_withoutTunnelPath(error)}');
       } on TunnelOpenFailure catch (failure) {
         _log("couldn't open the tunnel: ${failure.message}");
       } on TimeoutException {
         _log('no connection within ${connectWithin.inSeconds}s');
         unawaited(_tunnel?.reconnect());
+      } on _NotNow {
+        // Said why already.
       }
       // This Mac's own through the tunnel never got welcomed: the open
       // port next, with its code's token.
       if (local != null && !loopback && !_welcomed) _loopbackNext = true;
       _disconnected();
+      if (!_welcomed) _triedQuietly(tryNumber);
       _watchTunnel();
       // Turned away at the tunnel: like a refused Hello, trying again
       // won't help until the person pairs again.
@@ -493,6 +699,91 @@ class Backend {
   RemoteFactory? _helloVia;
   String? _helloKey;
 
+  static const _signInToConnect =
+      'Sign in to your Claktory account on this device to connect.';
+
+  /// The endpoint id of the Claktory this connects to, through the tunnel
+  /// (this Mac's own's too, once it's read its code); empty otherwise.
+  String get endpointId => (_target ?? _helloVia)?.endpointId ?? '';
+
+  /// The current connection's Hello: its refusal is the connection's.
+  var _helloId = 0;
+
+  /// The device assertion the current connection's Hello showed; empty if
+  /// none.
+  String _helloAssertion = '';
+
+  /// [connecting], or a [TimeoutException] after [connectWithin]; one that
+  /// connects after all is closed, so no connection given up on lingers
+  /// at the other end beside the next.
+  Future<WebSocket> _connectWithin(Future<WebSocket> connecting) =>
+      connecting.timeout(
+        connectWithin,
+        onTimeout: () {
+          unawaited(
+            connecting.then((late) => late.close(), onError: (Object _) {}),
+          );
+          throw TimeoutException('no connection', connectWithin);
+        },
+      );
+
+  /// How long a Hello waits for this device's assertion, once its
+  /// connection is open; the request itself carries on, for the next try.
+  Duration assertionWithin = const Duration(seconds: 5);
+
+  /// Assertions on their way, by device key and endpoint: one request each,
+  /// however many wait for it.
+  final _assertionsAhead = <String, Future<String?>>{};
+
+  /// [target]'s assertion as [key], asked for now or joining the request
+  /// already on its way ([_assertionFor]).
+  Future<String?> _assertionAhead(RemoteFactory target, String key) {
+    final id = '$key/${target.endpointId}';
+    final ahead = _assertionsAhead[id];
+    if (ahead != null) return ahead;
+    final asked = _assertionFor(target, key);
+    _assertionsAhead[id] = asked;
+    unawaited(asked.whenComplete(() => _assertionsAhead.remove(id)));
+    return asked;
+  }
+
+  /// Gets the assertion for the Claktory this connects to on its way, so
+  /// a connection made afresh needn't wait for claktory.com: the app back
+  /// in front, the network moved. The account keeps it until shortly
+  /// before it expires.
+  void _prefetchAssertion() {
+    final target = _target;
+    if (_closed || target == null || !target.tunnelled) return;
+    if (!(account?.signedIn ?? false)) return;
+    unawaited(_assertionAhead(target, deviceKey(target)));
+  }
+
+  /// A device assertion for [target], reached as the device key [key]:
+  /// for the tunnel key that key makes. Empty when this device isn't
+  /// signed in to its account or the service refuses one; null when it
+  /// can't be had now (claktory.com out of reach, or failing), to try
+  /// again.
+  Future<String?> _assertionFor(RemoteFactory target, String key) async {
+    final account = this.account;
+    if (account == null || !account.signedIn) return '';
+    try {
+      final ids = await _tunnels.pairingIds(
+        deviceKey: key,
+        endpointId: target.endpointId,
+      );
+      return await account.assertionFor(ids.device);
+    } on AccountServiceError catch (error) {
+      _log("couldn't get a device assertion: $error");
+      return error.status >= 500 ? null : '';
+    } on AccountServiceUnreachable catch (error) {
+      _log("couldn't get a device assertion: $error");
+      return null;
+    } catch (error) {
+      _log("couldn't get a device assertion: $error");
+      return null;
+    }
+  }
+
   /// This device used a pairing code and waits for the person to allow it
   /// on that Claktory (PairingPending), with the number to compare; null
   /// otherwise. It stays set when the device is turned away ([refused]
@@ -513,7 +804,9 @@ class Backend {
         number = pairingNumber(
           backendId: ids.backend,
           deviceId: ids.device,
-          token: via.token,
+          // Found through the account, the assertion stands in for a
+          // code's token.
+          token: pending.discovered ? _helloAssertion : via.token,
         );
       } catch (error) {
         _log("can't work out the pairing number: $error");
@@ -528,11 +821,18 @@ class Backend {
   void connectTo(RemoteFactory? target) {
     _target = target;
     refused.value = null;
+    signInRequired.value = null;
+    confirmBy.value = null;
     pairing.value = null;
     _retryDelay = _minRetryDelay;
-    workspace.apply(Workspace());
+    // Unknown until this one's Workspace arrives, not empty.
+    workspace.clear();
+    move.value = null;
     highlights.forgetKnown();
     transcript.load(Transcript());
+    pipeChat.load(PipeTranscript());
+    chatTranscript.load(Transcript());
+    chatQueued.apply(QueuedMessages());
     extensionView.apply(ExtensionView());
     queued.apply(QueuedMessages());
     unawaited(_socket?.close());
@@ -612,16 +912,19 @@ class Backend {
   /// than after its backoff.
   void reconnectNow() {
     if (_closed) return;
-    if (refused.value != null) return retry();
+    if (refused.value != null || signInRequired.value != null) {
+      return retry();
+    }
     if (connected.value) return _restart();
     unawaited(_tunnel?.reconnect());
     _retryDelay = _minRetryDelay;
     _wakeUp();
   }
 
-  /// After a refusal, tries the same Factory again.
+  /// After a refusal, tries the same Factory again: after signing in, say.
   void retry() {
     refused.value = null;
+    signInRequired.value = null;
     _retryDelay = _minRetryDelay;
     _wakeUp();
   }
@@ -633,8 +936,10 @@ class Backend {
 
   Future<void> close() async {
     _closed = true;
+    account = null;
     _quiet?.cancel();
     _sleepWatch?.cancel();
+    unawaited(_network?.cancel());
     _wakeUp();
     await _socket?.close();
     await forwards.stopAll();
@@ -671,6 +976,7 @@ class Backend {
     String text, {
     String clientId = '',
     List<Attachment> attachments = const [],
+    bool voice = false,
   }) => _request(
     ClientMessage(
       sendMessage: SendMessage(
@@ -678,6 +984,38 @@ class Backend {
         text: text,
         clientId: clientId,
         attachments: attachments,
+        voice: voice,
+      ),
+    ),
+  );
+
+  /// Starts (or picks up) downloading the speech model voice messages
+  /// need; its progress comes in `Workspace.speech_model`.
+  Future<void> installSpeechModel() =>
+      _request(ClientMessage(installSpeechModel: InstallSpeechModel()));
+
+  /// Deletes the speech model, or stops its download.
+  Future<void> removeSpeechModel() =>
+      _request(ClientMessage(removeSpeechModel: RemoveSpeechModel()));
+
+  /// Transcribes a voice message that failed again; [messageId] is its
+  /// `QueuedMessage.id`.
+  Future<void> retryVoiceMessage(String agentId, Int64 messageId) => _request(
+    ClientMessage(
+      retryVoiceMessage: RetryVoiceMessage(
+        agentId: agentId,
+        messageId: messageId,
+      ),
+    ),
+  );
+
+  /// Drops a voice message waiting to be transcribed, or that failed,
+  /// undelivered.
+  Future<void> discardVoiceMessage(String agentId, Int64 messageId) => _request(
+    ClientMessage(
+      discardVoiceMessage: DiscardVoiceMessage(
+        agentId: agentId,
+        messageId: messageId,
       ),
     ),
   );
@@ -773,6 +1111,44 @@ class Backend {
     transcript.prepend(page.agentId, page.entries, hasEarlier: page.hasEarlier);
   }
 
+  /// [agentId]'s entry [seq], as it is now, whichever agent shows: what
+  /// Needs you shows of a card waiting in a conversation that isn't open.
+  /// Null when the backend has no such entry.
+  Future<Entry?> fetchEntry(String agentId, int seq) async {
+    final reply = await _call(
+      ClientMessage(
+        loadEntries: LoadEntries(
+          agentId: agentId,
+          beforeSeq: Int64(seq + 1),
+          fromSeq: Int64(seq),
+        ),
+      ),
+    );
+    for (final entry in reply.entryPage.entries) {
+      if (entry.seq.toInt() == seq) return entry;
+    }
+    return null;
+  }
+
+  /// The person's answer to [agentId]'s question at entry [seq]: [text]
+  /// (needed when it asks for one; else an optional comment with the
+  /// approval), or [dismiss] it, leaving it to the agent's judgment.
+  Future<void> answerAsk(
+    String agentId,
+    int seq, {
+    String text = '',
+    bool dismiss = false,
+  }) => _request(
+    ClientMessage(
+      answerAsk: AnswerAsk(
+        agentId: agentId,
+        seq: Int64(seq),
+        text: text,
+        dismiss: dismiss,
+      ),
+    ),
+  );
+
   Future<void> stopAgent(String agentId) =>
       _request(ClientMessage(stopAgent: StopAgent(agentId: agentId)));
 
@@ -780,15 +1156,18 @@ class Backend {
   /// Rivet [comment] and the proposal as the person's message; the entry
   /// comes back decided. Refused when it's already decided, or there's no
   /// Rivet that can run.
+  /// A chat's proposal names the chat ([chatId]) instead of an agent.
   Future<void> decideProposal(
     String agentId,
     String proposalId, {
     required bool approve,
     String comment = '',
+    String chatId = '',
   }) => _request(
     ClientMessage(
       decideProposal: DecideProposal(
-        agentId: agentId,
+        agentId: chatId.isEmpty ? agentId : '',
+        chatId: chatId,
         proposalId: proposalId,
         approve: approve,
         comment: comment,
@@ -964,7 +1343,8 @@ class Backend {
   /// made from [name], [description] and [entries], for its request; or
   /// dismisses the request ([approve] false), telling it [comment]. A request
   /// from before agents described what they need names its secret, and
-  /// approving it needs neither.
+  /// approving it needs neither. With [approveOnly], approves the need
+  /// instead, and the request's admin agent finds or collects the secret.
   Future<void> decideSecretRequest(
     String agentId,
     String requestId, {
@@ -976,6 +1356,7 @@ class Backend {
     String description = '',
     Map<String, String> aliases = const {},
     bool asIs = false,
+    bool approveOnly = false,
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -989,6 +1370,7 @@ class Backend {
         description: description,
         aliases: aliases.entries,
         asIs: asIs,
+        approveOnly: approveOnly,
       ),
     ),
   );
@@ -1181,11 +1563,6 @@ class Backend {
   Future<void> accountResend() =>
       _request(ClientMessage(accountResend: AccountResend()));
 
-  /// Not now: a Claktory from before sign-in stops asking, until the
-  /// person signs in from Settings → Account.
-  Future<void> skipAccountSignIn() =>
-      _request(ClientMessage(skipAccountSignIn: SkipAccountSignIn()));
-
   Future<void> accountSignOut() =>
       _request(ClientMessage(accountSignOut: AccountSignOut()));
 
@@ -1327,9 +1704,10 @@ class Backend {
       _request(ClientMessage(setZoom: SetZoom(zoom: zoom)));
 
   /// Gives the person's avatar new colors (Workspace.person), the same on
-  /// every device.
-  Future<void> shuffleAvatar() =>
-      _request(ClientMessage(shuffleAvatar: ShuffleAvatar()));
+  /// every device: [choice], one of Person.avatar_choices, or else others
+  /// at random.
+  Future<void> shuffleAvatar({int? choice}) =>
+      _request(ClientMessage(shuffleAvatar: ShuffleAvatar(choice: choice)));
 
   /// This device's key in `Settings.zoom`: its paired id, or "local" for
   /// this machine's own app.
@@ -1398,6 +1776,258 @@ class Backend {
   /// (`Settings.onboarding`), on every device.
   Future<void> skipModelStep() =>
       _request(ClientMessage(setOnboarding: SetOnboarding(skipModel: true)));
+
+  // ---- Pipes (#196) ----
+
+  /// Makes an invite for a pipe from [projectId]: the pipe shows as
+  /// INVITED, and the code comes back only here, once.
+  Future<PipeInvite> createPipeInvite(
+    String projectId,
+    String name,
+    String purpose,
+  ) async {
+    final reply = await _call(
+      ClientMessage(
+        createPipeInvite: CreatePipeInvite(
+          projectId: projectId,
+          name: name,
+          purpose: purpose,
+        ),
+      ),
+    );
+    if (!reply.hasPipeInvite()) {
+      throw const RequestFailure('Claktory sent no invite.');
+    }
+    return reply.pipeInvite;
+  }
+
+  /// What a pipe invite [code] says, without using it.
+  Future<PipeInvitePreview> readPipeInvite(String code) async {
+    final reply = await _call(
+      ClientMessage(readPipeInvite: ReadPipeInvite(code: code)),
+    );
+    if (!reply.hasPipeInvitePreview()) {
+      throw const RequestFailure("Claktory couldn't read that code.");
+    }
+    return reply.pipeInvitePreview;
+  }
+
+  /// Uses an invite [code] for a pipe to [projectId].
+  Future<void> acceptPipeInvite(
+    String code,
+    String projectId, {
+    String name = '',
+    String purpose = '',
+  }) => _request(
+    ClientMessage(
+      acceptPipeInvite: AcceptPipeInvite(
+        code: code,
+        projectId: projectId,
+        name: name,
+        purpose: purpose,
+      ),
+    ),
+  );
+
+  /// The person's decision on a pipe waiting for their approval.
+  Future<void> approvePipe(ApprovePipe approve) =>
+      _request(ClientMessage(approvePipe: approve));
+
+  Future<void> updatePipe(UpdatePipe update) =>
+      _request(ClientMessage(updatePipe: update));
+
+  Future<void> setPipeState(String pipeId, PipeAction action) => _request(
+    ClientMessage(
+      setPipeState: SetPipeState(pipeId: pipeId, action: action),
+    ),
+  );
+
+  /// Shows [pipeId] in the main pane, on every device; its messages follow.
+  Future<void> selectPipe(String pipeId) =>
+      _request(ClientMessage(selectPipe: SelectPipe(pipeId: pipeId)));
+
+  /// Makes a chat and shows it, on every device: with [text] as its first
+  /// message, or empty (gone again once it's left with nothing said).
+  Future<void> createChat({String text = '', String clientId = ''}) => _request(
+    ClientMessage(
+      createChat: CreateChat(text: text, clientId: clientId),
+    ),
+  );
+
+  /// Shows [chatId] in the main pane, on every device; its conversation
+  /// follows. The agent selected stays, to go back to.
+  Future<void> selectChat(String chatId) =>
+      _request(ClientMessage(selectChat: SelectChat(chatId: chatId)));
+
+  /// The person writes in a chat; [clientId] comes back on the queued
+  /// message, as for an agent.
+  Future<void> sendChatMessage(
+    String chatId,
+    String text, {
+    String clientId = '',
+  }) => _request(
+    ClientMessage(
+      sendChatMessage: SendChatMessage(
+        chatId: chatId,
+        text: text,
+        clientId: clientId,
+      ),
+    ),
+  );
+
+  /// Stops a chat's reply, or its wait for usage.
+  Future<void> stopChat(String chatId) =>
+      _request(ClientMessage(stopChat: StopChat(chatId: chatId)));
+
+  /// Deletes a chat and its conversation, for good.
+  Future<void> deleteChat(String chatId) =>
+      _request(ClientMessage(deleteChat: DeleteChat(chatId: chatId)));
+
+  /// Starts moving this Claktory to the computer showing [code] (from
+  /// `factoryd receive` there). Throws [RequestFailure] with a sentence for
+  /// the person when it can't.
+  Future<void> startMove(String code) =>
+      _request(ClientMessage(startMove: StartMove(code: code)));
+
+  /// The person sees the same digits on both computers.
+  Future<void> confirmMove() =>
+      _request(ClientMessage(confirmMove: ConfirmMove()));
+
+  /// Calls the move off, until the switch; once it failed, dismisses it.
+  Future<void> cancelMove() =>
+      _request(ClientMessage(cancelMove: CancelMove()));
+
+  /// Pauses the agents for the last of the copy now, rather than once the
+  /// copy has caught up.
+  Future<void> freezeMove() =>
+      _request(ClientMessage(freezeMove: FreezeMove()));
+
+  /// Names a chat; empty goes back to its automatic title.
+  Future<void> renameChat(String chatId, String title) => _request(
+    ClientMessage(
+      renameChat: RenameChat(chatId: chatId, title: title),
+    ),
+  );
+
+  /// Loads the entries before the first one [chatTranscript] holds, when
+  /// it's [chatId]'s. Throws [RequestFailure] when it can't.
+  Future<void> loadEarlierChat(String chatId) => _loadChatBefore(chatId);
+
+  /// Loads every entry from [seq] up to the first one [chatTranscript]
+  /// holds, when it's [chatId]'s.
+  Future<void> loadChatFrom(String chatId, int seq) =>
+      _loadChatBefore(chatId, from: seq);
+
+  Future<void> _loadChatBefore(String chatId, {int? from}) async {
+    final store = chatTranscript;
+    if (store.chatId != chatId || store.length == 0) return;
+    final loads = store.loads;
+    final first = store[0].entry.seq;
+    if (from != null && from >= first.toInt()) return;
+    final reply = await _call(
+      ClientMessage(
+        loadChatEntries: LoadChatEntries(
+          chatId: chatId,
+          beforeSeq: first,
+          fromSeq: from == null ? null : Int64(from),
+        ),
+      ),
+    );
+    if (store.loads != loads ||
+        store.length == 0 ||
+        store[0].entry.seq != first) {
+      return;
+    }
+    final page = reply.chatEntryPage;
+    store.prepend(page.chatId, page.entries, hasEarlier: page.hasEarlier);
+  }
+
+  /// [chatId]'s entry [seq] as it is now, whichever chat shows; null when
+  /// the backend has no such entry.
+  Future<Entry?> fetchChatEntry(String chatId, int seq) async {
+    final reply = await _call(
+      ClientMessage(
+        loadChatEntries: LoadChatEntries(
+          chatId: chatId,
+          beforeSeq: Int64(seq + 1),
+          fromSeq: Int64(seq),
+        ),
+      ),
+    );
+    for (final entry in reply.chatEntryPage.entries) {
+      if (entry.seq.toInt() == seq) return entry;
+    }
+    return null;
+  }
+
+  /// The person writes in a pipe.
+  Future<void> sendPipeMessage(String pipeId, String text) => _request(
+    ClientMessage(
+      sendPipeMessage: SendPipeMessage(pipeId: pipeId, text: text),
+    ),
+  );
+
+  /// Sends or discards a held message, or lets a held incoming one in.
+  Future<void> decidePipeMessage(String pipeId, int seq, bool allow) =>
+      _request(
+        ClientMessage(
+          decidePipeMessage: DecidePipeMessage(
+            pipeId: pipeId,
+            seq: Int64(seq),
+            allow: allow,
+          ),
+        ),
+      );
+
+  /// Loads the pipe's messages before the first one held.
+  Future<void> loadPipeMessages(String pipeId) async {
+    final chat = pipeChat;
+    if (chat.pipeId != pipeId || chat.messages.isEmpty) return;
+    final first = chat.messages.first.seq;
+    final reply = await _call(
+      ClientMessage(
+        loadPipeMessages: LoadPipeMessages(pipeId: pipeId, beforeSeq: first),
+      ),
+    );
+    if (reply.hasPipeMessagePage()) chat.prepend(reply.pipeMessagePage);
+  }
+
+  /// [pipeId]'s message [seq], as it is now, whichever pipe shows: what
+  /// Needs you shows of a held message. Null when there's no such message.
+  Future<PipeMessage?> fetchPipeMessage(String pipeId, int seq) async {
+    final reply = await _call(
+      ClientMessage(
+        loadPipeMessages: LoadPipeMessages(
+          pipeId: pipeId,
+          beforeSeq: Int64(seq + 1),
+          limit: 1,
+        ),
+      ),
+    );
+    for (final message in reply.pipeMessagePage.messages) {
+      if (message.seq.toInt() == seq) return message;
+    }
+    return null;
+  }
+
+  /// Makes a liaison agent for a pipe: a member and its lead.
+  Future<void> addPipeLiaison(String pipeId, String name) => _request(
+    ClientMessage(
+      addPipeLiaison: AddPipeLiaison(pipeId: pipeId, name: name),
+    ),
+  );
+
+  /// The person's decision on an agent that read a pipe using a secret.
+  Future<void> decideSecretApproval(String agentId, int seq, bool allow) =>
+      _request(
+        ClientMessage(
+          decideSecretApproval: DecideSecretApproval(
+            agentId: agentId,
+            seq: Int64(seq),
+            allow: allow,
+          ),
+        ),
+      );
 
   /// The folders in [path] on the machine Factory runs on: absolute, or
   /// from the home folder ("", "~" or "~/code").
@@ -1521,6 +2151,17 @@ class Backend {
   Future<void> unpairDevice(String deviceId) =>
       _request(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
 
+  /// Confirms the paired device [deviceId] as the person's own ("Confirm
+  /// it's yours"), from this device, which must be confirmed itself.
+  Future<void> confirmDevice(String deviceId) =>
+      _request(ClientMessage(confirmDevice: ConfirmDevice(deviceId: deviceId)));
+
+  /// Confirms this device as the owner's with [assertion], its account's
+  /// word that it's signed in.
+  Future<void> confirmThisDevice(String assertion) => _request(
+    ClientMessage(confirmDevice: ConfirmDevice(assertion: assertion)),
+  );
+
   /// Lets in the device waiting with [deviceId]'s code
   /// (RemoteAccess.pending_devices): it's paired from now on.
   Future<void> approveDevice(String deviceId) =>
@@ -1583,6 +2224,11 @@ class Backend {
         deviceId = message.welcome.deviceId;
         welcomeName = message.welcome.name;
         welcomeColor = message.welcome.color;
+        confirmBy.value = message.welcome.confirmByMs > 0
+            ? DateTime.fromMillisecondsSinceEpoch(
+                message.welcome.confirmByMs.toInt(),
+              )
+            : null;
         pairing.value = null;
         connectedSince.value = DateTime.now();
         connected.value = true;
@@ -1594,7 +2240,9 @@ class Backend {
       case ServerMessage_Body.pairingPending:
         unawaited(_pairingPending(message.pairingPending));
       case ServerMessage_Body.error:
-        if (message.error.code == ErrorCode.ERROR_CODE_UNAUTHORIZED) {
+        final toHello = message.replyTo.toInt() == _helloId;
+        if (toHello &&
+            message.error.code == ErrorCode.ERROR_CODE_UNAUTHORIZED) {
           if (_target != null) {
             // Not (or no longer) a paired device: retrying won't help.
             refused.value = message.error.message;
@@ -1605,6 +2253,10 @@ class Backend {
             _log('this Mac\'s Claktory refused: ${message.error.message}');
             unawaited(_socket?.close());
           }
+        } else if (toHello &&
+            message.error.code == ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED) {
+          // Refused until this device signs in: neither will it.
+          signInRequired.value = message.error.message;
         }
         final pending = _pending.remove(message.replyTo.toInt());
         if (pending != null) {
@@ -1617,6 +2269,7 @@ class Backend {
       case ServerMessage_Body.workspace:
         _wholeWorkspace = true;
         workspace.apply(message.workspace);
+        _sawMove(message.workspace);
       case ServerMessage_Body.workspacePatch:
         final next = _wholeWorkspace
             ? patchWorkspace(workspace.workspace, message.workspacePatch)
@@ -1629,6 +2282,7 @@ class Backend {
           return;
         }
         workspace.apply(next);
+        _sawMove(next);
       case ServerMessage_Body.transcript:
         transcript.load(message.transcript);
       case ServerMessage_Body.entry:
@@ -1662,6 +2316,10 @@ class Backend {
       case ServerMessage_Body.usageReport:
       case ServerMessage_Body.usageResetAnswer:
       case ServerMessage_Body.appPermissions:
+      case ServerMessage_Body.pipeInvite:
+      case ServerMessage_Body.pipeInvitePreview:
+      case ServerMessage_Body.pipeMessagePage:
+      case ServerMessage_Body.chatEntryPage:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.threadList:
         threads.apply(message.threadList);
@@ -1671,6 +2329,38 @@ class Backend {
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.fileChanged:
         fileChanged.value = message.fileChanged;
+      case ServerMessage_Body.pipeTranscript:
+        pipeChat.load(message.pipeTranscript);
+      case ServerMessage_Body.pipeMessageUpdate:
+        pipeChat.update(message.pipeMessageUpdate);
+      case ServerMessage_Body.chatTranscript:
+        final chat = message.chatTranscript;
+        chatTranscript.load(
+          Transcript(
+            agentId: chat.chatId,
+            entries: chat.entries,
+            hasEarlier: chat.hasEarlier,
+          ),
+        );
+      case ServerMessage_Body.chatEntry:
+        chatTranscript.update(
+          EntryUpdate(
+            agentId: message.chatEntry.chatId,
+            entry: message.chatEntry.entry,
+          ),
+        );
+      case ServerMessage_Body.chatDelta:
+        final delta = message.chatDelta;
+        chatTranscript.delta(
+          EntryDelta(agentId: delta.chatId, seq: delta.seq, text: delta.text),
+        );
+      case ServerMessage_Body.chatQueuedMessages:
+        chatQueued.apply(
+          QueuedMessages(
+            agentId: message.chatQueuedMessages.chatId,
+            messages: message.chatQueuedMessages.messages,
+          ),
+        );
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
         break;
@@ -1702,3 +2392,46 @@ void fireAndLog(Future<void> request) {
 }
 
 void _log(String message) => developer.log(message, name: 'factory.backend');
+
+/// The selected chat's conversation: an agent's transcript store, keyed by
+/// the chat's id.
+class ChatTranscriptStore extends TranscriptStore {
+  /// The chat it belongs to; empty before one loads.
+  String get chatId => agentId;
+}
+
+/// A chat's way to the backend for the outbox: text only, so nothing is
+/// ever uploaded.
+class _ChatOutbox implements OutboxBackend {
+  _ChatOutbox(this._backend);
+
+  final Backend _backend;
+
+  static const _textOnly = RequestFailure('Chats take text only.');
+
+  @override
+  Future<void> send(
+    String agentId,
+    String text,
+    String clientId,
+    List<SentFile> files, {
+    bool voice = false,
+  }) {
+    if (files.isNotEmpty) throw _textOnly;
+    return _backend.sendChatMessage(agentId, text, clientId: clientId);
+  }
+
+  @override
+  Future<int> startUpload(String uploadId, String agentId, LocalFile file) =>
+      throw _textOnly;
+
+  @override
+  Future<int> uploadChunk(String uploadId, int offset, Uint8List data) =>
+      throw _textOnly;
+
+  @override
+  Future<SentFile> finishUpload(String uploadId) => throw _textOnly;
+
+  @override
+  Future<void> cancelUpload(String uploadId) async {}
+}

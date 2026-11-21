@@ -7,6 +7,7 @@ import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
 import 'package:factory_app/name_step.dart';
+import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
@@ -362,6 +363,26 @@ void main() {
     expect(_labeled('nixos has something new'), findsNothing);
   });
 
+  testWidgets("a tile counts what waits in a Claktory's chats and pipes too, "
+      'as Needs you does', (tester) async {
+    final app = _App(
+      snapshots: {
+        '': _workspace('Rivet'),
+        _nixos: _workspace('Nix', waiting: [4])
+          ..chats.add(Chat(id: 'c1', waitingSeqs: [Int64(2)]))
+          ..pipes.add(Pipe(id: 'p1', state: PipeState.PIPE_STATE_APPROVAL)),
+      },
+    );
+    app.connections.use(parsePairingCode(_nixos));
+    app.connections.use(null);
+    await app.show(tester);
+
+    expect(
+      _labeled('nixos has 3 things waiting for your answer'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets("a tile doesn't wave for an agent only waiting out its usage "
       'limits', (tester) async {
     final app = _App(
@@ -398,8 +419,14 @@ void main() {
       },
     );
     app.connections.use(parsePairingCode(_nixos));
+    final semantics = tester.ensureSemantics();
     await app.show(tester);
     expect(find.text("What's your name?"), findsOneWidget);
+    // VoiceOver reaches the rail too, and nothing else behind the step.
+    expect(find.semantics.byLabel(RegExp('This Mac')), findsWidgets);
+    // Nix, the agent behind it, isn't.
+    expect(find.semantics.byLabel(RegExp('Nix')), findsNothing);
+    semantics.dispose();
 
     await tester.tap(_labeled('This Mac'));
     await pumpFrames(tester);
@@ -428,9 +455,8 @@ void main() {
     expect(find.byType(ClaktoryList), findsOneWidget);
   });
 
-  testWidgets('on a phone, the Claktories are a list at the top', (
-    tester,
-  ) async {
+  testWidgets('on a phone, the Claktories are a rail in the drawer; the '
+      'list of them stays in reach', (tester) async {
     final app = _App(
       localBackend: false,
       snapshots: {
@@ -444,13 +470,29 @@ void main() {
       ..use(parsePairingCode(_nixos));
     await app.show(tester, size: const Size(390, 844));
     expect(find.byType(ClaktoryRail), findsNothing);
-    // The chosen one shows first.
+    // The chosen one's conversation fills the screen; the drawer waits.
+    expect(find.byType(Sidebar), findsNothing);
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
+    await pumpFrames(tester);
+    expect(find.byType(PhoneClaktoryRail), findsOneWidget);
     expect(
       find.descendant(of: find.byType(Sidebar), matching: find.text('Nix')),
       findsWidgets,
     );
+    expect(_labeled('mac-mini has something new'), findsOneWidget);
 
-    // Back to the list (the sidebar's "‹ Claktories" row).
+    // Another: its agents, in the drawer still open.
+    await tester.tap(_labeled('mac-mini'));
+    await pumpFrames(tester);
+    expect(app.connections.current?.code, _mini);
+    expect(
+      find.descendant(of: find.byType(Sidebar), matching: find.text('Mini')),
+      findsWidgets,
+    );
+
+    // Over a step that covers the window, the way to the list of them.
     final back = tester.widget(
       find.byWidgetPredicate((w) => w.runtimeType.toString() == '_BackToList'),
     );
@@ -458,21 +500,15 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsOneWidget);
     expect(_labeled('nixos'), findsOneWidget);
-    expect(_labeled('mac-mini has something new'), findsOneWidget);
-
-    await tester.tap(_labeled('mac-mini'));
+    await tester.tap(_labeled('nixos'));
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsNothing);
-    expect(app.connections.current?.code, _mini);
-    expect(
-      find.descendant(of: find.byType(Sidebar), matching: find.text('Mini')),
-      findsWidgets,
-    );
+    expect(app.connections.current?.code, _nixos);
 
     // Adding one pairs it, then shows it.
-    (tester.widget(
-      find.byWidgetPredicate((w) => w.runtimeType.toString() == '_BackToList'),
-    ) as dynamic).back();
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
     await pumpFrames(tester);
     await tester.tap(_labeled('Add a Claktory'));
     await pumpFrames(tester);
@@ -487,60 +523,73 @@ void main() {
     expect(app.connections.saved, hasLength(3));
   });
 
-  for (final size in const [Size(320, 568), Size(568, 320), Size(390, 844)]) {
-    testWidgets('the phone list fits a ${size.width.toInt()}×'
-        '${size.height.toInt()} screen, long names and problems too', (
-      tester,
-    ) async {
-      final long =
-          'factory://?t=${'e' * 64}&name=a-very-long-machine-name-for-a-'
-          'small-screen&e=${'f' * 64}';
-      final app = _App(
-        localBackend: false,
-        snapshots: {
-          _nixos: _workspace('Nix', working: true),
-          _mini: _workspace('Mini', unseen: true),
-          long: _workspace('Long'),
-        },
-      );
-      app.connections
-        ..use(parsePairingCode(_nixos))
-        ..use(parsePairingCode(_mini))
-        ..use(parsePairingCode(long))
-        ..use(parsePairingCode(_nixos));
-      await app.show(tester, size: size);
-      // One that can't be reached, and one that turned this device away.
-      app.backends[_mini]!.connected.value = false;
-      app.backends[_mini]!.tunnel.value = const TunnelStatus(
-        phase: TunnelPhase.failed,
-        path: TunnelPath.none,
-        error: 'timed out',
-        failure: TunnelFailure.unreachable,
-        relayConnected: false,
-      );
-      app.backends[long]!.connected.value = false;
-      app.backends[long]!.refused.value = 'unknown device';
-      (tester.widget(
-        find.byWidgetPredicate(
-          (w) => w.runtimeType.toString() == '_BackToList',
-        ),
-      ) as dynamic).back();
-      await pumpFrames(tester);
-      expect(find.byType(ClaktoryList), findsOneWidget);
-      expect(find.text("Can't connect"), findsOneWidget);
-      expect(find.text('Not allowed'), findsOneWidget);
-      expect(find.text('Working'), findsOneWidget);
-      // The last rows are reachable however short the screen.
-      await tester.scrollUntilVisible(
-        find.text('Add a Claktory'),
-        100,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(find.text('Add a Claktory'));
-      await pumpFrames(tester);
-      expect(find.byType(PairScreen), findsOneWidget);
-      // Overflows would have failed the test by now.
-    });
+  for (final (scale, size) in [
+    for (final scale in const [1.0, 3.1])
+      for (final size in const [Size(320, 568), Size(568, 320), Size(390, 844)])
+        (scale, size),
+  ]) {
+    testWidgets(
+      'the phone list fits a ${size.width.toInt()}×'
+      '${size.height.toInt()} screen${scale > 1 ? ' at the largest text' : ''}, long names and problems too',
+      (tester) async {
+        final long =
+            'factory://?t=${'e' * 64}&name=a-very-long-machine-name-for-a-'
+            'small-screen&e=${'f' * 64}';
+        final app = _App(
+          localBackend: false,
+          snapshots: {
+            _nixos: _workspace('Nix', working: true),
+            _mini: _workspace('Mini', unseen: true),
+            long: _workspace('Long'),
+          },
+        );
+        app.connections
+          ..use(parsePairingCode(_nixos))
+          ..use(parsePairingCode(_mini))
+          ..use(parsePairingCode(long))
+          ..use(parsePairingCode(_nixos));
+        await app.show(tester, size: size);
+        // One that can't be reached, and one that turned this device away.
+        app.backends[_mini]!.connected.value = false;
+        app.backends[_mini]!.tunnel.value = const TunnelStatus(
+          phase: TunnelPhase.failed,
+          path: TunnelPath.none,
+          error: 'timed out',
+          failure: TunnelFailure.unreachable,
+          relayConnected: false,
+        );
+        app.backends[long]!.connected.value = false;
+        app.backends[long]!.refused.value = 'unknown device';
+        (tester.widget(
+          find.byWidgetPredicate(
+            (w) => w.runtimeType.toString() == '_BackToList',
+          ),
+        ) as dynamic).back();
+        await pumpFrames(tester);
+        // The list, at this text size: each row grows with it.
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await pumpFrames(tester);
+        expect(find.byType(ClaktoryList), findsOneWidget);
+        for (final line in ['Working', "Can't connect", 'Not allowed']) {
+          await tester.scrollUntilVisible(
+            find.text(line),
+            100,
+            scrollable: find.byType(Scrollable).first,
+          );
+        }
+        // The last rows are reachable however short the screen.
+        await tester.scrollUntilVisible(
+          find.text('Add a Claktory'),
+          100,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.tap(find.text('Add a Claktory'));
+        await pumpFrames(tester);
+        expect(find.byType(PairScreen), findsOneWidget);
+        // Overflows would have failed the test by now.
+      },
+    );
   }
 
   testWidgets('removing one from the phone list stays on the list', (

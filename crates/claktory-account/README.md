@@ -44,6 +44,13 @@ without them, no Claktory signed in here can unlock its secrets after a
 restart except with its recovery key. The database can be lost (Claktories
 then sign in again); the secrets can't.
 
+If a key leaks, `claktory-account rotate-secrets secrets.json --signing-key`
+(or `--k-share`, or both) replaces only the keys named, keeping the file as
+it was beside it (`secrets.json.before-<time>`), then restart the service. A
+new signing key makes every Claktory sign in again, and its secrets open by
+themselves after; a new `k_share` makes every Claktory open its secrets with
+its recovery key once, and they open by themselves again from then on.
+
 ## What it keeps
 
 Accounts (email, when made, last sign-in); Claktories (id, name, backend

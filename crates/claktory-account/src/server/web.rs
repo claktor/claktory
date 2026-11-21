@@ -23,6 +23,7 @@ pub(super) async fn page(service: &Service, call: &Call) -> Reply {
         (&Method::POST, "/account/remove") => remove(service, call, &form),
         (&Method::POST, "/account/remove-device") => remove_device(service, call, &form),
         (&Method::POST, "/account/delete") => delete(service, call, &form),
+        (&Method::GET, "/account/delete") => Ok(delete_page(service, call)),
         (&Method::POST, "/account/sign-out") => Ok(sign_out(service, call)),
         (&Method::GET, "/account/data") => data(service, call),
         (&Method::GET, "/account/admin") => Ok(admin(service, call)),
@@ -86,7 +87,7 @@ fn checked_session(service: &Service, call: &Call, form: &Form) -> Option<String
 fn home(service: &Service, call: &Call, notice: Option<&str>) -> Reply {
     let notice = notice.map(|text| format!("<p class=\"notice\">{}</p>", escape(text))).unwrap_or_default();
     let Some((_, email, csrf)) = session(service, call) else {
-        return sign_in_page(&notice, "");
+        return sign_in_page(&notice, "", Next::Account);
     };
     let conn = service.db();
     let account = db::account_by_email(&conn, &email).ok().flatten();
@@ -245,50 +246,89 @@ fn admin(service: &Service, call: &Call) -> Reply {
     )
 }
 
-fn sign_in_page(notice: &str, email: &str) -> Reply {
+/// Where signing in on the web leads: the account page, or straight to
+/// deleting the account (the app's Delete account… opens
+/// /account/delete).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Next {
+    Account,
+    Delete,
+}
+
+impl Next {
+    fn of(form: &Form) -> Next {
+        if form.get("next") == "delete" { Next::Delete } else { Next::Account }
+    }
+
+    /// The hidden field that carries it through the sign-in's forms.
+    fn field(self) -> &'static str {
+        match self {
+            Next::Account => "",
+            Next::Delete => "<input type=\"hidden\" name=\"next\" value=\"delete\">",
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Next::Account => "/account",
+            Next::Delete => "/account/delete",
+        }
+    }
+}
+
+fn sign_in_page(notice: &str, email: &str, next: Next) -> Reply {
+    let why = match next {
+        Next::Account => "Enter your email address. You'll get a code to sign in.",
+        Next::Delete => "To delete your account, sign in first. Enter your email address, and you'll get a code.",
+    };
     html(
         StatusCode::OK,
         "Sign in to Claktory",
         &format!(
-            "{notice}<p>Enter your email address. You'll get a code to sign in.</p>\
-             <form method=\"post\" action=\"/account/sign-in\"><input type=\"email\" name=\"email\" value=\"{}\" placeholder=\"Email address\" required autofocus>\
+            "{notice}<p>{why}</p>\
+             <form method=\"post\" action=\"/account/sign-in\">{next}<input type=\"email\" name=\"email\" value=\"{}\" placeholder=\"Email address\" required autofocus>\
              <button>Send code</button></form>",
-            escape(email)
+            escape(email),
+            next = next.field(),
         ),
     )
 }
 
 /// A code that can't be used any more: a new one to the same address.
-fn new_code_page(email: &str, notice: &str) -> Reply {
+fn new_code_page(email: &str, notice: &str, next: Next) -> Reply {
     if normalize_email(email).is_none() {
-        return sign_in_page(&format!("<p class=\"notice\">{}</p>", escape(notice)), "");
+        return sign_in_page(&format!("<p class=\"notice\">{}</p>", escape(notice)), "", next);
     }
     html(
         StatusCode::OK,
         "Sign in to Claktory",
         &format!(
-            "<p class=\"notice\">{}</p><form method=\"post\" action=\"/account/sign-in\"><input type=\"hidden\" name=\"email\" value=\"{}\">\
-             <button>Send new code</button></form><p><a href=\"/account\">Use a different email</a></p>",
+            "<p class=\"notice\">{}</p><form method=\"post\" action=\"/account/sign-in\">{next}<input type=\"hidden\" name=\"email\" value=\"{}\">\
+             <button>Send new code</button></form><p><a href=\"{path}\">Use a different email</a></p>",
             escape(notice),
-            escape(email)
+            escape(email),
+            next = next.field(),
+            path = next.path(),
         ),
     )
 }
 
-fn code_page(email: &str, request_id: &str, notice: &str) -> Reply {
+fn code_page(email: &str, request_id: &str, notice: &str, next: Next) -> Reply {
     html(
         StatusCode::OK,
         "Check your email",
         &format!(
             "{notice}<p>Enter the 6-digit code sent to {email}. It works for 15 minutes.</p>\
-             <form method=\"post\" action=\"/account/verify\"><input type=\"hidden\" name=\"request\" value=\"{request}\">\
+             <form method=\"post\" action=\"/account/verify\">{next}<input type=\"hidden\" name=\"request\" value=\"{request}\">\
              <input type=\"hidden\" name=\"email\" value=\"{email}\">\
              <input name=\"code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" placeholder=\"Code\" required autofocus>\
              <button>Continue</button></form>\
-             <form method=\"post\" action=\"/account/sign-in\"><input type=\"hidden\" name=\"email\" value=\"{email}\"><button class=\"plain\">Resend code</button></form>\
-             <p><a href=\"/account\">Use a different email</a></p>",
+             <form method=\"post\" action=\"/account/sign-in\">{next}<input type=\"hidden\" name=\"email\" value=\"{email}\"><button class=\"plain\">Resend code</button></form>\
+             <p><a href=\"{path}\">Use a different email</a></p>",
             email = escape(email),
             request = escape(request_id),
+            next = next.field(),
+            path = next.path(),
         ),
     )
 }
@@ -312,8 +352,9 @@ fn platform_name(platform: &str) -> String {
 }
 
 async fn sign_in(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    let next = Next::of(form);
     let Some(email) = normalize_email(form.get("email")) else {
-        return Ok(sign_in_page("<p class=\"notice\">Enter an email address, like you@example.com.</p>", form.get("email")));
+        return Ok(sign_in_page("<p class=\"notice\">Enter an email address, like you@example.com.</p>", form.get("email"), next));
     };
     sign_in_limits(service, &email, &call.ip)?;
     let request = db::Request {
@@ -330,9 +371,9 @@ async fn sign_in(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
         expires: 0,
     };
     match start(service, request, &new_code()).await {
-        Ok(request_id) => Ok(code_page(&email, &request_id, "")),
+        Ok(request_id) => Ok(code_page(&email, &request_id, "", next)),
         Err(error) if error.body.error == "email_unavailable" => {
-            Ok(sign_in_page("<p class=\"notice\">Codes can't be sent right now. Try again in a few minutes.</p>", &email))
+            Ok(sign_in_page("<p class=\"notice\">Codes can't be sent right now. Try again in a few minutes.</p>", &email, next))
         }
         Err(error) => Err(error),
     }
@@ -340,18 +381,24 @@ async fn sign_in(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
 
 fn verify(service: &Service, _call: &Call, form: &Form) -> Result<Reply, ApiError> {
     let email = form.get("email");
+    let next = Next::of(form);
     let request = match check_code(service, form.get("request"), form.get("code"), "web") {
         Ok(request) => request,
         Err(error) if error.body.error == "wrong_code" => {
             let left = error.body.attempts_left.unwrap_or(0);
             if left == 0 {
-                return Ok(new_code_page(email, "Too many tries. Get a new code."));
+                return Ok(new_code_page(email, "Too many tries. Get a new code.", next));
             }
             let tries = if left == 1 { "1 try".to_owned() } else { format!("{left} tries") };
-            return Ok(code_page(email, form.get("request"), &format!("<p class=\"notice\">That code isn't right. {tries} left.</p>")));
+            return Ok(code_page(
+                email,
+                form.get("request"),
+                &format!("<p class=\"notice\">That code isn't right. {tries} left.</p>"),
+                next,
+            ));
         }
         Err(error) if error.body.error == "code_expired" => {
-            return Ok(new_code_page(email, "That code has expired. Get a new one."));
+            return Ok(new_code_page(email, "That code has expired. Get a new one.", next));
         }
         Err(error) => return Err(error),
     };
@@ -364,7 +411,7 @@ fn verify(service: &Service, _call: &Call, form: &Form) -> Result<Reply, ApiErro
     }
     let secure = if service.config.trust_proxy { "; Secure" } else { "" };
     let cookie = format!("{COOKIE}={token}; Path=/account; HttpOnly; SameSite=Strict; Max-Age={SESSION}{secure}");
-    Ok(redirect(Some(cookie)))
+    Ok(redirect_to(next.path(), Some(cookie)))
 }
 
 fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
@@ -431,23 +478,51 @@ fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
     let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None)) };
     let Some(account) = db::account_by_email(&service.db(), &email)? else { return Ok(home(service, call, None)) };
     if form.get("confirm") != "yes" {
-        return Ok(html(
-            StatusCode::OK,
-            "Delete your account?",
-            &format!(
-                "<p>This deletes your email and everything linked to it. Your Claktories keep running, but after a restart \
-                 they can unlock their secrets only with their recovery key, until you sign in on them again.</p>\
-                 <form method=\"post\" action=\"/account/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">\
-                 <input type=\"hidden\" name=\"confirm\" value=\"yes\"><button class=\"danger\">Delete account</button> <a href=\"/account\">Cancel</a></form>",
-                escape(form.get("csrf"))
-            ),
-        ));
+        return Ok(delete_confirm(form.get("csrf")));
     }
     db::delete_account(&mut service.db(), &account)?;
     tracing::info!("deleted: account {}", account.id);
-    let mut reply = sign_in_page("<p class=\"notice\">Your account was deleted.</p>", "");
+    let mut reply = sign_in_page("<p class=\"notice\">Your account was deleted.</p>", "", Next::Account);
     reply.headers.push(clear_cookie());
     Ok(reply)
+}
+
+fn delete_confirm(csrf: &str) -> Reply {
+    html(
+        StatusCode::OK,
+        "Delete your account?",
+        &format!(
+            "<p>This deletes your email and everything linked to it. Your Claktories keep running, but after a restart \
+             they can unlock their secrets only with their recovery key, until you sign in on them again.</p>\
+             <form method=\"post\" action=\"/account/delete\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">\
+             <input type=\"hidden\" name=\"confirm\" value=\"yes\"><button class=\"danger\">Delete account</button> <a href=\"/account\">Cancel</a></form>",
+            escape(csrf)
+        ),
+    )
+}
+
+/// GET /account/delete, where the app's Delete account… leads: the
+/// confirm step, after signing in if need be.
+fn delete_page(service: &Service, call: &Call) -> Reply {
+    let Some((_, email, csrf)) = session(service, call) else {
+        return sign_in_page("", "", Next::Delete);
+    };
+    match db::account_by_email(&service.db(), &email) {
+        Ok(Some(_)) => delete_confirm(&csrf),
+        Ok(None) => html(
+            StatusCode::OK,
+            "No account to delete",
+            &format!(
+                "<p>No Claktory or device has signed in with {}, so there's nothing to delete.</p><p><a href=\"/account\">Go to your account</a></p>",
+                escape(&email)
+            ),
+        ),
+        Err(_) => html(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Something went wrong",
+            "<p>Try again in a few minutes.</p><p><a href=\"/account\">Go to your account</a></p>",
+        ),
+    }
 }
 
 fn sign_out(service: &Service, call: &Call) -> Reply {
@@ -487,9 +562,14 @@ pub(super) fn root() -> Reply {
 
 /// Back to the account page, after a form.
 fn redirect(cookie: Option<String>) -> Reply {
+    redirect_to("/account", cookie)
+}
+
+/// On to `path`, one of the account's own pages, after a form.
+fn redirect_to(path: &'static str, cookie: Option<String>) -> Reply {
     let mut reply =
         Reply { status: StatusCode::SEE_OTHER, content_type: "text/plain; charset=utf-8", headers: Vec::new(), body: Vec::new() };
-    reply.headers.push((hyper::header::LOCATION, HeaderValue::from_static("/account")));
+    reply.headers.push((hyper::header::LOCATION, HeaderValue::from_static(path)));
     if let Some(cookie) = cookie.and_then(|cookie| HeaderValue::from_str(&cookie).ok()) {
         reply.headers.push((hyper::header::SET_COOKIE, cookie));
     }

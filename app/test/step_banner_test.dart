@@ -2,6 +2,8 @@ import 'package:factory_app/changelog.dart' show ChangelogView;
 import 'package:factory_app/name_step.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show Size;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -40,6 +42,30 @@ void main() {
     await tester.tap(find.text('Update').hitTestable());
     await pumpFrames(tester);
     expect(harness.last.hasInstallUpdate(), isTrue);
+  });
+
+  testWidgets('on a Mac, VoiceOver behind the step reaches only the update '
+      'banner', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(_snapshot(), named: false);
+    harness.appVersion = 'v0.1.10';
+    final semantics = tester.ensureSemantics();
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    for (final n in find.semantics.byPredicate((n) => true).evaluate()) {
+      debugPrint('YYY ${n.label} ${n.rect} hidden=${n.flagsCollection}');
+    }
+    expect(find.byType(NameStep), findsOneWidget);
+    expect(find.semantics.byLabel("What's your name?"), findsOneWidget);
+    expect(find.semantics.byLabel(RegExp('Update')), findsWidgets);
+    // The sidebar's agents and the conversation behind are silent.
+    expect(find.semantics.byLabel(RegExp('Rivet')), findsNothing);
+    for (final n
+        in find.semantics.byPredicate((n) => n.label.isNotEmpty).evaluate()) {
+      debugPrint('XXX ${n.label}');
+    }
+    semantics.dispose();
   });
 
   testWidgets("What's new shows instead of the question until it's closed", (

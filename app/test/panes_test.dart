@@ -254,8 +254,7 @@ void main() {
     harness.backend.files['/w/main.rs'] = text('/w/main.rs', 'fn main() {}');
     await harness.show(tester, size: const Size(390, 844));
     await pumpFrames(tester);
-    await tester.tap(find.text('Builder'));
-    await pumpFrames(tester);
+    // Its conversation fills the screen.
     expect(find.byType(Pane), findsNothing, reason: 'one pane at a time');
     await tester.tap(find.bySemanticsLabel('Extensions'));
     await pumpFrames(tester);
@@ -266,5 +265,8 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester);
     expect(find.text('fn main() {}'), findsNothing);
+    // Back closes it on this phone only: the agent's layout, which other
+    // devices show too, stays as it is.
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
   });
 }

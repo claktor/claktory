@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "client_batch_id": "batch-6f1c2a90",
+  "addressed_agent": "june",
+  "source": {
+    "absolute_path": "/Users/me/papers/paper.pdf",
+    "sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb"
+  },
+  "items": [
+    {
+      "thread": "t-41",
+      "annotation_id": "ann-41",
+      "ink_layer_id": "layer-paper-p3",
+      "layer_revision": 2,
+      "page_1based": 3,
+      "question": "Why does this step follow?"
+    },
+    {
+      "thread": "t-42",
+      "annotation_id": "ann-42",
+      "ink_layer_id": "layer-paper-p3",
+      "layer_revision": 2,
+      "page_1based": 3,
+      "question": null
+    },
+    {
+      "thread": "t-45",
+      "annotation_id": "ann-45",
+      "ink_layer_id": "layer-paper-p7",
+      "layer_revision": 3,
+      "page_1based": 7,
+      "question": "Is this bound tight?"
+    }
+  ],
+  "excluded_drafts": [
+    "t-43"
+  ]
+}

@@ -223,7 +223,7 @@ pub(crate) fn uninstall(setup: &Setup, delete_data: bool) -> Report {
     if let Err(detail) = stop(setup) {
         return report(setup, Outcome::Failed, "macOS didn't stop Claktory, so nothing was removed.", detail, &plan);
     }
-    stop_leftovers(setup);
+    stop_leftovers(&setup.home);
     let mut failed = Vec::new();
     if let Some(plist) = &plan.plist
         && let Err(error) = std::fs::remove_file(plist)
@@ -281,10 +281,10 @@ fn stop(setup: &Setup) -> Result<(), String> {
 /// outlive it: agents' background tasks and monitors' watches that factory.db
 /// says still run. Only those started since this boot, whose pids can't be
 /// another's.
-fn stop_leftovers(setup: &Setup) {
+pub(crate) fn stop_leftovers(home: &crate::home::Home) {
     use factory_agent::tools::bash::{group_alive, started_before_boot};
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let Ok(db) = rusqlite::Connection::open_with_flags(setup.home.db_path(), flags) else { return };
+    let Ok(db) = rusqlite::Connection::open_with_flags(home.db_path(), flags) else { return };
     let mut groups: Vec<(u32, i64)> = Vec::new();
     if let Ok(mut statement) = db.prepare("SELECT pid, started FROM tasks WHERE ended IS NULL")
         && let Ok(rows) = statement.query_map([], crate::store::row2::<i64, i64>)

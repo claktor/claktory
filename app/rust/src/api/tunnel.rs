@@ -1,5 +1,5 @@
 //! The private tunnel, for Dart: a device key, and a tunnel to a backend
-//! that the app reaches at ws://127.0.0.1:<port>.
+//! that the app reaches at ws://127.0.0.1:<port><path>.
 
 use std::sync::{Arc, LazyLock};
 
@@ -54,10 +54,18 @@ pub fn pairing_ids(device_key: String, endpoint_id: String) -> anyhow::Result<Pa
 }
 
 impl TunnelHandle {
-    /// Where the app connects: ws://127.0.0.1:<port>.
+    /// Where the app connects: ws://127.0.0.1:<port><path>.
     #[frb(sync)]
     pub fn port(&self) -> u16 {
         self.tunnel.port()
+    }
+
+    /// The path the app asks for at [port]: `/<secret>`, the tunnel's own.
+    /// Nothing else there is forwarded, so no other program on this device
+    /// passes for it. Never shown, saved or logged.
+    #[frb(sync)]
+    pub fn path(&self) -> String {
+        self.tunnel.path().to_owned()
     }
 
     #[frb(sync)]

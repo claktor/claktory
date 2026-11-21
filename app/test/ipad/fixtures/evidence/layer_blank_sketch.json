@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "ink_layer_id": "layer-sketch",
+  "revision": 1,
+  "parent_revision": null,
+  "source": {
+    "absolute_path": "/Users/me/project/sketches/sketch-2026-11-21.png",
+    "sha256": "60f5cf6af6bbf57c15b55b748e5de39afad06ac9e7cf9ee9b86f6b045421099d",
+    "mime": "image/png",
+    "size": 40211
+  },
+  "coordinate_space": {
+    "kind": "image",
+    "oriented_width": 2048,
+    "oriented_height": 1536,
+    "stored_width": 2048,
+    "stored_height": 1536,
+    "exif_orientation": 1,
+    "units": "px"
+  },
+  "drawing": {
+    "format": "pencilkit",
+    "content_version": 1,
+    "blob_id": "blob-sketch-r1-drawing",
+    "sha256": "f0e9de4d15e070bdc55d688ac5c5f6ec081857b35341fec78cc63a456835281c",
+    "bytes": 9020,
+    "space": "blank_canvas",
+    "drawing_to_document": [
+      2,
+      0,
+      0,
+      2,
+      0,
+      0
+    ]
+  },
+  "ink_preview": {
+    "png_blob_id": "blob-sketch-r1-preview",
+    "sha256": "0ed68054505eef61a6adb1ed2decc2f7c7be80ae35c18e32fe6cd5fd28bcc914",
+    "pixel_width": 2048,
+    "pixel_height": 1536,
+    "bytes": 40211
+  },
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

@@ -29,9 +29,11 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Scan the code your Mac shows to connect to Claktory.</string>
+	<string>Scan the code from your Claktory to connect this iPhone to it.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect straight to your Mac when your iPhone is on the same network, for a faster connection.</string>
+	<string>Connect straight to your Claktory when it's on the same network as this iPhone, for a faster connection.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record voice messages to your agents. Claktory turns them into text.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

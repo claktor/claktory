@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "annotation_id": "ann-42",
+  "thread": "t-42",
+  "ink_layer_id": "layer-paper-p3",
+  "layer_revision": 2,
+  "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+  "anchor": {
+    "kind": "pdf",
+    "selectors": [
+      {
+        "type": "FragmentSelector",
+        "conformsTo": "http://tools.ietf.org/rfc/rfc8118",
+        "value": "page=3",
+        "refinedBy": {
+          "type": "ClaktoryPageRegion",
+          "version": 1,
+          "box": "crop",
+          "rotation": 0,
+          "units": "normalized",
+          "origin": "top_left_unrotated",
+          "x": 0.6,
+          "y": 0.72,
+          "w": 0.25,
+          "h": 0.06
+        }
+      }
+    ]
+  },
+  "region": {
+    "x": 0.6,
+    "y": 0.72,
+    "w": 0.25,
+    "h": 0.06
+  },
+  "context_composite": {
+    "png_blob_id": "blob-t-42-r2-context",
+    "sha256": "23a8037f5123c78e3302387955896cb654ebfa72a5a9d2ce4bfa91d00e4c10a7",
+    "pixel_width": 2048,
+    "pixel_height": 1060,
+    "bytes": 402118,
+    "region": {
+      "x": 0.55,
+      "y": 0.68,
+      "w": 0.35,
+      "h": 0.14
+    },
+    "crop_to_document_transform": [
+      0.10459,
+      0,
+      0,
+      -0.10459,
+      336.6,
+      253.44
+    ]
+  },
+  "question": null,
+  "excerpt_text": null,
+  "recognized_text": null,
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

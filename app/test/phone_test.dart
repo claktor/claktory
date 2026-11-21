@@ -4,6 +4,7 @@ import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/shell.dart' show NoAgentView;
 import 'package:factory_app/sidebar.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -44,29 +45,34 @@ Future<Harness> showPhone(WidgetTester tester, Workspace snapshot) async {
   return harness;
 }
 
+/// The conversation's leading button, which opens the drawer.
+Finder menuButton() => find.bySemanticsLabel(RegExp(r'^(Menu|Back)$'));
+
 void main() {
-  testWidgets('the sidebar is the first screen; an agent is pushed over it '
-      'and Back returns', (tester) async {
+  testWidgets('the conversation fills the screen; the drawer chooses '
+      'another agent', (tester) async {
     final harness = await showPhone(tester, workspace());
     expect(find.byType(PhoneShell), findsOneWidget);
-    expect(find.byType(AgentView), findsNothing);
-    expect(tester.getSize(find.byType(Sidebar)).width, phone.width);
+    expect(tester.getSize(find.byType(AgentView)).width, phone.width);
+    // The drawer waits, closed.
+    expect(find.byType(Sidebar), findsNothing);
 
-    await tester.tap(find.text('Mike'));
+    await tester.tap(menuButton());
+    await pumpFrames(tester);
+    expect(find.byType(Sidebar), findsOneWidget);
+    await tester.tap(
+      find.descendant(of: find.byType(Sidebar), matching: find.text('Mike')),
+    );
     await pumpFrames(tester);
     expect(harness.last.selectAgent.agentId, 'mike');
+    expect(find.byType(Sidebar), findsNothing);
     await harness.apply(tester, workspace()..selectedAgentId = 'mike');
     await pumpFrames(tester);
-    expect(find.byType(AgentView), findsOneWidget);
     // The name with its role; no model or context meter at this size.
     expect(
       find.descendant(of: find.byType(AgentView), matching: find.text('Mike')),
       findsOneWidget,
     );
-
-    await tester.tap(find.bySemanticsLabel('Back'));
-    await pumpFrames(tester);
-    expect(find.byType(AgentView), findsNothing);
   });
 
   testWidgets('panels open as sheets from the "…" list', (tester) async {
@@ -74,8 +80,6 @@ void main() {
       tester,
       workspace()..selectedAgentId = 'mike',
     );
-    await tester.tap(find.text('Mike'));
-    await pumpFrames(tester);
     await tester.tap(find.bySemanticsLabel('Extensions'));
     await pumpFrames(tester);
     expect(find.text("Mike's extensions"), findsOneWidget);
@@ -91,16 +95,14 @@ void main() {
     );
     await pumpFrames(tester);
     expect(tester.getSize(find.byType(ExtensionPanel)).width, phone.width - 2);
-    // A tap above it closes it.
-    await tester.tapAt(const Offset(195, 30));
+    // A tap above it closes it: the dimmed sliver over a tall sheet.
+    await tester.tapAt(const Offset(195, 3));
     await pumpFrames(tester);
     expect(harness.last.openPanel.extensionId, '');
   });
 
   testWidgets('the message box sits above the keyboard', (tester) async {
     await showPhone(tester, workspace()..selectedAgentId = 'mike');
-    await tester.tap(find.text('Mike'));
-    await pumpFrames(tester);
     tester.view.viewInsets = const FakeViewPadding(bottom: 336);
     await pumpFrames(tester);
     final box = find
@@ -151,7 +153,7 @@ void main() {
     expect(harness.connections.current?.endpointId, 'c' * 64);
     expect(harness.backend.target?.endpointId, 'c' * 64);
     expect(find.byType(PairScreen), findsNothing);
-    expect(find.byType(Sidebar), findsOneWidget);
+    expect(find.byType(NoAgentView), findsOneWidget);
   });
 
   testWidgets('Scan code asks for the camera, then connects to the code it '

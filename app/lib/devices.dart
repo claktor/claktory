@@ -5,11 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'android/device_identity.dart';
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/input.dart' show InputKind;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
@@ -17,6 +22,8 @@ import 'tunnel_client.dart';
 import 'settings_view.dart';
 import 'usage.dart';
 import 'tell_rivet.dart';
+import 'your_claktories.dart'
+    show YourClaktories, deadlineDay, showConfirmSignIn;
 
 /// Settings → Devices: the devices that can show this Claktory, and adding
 /// one. Any device showing it may add and remove devices: one already
@@ -59,14 +66,15 @@ class _DevicesSettingsState extends State<DevicesSettings>
           ErrorLine(
             remote.error,
             about: 'Settings → Devices has an error.',
-            style: TextStyles.body.copyWith(color: palette.danger),
+            style: TypeScale.of(context).body.copyWith(color: palette.danger),
           ),
           const SizedBox(height: Space.s),
         ],
         if (remote.devices.isEmpty)
           Text(
             'No devices yet.',
-            style: TextStyles.body.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textFaint),
           ),
         for (final device in remote.devices)
           _DeviceRow(
@@ -77,16 +85,15 @@ class _DevicesSettingsState extends State<DevicesSettings>
           ),
         failureLine(palette),
         const SizedBox(height: Space.m),
-        Row(
-          children: [
-            Button(
-              label: 'Add a device…',
-              onPressed: () => showModal(
-                context,
-                (context, close) => PairDeviceForm(close: close),
-              ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Button(
+            label: 'Add a device…',
+            onPressed: () => showModal(
+              context,
+              (context, close) => PairDeviceForm(close: close),
             ),
-          ],
+          ),
         ),
       ],
     );
@@ -155,6 +162,30 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
       seen,
       'Added ${pairedOn(device.pairedMs.toInt(), widget.now)}',
     ].join(' · ');
+    // Not shown to be the owner's yet: by when it has to be, or that it's
+    // past that and turned away. Before it connected with an app that can
+    // confirm, it isn't asked to.
+    final confirmBy = device.confirmed || device.confirmByMs == 0
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(device.confirmByMs.toInt());
+    final late = confirmBy != null && !confirmBy.isAfter(widget.now);
+    // On a phone two buttons don't fit beside the words: they go under them,
+    // as one does at large text sizes.
+    final stacked =
+        isPhoneLayout(context) && (largeText(context) || confirmBy != null);
+    final actions = [
+      if (confirmBy != null)
+        Button(
+          label: widget.thisDevice ? 'Confirm…' : "Confirm it's yours",
+          onPressed: widget.thisDevice
+              ? () => showConfirmSignIn(
+                  context,
+                  claktoryName(AppScope.of(context)),
+                )
+              : () => run(() => AppScope.of(context).confirmDevice(device.id)),
+        ),
+      Button(label: 'Remove', onPressed: _unpair),
+    ];
     return Container(
       padding: const EdgeInsets.symmetric(vertical: Space.s),
       decoration: BoxDecoration(
@@ -186,16 +217,14 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
                         children: [
                           TextSpan(
                             text: device.name,
-                            style: TextStyles.label.copyWith(
-                              color: palette.text,
-                            ),
+                            style: TypeScale.of(context).label
+                                .copyWith(color: palette.text),
                           ),
                           if (widget.thisDevice)
                             TextSpan(
                               text: '  This device',
-                              style: TextStyles.caption.copyWith(
-                                color: palette.textMuted,
-                              ),
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textMuted),
                             ),
                         ],
                       ),
@@ -203,19 +232,43 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
                     const SizedBox(height: 2),
                     Text(
                       details,
-                      style: TextStyles.caption.copyWith(
+                      style: TypeScale.of(context).caption.copyWith(
                         color: device.connected
                             ? palette.textMuted
                             : palette.textFaint,
                       ),
                     ),
+                    if (confirmBy != null)
+                      Text(
+                        late
+                            ? "Not confirmed: it can't connect until it's "
+                                  'confirmed'
+                            : 'Not confirmed yet · confirm by '
+                                  '${deadlineDay(confirmBy, widget.now)}',
+                        style: TypeScale.of(context).caption.copyWith(
+                          color: late ? palette.danger : palette.textMuted,
+                        ),
+                      ),
                   ],
                 ),
               ),
-              const SizedBox(width: Space.m),
-              Button(label: 'Remove', onPressed: _unpair),
+              if (!stacked)
+                for (final (i, action) in actions.indexed) ...[
+                  SizedBox(width: i == 0 ? Space.m : Space.s),
+                  action,
+                ],
             ],
           ),
+          // At large text sizes the buttons go under the words.
+          if (stacked)
+            Padding(
+              padding: const EdgeInsets.only(left: Space.l, top: Space.s),
+              child: Wrap(
+                spacing: Space.s,
+                runSpacing: Space.s,
+                children: actions,
+              ),
+            ),
           failureLine(palette),
         ],
       ),
@@ -364,6 +417,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
               child: TextField(
                 controller: _name,
                 placeholder: 'iPhone',
+                kind: InputKind.text,
                 autofocus: true,
                 onSubmitted: (_) {
                   if (ready) _add();
@@ -500,40 +554,62 @@ class _PairingCodeViewState extends State<PairingCodeView> {
         children: [
           Text(
             'Scan with your iPhone',
-            style: TextStyles.emphasis.copyWith(color: palette.text),
+            style: TypeScale.of(context).emphasis.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.s),
           Text(
             'Open Claktory on $device and scan this code.',
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.xl),
           Center(child: QrCode(text: widget.code, size: 240)),
           const SizedBox(height: Space.l),
           Text(
             'Or copy the code and paste it on $device.',
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.xs),
           Text(
             'This code works only for $device and is shown once.',
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textFaint),
           ),
           const SizedBox(height: Space.xl),
-          Row(
-            children: [
-              if (_copied)
-                Text(
-                  'Copied',
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
-                ),
-              const Spacer(),
-              Button(label: 'Copy code', onPressed: _copy),
-              const SizedBox(width: Space.s),
-              // Closing ends the code: it lasts only while it's shown.
-              Button(label: 'Cancel', onPressed: widget.close),
-            ],
-          ),
+          if (isPhoneLayout(context) && largeText(context))
+            // No room for both side by side: each on a line of its own.
+            Wrap(
+              spacing: Space.s,
+              runSpacing: Space.s,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Button(label: 'Copy code', onPressed: _copy),
+                Button(label: 'Cancel', onPressed: widget.close),
+                if (_copied)
+                  Text(
+                    'Copied',
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
+              ],
+            )
+          else
+            Row(
+              children: [
+                if (_copied)
+                  Text(
+                    'Copied',
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
+                const Spacer(),
+                Button(label: 'Copy code', onPressed: _copy),
+                const SizedBox(width: Space.s),
+                // Closing ends the code: it lasts only while it's shown.
+                Button(label: 'Cancel', onPressed: widget.close),
+              ],
+            ),
         ],
       ),
     );
@@ -700,6 +776,11 @@ class _FactoryChooserState extends State<FactoryChooser> {
               ),
             const SizedBox(height: Space.l),
             Field(
+              label: 'On your account',
+              child: YourClaktories(onConnect: _show, hideConnected: true),
+            ),
+            const SizedBox(height: Space.l),
+            Field(
               label: 'Connect to another Claktory',
               note:
                   "Paste the code from that Claktory's Settings → Devices, "
@@ -707,6 +788,8 @@ class _FactoryChooserState extends State<FactoryChooser> {
               child: TextField(
                 controller: _code,
                 placeholder: 'Paste code',
+                autocorrect: false,
+                textCapitalization: TextCapitalization.none,
                 autofocus: true,
                 onSubmitted: (_) {
                   if (target != null) _show(target);
@@ -772,13 +855,13 @@ class _FactoryRow extends StatelessWidget {
                   children: [
                     Text(
                       label,
-                      style: TextStyles.label.copyWith(color: palette.text),
+                      style: TypeScale.of(context).label
+                          .copyWith(color: palette.text),
                     ),
                     Text(
                       detail,
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
-                      ),
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textFaint),
                     ),
                   ],
                 ),
@@ -793,9 +876,15 @@ class _FactoryRow extends StatelessWidget {
   }
 }
 
-/// What this device is: "iPhone" or "Mac", for what it's told.
-String get thisDeviceKind =>
-    defaultTargetPlatform == TargetPlatform.iOS ? 'iPhone' : 'Mac';
+/// What this device is, for what it's told: "iPhone", "Mac", or on
+/// Android "phone" or "tablet" (from the display, not the window).
+String get thisDeviceKind => switch (defaultTargetPlatform) {
+  TargetPlatform.iOS => 'iPhone',
+  TargetPlatform.android => AndroidDeviceIdentity.forDisplayShortestSide(
+    androidDisplayShortestSide(),
+  ).noun,
+  _ => 'Mac',
+};
 
 /// Whether this device is connected to [machine], connecting, or why it
 /// can't connect.
@@ -819,17 +908,15 @@ class TunnelLine extends StatelessWidget {
               : connected
               ? 'Connected to $machine'
               : 'Connecting to $machine…',
-          style: TextStyles.body.copyWith(
-            color: failed ? palette.danger : palette.textMuted,
-          ),
+          style: TypeScale.of(context).body
+              .copyWith(color: failed ? palette.danger : palette.textMuted),
         ),
         Text(
           failed
               ? tunnelAdvice(status, machine, device: thisDeviceKind)
               : 'Private and encrypted.',
-          style: TextStyles.caption.copyWith(
-            color: failed ? palette.textMuted : palette.textFaint,
-          ),
+          style: TypeScale.of(context).caption
+              .copyWith(color: failed ? palette.textMuted : palette.textFaint),
         ),
       ],
     );
@@ -867,7 +954,8 @@ class TunnelProblem extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: Space.m),
                 child: Text(
                   now.error,
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ),
           ],

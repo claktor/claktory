@@ -203,7 +203,8 @@ PLIST
 }
 
 # Puts the helpers in the app (Contents/Helpers): the backend (factoryd),
-# the apps host (claktory-apps) and the supervisor's app, as the release has
+# the apps host (claktory-apps), the speech host (claktory-speech, which
+# writes what voice messages say) and the supervisor's app, as the release has
 # them, so the app can install Claktory on a Mac by itself (`factoryd
 # install`, from a .dmg) or repair it. scripts/sign-release.sh signs them in
 # the app.
@@ -214,6 +215,7 @@ add_helpers() {
   mkdir -p "$helpers"
   cp "$release/factoryd" "$helpers/factoryd"
   if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
+  if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
   if [[ -d "$release/supervisor/Claktory Agents.app" ]]; then
     ditto "$release/supervisor/Claktory Agents.app" "$helpers/Claktory Agents.app"
   fi

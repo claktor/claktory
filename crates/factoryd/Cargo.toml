@@ -59,6 +59,8 @@ tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
+# Move bundles (move_bundle.rs); already linked through async-compression.
+zstd = "0.14"
 toml = "1.2.1"
 
 [dev-dependencies]

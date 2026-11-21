@@ -15,11 +15,10 @@
 
 use std::sync::{Arc, Mutex, Weak};
 
-use factory_agent::{Event, EventSource};
 use factory_protocol::v1::{self, OnboardingStep};
 use rusqlite::OptionalExtension;
 
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 use crate::store::Store;
 
 pub(crate) const SCHEMA: &str = "
@@ -173,6 +172,6 @@ async fn model_connected(factory: &Arc<Factory>) {
         ));
     }
     let summary = format!("{person_capitalized} connected a model");
-    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+    let event = host_event(summary);
     factory.deliver_event(&rivet, text, event);
 }

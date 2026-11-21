@@ -71,11 +71,48 @@ typedef EntryTarget = ({String agentId, int seq});
 class EntryReveal extends ValueNotifier<EntryTarget?> {
   EntryReveal() : super(null);
 
-  /// Opens [agent]'s conversation at what waits there first, if anything.
+  /// Opens [agent]'s conversation at what waits there first, if it's
+  /// news: among the latest entries the conversation opens with, and with
+  /// nothing from the person after it. An older card is left where it is,
+  /// for its needs-you mark ([reach]) to go to, so opening a conversation
+  /// never leaps far back for old news.
   void oldestWaiting(Agent agent) {
     if (agent.waitingSeqs.isEmpty) return;
+    _reach = false;
     value = (agentId: agent.id, seq: agent.waitingSeqs.first.toInt());
   }
+
+  /// Opens [agent]'s conversation at what waits there first, however far
+  /// back: the person asked for it, with its needs-you mark.
+  void reach(Agent agent) {
+    if (agent.waitingSeqs.isEmpty) return;
+    final target = (agentId: agent.id, seq: agent.waitingSeqs.first.toInt());
+    _reach = true;
+    // Asked again for the same card: it goes there again.
+    if (value == target) {
+      notifyListeners();
+    } else {
+      value = target;
+    }
+  }
+
+  /// Opens [agentId]'s conversation at its entry [seq], however far back:
+  /// the person asked for that card (from Needs you).
+  void reachSeq(String agentId, int seq) {
+    final target = (agentId: agentId, seq: seq);
+    _reach = true;
+    if (value == target) {
+      notifyListeners();
+    } else {
+      value = target;
+    }
+  }
+
+  /// Whether the entry asked for is gone to however far back it is, and
+  /// even when the person has written since ([reach]); else only when it's
+  /// news ([oldestWaiting]).
+  bool get reachBack => _reach;
+  var _reach = false;
 
   /// Done with [target]: the conversation is there, or it can't be.
   void used(EntryTarget target) {

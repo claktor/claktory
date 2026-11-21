@@ -38,7 +38,7 @@ The person sees Claktory in its app. `highlight` makes parts of the app glow for
 - settings, marketplace: the buttons at the bottom of the sidebar (no id)
 Add a short `text` to say what to look at. It changes nothing; use it sparingly.
 
-`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, apps, defaults, devices, resources, display; none for the top), map, usage, marketplace, changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
+`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, apps, defaults, voice, devices, resources, display; none for the top), map, usage, marketplace, changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
 ";
 
 const DESCRIPTION: &str = "Make parts of the app glow for a moment so the person sees them. targets: [{kind, id}], kind agent, project, checklist_item (\"<agent>#<n>\"), extension (\"<agent>/<extension>\"), settings or marketplace (no id). text: an optional short caption.";
@@ -50,7 +50,7 @@ const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the per
 const SCREENS: [&str; 7] = ["settings", "map", "usage", "marketplace", "changelog", "agent", "agent_settings"];
 
 /// The sections of Settings an agent can open, as the app names them.
-const SECTIONS: [(&str, &str); 10] = [
+const SECTIONS: [(&str, &str); 11] = [
     ("profile", "Profile"),
     ("general", "General"),
     ("account", "Account"),
@@ -58,6 +58,7 @@ const SECTIONS: [(&str, &str); 10] = [
     ("secrets", "Secrets"),
     ("apps", "Apps"),
     ("defaults", "Defaults"),
+    ("voice", "Voice"),
     ("devices", "Devices"),
     ("resources", "Resources"),
     ("display", "Display"),
@@ -93,18 +94,11 @@ impl Extension for Highlight {
             },
             "additionalProperties": false,
         });
-        let weak = Arc::downgrade(factory);
-        let (factory, agent) = (weak.clone(), agent.to_owned());
-        let caller = agent.clone();
-        let handler: factory_agent::Handler = Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                let args: Args = serde_json::from_value(args)?;
-                let text = show(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
-            })
+        let handler: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let args: Args = serde_json::from_value(args)?;
+            let text = show(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
+            Ok(ToolResult::text(text, json!({})))
         });
         let screen_parameters = json!({
             "type": "object",
@@ -115,16 +109,11 @@ impl Extension for Highlight {
             },
             "additionalProperties": false,
         });
-        let (factory, agent) = (weak, caller);
-        let screen: factory_agent::Handler = Arc::new(move |args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                let args: ScreenArgs = serde_json::from_value(args)?;
-                let text = open_screen(&factory, &agent, args).await.map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
-            })
+        let screen: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let args: ScreenArgs = serde_json::from_value(args)?;
+            let text = open_screen(&factory, &agent, args).await.map_err(factory_agent::Error::Other)?;
+            Ok(ToolResult::text(text, json!({})))
         });
         vec![
             super::tool("highlight", "Highlight", DESCRIPTION, parameters, handler),

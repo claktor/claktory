@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "selectionChanged",
+  "arguments": {
+    "page_1based": 3,
+    "text": "h_t = σ(W x_t + U h_{t−1})",
+    "region": {
+      "x": 0.14,
+      "y": 0.33,
+      "w": 0.42,
+      "h": 0.03
+    }
+  }
+}

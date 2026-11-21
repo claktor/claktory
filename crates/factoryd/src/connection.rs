@@ -123,14 +123,21 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
         kind = hello.device_kind();
         workspace_patches = hello.workspace_patches;
+        let knock = crate::remote::Knock {
+            token: &hello.token,
+            assertion: &hello.assertion,
+            can_confirm: hello.can_confirm,
+            kind,
+            name: &hello.device_name,
+        };
         if let Some(peer) = &peer {
-            let connected = match factory.authorize(&hello.token, peer, kind, &hello.device_name).await {
+            let connected = match factory.authorize(&knock, peer).await {
                 Authorized::Connected(connected) => connected,
                 Authorized::Pending(waiting) => {
                     // Remote access stays on until it's heard how this ends.
                     let _waiting = factory.waiting();
                     match wait_to_be_allowed(&mut socket, &factory, message.id, &waiting, peer).await? {
-                        Pairing::Allowed => match factory.authorize(&hello.token, peer, kind, &hello.device_name).await {
+                        Pairing::Allowed => match factory.authorize(&knock, peer).await {
                             Authorized::Connected(connected) => connected,
                             _ => {
                                 let reason = "This device was allowed, then removed.";
@@ -146,6 +153,7 @@ pub(crate) async fn serve_stream<S: Stream>(
                     let reason = "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                     return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
                 }
+                Authorized::Turned(code, reason) => return reject(socket, message.id, code, reason).await,
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
             device = connected;
@@ -154,7 +162,7 @@ pub(crate) async fn serve_stream<S: Stream>(
             // only this machine's app's token (from its local pairing code,
             // which only this user can read) lets a client in.
             let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
-            let Authorized::Connected(connected) = factory.authorize(&hello.token, &local, kind, &hello.device_name).await else {
+            let Authorized::Connected(connected) = factory.authorize(&knock, &local).await else {
                 // Another user's program, or one of this user's without the
                 // token: an app build or test made without FACTORY_PORT, say.
                 tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
@@ -179,8 +187,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         device_id: device.device.id.clone(),
         name: claktory.name,
         color: claktory.color,
-        // Confirming devices as the owner's (onboarding slice 6): Sam's next.
-        confirm_by_ms: 0,
+        confirm_by_ms: device.confirm_by,
     };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
     // This machine's own app may do what the loopback port's may.
@@ -196,6 +203,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         sent_from,
         binding: device.device.id.clone(),
         zoom_device: device.device.id.clone(),
+        endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
         workspace_patches,
         files,
     };
@@ -215,8 +223,10 @@ struct Connection {
     /// What a flow connecting a service is bound to: the paired device's id.
     binding: String,
     /// Whose zoom SetZoom sets: the paired device's id, "local" for this
-    /// machine's own app.
+    /// machine's own app. Also who confirms with ConfirmDevice.
     zoom_device: String,
+    /// The tunnel key it connected with; empty on the loopback port.
+    endpoint_id: String,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
     /// The project whose files it shows on their own (WatchFiles).
@@ -291,6 +301,12 @@ async fn sync<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, factory:
     if let Some(queued) = snapshot.queued {
         send(socket, 0, Body::QueuedMessages(queued)).await?;
     }
+    if let Some((transcript, queued)) = snapshot.chat {
+        send(socket, 0, Body::ChatTranscript(transcript)).await?;
+        if !queued.messages.is_empty() {
+            send(socket, 0, Body::ChatQueuedMessages(queued)).await?;
+        }
+    }
     Ok(snapshot.events)
 }
 
@@ -347,6 +363,7 @@ async fn handle(
                 avatar_face: _,
                 role,
                 lead_id,
+                fallback_model,
             } = request;
             let change = AgentChange {
                 name: name.as_deref(),
@@ -361,10 +378,19 @@ async fn handle(
                 avatar_shape: avatar_shape.as_deref(),
                 role: role.as_deref(),
                 lead: lead_id.as_deref(),
+                fallback_model: fallback_model.as_deref(),
             };
             factory.update_agent(&agent_id, change).await
         }
         Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
+        Some(Request::SendMessage(request)) if request.voice => crate::speech::voice::send(
+            factory,
+            &request.agent_id,
+            &request.text,
+            Some(connection.sent_from.clone()),
+            &request.client_id,
+            &request.attachments,
+        ),
         Some(Request::SendMessage(request)) => factory.send_message(
             &request.agent_id,
             &request.text,
@@ -377,14 +403,21 @@ async fn handle(
         Some(Request::UpdateProject(request)) => {
             factory.update_project(&request.project_id, request.name.as_deref(), request.archived).await
         }
-        Some(Request::DeleteProject(request)) => factory.delete_project(&request.project_id).await,
+        Some(Request::DeleteProject(request)) => {
+            let deleted = factory.delete_project(&request.project_id).await;
+            if deleted.is_ok() {
+                crate::pipes::project_gone(factory, &request.project_id);
+            }
+            deleted
+        }
         Some(Request::UpdateSettings(request)) => factory.update_settings(request).await,
-        Some(Request::ShuffleAvatar(_)) => factory.shuffle_avatar().await,
+        Some(Request::ShuffleAvatar(request)) => factory.shuffle_avatar(request).await,
         Some(Request::ScreenOpened(answer)) => {
             crate::extensions::highlight::screen_opened(&answer.id, &connection.sent_from.device, answer.opened);
             Ok(())
         }
         Some(Request::SetZoom(request)) => factory.set_zoom(&connection.zoom_device, request.zoom).await,
+        Some(Request::ConfirmDevice(request)) => factory.confirm_device(&connection.zoom_device, &connection.endpoint_id, &request).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
         // A remote device's app is on another machine: its path means nothing here.
         Some(Request::InstallUpdate(request)) => factory.install_update(if remote { "" } else { &request.app_path }).await,
@@ -560,15 +593,52 @@ async fn handle(
         Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await,
         Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
-        Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory).await,
-        // Onboarding slice 6 (Sam's next): refused until it's built.
-        Some(Request::ConfirmDevice(_)) => {
-            Err(RequestError::Account(v1::ErrorCode::InvalidRequest, "Confirming devices isn't available in this version yet.".into()))
+        Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory),
+        // Pipes (#196): `crate::pipes`.
+        Some(Request::CreatePipeInvite(request)) => return answer(crate::pipes::create_invite(factory, &request).await, Body::PipeInvite),
+        Some(Request::ReadPipeInvite(request)) => return answer(crate::pipes::read_invite(&request.code), Body::PipeInvitePreview),
+        Some(Request::AcceptPipeInvite(request)) => {
+            crate::pipes::accept(factory, &request).inspect(|()| crate::chats::leave_for_pipe(factory))
         }
+        Some(Request::ApprovePipe(request)) => crate::pipes::approve(factory, &request).await,
+        Some(Request::UpdatePipe(request)) => crate::pipes::update(factory, &request),
+        Some(Request::SetPipeState(request)) => crate::pipes::set_pipe_state(factory, &request),
+        Some(Request::SelectPipe(request)) => {
+            crate::pipes::select(factory, &request.pipe_id).inspect(|()| crate::chats::leave_for_pipe(factory))
+        }
+        Some(Request::SendPipeMessage(request)) => crate::pipes::send_person(factory, &request),
+        Some(Request::DecidePipeMessage(request)) => crate::pipes::decide_message(factory, &request),
+        Some(Request::LoadPipeMessages(request)) => return answer(crate::pipes::load_messages(factory, &request), Body::PipeMessagePage),
+        Some(Request::DecideSecretApproval(request)) => crate::pipes::agents::decide(factory, &request).await,
+        Some(Request::AddPipeLiaison(request)) => crate::pipes::add_liaison(factory, &request).await,
+        // Chats (#213): `crate::chats`.
+        Some(Request::CreateChat(request)) => {
+            crate::chats::create(factory, &request.text, &request.client_id, Some(connection.sent_from.clone())).await
+        }
+        Some(Request::SelectChat(request)) => crate::chats::select(factory, &request.chat_id).await,
+        Some(Request::SendChatMessage(request)) => {
+            crate::chats::send(factory, &request.chat_id, &request.text, &request.client_id, Some(connection.sent_from.clone()))
+        }
+        Some(Request::StopChat(request)) => crate::chats::stop(factory, &request.chat_id),
+        Some(Request::DeleteChat(request)) => crate::chats::delete(factory, &request.chat_id),
+        Some(Request::LoadChatEntries(request)) => return answer(crate::chats::load_entries(factory, &request).await, Body::ChatEntryPage),
+        Some(Request::RenameChat(request)) => crate::chats::rename(factory, &request.chat_id, &request.title),
+        // Moving this Claktory (#217): `crate::move_run`.
+        Some(Request::StartMove(request)) => crate::move_run::start(factory, &request.code),
+        Some(Request::ConfirmMove(_)) => crate::move_run::confirm(factory),
+        Some(Request::CancelMove(_)) => crate::move_run::cancel(factory),
+        Some(Request::FreezeMove(_)) => crate::move_run::freeze(factory),
+        Some(Request::InstallSpeechModel(_)) => crate::speech::model::install(factory),
+        Some(Request::RemoveSpeechModel(_)) => crate::speech::model::remove(factory),
+        Some(Request::RetryVoiceMessage(request)) => crate::speech::voice::retry(factory, &request.agent_id, request.message_id),
+        Some(Request::DiscardVoiceMessage(request)) => crate::speech::voice::discard(factory, &request.agent_id, request.message_id),
+        Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request).await,
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
         Some(Request::DecideProposal(request)) => {
-            crate::proposals::decide(factory, &request.agent_id, &request.proposal_id, request.approve, &request.comment)
+            // A chat's proposal names the chat instead of an agent.
+            let from = if request.chat_id.is_empty() { &request.agent_id } else { &request.chat_id };
+            crate::proposals::decide(factory, from, &request.proposal_id, request.approve, &request.comment)
         }
         Some(Request::ClearBuildCache(request)) => {
             crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)
@@ -683,11 +753,11 @@ async fn wait_to_be_allowed<S: Stream>(
         name: waiting.name.clone(),
         machine: crate::remote::machine_name().to_owned(),
         expires_ms: waiting.code_expires.unwrap_or_default(),
-        discovered: false,
+        discovered: waiting.discovered,
     };
     send(socket, hello_id, Body::PairingPending(pending)).await?;
     loop {
-        match factory.pairing(&waiting.id, &peer.endpoint_id) {
+        match factory.pairing(waiting, &peer.endpoint_id) {
             Pairing::Waiting => {}
             settled => return Ok(settled),
         }

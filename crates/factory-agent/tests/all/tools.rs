@@ -87,14 +87,27 @@ fn text(result: &ToolResult) -> String {
 fn tool_specs_serialize_like_the_typescript_agents() {
     let tools = coding_tools(Path::new("/tmp/w"), &[], None);
     let names: Vec<&str> = tools.iter().map(|tool| tool.spec.name.as_ref()).collect();
-    assert_eq!(names, ["read_file", "write_file", "edit_file", "bash"]);
+    assert_eq!(names, ["read_file", "read_image", "write_file", "edit_file", "bash"]);
     let read = serde_json::to_value(&tool(&tools, "read_file").spec).unwrap();
     assert_eq!(
         read,
         json!({"name":"read_file","label":"Read file","description":"Read numbered UTF-8 lines. offset is one-based; limit defaults to 200. Use smaller ranges when output is truncated.","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"offset":{"anyOf":[{"type":"integer","minimum":1},{"type":"null"}]},"limit":{"anyOf":[{"type":"integer","minimum":1,"maximum":2000},{"type":"null"}]}},"additionalProperties":false},"constrainedSampling":{"type":"json_schema","strict":"prefer"}})
     );
     let labels: Vec<(&str, &str)> = tools.iter().map(|tool| (tool.spec.name.as_ref(), tool.spec.label.as_ref())).collect();
-    assert_eq!(labels, [("read_file", "Read file"), ("write_file", "Write file"), ("edit_file", "Edit file"), ("bash", "Run command")]);
+    assert_eq!(
+        labels,
+        [
+            ("read_file", "Read file"),
+            ("read_image", "Read image"),
+            ("write_file", "Write file"),
+            ("edit_file", "Edit file"),
+            ("bash", "Run command"),
+        ]
+    );
+    assert_eq!(
+        tool(&tools, "read_image").spec.description,
+        "Look at an image file: PNG, JPEG, GIF or WebP. It's added to the conversation as an image you see, at this point. One too big for your model is scaled down for you; the result says so. Only an agent whose model reads images can use it."
+    );
     assert_eq!(
         tool(&tools, "write_file").spec.description,
         "Create or replace a whole UTF-8 file and its parent directories. Use edit_file for partial changes to an existing file."

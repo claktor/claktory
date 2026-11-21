@@ -13,11 +13,10 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use factory_agent::{Event, EventSource};
 use rusqlite::OptionalExtension;
 
 use super::checklist::{self, Query, Status};
-use crate::factory::Factory;
+use crate::factory::{Factory, host_event};
 use crate::transcript::now_ms;
 
 /// Items a reminder names; more are counted.
@@ -60,7 +59,7 @@ fn check(factory: &Arc<Factory>, after: Duration, reminded: &mut HashMap<String,
             } else if super::enabled(agent, checklist::ID)
                 && super::switch(agent, checklist::ID, "nudge")
                 && !inner.config.archived(agent)
-                && runtime.is_none_or(|runtime| runtime.queue.is_empty())
+                && runtime.is_none_or(|runtime| !runtime.has_ready())
             {
                 idle.push(agent.id.clone());
             }
@@ -113,7 +112,7 @@ fn check(factory: &Arc<Factory>, after: Duration, reminded: &mut HashMap<String,
         }
         text.push_str(". Carry on, or mark what's waiting with status blocked and a note saying on what.");
         let summary = format!("Reminder: {total} outstanding checklist item{}", if total == 1 { "" } else { "s" });
-        let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+        let event = host_event(summary);
         tracing::info!(agent = %id, total, "reminding an idle agent of its outstanding items");
         factory.deliver_event(&id, text, event);
         reminded.insert(id.clone(), situation(factory)?);

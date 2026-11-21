@@ -85,7 +85,7 @@ fn free_path(folder: &Path, name: &str) -> PathBuf {
 }
 
 /// Bytes free for this user on the volume holding `path`.
-fn available(path: &Path) -> Option<u64> {
+pub(crate) fn available(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     // SAFETY: statvfs fills the zeroed struct it's given, for a valid C string.

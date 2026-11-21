@@ -11,6 +11,10 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/comment_editor.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/metrics.dart';
+import 'mobile/presentation.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'selection.dart';
 import 'usage.dart' show formatAge;
@@ -439,7 +443,11 @@ class CommentsController extends ChangeNotifier {
   final narrow = ValueNotifier<bool>(false);
 
   /// Why the last request failed, till the next one.
-  String? error;
+  String? get error => failure.value;
+  set error(String? error) => failure.value = error;
+
+  /// [error], to listen to (a phone's editor shows it under its field).
+  final failure = ValueNotifier<String?>(null);
 
   /// Where an offset of the text shown is, as a y in the viewer's box;
   /// null when it isn't laid out.
@@ -544,6 +552,7 @@ class CommentsController extends ChangeNotifier {
     backend.connected.removeListener(_reconnected);
     selection.dispose();
     narrow.dispose();
+    failure.dispose();
     layout.dispose();
     super.dispose();
   }
@@ -747,15 +756,15 @@ class CommentsController extends ChangeNotifier {
   }
 
   /// Sends the comment being written to its agent, or with [sendNow] false
-  /// keeps it as a draft.
-  Future<void> submit(
+  /// keeps it as a draft; whether it went.
+  Future<bool> submit(
     String body, {
     required bool sendNow,
     String? replacement,
   }) async {
     final text = body.trim();
     final suggestion = suggesting ? replacement : null;
-    if (text.isEmpty && suggestion == null) return;
+    if (text.isEmpty && suggestion == null) return false;
     final mark = composing;
     final reply = replyingTo;
     final edited = editing;
@@ -790,6 +799,7 @@ class CommentsController extends ChangeNotifier {
       selection.value = null;
       notifyListeners();
     }
+    return ok;
   }
 
   Future<void> resolve(Thread thread, {required bool resolved}) =>
@@ -964,6 +974,7 @@ class _CommentedState extends State<Commented> {
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
+    final phone = isPhoneLayout(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= Commented.wideFrom;
@@ -1011,7 +1022,9 @@ class _CommentedState extends State<Commented> {
                     top: 0,
                     bottom: 0,
                     right: 0,
-                    width: Commented.markerWidth,
+                    // A finger's width to tap, reaching over the text's
+                    // edge; the dots stay in their strip.
+                    width: phone ? Touch.target : Commented.markerWidth,
                     child: _Markers(controller: controller),
                   ),
                 Positioned.fill(
@@ -1027,7 +1040,9 @@ class _CommentedState extends State<Commented> {
                   bottom: Space.m,
                   child: _Footer(controller: controller),
                 ),
-                if (!wide)
+                if (phone)
+                  _PhoneComments(controller: controller)
+                else if (!wide)
                   Positioned.fill(child: _Sheet(controller: controller)),
               ],
             );
@@ -1073,6 +1088,9 @@ class CommentsButton extends StatelessWidget {
         );
       }
       final count = controller.shown.length;
+      if (isPhoneLayout(context)) {
+        return _PhoneCommentsButton(controller: controller, count: count);
+      }
       return GlyphButton(
         label: count == 0 ? 'Comments' : '$count comments',
         active: controller.sheetOpen,
@@ -1113,7 +1131,10 @@ class _Popovers extends StatelessWidget {
       controller.selection,
     ]),
     builder: (context, _) {
-      if (controller.sheetOpen) return const SizedBox.shrink();
+      // A phone writes and reads them in sheets ([_PhoneComments]).
+      if (controller.sheetOpen || isPhoneLayout(context)) {
+        return const SizedBox.shrink();
+      }
       final box = stack.currentContext?.findRenderObject();
       if (box is! RenderBox || !box.hasSize) {
         // Laid out after this frame: placed then.
@@ -1443,6 +1464,10 @@ class _Markers extends StatelessWidget {
     builder: (context, _) {
       final threads = controller.inOrder(controller.shown);
       final focused = threads.indexWhere((t) => t.id == controller.focused);
+      // A phone's are a finger's size, centered on their line.
+      final lift = isPhoneLayout(context)
+          ? (Touch.target - Commented.markerWidth) / 2
+          : 0.0;
       return Listener(
         onPointerSignal: (event) {
           if (event is PointerScrollEvent) {
@@ -1452,7 +1477,13 @@ class _Markers extends StatelessWidget {
         child: ClipRect(
           child: CustomMultiChildLayout(
             delegate: _Stacked(
-              [for (final t in threads) controller.yOfThread(t.id)],
+              [
+                for (final t in threads)
+                  if (controller.yOfThread(t.id) case final y?)
+                    y - lift
+                  else
+                    null,
+              ],
               focused: focused == -1 ? null : focused,
               gap: 0,
             ),
@@ -1482,32 +1513,43 @@ class _Marker extends StatelessWidget {
     final focused = controller.focused == thread.id;
     final agent = _agent(controller.backend, thread.agentId);
     final resolved = thread.status == ThreadStatus.THREAD_STATUS_RESOLVED;
+    // On a phone, a finger's size, the dot at its end in the strip.
+    final phone = isPhoneLayout(context);
     return Semantics(
+      container: true,
       button: true,
       label: 'Comment for ${agent?.name ?? thread.agentId}',
+      onTap: () => controller.focus(focused ? null : thread.id),
       excludeSemantics: true,
       child: Pressable(
         onTap: () => controller.focus(focused ? null : thread.id),
-        builder: (context, hovered) => Container(
-          width: Commented.markerWidth,
-          height: Commented.markerWidth,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: focused
-                ? palette.selected
-                : hovered
-                ? palette.hover
-                : const Color(0x00000000),
-            borderRadius: BorderRadius.circular(Radii.control),
-          ),
-          child: Opacity(
-            opacity: resolved ? 0.6 : 1,
-            child: Dot(
-              color: agentColor(agent?.color ?? ''),
-              size: focused ? 10 : 8,
+        builder: (context, hovered) {
+          final dot = Container(
+            width: Commented.markerWidth,
+            height: Commented.markerWidth,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: focused
+                  ? palette.selected
+                  : hovered
+                  ? palette.hover
+                  : const Color(0x00000000),
+              borderRadius: BorderRadius.circular(Radii.control),
             ),
-          ),
-        ),
+            child: Opacity(
+              opacity: resolved ? 0.6 : 1,
+              child: Dot(
+                color: agentColor(agent?.color ?? ''),
+                size: focused ? 10 : 8,
+              ),
+            ),
+          );
+          if (!phone) return dot;
+          return SizedBox.square(
+            dimension: Touch.target,
+            child: Align(alignment: Alignment.centerRight, child: dot),
+          );
+        },
       ),
     );
   }
@@ -1800,7 +1842,8 @@ class _ThreadCard extends StatelessWidget {
                 if (comment.body.isNotEmpty ||
                     controller.editing == comment.id) ...[
                   const SizedBox(height: Space.s),
-                  if (controller.editing == comment.id)
+                  if (controller.editing == comment.id &&
+                      !isPhoneLayout(context))
                     _Composer(
                       controller: controller,
                       initial: comment.body,
@@ -1819,7 +1862,8 @@ class _ThreadCard extends StatelessWidget {
                 const SizedBox(height: Space.s),
                 _Decide(controller: controller, thread: thread),
               ],
-              if (controller.replyingTo == thread.id) ...[
+              if (controller.replyingTo == thread.id &&
+                  !isPhoneLayout(context)) ...[
                 const SizedBox(height: Space.s),
                 _Composer(
                   controller: controller,
@@ -1997,8 +2041,28 @@ class _Comment extends StatelessWidget {
     final author = mine
         ? 'You'
         : _agentName(controller.backend, comment.authorAgentId);
-    final faint = TextStyles.caption.copyWith(color: palette.textFaint);
+    final type = TypeScale.of(context);
+    final faint = type.caption.copyWith(color: palette.textFaint);
     final focused = controller.focused == thread.id;
+    // At the largest text on a phone, when and Edit and Delete go under
+    // who wrote it, each with the width.
+    final stacked = isPhoneLayout(context) && largeText(context);
+    final actions = mine && focused
+        ? [
+            _TextAction(
+              label: 'Edit',
+              onTap: () => controller.startEdit(comment.id, thread.id),
+            ),
+            _TextAction(
+              label: 'Delete',
+              onTap: () => controller.delete(comment),
+            ),
+          ]
+        : const <Widget>[];
+    final age = Text(
+      comment.draft ? 'Draft' : formatAge(comment.createdMs.toInt(), now),
+      style: faint,
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2009,41 +2073,35 @@ class _Comment extends StatelessWidget {
                 const PersonAvatar(size: 16),
                 const SizedBox(width: Space.xs + 2),
               ],
-              Text(
-                author,
-                style: TextStyles.caption.copyWith(
-                  color: palette.text,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: Space.xs + 2),
-              Expanded(
+              Flexible(
                 child: Text(
-                  comment.draft
-                      ? 'Draft'
-                      : formatAge(comment.createdMs.toInt(), now),
-                  style: faint,
+                  author,
+                  style: type.caption.copyWith(
+                    color: palette.text,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
-              if (mine && focused) ...[
-                _TextAction(
-                  label: 'Edit',
-                  onTap: () => controller.startEdit(comment.id, thread.id),
-                ),
-                const SizedBox(width: Space.s),
-                _TextAction(
-                  label: 'Delete',
-                  onTap: () => controller.delete(comment),
-                ),
+              if (!stacked) ...[
+                const SizedBox(width: Space.xs + 2),
+                Expanded(child: age),
+                for (final (i, action) in actions.indexed) ...[
+                  if (i > 0) const SizedBox(width: Space.s),
+                  action,
+                ],
               ],
             ],
           ),
         ),
+        if (stacked) ...[
+          Unselectable(child: age),
+          if (actions.isNotEmpty)
+            Unselectable(
+              child: Wrap(spacing: Space.s, children: actions),
+            ),
+        ],
         const SizedBox(height: 2),
-        Text(
-          comment.body,
-          style: TextStyles.body.copyWith(color: palette.text),
-        ),
+        Text(comment.body, style: type.body.copyWith(color: palette.text)),
       ],
     );
   }
@@ -2058,14 +2116,34 @@ class _TextAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Pressable(
+    final phone = isPhoneLayout(context);
+    final text = Pressable(
       onTap: onTap,
-      builder: (context, hovered) => Text(
-        label,
-        style: TextStyles.caption.copyWith(
-          color: hovered ? palette.text : palette.textMuted,
-        ),
-      ),
+      builder: (context, hovered) {
+        final label = Text(
+          this.label,
+          style: TypeScale.of(context).caption
+              .copyWith(color: hovered ? palette.text : palette.textMuted),
+        );
+        // A finger's size on a phone.
+        return phone
+            ? ConstrainedBox(
+                constraints: const BoxConstraints(
+                  minWidth: Touch.target,
+                  minHeight: Touch.target,
+                ),
+                child: Center(widthFactor: 1, child: label),
+              )
+            : label;
+      },
+    );
+    return Semantics(
+      container: true,
+      button: true,
+      label: label,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: text,
     );
   }
 }
@@ -2612,6 +2690,434 @@ class _Sheet extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// A phone's header button for the comments: the glyph and how many,
+/// opening them in a sheet.
+class _PhoneCommentsButton extends StatelessWidget {
+  const _PhoneCommentsButton({required this.controller, required this.count});
+
+  final CommentsController controller;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Semantics(
+      container: true,
+      button: true,
+      label: switch (count) {
+        0 => 'Comments',
+        1 => '1 comment',
+        _ => '$count comments',
+      },
+      onTap: () => controller.openSheet(true),
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: () => controller.openSheet(true),
+        builder: (context, pressed) => ConstrainedBox(
+          constraints: const BoxConstraints(
+            minWidth: Touch.target,
+            minHeight: Touch.target,
+          ),
+          child: Center(
+            widthFactor: 1,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ExtensionGlyph(
+                    icon: 'message-square',
+                    name: 'Comments',
+                    color: pressed ? palette.textMuted : palette.text,
+                    size: 20,
+                  ),
+                  if (count > 0) ...[
+                    const SizedBox(width: Space.xs),
+                    Text(
+                      '$count',
+                      style: TypeScale.of(context).secondary.copyWith(
+                        color: palette.text,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// On a phone, the comments in sheets rather than over the file (research
+/// mobile.md §4): Comment or Suggest from the text's own menu writes in a
+/// sheet above the keyboard; a marker opens its thread in a sheet; the
+/// header's count lists them all, with Send for those kept to send. Builds
+/// nothing itself: it presents the sheets as the controller asks.
+class _PhoneComments extends StatefulWidget {
+  const _PhoneComments({required this.controller});
+
+  final CommentsController controller;
+
+  @override
+  State<_PhoneComments> createState() => _PhoneCommentsState();
+}
+
+class _PhoneCommentsState extends State<_PhoneComments> {
+  var _writing = false;
+  var _listing = false;
+  String? _reading;
+
+  CommentsController get _comments => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _comments.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(_PhoneComments old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_changed);
+      widget.controller.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    _comments.removeListener(_changed);
+    super.dispose();
+  }
+
+  var _due = false;
+
+  /// After the frame: the controller tells while it's changing.
+  void _changed() {
+    if (_due) return;
+    _due = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _due = false;
+      if (mounted) _sync();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _sync() {
+    final comments = _comments;
+    final writing =
+        comments.composing != null ||
+        comments.replyingTo != null ||
+        comments.editing != null;
+    if (writing && !_writing) {
+      unawaited(_write());
+    } else if (comments.sheetOpen && !_listing) {
+      unawaited(_list());
+    } else if (!comments.sheetOpen &&
+        !_listing &&
+        !_writing &&
+        _reading == null &&
+        comments.focused != null) {
+      unawaited(_read(comments.focused!));
+    }
+  }
+
+  Thread? _thread(String id) =>
+      _comments.all.where((thread) => thread.id == id).firstOrNull;
+
+  /// What a thread is on, for the top of its reply.
+  Widget _quoteOf(Thread thread) {
+    final region = _comments.regions[thread.id];
+    if (region != null) {
+      return RegionThumbnail(image: _comments.image, region: region);
+    }
+    final moment = _comments.moments[thread.id];
+    if (moment != null) return _MomentLabel(moment: moment);
+    final anchor = anchorIn(thread, _comments.kind);
+    return QuotedPassage(anchor?.exact ?? thread.originalExact);
+  }
+
+  Future<void> _write() async {
+    final comments = _comments;
+    _writing = true;
+    final backend = comments.backend;
+    final editing = comments.editing;
+    final replyingTo = comments.replyingTo;
+    final mark = comments.composing;
+    late final CommentEditing kind;
+    late final Widget quote;
+    var recipient = '';
+    var initial = '';
+    String? replacing;
+    if (editing != null) {
+      final thread = comments.all
+          .where((t) => t.comments.any((c) => c.id == editing))
+          .firstOrNull;
+      kind = CommentEditing.edit;
+      quote = thread == null ? const SizedBox.shrink() : _quoteOf(thread);
+      initial = thread?.comments.firstWhere((c) => c.id == editing).body ?? '';
+    } else if (replyingTo != null) {
+      final thread = _thread(replyingTo);
+      kind = CommentEditing.reply;
+      quote = thread == null ? const SizedBox.shrink() : _quoteOf(thread);
+      recipient = _agentName(backend, thread?.agentId ?? '');
+    } else {
+      final suggest = comments.suggesting && mark is Passage;
+      kind = suggest ? CommentEditing.suggest : CommentEditing.comment;
+      recipient = _agentName(backend, comments.defaultAgent);
+      quote = switch (mark) {
+        Region(:final rect) => RegionThumbnail(
+          image: comments.image,
+          region: rect,
+        ),
+        Moment() => _MomentLabel(moment: mark),
+        Passage(:final exact) => QuotedPassage(exact, struck: suggest),
+        null => const SizedBox.shrink(),
+      };
+      if (suggest) replacing = mark.exact;
+    }
+    comments.error = null;
+    await showCommentEditor(
+      context,
+      editing: kind,
+      quote: quote,
+      recipient: recipient,
+      initial: initial,
+      replacing: replacing,
+      error: comments.failure,
+      submit: (body, replacement) => comments.submit(
+        body,
+        sendNow: kind != CommentEditing.edit,
+        replacement: replacement,
+      ),
+    );
+    _writing = false;
+    if (!mounted) return;
+    // Closed without sending: nothing's being written any more.
+    if (comments.composing != null ||
+        comments.replyingTo != null ||
+        comments.editing != null) {
+      comments.cancel();
+    }
+  }
+
+  Future<void> _list() async {
+    _listing = true;
+    await presentSheet<void>(
+      context,
+      title: 'Comments',
+      tall: _comments.shown.length > 1,
+      padded: false,
+      builder: (context, close) => _PhoneThreadList(controller: _comments),
+    );
+    _listing = false;
+    if (!mounted) return;
+    if (_comments.sheetOpen) _comments.openSheet(false);
+    _comments.letGo();
+  }
+
+  Future<void> _read(String threadId) async {
+    _reading = threadId;
+    await presentSheet<void>(
+      context,
+      padded: false,
+      builder: (context, close) => ListenableBuilder(
+        listenable: _comments,
+        builder: (context, _) {
+          final thread = _thread(threadId);
+          if (thread == null) {
+            // Deleted meanwhile.
+            WidgetsBinding.instance.addPostFrameCallback((_) => close());
+            return const SizedBox.shrink();
+          }
+          return SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Touch.gutter,
+              0,
+              Touch.gutter,
+              Touch.gutter,
+            ),
+            child: _ThreadCard(controller: _comments, thread: thread),
+          );
+        },
+      ),
+    );
+    _reading = null;
+    if (!mounted) return;
+    if (_comments.focused == threadId) _comments.letGo();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+/// A phone's list of the comments on a file, in a sheet: each thread in
+/// reading order (a tap opens what can be done with it), whether resolved
+/// ones show, and Send for comments kept to send.
+class _PhoneThreadList extends StatelessWidget {
+  const _PhoneThreadList({required this.controller});
+
+  final CommentsController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final threads = controller.inOrder(controller.shown);
+        final resolved = controller.resolvedCount;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(
+                  Touch.gutter,
+                  0,
+                  Touch.gutter,
+                  Touch.gutter,
+                ),
+                children: [
+                  if (threads.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: Space.l),
+                      child: Text(
+                        switch (controller.kind) {
+                          'image' =>
+                            'Tap Comment, then tap or drag across the part '
+                                'of the image you want to comment on.',
+                          'video' =>
+                            'Tap Comment to comment on the moment playing, '
+                                'or drag across the frame to point at part '
+                                'of it.',
+                          _ =>
+                            'Touch and hold text to select it, then tap '
+                                'Comment.',
+                        },
+                        textAlign: TextAlign.center,
+                        style: type.body.copyWith(color: palette.textMuted),
+                      ),
+                    ),
+                  for (final thread in threads) ...[
+                    _ThreadCard(controller: controller, thread: thread),
+                    const SizedBox(height: Space.s),
+                  ],
+                  if (resolved > 0)
+                    Center(
+                      child: Button(
+                        label: controller.showResolved
+                            ? 'Hide resolved'
+                            : 'Show $resolved resolved',
+                        onPressed: controller.toggleResolved,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            _SendBar(controller: controller),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// A phone's bar under an image or a video, in the thumb's reach. At rest
+/// it holds Comment, which turns on picking what to comment on. Picking,
+/// [hint] says how, Cancel stops, and [action] is what needs no gesture:
+/// the whole image, or a video's moment picked so far, written about at
+/// once ([actionPrimary]).
+class CommentModeBar extends StatelessWidget {
+  const CommentModeBar({
+    super.key,
+    required this.marking,
+    required this.onToggle,
+    required this.hint,
+    this.action,
+    this.onAction,
+    this.actionPrimary = false,
+  });
+
+  final bool marking;
+  final VoidCallback onToggle;
+  final String hint;
+
+  /// While picking: a button beside Cancel, and what it does.
+  final String? action;
+  final VoidCallback? onAction;
+  final bool actionPrimary;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final action = this.action;
+    return Unselectable(
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Touch.gutter,
+          vertical: Space.xs,
+        ),
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          border: Border(top: BorderSide(color: palette.hairline)),
+        ),
+        child: marking
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        hint,
+                        style: type.secondary.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Cancel at the leading end, the way forward at the
+                  // trailing one, as iOS's bars have them; at the largest
+                  // text, one over the other, the way forward on top.
+                  OverflowBar(
+                    alignment: MainAxisAlignment.spaceBetween,
+                    spacing: Space.s,
+                    overflowSpacing: Space.xs,
+                    overflowAlignment: OverflowBarAlignment.end,
+                    overflowDirection: VerticalDirection.up,
+                    children: [
+                      Button(label: 'Cancel', onPressed: onToggle),
+                      if (action != null)
+                        Button(
+                          label: action,
+                          primary: actionPrimary,
+                          onPressed: onAction,
+                        ),
+                    ],
+                  ),
+                ],
+              )
+            : Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: Button(
+                  label: 'Comment',
+                  primary: true,
+                  onPressed: onToggle,
+                ),
+              ),
+      ),
     );
   }
 }

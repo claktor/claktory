@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "annotation_id": "ann-63",
+  "thread": "t-63",
+  "ink_layer_id": "layer-derivation-excerpt-1",
+  "layer_revision": 1,
+  "source_sha256": "4d967f33427815e06ce250dc49ab7cf4545ac738e5f98cc6aa1efcbe94b1c427",
+  "anchor": {
+    "kind": "markdown",
+    "selectors": [
+      {
+        "type": "TextQuoteSelector",
+        "exact": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0.",
+        "prefix": "activations.\n\n",
+        "suffix": "\n\nIn practice"
+      },
+      {
+        "type": "TextPositionSelector",
+        "start": 1804,
+        "end": 1890
+      }
+    ]
+  },
+  "region": null,
+  "context_composite": {
+    "png_blob_id": "blob-t-63-r1-context",
+    "sha256": "5ff1a75c22d743f8c8571aa9c27943765e10e83e7f670131af185318f74f3ae0",
+    "pixel_width": 1280,
+    "pixel_height": 356,
+    "bytes": 88120,
+    "region": {
+      "x": 0,
+      "y": 0,
+      "w": 1,
+      "h": 1
+    },
+    "crop_to_document_transform": [
+      0.5,
+      0,
+      0,
+      0.5,
+      0,
+      0
+    ]
+  },
+  "question": "Why does the gradient vanish here?",
+  "excerpt_text": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0.",
+  "recognized_text": null,
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

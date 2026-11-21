@@ -203,7 +203,13 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     assert_eq!(claude(&view).plan, "Claude Max 20x");
     assert_eq!(claude(&view).usage.expect("usage").windows[0].used_percent, 100.0);
 
-    let model = factory_agent::providers::catalog::models("anthropic").into_iter().next().expect("a Claude model").id;
+    // A model of the normal pool: Fable draws on a weekly limit of its own,
+    // and these tests are about the account machinery.
+    let model = factory_agent::providers::catalog::models("anthropic")
+        .into_iter()
+        .find(|model| !model.id.starts_with("claude-fable"))
+        .expect("a Claude model")
+        .id;
     let create = Request::CreateAgent(v1::CreateAgent {
         name: "Builder".into(),
         model: format!("anthropic/{model}"),
@@ -358,7 +364,13 @@ async fn serve(factory: &Arc<Factory>, dir: &std::path::Path) -> (Client, View) 
 }
 
 async fn create_builder(client: &mut Client, view: &mut View) {
-    let model = factory_agent::providers::catalog::models("anthropic").into_iter().next().expect("a Claude model").id;
+    // A model of the normal pool: Fable draws on a weekly limit of its own,
+    // and these tests are about the account machinery.
+    let model = factory_agent::providers::catalog::models("anthropic")
+        .into_iter()
+        .find(|model| !model.id.starts_with("claude-fable"))
+        .expect("a Claude model")
+        .id;
     let create = Request::CreateAgent(v1::CreateAgent {
         name: "Builder".into(),
         model: format!("anthropic/{model}"),

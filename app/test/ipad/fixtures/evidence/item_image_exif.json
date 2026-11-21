@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "annotation_id": "ann-52",
+  "thread": "t-52",
+  "ink_layer_id": "layer-whiteboard",
+  "layer_revision": 1,
+  "source_sha256": "745a23c14bbeb5af0ff63c531e150562d9753aed2aa060e6fc055c1c16df1b3b",
+  "anchor": {
+    "kind": "image",
+    "selectors": [
+      {
+        "type": "FragmentSelector",
+        "conformsTo": "http://www.w3.org/TR/media-frags/",
+        "value": "xywh=percent:25,40,30,20"
+      }
+    ]
+  },
+  "region": {
+    "x": 0.25,
+    "y": 0.4,
+    "w": 0.3,
+    "h": 0.2
+  },
+  "context_composite": {
+    "png_blob_id": "blob-t-52-r1-context",
+    "sha256": "46ede12e95bab339923590c6ebcf7d102cb8fd5fe67e0c2cdb2485e981e28094",
+    "pixel_width": 2048,
+    "pixel_height": 2048,
+    "bytes": 1902331,
+    "region": {
+      "x": 0.2,
+      "y": 0.35,
+      "w": 0.4,
+      "h": 0.3
+    },
+    "crop_to_document_transform": [
+      0.59062,
+      0,
+      0,
+      0.59062,
+      604.8,
+      1411.2
+    ]
+  },
+  "question": "Which arrow is the cache?",
+  "excerpt_text": null,
+  "recognized_text": null,
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

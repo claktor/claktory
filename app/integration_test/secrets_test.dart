@@ -289,10 +289,10 @@ void main() {
     );
     expect(settings, findsOneWidget);
     // One of the person's secrets may look like it (one from an earlier
-    // run, with the same variable): the card starts on it. Add new instead.
+    // run, with the same variable): the card starts on it. New secret instead.
     final addNew = find.descendant(
       of: settings,
-      matching: find.text('Add new'),
+      matching: find.text('New secret'),
     );
     if (find
         .descendant(of: settings, matching: find.text('Add and give'))
@@ -302,7 +302,7 @@ void main() {
       await tester.tap(addNew);
       await tester.pump(const Duration(milliseconds: 300));
     }
-    // Add new, filled in from the request: only its value to paste.
+    // New secret, filled in from the request: only its value to paste.
     await tester.enterText(
       find.descendant(
         of: find.descendant(

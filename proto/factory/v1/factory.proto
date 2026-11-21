@@ -157,6 +157,39 @@ message ClientMessage {
     // Skips a step of a new Claktory's first run (Settings.onboarding).
     SetOnboarding set_onboarding = 110;
     ConfirmDevice confirm_device = 111;
+    // Pipes (see Pipe).
+    CreatePipeInvite create_pipe_invite = 112;
+    ReadPipeInvite read_pipe_invite = 113;
+    AcceptPipeInvite accept_pipe_invite = 114;
+    ApprovePipe approve_pipe = 115;
+    UpdatePipe update_pipe = 116;
+    SetPipeState set_pipe_state = 117;
+    SelectPipe select_pipe = 118;
+    SendPipeMessage send_pipe_message = 119;
+    DecidePipeMessage decide_pipe_message = 120;
+    LoadPipeMessages load_pipe_messages = 121;
+    DecideSecretApproval decide_secret_approval = 122;
+    AddPipeLiaison add_pipe_liaison = 123;
+    // Voice messages (see SendMessage.voice).
+    InstallSpeechModel install_speech_model = 124;
+    RemoveSpeechModel remove_speech_model = 125;
+    RetryVoiceMessage retry_voice_message = 126;
+    DiscardVoiceMessage discard_voice_message = 127;
+    // Asks (see AskPerson).
+    AnswerAsk answer_ask = 128;
+    // Chats (see Chat).
+    CreateChat create_chat = 129;
+    SelectChat select_chat = 130;
+    SendChatMessage send_chat_message = 131;
+    StopChat stop_chat = 132;
+    DeleteChat delete_chat = 133;
+    LoadChatEntries load_chat_entries = 134;
+    RenameChat rename_chat = 135;
+    // Moving this Claktory to another computer (see Move).
+    StartMove start_move = 136;
+    ConfirmMove confirm_move = 137;
+    CancelMove cancel_move = 138;
+    FreezeMove freeze_move = 139;
   }
 }
 
@@ -225,6 +258,22 @@ message ServerMessage {
     AppPermissions app_permissions = 38;
     // An agent asks the app the person is using to open a screen.
     OpenScreen open_screen = 39;
+    // Pipes: to the asker only (PipeInvite, PipeInvitePreview,
+    // PipeMessagePage), or to every client showing the pipe (PipeTranscript,
+    // PipeMessageUpdate).
+    PipeInvite pipe_invite = 40;
+    PipeInvitePreview pipe_invite_preview = 41;
+    PipeTranscript pipe_transcript = 42;
+    PipeMessageUpdate pipe_message_update = 43;
+    PipeMessagePage pipe_message_page = 44;
+    // Chats: to every client while the chat is selected (ChatTranscript,
+    // ChatEntryUpdate, ChatEntryDelta, ChatQueuedMessages), or to the asker
+    // only (ChatEntryPage, the answer to LoadChatEntries).
+    ChatTranscript chat_transcript = 45;
+    ChatEntryUpdate chat_entry = 46;
+    ChatEntryDelta chat_delta = 47;
+    ChatEntryPage chat_entry_page = 48;
+    ChatQueuedMessages chat_queued_messages = 49;
   }
 }
 
@@ -596,6 +645,10 @@ message UpdateAgent {
   // others. Moving the agent to another project drops a lead that no
   // longer fits, and the leads of agents that reported to it.
   optional string lead_id = 15;
+  // The model a step its model refused is retried on (see
+  // Agent.fallback_model); empty falls back to the Claktory-wide default
+  // (Settings.default_fallback_model).
+  optional string fallback_model = 16;
 }
 
 // Turns an extension on or off for an agent, and/or sets one of its options.
@@ -628,6 +681,14 @@ message SendMessage {
   // which the message carries; with any, `text` may be empty. Each must be in
   // the agent's uploads folder and still there, or the message is refused.
   repeated Attachment attachments = 4;
+  // A voice message: attachments[0] is a recording (AAC in .m4a, 16 kHz
+  // mono from the apps; WAV, MP3, FLAC, Ogg Vorbis also read), up to 30
+  // minutes, and `text` is empty. It waits in the queue
+  // (QueuedMessage.transcription) while this Claktory transcribes it, then
+  // the agent gets its words as the person's message. Refused while the
+  // speech model is ABSENT or UNSUPPORTED (Workspace.speech_model): the app
+  // asks the person and sends InstallSpeechModel first.
+  bool voice = 5;
 }
 
 // A file the person attached to a message: uploaded to the agent's uploads
@@ -770,6 +831,8 @@ message UpdateSettings {
   // This Claktory's color (see Settings), one of the palette; "" goes back to
   // its default.
   optional string color = 27;
+  // See Settings; "" for none.
+  optional string default_fallback_model = 30;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -953,6 +1016,8 @@ message DecideProposal {
   bool approve = 3;
   // What the person adds for Rivet; may be empty.
   string comment = 4;
+  // Set instead of agent_id for a chat's proposal (Chat.id).
+  string chat_id = 5;
 }
 
 enum MonitorAction {
@@ -1388,10 +1453,16 @@ message UseUsageReset {
   string reset_id = 3;
 }
 
-// Picks new colours for the person's avatar, always different from the
-// ones it had. Answered with Ack; the new avatar reaches every device with
+// Picks new colours for the person's avatar: the pair they chose
+// (`choice`), or, with `choice` unset, a random pair always different from
+// the one it had (a chosen pair is forgotten then, so later shuffles keep
+// working). Answered with Ack; the new avatar reaches every device with
 // Workspace.
-message ShuffleAvatar {}
+message ShuffleAvatar {
+  // An index into Person.avatar_choices, to pick that pair; out of range
+  // is refused. Unset shuffles, as before.
+  optional int32 choice = 1;
+}
 
 // ---- Server → client ----
 
@@ -1528,6 +1599,26 @@ message Workspace {
   // While false, `apps` is empty, the Map has none and their requests are
   // refused.
   bool apps_available = 25;
+  // This Claktory's pipes, every state but deleted (see Pipe), oldest first.
+  repeated Pipe pipes = 26;
+  // The pipe every client shows in the main pane, in place of an agent's
+  // conversation (SelectPipe); empty when an agent's is shown. SelectAgent
+  // clears it.
+  string selected_pipe_id = 27;
+  // The speech model voice messages need (see SpeechModel).
+  SpeechModel speech_model = 28;
+  // The person's chats, most recent activity first (see Chat).
+  repeated Chat chats = 29;
+  // The chat every client shows in the main pane, in place of an agent's
+  // conversation or a pipe (SelectChat, CreateChat); empty otherwise.
+  // SelectAgent and SelectPipe clear it, and SelectChat clears
+  // selected_pipe_id; selected_agent_id stays, for going back.
+  string selected_chat_id = 30;
+  // Moving this Claktory to another computer, from StartMove until it's
+  // done, or failed and dismissed (CancelMove); unset when there's no move.
+  // While the move is frozen (MOVE_PHASE_FROZEN and after), the backend
+  // runs no Factory: its Workspace has only `move` and `version` set.
+  Move move = 31;
 }
 
 // The person a Claktory belongs to, as every device shows them.
@@ -1549,6 +1640,22 @@ message Person {
   // its account.
   string identity_id = 5;
   string email = 6;
+  // The palette the avatar's colours come from: 12 pairs in a fixed order,
+  // sent so the app never keeps a list of its own. ShuffleAvatar.choice is
+  // an index into it.
+  repeated AvatarColors avatar_choices = 7;
+  // Which of `avatar_choices` the avatar shows now (avatar_from and
+  // avatar_to are its colours).
+  int32 avatar_choice = 8;
+}
+
+// One pair of the avatar palette (Person.avatar_choices).
+message AvatarColors {
+  // "#RRGGBB": the diagonal gradient's top-left and bottom-right.
+  string from = 1;
+  string to = 2;
+  // Its name as people read it, for labels: "Indigo and violet", "Slate".
+  string name = 3;
 }
 
 // A Workspace as a change to the last one this app was sent (a Workspace or
@@ -2129,6 +2236,9 @@ message Settings {
   map<string, double> zoom = 28;
   // Where this Claktory's first run stands, the same on every device.
   Onboarding onboarding = 29;
+  // "<provider>/<model id>" a refused step is retried on for agents that
+  // name no fallback_model of their own; empty for none.
+  string default_fallback_model = 30;
 }
 
 // Where a new Claktory's first run stands. A Claktory from before it, or
@@ -2457,8 +2567,9 @@ message Agent {
   // default, set the prompt to this text (UpdateAgent).
   string default_prompt = 31;
   // The seqs of the entries in its conversation that wait for the person's
-  // answer, oldest first: its pending SecretRequest, ConnectProposal and
-  // Proposal (to Rivet) entries. Empty when nothing waits. The Workspace is
+  // answer, oldest first: its pending SecretRequest, ConnectProposal,
+  // Proposal (to Rivet), DevicePairing, SecretApproval and AskPerson
+  // entries. Empty when nothing waits. The Workspace is
   // sent again whenever one is made, decided, withdrawn or expires.
   repeated uint64 waiting_seqs = 32;
   // The agent it reports to, its lead, which can read how it's set up (its
@@ -2480,6 +2591,16 @@ message Agent {
   // reset plus a few seconds' margin is when it actually does); 0 when it
   // waits for the person (out of credit) or isn't held up.
   int64 usage_wait_until_ms = 35;
+  // The pipes whose messages it has read in its current context (as events,
+  // or with pipe_read), by Pipe.id: it's "tainted" until /clear, and using a
+  // secret needs the person's approval each time (SecretApproval). Empty when
+  // it has read none.
+  repeated string tainted_by_pipes = 36;
+  // "<provider>/<model id>" a step this agent's model refused is retried on,
+  // once per refused turn, the next step back on its own model; empty uses
+  // the Claktory-wide default (Settings.default_fallback_model), and with
+  // both empty a refusal just ends the step.
+  string fallback_model = 37;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -2530,6 +2651,10 @@ message Model {
   uint64 context_window = 3;
   // Reasoning efforts the model accepts, weakest first.
   repeated string efforts = 4;
+  // The model takes image input: an agent on it can look at image files
+  // (read_image). From the provider catalog's input list, the same source
+  // as the tool's gate.
+  bool image_input = 5;
 }
 
 // The selected agent's whole transcript, oldest entry first.
@@ -2600,6 +2725,10 @@ message QueuedMessage {
   string client_id = 9;
   // The person's: the files it carries (see Attachment).
   repeated Attachment attachments = 10;
+  // A voice message (SendMessage.voice), while it's transcribed or after it
+  // failed; unset for any other. `text` is empty until it's DONE, and
+  // attachments[0] is the recording.
+  Transcription transcription = 11;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -2636,6 +2765,12 @@ message Entry {
     // An agent adds a device for the person (its devices_add tool): see
     // DevicePairing.
     DevicePairing device_pairing = 14;
+    // An agent that has read a pipe wants to use a secret (see
+    // SecretApproval).
+    SecretApproval secret_approval = 15;
+    // An agent blocked on something only the person can give asks them
+    // (its ask_person tool): see AskPerson.
+    AskPerson ask_person = 16;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -2742,6 +2877,9 @@ enum EventSource {
   EVENT_SOURCE_MONITOR = 4;
   // An app (see AppInfo): `from` is its name, `from_id` its id.
   EVENT_SOURCE_APP = 5;
+  // A pipe's messages for its lead (see Pipe): `from` is the pipe's name
+  // and the other Claktory's, `from_id` "pipe:<Pipe.id>".
+  EVENT_SOURCE_PIPE = 6;
 }
 
 message UserText {
@@ -2755,6 +2893,94 @@ message UserText {
   // The files the message carries (see Attachment); `text` may be empty
   // when it has any.
   repeated Attachment attachments = 4;
+  // Set when the person said it (a voice message, DONE): `text` is what was
+  // heard, attachments[0] the recording, to play back.
+  Transcription voice = 5;
+}
+
+// A voice message's transcription.
+message Transcription {
+  TranscriptionState state = 1;
+  // How long the recording is; 0 while PENDING until it's been read.
+  uint64 duration_ms = 2;
+  // FAILED: what went wrong, for people ("Didn't hear any speech.").
+  string error = 3;
+  // FAILED: for programs. no_model (the speech model couldn't be had),
+  // download_failed, too_long, no_speech, decode_failed, unsupported_cpu,
+  // timed_out (transcribing took over a minute more than the recording's
+  // length), transcribe_failed.
+  string error_code = 4;
+  // The language heard, such as "pl", when the model says; often empty.
+  string language = 5;
+}
+
+enum TranscriptionState {
+  TRANSCRIPTION_STATE_UNSPECIFIED = 0;
+  // Waiting for the speech model (Workspace.speech_model shows its
+  // download) or being transcribed. The person's messages after it wait
+  // behind it, so the agent reads them in the order they were sent; other
+  // events don't.
+  TRANSCRIPTION_STATE_PENDING = 1;
+  TRANSCRIPTION_STATE_DONE = 2;
+  // Not delivered, and not holding up the queue: RetryVoiceMessage or
+  // DiscardVoiceMessage.
+  TRANSCRIPTION_STATE_FAILED = 3;
+}
+
+// The speech model voice messages are transcribed with, on this Claktory's
+// computer (not the device's).
+message SpeechModel {
+  SpeechModelState state = 1;
+  // "Parakeet v3 (25 languages)".
+  string name = 2;
+  // DOWNLOADING: bytes so far, of `total`. READY: its size.
+  uint64 bytes = 3;
+  uint64 total = 4;
+  // FAILED or UNSUPPORTED: why, for people.
+  string error = 5;
+  // The model's licence credit, to show where it's named (CC BY 4.0).
+  string attribution = 6;
+}
+
+enum SpeechModelState {
+  SPEECH_MODEL_STATE_UNSPECIFIED = 0;
+  // Not downloaded: InstallSpeechModel, after asking the person (it's big:
+  // `total`).
+  SPEECH_MODEL_STATE_ABSENT = 1;
+  SPEECH_MODEL_STATE_DOWNLOADING = 2;
+  // Downloaded; its checksum is being checked.
+  SPEECH_MODEL_STATE_VERIFYING = 3;
+  SPEECH_MODEL_STATE_READY = 4;
+  // The download failed (`error`); InstallSpeechModel tries again, from
+  // where it stopped.
+  SPEECH_MODEL_STATE_FAILED = 5;
+  // This computer can't run speech recognition (`error`): grey the
+  // microphone out.
+  SPEECH_MODEL_STATE_UNSUPPORTED = 6;
+}
+
+// Starts (or resumes) downloading the speech model; Ack at once, progress
+// in Workspace.speech_model. Refused when it's UNSUPPORTED or there isn't
+// room for it.
+message InstallSpeechModel {}
+
+// Deletes the speech model, or stops its download. Voice messages waiting
+// for it fail (no_model).
+message RemoveSpeechModel {}
+
+// Transcribes a FAILED voice message again.
+message RetryVoiceMessage {
+  string agent_id = 1;
+  // QueuedMessage.id.
+  int64 message_id = 2;
+}
+
+// Drops a PENDING or FAILED voice message from the queue, undelivered; its
+// recording stays in the agent's uploads.
+message DiscardVoiceMessage {
+  string agent_id = 1;
+  // QueuedMessage.id.
+  int64 message_id = 2;
 }
 
 // How much of an upload the backend has, in bytes: where the next
@@ -2834,6 +3060,12 @@ message Notice {
   // other failure (rate and usage limits, credit, outages). `text` keeps the
   // provider's own words.
   CredentialsRefused refused = 3;
+  // Set when this notice is the model refusing a step on safety grounds:
+  // the policy area the model named, written out as people read it (such
+  // as "cybersecurity" or "biology"), or "unspecified" when it named
+  // none. Empty when the notice isn't a refusal. The app shows a refusal
+  // as itself, not as a failure.
+  string refusal_category = 4;
 }
 
 // Whose credentials a provider refused: what to sign in to again.
@@ -3116,6 +3348,13 @@ message DecideSecretRequest {
   // variable are paired by themselves; any other mismatch is refused,
   // saying so.
   bool as_is = 11;
+  // With `approve`: approve the need and pass the request to its admin
+  // agent (SecretRequest.admin_agent_id), giving nothing yet. The request
+  // becomes APPROVED and the admin agent is told what was approved; it
+  // grants a matching secret or asks the person to add one. Refused when
+  // no admin agent has Secrets (the request's admin_agent_id is empty; the
+  // app offers the direct path instead).
+  bool approve_only = 12;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -3232,6 +3471,18 @@ message SecretRequest {
   // When the agent last changed it (its description, reason or variables),
   // in ms since 1970; 0 if never.
   int64 updated_ms = 12;
+  // APPROVED: when the person approved the need and passed it to the admin
+  // agent, in ms since 1970; 0 otherwise.
+  int64 approved_ms = 13;
+  // The admin agent an approval passes it to (DecideSecretRequest's
+  // approve_only), and, once approved, the one finding or collecting the
+  // secret. Set when the request is made; empty when no admin agent has
+  // Secrets, and the app then offers giving or adding a secret directly.
+  string admin_agent_id = 14;
+  // APPROVED: the admin agent asked the person to add this secret (its
+  // secrets_collect): the add-secret card is open in its conversation,
+  // prefilled from the request, and the values go straight into the vault.
+  bool collecting = 15;
 }
 
 message NewSecret {
@@ -3252,6 +3503,12 @@ enum SecretRequestState {
   // any more. decided_ms says when, and `comment` holds the agent's reason,
   // if it gave one.
   SECRET_REQUEST_STATE_WITHDRAWN = 5;
+  // The person approved the need (DecideSecretRequest.approve_only) and the
+  // admin agent (`admin_agent_id`) finds a matching secret or collects a
+  // new one. The card keeps its direct actions (give a secret, add one,
+  // dismiss), so the person is never stuck on the admin agent. It doesn't
+  // expire: only PENDING requests do.
+  SECRET_REQUEST_STATE_APPROVED = 6;
 }
 
 // This Claktory's account at claktory.com, or at the service in
@@ -4053,3 +4310,627 @@ message SetAppSecret {
   string name = 2;
   string value = 3;
 }
+
+// ---- Pipes ----
+//
+// A pipe is a chat between one of this Claktory's projects and one of
+// another Claktory's, both people having approved it. The agents granted it
+// (its members) write in it with their pipe tools, the lead hears each
+// incoming message as an event, and the person can write in it too. It lives
+// in the backend (factory.db), never in config.json, so no agent can make or
+// approve one; approvals are the person's only.
+
+message Pipe {
+  // This Claktory's id for it (the other side has its own).
+  string id = 1;
+  // Its name on this side, such as "Website ⇄ Marketing".
+  string name = 2;
+  // The project at this end.
+  string project_id = 3;
+  PipeState state = 4;
+  // PAUSED: why.
+  PipePause paused = 5;
+  // ms since 1970.
+  int64 created_ms = 6;
+  // The other side, as it describes itself; unset while INVITED.
+  PipePeer peer = 7;
+  // What this side says the pipe is for, in a line: the other side sees it.
+  string purpose = 8;
+  // This side's prompt for it, added to its members' context after the
+  // fixed safety prompt. The other side never sees it.
+  string prompt = 9;
+  // The agents granted it, by id: they have its tools (the pipe:<id>
+  // extension instance).
+  repeated string member_ids = 10;
+  // The member woken by each incoming message; empty when none is.
+  string lead_id = 11;
+  PipeLimits limits = 12;
+  // Every outgoing message from an agent waits for the person's Send or
+  // Discard (PIPE_MESSAGE_STATE_HELD). On for a new pipe.
+  bool review_outgoing = 13;
+  // APPROVAL: the four digits both people must see alike before approving.
+  string digits = 14;
+  // INVITED: when the invite code stops working, in ms since 1970.
+  int64 invite_expires_ms = 15;
+  // Whether the other Claktory is connected now, and when it last was (ms
+  // since 1970; 0 if never).
+  bool online = 16;
+  int64 last_seen_ms = 17;
+  // Messages from this side not yet delivered ("3 waiting").
+  uint32 queued = 18;
+  // Something new the person hasn't seen: a message since they last showed
+  // the pipe (SelectPipe clears it).
+  bool unseen = 19;
+  // Messages waiting for the person's decision (held outgoing, held
+  // incoming), by PipeMessage.seq: like Agent.waiting_seqs, for "Needs you".
+  repeated uint64 waiting_seqs = 20;
+}
+
+enum PipeState {
+  PIPE_STATE_UNSPECIFIED = 0;
+  // This side made an invite; nobody has used its code yet.
+  PIPE_STATE_INVITED = 1;
+  // This side used a code and is reaching the other Claktory.
+  PIPE_STATE_JOINING = 2;
+  // Both Claktories are connected: waiting for this person to approve
+  // (ApprovePipe), checking `digits`.
+  PIPE_STATE_APPROVAL = 3;
+  // This person approved; waiting for the other's.
+  PIPE_STATE_WAITING_PEER = 4;
+  // Both approved: messages flow.
+  PIPE_STATE_OPEN = 5;
+  // Nothing flows until it's resumed; `paused` says why.
+  PIPE_STATE_PAUSED = 6;
+  // Closed by either side, denied, or its invite expired: it keeps its
+  // history until deleted, and can't open again.
+  PIPE_STATE_CLOSED = 7;
+}
+
+enum PipePause {
+  PIPE_PAUSE_UNSPECIFIED = 0;
+  // This person paused it.
+  PIPE_PAUSE_BY_ME = 1;
+  // The other side paused it: only they can resume.
+  PIPE_PAUSE_BY_PEER = 2;
+  // The loop breaker: agents exchanged 10 messages with no person writing
+  // on either side, or repeated themselves. Resuming is "Continue".
+  PIPE_PAUSE_LOOP = 3;
+}
+
+// The other side of a pipe, as it describes itself.
+message PipePeer {
+  // Its Claktory's name.
+  string claktory_name = 1;
+  // Its person, as they named themselves, and their email when signed in;
+  // either may be empty. Claimed, not checked: see `verified`.
+  string owner_name = 2;
+  string owner_email = 3;
+  // Whether an account service vouched for whose Claktory it is. Always
+  // false for now: show "not verified".
+  bool verified = 4;
+  // The project at its end, and what it says the pipe is for.
+  string project_name = 5;
+  string purpose = 6;
+}
+
+message PipeLimits {
+  // Messages each way an hour, and at most this many in a row at once.
+  uint32 messages_per_hour = 1;
+  uint32 burst = 2;
+  // Megabytes of files sent a day.
+  uint32 file_mb_per_day = 3;
+  // What's left of them now (read-only: ignored in UpdatePipe).
+  uint32 messages_left = 4;
+  uint32 file_mb_left = 5;
+}
+
+// One message in a pipe, or a line from Claktory about it (approved,
+// paused, closed…).
+message PipeMessage {
+  // Its place in this side's chat, from 1; unique per pipe, never reused.
+  uint64 seq = 1;
+  // ms since 1970: when it was written (sent, or received).
+  int64 timestamp_ms = 2;
+  PipeAuthor author = 3;
+  string text = 4;
+  repeated PipeFile files = 5;
+  PipeMessageState state = 6;
+  // REFUSED: why, for the person ("It contains your secret AWS."); HELD
+  // with files from outside the outbox: which; HELD_INCOMING: why it's held.
+  string note = 7;
+}
+
+message PipeAuthor {
+  PipeAuthorKind kind = 1;
+  // Their agent's or their person's name, or my agent's.
+  string name = 2;
+  // Their agent's role, as it says; empty otherwise.
+  string role = 3;
+  // MY_AGENT: its id.
+  string agent_id = 4;
+}
+
+enum PipeAuthorKind {
+  PIPE_AUTHOR_KIND_UNSPECIFIED = 0;
+  // An agent on the other side, as it says.
+  PIPE_AUTHOR_KIND_THEIR_AGENT = 1;
+  // The other side says its person wrote it: "says it's from <name>".
+  PIPE_AUTHOR_KIND_THEIR_PERSON = 2;
+  PIPE_AUTHOR_KIND_MY_AGENT = 3;
+  // This Claktory's person.
+  PIPE_AUTHOR_KIND_ME = 4;
+  // Claktory, about the pipe: shown as a line, not a bubble.
+  PIPE_AUTHOR_KIND_CLAKTORY = 5;
+}
+
+message PipeFile {
+  string name = 1;
+  uint64 size = 2;
+  // Where it is on the machine Claktory runs on: in the pipe's outbox for
+  // one sent, its inbox for one received.
+  string path = 3;
+}
+
+enum PipeMessageState {
+  PIPE_MESSAGE_STATE_UNSPECIFIED = 0;
+  // Outgoing, waiting for the person's Send or Discard (DecidePipeMessage):
+  // Review outgoing is on, or it carries files from outside the outbox.
+  PIPE_MESSAGE_STATE_HELD = 1;
+  // Outgoing, passed: on its way (the other side may be offline).
+  PIPE_MESSAGE_STATE_QUEUED = 2;
+  // Outgoing, and the other side has it.
+  PIPE_MESSAGE_STATE_DELIVERED = 3;
+  // Outgoing, and stopped: by Claktory (a secret in it, too big, over the
+  // limit) or by the other side. `note` says why. Never sent.
+  PIPE_MESSAGE_STATE_REFUSED = 4;
+  // Outgoing, and the person discarded it. Never sent.
+  PIPE_MESSAGE_STATE_DISCARDED = 5;
+  // Incoming, and in: the lead was told.
+  PIPE_MESSAGE_STATE_RECEIVED = 6;
+  // Incoming over the rate limit: no agent sees it until the person lets
+  // it in (DecidePipeMessage).
+  PIPE_MESSAGE_STATE_HELD_INCOMING = 7;
+}
+
+// Makes an invite for a pipe from `project_id`: the pipe appears as
+// INVITED, and the code is answered with PipeInvite to the asker only.
+message CreatePipeInvite {
+  string project_id = 1;
+  // The pipe's name on this side, and what this side says it's for (the
+  // other side sees both before accepting).
+  string name = 2;
+  string purpose = 3;
+}
+
+message PipeInvite {
+  string pipe_id = 1;
+  // claktory-pipe://…: for the other person to paste in their Claktory.
+  // Works once, until Pipe.invite_expires_ms.
+  string code = 2;
+}
+
+// Reads an invite code without using it, for the Accept screen: answered
+// with PipeInvitePreview; INVALID_REQUEST for a code that isn't one.
+message ReadPipeInvite {
+  string code = 1;
+}
+
+message PipeInvitePreview {
+  string code = 1;
+  // The inviting side, as the code describes it (`verified` false).
+  PipePeer peer = 2;
+  // The pipe's name, as the inviter named it.
+  string name = 3;
+  // When the code stops working, in ms since 1970.
+  int64 expires_ms = 4;
+}
+
+// Uses an invite code for a pipe to `project_id`: the pipe appears as
+// JOINING, selected (Workspace.selected_pipe_id), then APPROVAL once the
+// other Claktory answers (or CLOSED, with a line saying why, when it
+// can't). Answered with Ack.
+message AcceptPipeInvite {
+  string code = 1;
+  string project_id = 2;
+  // Its name on this side; empty takes the inviter's.
+  string name = 3;
+  // What this side says it's for.
+  string purpose = 4;
+}
+
+// The person's decision on a pipe in APPROVAL. Approving needs a lead
+// among the members, or `liaison_name`. Denying closes it.
+message ApprovePipe {
+  string pipe_id = 1;
+  bool approve = 2;
+  repeated string member_ids = 3;
+  string lead_id = 4;
+  // Makes a liaison agent of that name in the pipe's project (see
+  // AddPipeLiaison), a member and the lead.
+  string liaison_name = 5;
+}
+
+// Changes a pipe's settings; unset fields stay as they are.
+message UpdatePipe {
+  string pipe_id = 1;
+  optional string name = 2;
+  optional string prompt = 3;
+  optional string purpose = 4;
+  PipeMembers members = 5;
+  optional string lead_id = 6;
+  PipeLimits limits = 7;
+  optional bool review_outgoing = 8;
+}
+
+message PipeMembers {
+  repeated string agent_ids = 1;
+}
+
+// Pauses, resumes (Continue, after the loop breaker), closes or deletes a
+// pipe. Delete removes a closed pipe and its history from this side.
+message SetPipeState {
+  string pipe_id = 1;
+  PipeAction action = 2;
+}
+
+enum PipeAction {
+  PIPE_ACTION_UNSPECIFIED = 0;
+  PIPE_ACTION_PAUSE = 1;
+  PIPE_ACTION_RESUME = 2;
+  PIPE_ACTION_CLOSE = 3;
+  PIPE_ACTION_DELETE = 4;
+}
+
+// Shows the pipe in every client's main pane (Workspace.selected_pipe_id):
+// answered with PipeTranscript, and clears Pipe.unseen.
+message SelectPipe {
+  string pipe_id = 1;
+}
+
+// The person writes in a pipe; it goes out as theirs, unheld.
+message SendPipeMessage {
+  string pipe_id = 1;
+  string text = 2;
+}
+
+// The person's decision on a held message: HELD (send or discard it) or
+// HELD_INCOMING (let it in, or discard it).
+message DecidePipeMessage {
+  string pipe_id = 1;
+  uint64 seq = 2;
+  bool allow = 3;
+}
+
+// A pipe's latest messages, sent when it's selected: at most 200.
+message PipeTranscript {
+  string pipe_id = 1;
+  repeated PipeMessage messages = 2;
+  bool has_earlier = 3;
+}
+
+// Adds a message or replaces the one with the same seq, in the selected pipe.
+message PipeMessageUpdate {
+  string pipe_id = 1;
+  PipeMessage message = 2;
+}
+
+// Earlier messages, answered with PipeMessagePage to the asker only.
+message LoadPipeMessages {
+  string pipe_id = 1;
+  // Messages before this seq (exclusive).
+  uint64 before_seq = 2;
+  // 0 for 200; 1000 at most.
+  uint32 limit = 3;
+}
+
+message PipeMessagePage {
+  string pipe_id = 1;
+  repeated PipeMessage messages = 2;
+  bool has_earlier = 3;
+}
+
+// Makes a liaison agent for a pipe: in the pipe's project, with no secrets,
+// no web and no messaging, a member and the lead. Answered with Ack; the
+// agent shows in Pipe.member_ids and lead_id.
+message AddPipeLiaison {
+  string pipe_id = 1;
+  string name = 2;
+}
+
+// An agent that has read a pipe (Agent.tainted_by_pipes) ran a command
+// with a secret: it didn't run, and waits for the person. Allowed, the
+// agent may use the secret in one command; it's told either way.
+message SecretApproval {
+  string agent_id = 1;
+  // The secrets it named, by name.
+  repeated string secret_names = 2;
+  // The pipes it has read, by name.
+  repeated string pipe_names = 3;
+  // The command it wanted to run.
+  string command = 4;
+  SecretApprovalState state = 5;
+  // When it was decided, in ms since 1970; 0 while pending.
+  int64 decided_ms = 6;
+  // Its id, for Claktory's records.
+  string id = 7;
+}
+
+enum SecretApprovalState {
+  SECRET_APPROVAL_STATE_UNSPECIFIED = 0;
+  SECRET_APPROVAL_STATE_PENDING = 1;
+  SECRET_APPROVAL_STATE_ALLOWED = 2;
+  SECRET_APPROVAL_STATE_DENIED = 3;
+  // Left unanswered 12 hours.
+  SECRET_APPROVAL_STATE_EXPIRED = 4;
+}
+
+// The person's decision on a SecretApproval entry in an agent's conversation.
+message DecideSecretApproval {
+  string agent_id = 1;
+  // The entry's seq.
+  uint64 seq = 2;
+  bool allow = 3;
+}
+
+// An agent's question for the person (its ask_person tool, the Ask
+// extension), shown in its conversation after the call: something it's
+// blocked on that only the person can give (a decision, an approval,
+// access). The person answers it or dismisses it with AnswerAsk; the entry
+// is sent again then, and the agent is told in an event (dismissed: to use
+// its best judgment). While pending, its seq is in Agent.waiting_seqs. It
+// waits until it's decided, across restarts; clearing the agent's
+// conversation (/clear) dismisses it without telling the agent.
+message AskPerson {
+  string id = 1;
+  // A short line saying what it needs.
+  string title = 2;
+  // What it needs and why, in the agent's words (Markdown).
+  string body = 3;
+  // The agent wants a written answer (AnswerAsk.text is needed to answer).
+  // Otherwise answering approves what it asks, with an optional comment.
+  bool wants_text = 4;
+  AskPersonState state = 5;
+  // ANSWERED: the person's answer or comment; may be empty when
+  // wants_text is false.
+  string answer = 6;
+  // When it was answered or dismissed, in ms since 1970; 0 while pending.
+  int64 decided_ms = 7;
+}
+
+enum AskPersonState {
+  ASK_PERSON_STATE_UNSPECIFIED = 0;
+  ASK_PERSON_STATE_PENDING = 1;
+  ASK_PERSON_STATE_ANSWERED = 2;
+  ASK_PERSON_STATE_DISMISSED = 3;
+}
+
+// The person's answer to an AskPerson entry in an agent's conversation, or
+// its dismissal. Answered with Ack; refused when it isn't pending, or when
+// it wants a written answer and `text` is empty.
+message AnswerAsk {
+  string agent_id = 1;
+  // The entry's seq.
+  uint64 seq = 2;
+  // Dismiss it instead: the agent is told to use its best judgment.
+  bool dismiss = 3;
+  // The answer (or, when the ask doesn't want one, an optional comment).
+  string text = 4;
+}
+
+// A chat: a one-off conversation of the person's, beside their agents but
+// not one of them. It has no name, folder or extensions; it can search the
+// web, read pages and propose to Rivet, and nothing else. Agents can't see
+// or message it, and the Map leaves it out. Kept until it's deleted.
+message Chat {
+  // Never an agent's id.
+  string id = 1;
+  // From its first exchange (a short model-written title, the first
+  // message's opening words until then), or as the person renamed it;
+  // empty while it has no message: show "New chat".
+  string title = 2;
+  // ms since 1970. `updated`: its last message, the person's or its own.
+  int64 created = 3;
+  int64 updated = 4;
+  // WORKING while it replies.
+  AgentStatus status = 5;
+  // A reply finished since the person last had it open.
+  bool unseen = 6;
+  // "<provider>/<model id>": the Claktory's default model when it was made,
+  // at medium effort.
+  string model = 7;
+  // Entries waiting for the person (a proposal to Rivet), as
+  // Agent.waiting_seqs.
+  repeated uint64 waiting_seqs = 8;
+  // Sent while it replies, not yet read (ChatQueuedMessages lists them).
+  uint32 queued_messages = 9;
+  // Its model can run (its provider is signed in); otherwise show "No model
+  // available".
+  bool model_available = 10;
+  // As Agent.usage_wait and Agent.usage_wait_until_ms: it waits for an
+  // account's usage to reset; StopChat ends the wait.
+  string usage_wait = 11;
+  int64 usage_wait_until_ms = 12;
+}
+
+// Makes a chat and selects it (Workspace.selected_chat_id, in the Workspace
+// before the Ack). With `text`, that's its first message; empty, the chat
+// is empty, and an empty chat is deleted as soon as it's left (another chat,
+// agent or pipe selected, or another CreateChat).
+message CreateChat {
+  string text = 1;
+  // As SendMessage.client_id.
+  string client_id = 2;
+}
+
+// Shows the chat in every client's main pane: Ack, then ChatTranscript to
+// every client. Clears Chat.unseen.
+message SelectChat {
+  string chat_id = 1;
+}
+
+// The person writes in a chat. While it replies, the message waits
+// (ChatQueuedMessages) and is read after its current step.
+message SendChatMessage {
+  string chat_id = 1;
+  string text = 2;
+  // As SendMessage.client_id.
+  string client_id = 3;
+}
+
+// Stops the chat's reply, or its wait for usage; what's queued stays.
+message StopChat {
+  string chat_id = 1;
+}
+
+// Deletes a chat and its conversation for good; one that's replying is
+// stopped first.
+message DeleteChat {
+  string chat_id = 1;
+}
+
+// Earlier entries of a chat, as LoadEntries for an agent's: answered with
+// ChatEntryPage to the asker only.
+message LoadChatEntries {
+  string chat_id = 1;
+  uint64 before_seq = 2;
+  uint32 limit = 3;
+  optional uint64 from_seq = 4;
+}
+
+// Names a chat; an empty title goes back to the automatic one.
+message RenameChat {
+  string chat_id = 1;
+  string title = 2;
+}
+
+// The selected chat's conversation, as Transcript for an agent's.
+message ChatTranscript {
+  string chat_id = 1;
+  repeated Entry entries = 2;
+  bool has_earlier = 3;
+}
+
+// Adds an entry to a chat's conversation or replaces the one with its seq.
+message ChatEntryUpdate {
+  string chat_id = 1;
+  Entry entry = 2;
+}
+
+// Appends streamed text to a chat's entry, as EntryDelta.
+message ChatEntryDelta {
+  string chat_id = 1;
+  uint64 seq = 2;
+  string text = 3;
+}
+
+// The answer to LoadChatEntries.
+message ChatEntryPage {
+  string chat_id = 1;
+  repeated Entry entries = 2;
+  bool has_earlier = 3;
+}
+
+// What waits for the selected chat, as QueuedMessages for an agent.
+message ChatQueuedMessages {
+  string chat_id = 1;
+  repeated QueuedMessage messages = 2;
+}
+
+// Moving this Claktory to another computer over the network (docs/MOVE.md,
+// "The handshake"). The other computer runs `factoryd receive`, which shows
+// a code; StartMove with that code dials it. Both computers show six
+// digits, the person confirms they match (ConfirmMove here, and on the
+// other computer's terminal), and the copy starts by itself while agents
+// keep working. Once little changes between rounds, Claktory freezes by
+// itself (FreezeMove does it at once), sends the last round, and waits for
+// the other computer to set it up; then this copy is put away and the
+// other one starts. A failure before that leaves Claktory here as it was.
+message Move {
+  MovePhase phase = 1;
+  // The other computer, as it says: its name ("cloud-box"), system
+  // ("linux", "macos"), architecture ("x86_64", "aarch64") and Claktory
+  // version. Set from MOVE_PHASE_CONFIRM on; before, from the code.
+  string target_machine = 2;
+  string target_os = 3;
+  string target_arch = 4;
+  string target_version = 5;
+  // The six digits both computers show, "123 456"; set from
+  // MOVE_PHASE_CONFIRM on.
+  string digits = 6;
+  // The person on the other computer confirmed the digits too.
+  bool target_confirmed = 7;
+  // Why the other computer can't take this Claktory, in sentences; with
+  // any, the move fails (MOVE_PHASE_FAILED).
+  repeated string problems = 8;
+  // Commands agents use that the other computer doesn't have ("flutter"):
+  // a warning, not a failure.
+  repeated string missing_tools = 9;
+  // Where folders go on the other computer, longest first.
+  repeated MovePath map = 10;
+  // How much the move carries, as planned.
+  uint64 plan_bytes = 11;
+  // What the other computer has of it so far, and the whole, after each
+  // round.
+  uint64 bytes_have = 12;
+  uint64 bytes_total = 13;
+  // The round under way, from 1; the last one is during MOVE_PHASE_FROZEN.
+  uint32 round = 14;
+  // What's happening, in a sentence for the person ("Copying round 2…",
+  // the other computer's import steps while MOVE_PHASE_IMPORTING).
+  string step_text = 15;
+  // Why it failed, in a sentence; set in MOVE_PHASE_FAILED.
+  string error = 16;
+  // CancelMove would call it off now: until the commit (false from
+  // MOVE_PHASE_COMMITTING on; true in MOVE_PHASE_FAILED, to dismiss it).
+  bool can_cancel = 17;
+  // When this last changed, ms since the epoch.
+  int64 updated_ms = 18;
+}
+
+message MovePath {
+  string from = 1;
+  string to = 2;
+}
+
+enum MovePhase {
+  MOVE_PHASE_UNSPECIFIED = 0;
+  // Dialing the other computer.
+  MOVE_PHASE_CONNECTING = 1;
+  // Both show `digits`: waiting for ConfirmMove here and the person there.
+  MOVE_PHASE_CONFIRM = 2;
+  // The other computer checks the plan.
+  MOVE_PHASE_CHECKING = 3;
+  // Copying while agents keep working; FreezeMove ends it now.
+  MOVE_PHASE_COPYING = 4;
+  // Agents are stopped and the last round goes; only `move` is served.
+  MOVE_PHASE_FROZEN = 5;
+  // The other computer sets it up and checks it (`step_text` says what).
+  MOVE_PHASE_IMPORTING = 6;
+  // This copy is put away; telling the other computer to start. No way back.
+  MOVE_PHASE_COMMITTING = 7;
+  // Moved: the other computer runs this Claktory now.
+  MOVE_PHASE_DONE = 8;
+  // It didn't go: `error` says why. Claktory runs here as before.
+  // CancelMove dismisses it.
+  MOVE_PHASE_FAILED = 9;
+}
+
+// Starts moving this Claktory to the computer that shows `code` (from
+// `factoryd receive` there). Refused with a sentence when the code isn't
+// one, the other computer has an older Claktory, a move is already under
+// way, or this Claktory can't stop and start itself (not run by its
+// service).
+message StartMove {
+  string code = 1;
+}
+
+// The person sees the same digits on both computers (MOVE_PHASE_CONFIRM).
+message ConfirmMove {}
+
+// Calls the move off, until the commit: the other computer throws away what
+// it has and Claktory carries on here. In MOVE_PHASE_FAILED, dismisses it.
+message CancelMove {}
+
+// Freezes now instead of waiting for the copy to settle
+// (MOVE_PHASE_COPYING only): agents stop for the last round.
+message FreezeMove {}

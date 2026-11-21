@@ -5,6 +5,13 @@
 //! exactly the socket's bytes both ways. The protocol code above it is the
 //! same as over a plain socket. A backend that has `claktory/2` gets them
 //! compressed (zstd); an older one, as they are (`claktory/1`).
+//!
+//! The port is this device's, not this app's: any program on it can
+//! connect there (another app on an iPhone, any process or user on a Mac),
+//! and whatever passes would reach the backend as this device. So each
+//! tunnel has a secret, and only a WebSocket asking for its path
+//! (`ws://127.0.0.1:<port>/<secret>`) is forwarded; anything else is
+//! closed before it reaches iroh.
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -32,8 +39,17 @@ pub const ALPN: &[u8] = b"claktory/1";
 pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
 
 /// How long a dial may take before the app says why it can't connect,
-/// rather than waiting on.
-pub const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+/// rather than waiting on. Under the app's own 10 s connect window, so a
+/// slow dial fails here first and the next try isn't queued behind it.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long a socket has to say what it asks for, and how much it may say
+/// before its request line ends.
+#[cfg(not(test))]
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
+const REQUEST_LINE_MAX: usize = 1024;
 
 /// A new device key: 32 random bytes as lowercase hex, made on the device.
 pub fn generate_key() -> String {
@@ -137,6 +153,9 @@ pub enum Failure {
 /// backend over iroh.
 pub struct Tunnel {
     port: u16,
+    /// What the app asks for to be forwarded: `/<secret>`, 32 random bytes
+    /// in hex, new for every tunnel.
+    path: String,
     shared: Arc<Shared>,
     accept: JoinHandle<()>,
     watch: JoinHandle<()>,
@@ -152,6 +171,9 @@ struct Shared {
     /// The connection localhost forwards travel on (`crate::forward`),
     /// dialled by the first one.
     forwards: AsyncMutex<Option<Connection>>,
+    /// Tells a dial in flight to give up: the network changed under it
+    /// (`reconnect`), so it may be stuck on a dead path.
+    cancel_dials: tokio::sync::Notify,
 }
 
 impl Tunnel {
@@ -160,19 +182,23 @@ impl Tunnel {
     pub async fn open(endpoint: Endpoint, backend: EndpointAddr) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = listener.local_addr()?.port();
+        // A key's 32 bytes are as random as any: the system's CSPRNG.
+        let path: Arc<str> = format!("/{}", hex::encode(SecretKey::generate().to_bytes())).into();
         let shared = Arc::new(Shared {
             endpoint,
             backend,
             connection: AsyncMutex::new(None),
             status: Mutex::new(Status::default()),
             forwards: AsyncMutex::new(None),
+            cancel_dials: tokio::sync::Notify::new(),
         });
         let accept = tokio::spawn({
             let shared = shared.clone();
+            let path = path.clone();
             async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let _ = socket.set_nodelay(true);
-                    tokio::spawn(forward(socket, shared.clone()));
+                    tokio::spawn(forward(socket, shared.clone(), path.clone()));
                 }
             }
         });
@@ -190,27 +216,39 @@ impl Tunnel {
                 }
             }
         });
-        Ok(Self { port, shared, accept, watch })
+        Ok(Self { port, path: path.to_string(), shared, accept, watch })
     }
 
-    /// The loopback port the app connects to: ws://127.0.0.1:<port>.
+    /// The loopback port the app connects to: ws://127.0.0.1:<port><path>.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The path the app asks for there; nothing else is forwarded.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     pub fn status(&self) -> Status {
         self.shared.status.lock().unwrap().clone()
     }
 
-    /// After the app was suspended, or the network changed under it: the
-    /// connection may be dead without knowing it yet, so it's closed (the
-    /// next socket dials afresh, unless a dial is under way) and iroh looks
-    /// at the network again. A failure from before says nothing about now.
+    /// After the app was suspended, or the network changed under it: a
+    /// dial in flight is told to give up (it may be stuck on a dead path,
+    /// and sockets would queue behind it), the connection is closed, so
+    /// the backend sees this session end now rather than when it times
+    /// out, and iroh looks at the network again. The next socket dials
+    /// afresh. A failure from before says nothing about now.
     pub async fn reconnect(&self) {
-        if let Ok(mut slot) = self.shared.connection.try_lock()
-            && let Some(connection) = slot.take()
+        self.shared.cancel_dials.notify_waiters();
         {
-            connection.close(0u32.into(), b"");
+            // Free at once, or as soon as the cancelled dial lets go.
+            let mut slot = self.shared.connection.lock().await;
+            if let Some(connection) = slot.take() {
+                connection.close(0u32.into(), b"");
+            }
+        }
+        {
             let mut status = self.shared.status.lock().unwrap();
             status.phase = Phase::Idle;
             status.path = Path::None;
@@ -260,7 +298,7 @@ impl Dialer {
             Ok(Ok(connection)) => connection,
             Ok(Err(error)) if refused_alpn(&error) => return Err(ForwardingFailure::Unsupported),
             Ok(Err(error)) => return Err(ForwardingFailure::Failed(explain_connect(&error).0)),
-            Err(_) => return Err(ForwardingFailure::Failed("Nothing answered within 20 seconds.".to_owned())),
+            Err(_) => return Err(ForwardingFailure::Failed(format!("Nothing answered within {} seconds.", DIAL_TIMEOUT.as_secs()))),
         };
         *slot = Some(connection.clone());
         Ok(connection)
@@ -283,10 +321,16 @@ impl Drop for Tunnel {
     }
 }
 
-/// One app socket: a new stream on the connection (dialling it if needed),
-/// bytes copied both ways until either side ends. A socket the tunnel
-/// can't carry is closed at once, and the status says why.
-async fn forward(socket: TcpStream, shared: Arc<Shared>) {
+/// One app socket: once it has asked for the tunnel's [path], a new stream
+/// on the connection (dialling it if needed), bytes copied both ways until
+/// either side ends, its request line asking for `/` as before. A socket
+/// that asks for anything else is closed without a word, before anything
+/// is dialled; one the tunnel can't carry is closed at once, and the
+/// status says why.
+async fn forward(mut socket: TcpStream, shared: Arc<Shared>, path: Arc<str>) {
+    let Ok(Ok(first)) = tokio::time::timeout(REQUEST_TIMEOUT, admitted(&mut socket, &path)).await else {
+        return;
+    };
     let Some(connection) = connection(&shared).await else {
         return;
     };
@@ -303,6 +347,10 @@ async fn forward(socket: TcpStream, shared: Arc<Shared>) {
         // message goes at once.
         let up = async {
             let mut send = ZstdEncoder::new(send);
+            // Flushed now: what follows may not come until the backend answers.
+            if send.write_all(&first).await.is_err() || send.flush().await.is_err() {
+                return;
+            }
             let _ = copy(&mut read, &mut send).await;
             let _ = send.shutdown().await;
         };
@@ -314,7 +362,9 @@ async fn forward(socket: TcpStream, shared: Arc<Shared>) {
         return;
     }
     let up = async {
-        let _ = copy(&mut read, &mut send).await;
+        if send.write_all(&first).await.is_ok() {
+            let _ = copy(&mut read, &mut send).await;
+        }
         let _ = send.finish();
     };
     let down = async {
@@ -322,6 +372,52 @@ async fn forward(socket: TcpStream, shared: Arc<Shared>) {
         let _ = write.shutdown().await;
     };
     tokio::join!(up, down);
+}
+
+/// Reads [socket]'s request line and checks it asks for [path]: then what
+/// was read, the line asking for `/` instead (what the backend expects),
+/// followed by whatever came after it.
+async fn admitted(socket: &mut TcpStream, path: &str) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not the tunnel's path");
+    let mut read = Vec::with_capacity(512);
+    let end = loop {
+        if let Some(end) = read.windows(2).position(|pair| pair == b"\r\n") {
+            break end;
+        }
+        if read.len() > REQUEST_LINE_MAX {
+            return Err(refused());
+        }
+        let mut chunk = [0u8; 512];
+        // Never more than a line's worth and its end past the cap.
+        let room = (REQUEST_LINE_MAX + 2 - read.len()).min(chunk.len());
+        let n = socket.read(&mut chunk[..room]).await?;
+        if n == 0 {
+            return Err(refused());
+        }
+        read.extend_from_slice(&chunk[..n]);
+    };
+    if end > REQUEST_LINE_MAX {
+        return Err(refused());
+    }
+    let line = &read[..end];
+    let mut parts = line.split(|byte| *byte == b' ');
+    let (Some(b"GET"), Some(target), Some(version), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return Err(refused());
+    };
+    if !same(target, path.as_bytes()) {
+        return Err(refused());
+    }
+    let mut first = Vec::with_capacity(read.len());
+    first.extend_from_slice(b"GET / ");
+    first.extend_from_slice(version);
+    first.extend_from_slice(&read[end..]);
+    Ok(first)
+}
+
+/// Whether [a] and [b] are the same, taking as long whatever differs.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 /// Dials the backend offering [ALPN_COMPRESSED], then [ALPN].
@@ -340,7 +436,20 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         return Some(open.clone());
     }
     shared.status.lock().unwrap().phase = Phase::Dialing;
-    let connection = match tokio::time::timeout(DIAL_TIMEOUT, dial(shared)).await {
+    let dialled = tokio::select! {
+        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared)) => dialled,
+        // `reconnect`: this dial may be stuck on a path that's gone. Give
+        // up quietly; the next socket dials afresh on what the network is
+        // now.
+        _ = shared.cancel_dials.notified() => {
+            let mut status = shared.status.lock().unwrap();
+            status.phase = Phase::Idle;
+            status.path = Path::None;
+            *slot = None;
+            return None;
+        }
+    };
+    let connection = match dialled {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
             let (said, failure) = explain_connect(&error);
@@ -351,7 +460,8 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         Err(_) => {
             let relay = shared.status.lock().unwrap().relay_connected;
             if relay {
-                shared.failed("Nothing answered within 20 seconds: the machine may be off, asleep or offline.", Failure::Unreachable);
+                let said = format!("Nothing answered within {} seconds: the machine may be off, asleep or offline.", DIAL_TIMEOUT.as_secs());
+                shared.failed(&said, Failure::Unreachable);
             } else {
                 shared.failed("This device can't reach the relay or the machine: check its network.", Failure::Offline);
             }
@@ -527,6 +637,17 @@ mod tests {
             .unwrap()
     }
 
+    /// A socket that asked for the tunnel's path, as the app's WebSocket
+    /// does: the backend gets (and the echo returns) `GET / HTTP/1.1`.
+    async fn ask(tunnel: &Tunnel) -> TcpStream {
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        socket.write_all(format!("GET {} HTTP/1.1\r\n", tunnel.path()).as_bytes()).await.unwrap();
+        let mut got = [0u8; 16];
+        tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").unwrap();
+        assert_eq!(&got, b"GET / HTTP/1.1\r\n");
+        socket
+    }
+
     #[tokio::test]
     async fn sockets_become_streams_on_one_connection() {
         let backend = echo_backend().await;
@@ -534,13 +655,13 @@ mod tests {
         assert_eq!(tunnel.status().phase, Phase::Idle, "nothing dials before the app connects");
 
         // Two sockets at once, each its own stream, bytes both ways.
-        let mut first = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
-        let mut second = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
-        first.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+        let mut first = ask(&tunnel).await;
+        let mut second = ask(&tunnel).await;
+        first.write_all(b"first").await.unwrap();
         second.write_all(b"second").await.unwrap();
-        let mut got = [0u8; 16];
+        let mut got = [0u8; 5];
         first.read_exact(&mut got).await.unwrap();
-        assert_eq!(&got, b"GET / HTTP/1.1\r\n");
+        assert_eq!(&got, b"first");
         let mut got = [0u8; 6];
         second.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"second");
@@ -559,10 +680,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_socket_asking_for_the_tunnels_path_is_forwarded() {
+        let backend = echo_backend().await;
+        let tunnel = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
+        assert!(tunnel.path().len() == 65 && tunnel.path().starts_with('/'), "{}", tunnel.path());
+        let other = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
+        assert_ne!(tunnel.path(), other.path(), "every tunnel has its own");
+        other.close().await;
+
+        let wrong = format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "0".repeat(64));
+        let line = "GET /".to_owned() + &"a".repeat(2000);
+        // The right path, but a line past the cap, its end just beyond it.
+        let long = format!("GET {} HTTP/1.1{}\r\n", tunnel.path(), "1".repeat(REQUEST_LINE_MAX + 100 - 74));
+        let refused: [&[u8]; 7] = [
+            long.as_bytes(),
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            wrong.as_bytes(),
+            b"POST /x HTTP/1.1\r\n",
+            b"hello\r\n",
+            // No line's end within the cap.
+            line.as_bytes(),
+            // Says nothing: dropped once its time is up.
+            b"",
+        ];
+        for asked in refused {
+            let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+            let _ = socket.write_all(asked).await;
+            let mut rest = Vec::new();
+            let read = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest)).await.expect("closed in time");
+            assert!(read.is_err() || rest.is_empty(), "{:?} got {:?}", String::from_utf8_lossy(asked), rest);
+        }
+        // Nothing was dialled for any of them.
+        assert_eq!(tunnel.status().phase, Phase::Idle);
+        assert!(tunnel.shared.connection.lock().await.is_none());
+
+        // The path's own case and a request line in pieces still pass.
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        let request = format!("GET {} HTTP/1.1\r\nUpgrade: websocket\r\n\r\n", tunnel.path());
+        for piece in request.as_bytes().chunks(7) {
+            socket.write_all(piece).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let expected = b"GET / HTTP/1.1\r\nUpgrade: websocket\r\n\r\n";
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").unwrap();
+        assert_eq!(got, expected);
+        let upper = format!("GET {} HTTP/1.1\r\n", tunnel.path().to_uppercase());
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        socket.write_all(upper.as_bytes()).await.unwrap();
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest)).await.expect("closed in time");
+        assert!(rest.is_empty(), "the path is compared exactly");
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
     async fn reconnect_dials_afresh_without_a_failure() {
         let backend = echo_backend().await;
         let tunnel = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
-        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        let mut socket = ask(&tunnel).await;
         socket.write_all(b"one").await.unwrap();
         let mut got = [0u8; 3];
         socket.read_exact(&mut got).await.unwrap();
@@ -576,11 +752,44 @@ mod tests {
         assert!(status.error.is_empty());
 
         // The next socket dials a new connection.
-        let mut again = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        let mut again = ask(&tunnel).await;
         again.write_all(b"two").await.unwrap();
         again.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"two");
         assert_eq!(tunnel.status().phase, Phase::Connected);
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_aborts_a_dial_in_flight() {
+        // A machine that never answers: a bound UDP port nobody reads.
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let nobody = SecretKey::generate().public();
+        let addr = EndpointAddr::new(nobody).with_ip_addr(dead.local_addr().unwrap());
+        let tunnel = Tunnel::open(local_device().await, addr).await.unwrap();
+
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        socket.write_all(format!("GET {} HTTP/1.1\r\n", tunnel.path()).as_bytes()).await.unwrap();
+        for _ in 0..100 {
+            if tunnel.status().phase == Phase::Dialing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(tunnel.status().phase, Phase::Dialing);
+
+        // reconnect doesn't wait the dial out: the dial gives up at once…
+        let begun = std::time::Instant::now();
+        tunnel.reconnect().await;
+        assert!(begun.elapsed() < Duration::from_secs(2), "took {:?}", begun.elapsed());
+        let status = tunnel.status();
+        assert_eq!(status.phase, Phase::Idle, "ready to dial afresh");
+        assert_eq!(status.failure, Failure::None);
+
+        // …and the socket that waited on it is closed, not left hanging.
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest)).await.expect("closed in time");
+        assert!(read.is_err() || rest.is_empty());
         tunnel.close().await;
     }
 
@@ -597,7 +806,7 @@ mod tests {
         });
         let tunnel = Tunnel::open(local_device().await, endpoint.addr()).await.unwrap();
         let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
-        socket.write_all(b"hello").await.unwrap();
+        socket.write_all(format!("GET {} HTTP/1.1\r\n", tunnel.path()).as_bytes()).await.unwrap();
         let mut rest = Vec::new();
         let _ = socket.read_to_end(&mut rest).await;
         // The close can arrive just after the stream opened.
@@ -616,7 +825,7 @@ mod tests {
 
     /// Bytes through the tunnel come back whole, one message at a time.
     async fn round_trip(tunnel: &Tunnel) {
-        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        let mut socket = ask(tunnel).await;
         for message in [&b"hello"[..], &[7u8; 100_000][..], b"bye"] {
             socket.write_all(message).await.unwrap();
             let mut got = vec![0u8; message.len()];

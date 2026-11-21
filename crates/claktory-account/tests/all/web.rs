@@ -166,3 +166,41 @@ async fn the_bare_root_leads_to_the_account_page() {
     assert_eq!(instance.send("POST", "/", Vec::new(), &[]).await.status, 404, "only GET and HEAD");
     assert_eq!(instance.send("GET", "/elsewhere", Vec::new(), &[]).await.status, 404);
 }
+
+/// The app's Delete account… opens /account/delete: signed in, the confirm
+/// step; signed out, the sign-in, which leads there instead of /account.
+#[tokio::test]
+async fn delete_account_has_a_page_of_its_own_that_signs_in_first() {
+    let instance = start().await;
+    let mut claktory = Claktory::new("203.0.113.9");
+    instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+
+    let headers = [("content-type", FORM.to_owned()), ("x-forwarded-for", "192.0.2.55".to_owned())];
+    let page = instance.send("GET", "/account/delete", Vec::new(), &[]).await.text();
+    assert!(page.contains("To delete your account, sign in first.") && page.contains("name=\"next\" value=\"delete\""), "{page}");
+    let body = b"next=delete&email=matt%40example.com".to_vec();
+    let page = instance.send("POST", "/account/sign-in", body, &headers).await.text();
+    assert_eq!(field(&page, "next"), "delete", "the code step carries it on");
+    let request = field(&page, "request");
+    let code = instance.last_code("matt@example.com");
+    let body = format!("next=delete&request={request}&email=matt%40example.com&code={code}").into_bytes();
+    let answer = instance.send("POST", "/account/verify", body, &headers).await;
+    assert_eq!(answer.status, 303);
+    assert_eq!(answer.headers.get("location").and_then(|value| value.to_str().ok()), Some("/account/delete"));
+    let cookie = answer.headers.get("set-cookie").and_then(|value| value.to_str().ok()).expect("a cookie");
+    let cookie = cookie.split(';').next().expect("the cookie").to_owned();
+
+    let page = get(&instance, "/account/delete", &cookie).await.text();
+    assert!(page.contains("Delete your account?") && page.contains("Cancel"), "{page}");
+    let csrf = field(&page, "csrf");
+    let done = post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
+    assert!(done.text().contains("Your account was deleted."));
+
+    // Signed in with an email no account has.
+    let cookie = web_sign_in(&instance, "new@example.com", "192.0.2.56").await;
+    let page = get(&instance, "/account/delete", &cookie).await.text();
+    assert!(page.contains("No account to delete"), "{page}");
+    // Signing in from the account page still leads to it.
+    let page = instance.send("GET", "/account", Vec::new(), &[]).await.text();
+    assert!(!page.contains("name=\"next\""), "{page}");
+}

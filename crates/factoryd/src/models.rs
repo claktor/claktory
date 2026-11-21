@@ -104,7 +104,13 @@ impl Models for Registry {
                 for effort in model.efforts {
                     efforts.push(effort.as_str().to_owned());
                 }
-                models.push(v1::Model { id: model.id, name: model.name, context_window: model.context_window, efforts });
+                models.push(v1::Model {
+                    id: model.id,
+                    name: model.name,
+                    context_window: model.context_window,
+                    efforts,
+                    image_input: model.image_input,
+                });
             }
             models
         })

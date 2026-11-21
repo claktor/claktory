@@ -1,6 +1,7 @@
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/links.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -40,6 +41,9 @@ void main() {
   testWidgets('a link asks before connecting, and Connect connects', (
     tester,
   ) async {
+    // A Mac's words ("this Mac"); tests run as Android otherwise.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace());
     await harness.show(tester);
     appLinks.receive(link(_code));

@@ -83,8 +83,8 @@ struct AddArgs {
 /// The agent's working folder; an error if it's gone.
 fn folder(factory: &Factory, agent: &str) -> Result<std::path::PathBuf, String> {
     let inner = factory.lock();
-    let Some(me) = inner.config.agent(agent) else { return Err("You're no longer in this Claktory.".to_owned()) };
-    Ok(crate::runner::places(&factory.home, &inner.config, me).folder)
+    let me = super::caller(&inner.config, agent)?;
+    Ok(crate::runner::places(&factory.home, &inner.config, me, &[]).folder)
 }
 
 fn list(factory: &Arc<Factory>, agent: &str, args: ListArgs) -> Result<ToolResult, String> {

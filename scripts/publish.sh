@@ -163,7 +163,7 @@ trap 'rm -rf "$STAGE"' EXIT
 SUPERVISOR_DIR=()
 [[ -d "$RELEASE/supervisor" ]] && SUPERVISOR_DIR=(supervisor)
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
+  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
   -C "$ROOT" LICENSE.md \
   -C "$ROOT/scripts" install-release.sh
 
@@ -185,10 +185,11 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   mkdir -p "$build"
   FACTORY_VERSION="$BACKEND_VERSION" FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/build-linux.sh" "$arch" "$build/factoryd"
   "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
+  "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-speech" claktory-speech
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$linux_name" \
-    -C "$build" factoryd claktory-apps backend-version CHANGELOG.md \
+    -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md \
     -C "$ROOT" LICENSE.md \
     -C "$ROOT/scripts" install-linux.sh
   FILES+=("$STAGE/$linux_name")
@@ -217,6 +218,7 @@ fi
 cat >"$STAGE/latest.json" <<JSON
 {
   "version": "$VERSION",
+  "released_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "backend": "$(cat "$RELEASE/backend-version")",
   "url": "$URL",
   "sha256": "$(shasum -a 256 "$STAGE/$NAME" | cut -d' ' -f1)",
@@ -229,6 +231,33 @@ $LINUX_JSON
   }
 }
 JSON
+# The publisher's signature over latest.json (G1, agreed with Security):
+# ed25519 over the file's exact bytes, a one-line sidecar
+# "claktory-release-1:BASE64" that factoryd verifies against its pinned
+# public keys on https channels. The key lives only in the vault
+# (CLAKTORY_SIGNING_KEY, a file): run publish.sh with that secret. Signed
+# whenever the key is here; a real publish without it warns loudly until
+# factoryd's verify half ships, then it will refuse instead. Old backends
+# never fetch the sidecar, so it changes nothing for them.
+SIGNING_KEY_ID="claktory-release-1"
+if [[ -n "${CLAKTORY_SIGNING_KEY:-}" ]]; then
+  openssl version | grep -q "^OpenSSL 3" || { echo "signing needs OpenSSL 3 (brew install openssl@3); this openssl is: $(openssl version)" >&2; exit 1; }
+  openssl pkeyutl -sign -inkey "$CLAKTORY_SIGNING_KEY" -rawin -in "$STAGE/latest.json" -out "$STAGE/latest.sig.bin"
+  printf '%s:%s\n' "$SIGNING_KEY_ID" "$(base64 <"$STAGE/latest.sig.bin" | tr -d '\n')" >"$STAGE/latest.json.sig"
+  # Self-check: the signature verifies against the key's own public half,
+  # so a wrongly pasted vault value is caught here, never shipped. The
+  # public key (not a secret) goes in the log.
+  openssl pkey -in "$CLAKTORY_SIGNING_KEY" -pubout -out "$STAGE/latest.pub.pem"
+  openssl pkeyutl -verify -pubin -inkey "$STAGE/latest.pub.pem" -rawin -in "$STAGE/latest.json" -sigfile "$STAGE/latest.sig.bin" >/dev/null ||
+    { echo "the fresh signature doesn't verify: is CLAKTORY_SIGNING_KEY the release signing key?" >&2; exit 1; }
+  echo "signed latest.json as $SIGNING_KEY_ID (public key $(openssl pkey -in "$STAGE/latest.pub.pem" -pubin -pubout -outform DER | tail -c 32 | base64))"
+  rm -f "$STAGE/latest.sig.bin" "$STAGE/latest.pub.pem"
+  FILES+=("$STAGE/latest.json.sig")
+elif [[ -n "$REPO" ]]; then
+  echo "publish.sh: refusing to publish unsigned: factoryd verifies latest.json against the pinned release keys, so an unsigned publish would stop every update. Run publish.sh with the vault's CLAKTORY_SIGNING_KEY (the Claktory release signing key)." >&2
+  exit 1
+fi
+
 sed "s|^MANIFEST_URL=\"\"\$|MANIFEST_URL=\"$MANIFEST_URL\"|" "$ROOT/scripts/install-online.sh" >"$STAGE/install.sh"
 grep -q "^MANIFEST_URL=\"$MANIFEST_URL\"\$" "$STAGE/install.sh" || { echo "couldn't fill in install.sh" >&2; exit 1; }
 
@@ -237,8 +266,14 @@ if [[ -n "$REPO" ]]; then
   "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --version "$VERSION" --expect "$SOURCE"
   # Its tag is the release's public commit, which push-source.sh left as the branch public.
   PUBLIC_COMMIT="$(git -C "$ROOT" rev-parse refs/heads/public)"
+  # The release page says what the version brings: the changelog section,
+  # which is the public commit's own message body (public_commit in lib.sh).
+  if [[ -z "$NOTES" ]]; then
+    NOTES="$(git -C "$ROOT" log -1 --format=%b refs/heads/public)"
+    [[ -n "$NOTES" ]] || NOTES="Claktory $VERSION"
+  fi
   gh release create "$VERSION" "${FILES[@]}" "$STAGE/latest.json" "$STAGE/install.sh" \
-    --repo "$REPO" --target "$PUBLIC_COMMIT" --title "Claktory $VERSION" --notes "${NOTES:-Claktory $VERSION}"
+    --repo "$REPO" --target "$PUBLIC_COMMIT" --title "Claktory $VERSION" --notes "$NOTES"
   echo "published Claktory $VERSION to $BASE"
   echo "install on another Mac, or a Linux machine, with:"
   echo "  curl -fsSL $BASE/latest/download/install.sh | bash"
@@ -247,6 +282,7 @@ else
   cp "${FILES[@]}" "$LOCAL/$VERSION/"
   cp "$STAGE/install.sh" "$LOCAL/install.sh"
   # The manifest last, once what it names is there.
+  [[ ! -f "$STAGE/latest.json.sig" ]] || cp "$STAGE/latest.json.sig" "$LOCAL/latest.json.sig"
   cp "$STAGE/latest.json" "$LOCAL/latest.json.new"
   mv -f "$LOCAL/latest.json.new" "$LOCAL/latest.json"
   echo "published Claktory $VERSION to $LOCAL"

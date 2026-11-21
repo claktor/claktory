@@ -14,11 +14,23 @@
 //! The manifest's own `url` is the Mac release: the app and the backend. A
 //! Linux backend takes its architecture's entry under `linux` instead: the
 //! backend alone, a static binary, since the app runs on another machine.
+//!
+//! Who may publish: a manifest from an online channel must be signed by one
+//! of `RELEASE_KEYS` (`latest.json.sig` beside it, written by
+//! `scripts/publish.sh`), and since it names every tarball's SHA-256, that
+//! pins everything the release holds. On a Mac, a backend that's signed with
+//! a Developer ID also takes only apps, backends and helpers signed by its
+//! own team. A channel in a folder (`file://`, for trying releases out, and
+//! `--dev` ones) is trusted as it is: whoever can write there can already
+//! change this Claktory's files.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -44,6 +56,78 @@ const FIRST_CHECK: Duration = Duration::from_secs(10);
 const EVERY: Duration = Duration::from_secs(30 * 60);
 const MANIFEST_TIMEOUT_SECONDS: &str = "20";
 const MANIFEST_MAX_BYTES: &str = "65536";
+const SIGNATURE_MAX_BYTES: &str = "4096";
+
+/// The keys releases are signed with, by key id (the part of
+/// `latest.json.sig` before its colon): raw ed25519 public keys, in base64.
+/// The working key, and a recovery key kept offline, so a lost or exposed
+/// working key can still be replaced by a signed release.
+pub const RELEASE_KEYS: &[(&str, &str)] = &[
+    // The working key: in the vault, used by scripts/publish.sh.
+    ("claktory-release-1", "1XSGB3t02Vb1Jy23RSfzXk+lF+vGynERpSbLzd6ZlbU="),
+    // The recovery key: kept offline only, to sign a release that replaces
+    // a lost or exposed working key.
+    ("claktory-release-recovery-1", "aGdAkbnB7pkB/dRRfPnkFKfKyWzPs+cF7FVHMlb7JpM="),
+];
+
+/// The pinned release keys, ready to check with.
+pub fn release_keys() -> Vec<(String, VerifyingKey)> {
+    RELEASE_KEYS.iter().filter_map(|(id, key)| Some(((*id).to_owned(), public_key(key)?))).collect()
+}
+
+/// An ed25519 public key from its base64.
+pub fn public_key(base64: &str) -> Option<VerifyingKey> {
+    let bytes: [u8; 32] = STANDARD.decode(base64.trim()).ok()?.try_into().ok()?;
+    VerifyingKey::from_bytes(&bytes).ok()
+}
+
+/// Whether a manifest from `url` must be signed: everything but a channel
+/// in a folder (`file://`), which is how dev and local channels are tried.
+pub fn requires_signature(url: &str) -> bool {
+    !url.trim_start().starts_with("file://")
+}
+
+/// Checks `sidecar` (`<key id>:<base64 signature>`) is a signature of the
+/// manifest's exact bytes by one of `keys`. Err says why not.
+pub fn verify_manifest(manifest: &[u8], sidecar: &[u8], keys: &[(String, VerifyingKey)]) -> Result<(), String> {
+    let line = std::str::from_utf8(sidecar).map_err(|_| "its signature isn't text".to_owned())?.trim();
+    let (id, signature) = line.split_once(':').ok_or_else(|| "its signature names no key".to_owned())?;
+    let shown: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+    let Some((_, key)) = keys.iter().find(|(known, _)| known == id) else {
+        return Err(format!("it's signed with a key this Claktory doesn't know ({shown})"));
+    };
+    let bytes = STANDARD.decode(signature.trim()).map_err(|_| "its signature isn't base64".to_owned())?;
+    let signature = Signature::from_slice(&bytes).map_err(|_| "its signature isn't an ed25519 one".to_owned())?;
+    key.verify_strict(manifest, &signature).map_err(|_| format!("its signature by {shown} doesn't match it"))
+}
+
+/// The team a Developer ID signature names, from `codesign -dv`'s output;
+/// None for one signed ad hoc.
+fn team_in(codesign_output: &str) -> Option<String> {
+    let team = codesign_output.lines().find_map(|line| line.strip_prefix("TeamIdentifier="))?.trim();
+    (!team.is_empty() && team.len() <= 20 && team.chars().all(|c| c.is_ascii_alphanumeric())).then(|| team.to_owned())
+}
+
+/// The team this backend is signed by, if a Developer ID signed it.
+async fn own_team() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let output = tokio::process::Command::new("/usr/bin/codesign").arg("-dv").arg(&exe).output().await.ok()?;
+    team_in(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// codesign's argument for the requirement that holds only for code signed
+/// by `team`'s Developer ID Application certificate (`-R=` then the
+/// requirement's text): Apple's chain, the team, and the Developer ID
+/// Application field, so not the same team's development certificates.
+fn team_requirement(team: &str) -> String {
+    format!(
+        "-R=anchor apple generic and certificate leaf[subject.OU] = \"{team}\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+}
+
 const DOWNLOAD_TIMEOUT_SECONDS: &str = "1800";
 const MAX_RELEASE_BYTES: u64 = 1 << 30;
 /// Releases kept, as `scripts/release.sh` keeps them.
@@ -118,6 +202,10 @@ pub enum ChannelError {
     /// The release itself is wrong; it isn't tried again.
     #[error("release {version} is unusable: {reason}")]
     Rejected { version: String, reason: String },
+    /// The manifest isn't signed by a release key: nothing in it is used.
+    /// Tried again at the next check (it may be mid-publish).
+    #[error("the manifest isn't signed by Claktory's release key: {0}")]
+    Unsigned(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -292,16 +380,39 @@ pub struct Channel {
     url: String,
     /// A release found unusable, by version: it isn't downloaded again.
     rejected: Option<String>,
+    /// The keys its manifest must be signed by; None for a channel in a
+    /// folder, whose manifest needn't be (`requires_signature`).
+    keys: Option<Vec<(String, VerifyingKey)>>,
 }
 
 impl Channel {
     pub fn new(home: Home, url: impl Into<String>) -> Channel {
-        Channel { home, url: url.into(), rejected: None }
+        let url = url.into();
+        let keys = requires_signature(&url).then(release_keys);
+        Channel { home, url, rejected: None, keys }
+    }
+
+    /// Requires its manifest to be signed by one of `keys`, wherever it is.
+    pub fn signed_by(mut self, keys: Vec<(String, VerifyingKey)>) -> Channel {
+        self.keys = Some(keys);
+        self
+    }
+
+    /// Err unless the manifest's signature (`<url>.sig`) is one of the
+    /// keys', when it needs one.
+    async fn check_signature(&self, manifest: &[u8]) -> Result<(), ChannelError> {
+        let Some(keys) = &self.keys else { return Ok(()) };
+        let sidecar = curl(&format!("{}.sig", self.url), MANIFEST_TIMEOUT_SECONDS, SIGNATURE_MAX_BYTES, None)
+            .await
+            .map_err(|error| ChannelError::Unsigned(format!("its signature couldn't be fetched ({error})")))?;
+        verify_manifest(manifest, &sidecar, keys).map_err(ChannelError::Unsigned)
     }
 
     /// Checks now, and downloads a newer release if there is one.
     pub async fn check(&mut self) -> Result<Checked, ChannelError> {
-        let manifest = Manifest::parse(&curl(&self.url, MANIFEST_TIMEOUT_SECONDS, MANIFEST_MAX_BYTES, None).await?)?;
+        let bytes = curl(&self.url, MANIFEST_TIMEOUT_SECONDS, MANIFEST_MAX_BYTES, None).await?;
+        self.check_signature(&bytes).await?;
+        let manifest = Manifest::parse(&bytes)?;
         let here = latest(&self.home).await.version;
         // With no release here yet, the one running is what's here.
         let here = if here.is_empty() && VERSION != "dev" { VERSION.to_owned() } else { here };
@@ -372,19 +483,43 @@ impl Channel {
         }
         // A Linux release has no app: the app runs on another machine.
         if cfg!(target_os = "macos") {
+            // From a signed channel, by a backend a Developer ID signed: only
+            // code its own team signed.
+            let team = if self.keys.is_some() { own_team().await } else { None };
+            let codesign = |deep: bool| {
+                let mut command = tokio::process::Command::new("/usr/bin/codesign");
+                command.args(["--verify", "--strict"]);
+                if deep {
+                    command.arg("--deep");
+                }
+                if let Some(team) = &team {
+                    command.arg(team_requirement(team));
+                }
+                command
+            };
             let Some(app) = find_app(partial).await? else { return Err(rejected("it has no app".into())) };
-            let verify =
-                tokio::process::Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app).output().await?;
+            let verify = codesign(true).arg(&app).output().await?;
             if !verify.status.success() {
                 return Err(rejected(format!("its app's signature doesn't verify: {}", String::from_utf8_lossy(&verify.stderr).trim())));
             }
-            // The apps host, which releases from before apps don't have.
-            let host = partial.join(crate::update::APPS_HOST);
-            if tokio::fs::metadata(&host).await.is_ok_and(|metadata| metadata.is_file()) {
-                let verify = tokio::process::Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&host).output().await?;
+            if team.is_some() {
+                let verify = codesign(false).arg(partial.join("factoryd")).output().await?;
                 if !verify.status.success() {
                     let why = String::from_utf8_lossy(&verify.stderr);
-                    return Err(rejected(format!("its apps host's signature doesn't verify: {}", why.trim())));
+                    return Err(rejected(format!("its backend's signature doesn't verify: {}", why.trim())));
+                }
+            }
+            // The helpers beside factoryd (the apps host, the speech host),
+            // which releases from before them don't have.
+            for name in crate::update::HELPERS {
+                let label = if name == crate::update::APPS_HOST { "apps host" } else { "speech host" };
+                let helper = partial.join(name);
+                if tokio::fs::metadata(&helper).await.is_ok_and(|metadata| metadata.is_file()) {
+                    let verify = codesign(false).arg(&helper).output().await?;
+                    if !verify.status.success() {
+                        let why = String::from_utf8_lossy(&verify.stderr);
+                        return Err(rejected(format!("its {label}'s signature doesn't verify: {}", why.trim())));
+                    }
                 }
             }
         } else {
@@ -435,6 +570,106 @@ pub async fn poll(home: Home, url: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn sidecar(id: &str, key: &SigningKey, bytes: &[u8]) -> Vec<u8> {
+        format!("{id}:{}\n", STANDARD.encode(key.sign(bytes).to_bytes())).into_bytes()
+    }
+
+    fn pinned() -> Vec<(String, VerifyingKey)> {
+        vec![("claktory-release-1".into(), key(1).verifying_key()), ("claktory-recovery-1".into(), key(2).verifying_key())]
+    }
+
+    #[test]
+    fn a_manifest_signed_by_a_pinned_key_verifies_and_nothing_else_does() {
+        let bytes = br#"{"version":"v0.1.9"}"#;
+        assert_eq!(verify_manifest(bytes, &sidecar("claktory-release-1", &key(1), bytes), &pinned()), Ok(()));
+        // The recovery key works too, by its own id.
+        assert_eq!(verify_manifest(bytes, &sidecar("claktory-recovery-1", &key(2), bytes), &pinned()), Ok(()));
+        // Other bytes than were signed: a changed manifest.
+        let changed = br#"{"version":"v0.1.99"}"#;
+        assert!(verify_manifest(changed, &sidecar("claktory-release-1", &key(1), bytes), &pinned()).is_err());
+        // A key nobody pinned, under a pinned id and under its own.
+        assert!(verify_manifest(bytes, &sidecar("claktory-release-1", &key(3), bytes), &pinned()).is_err());
+        assert!(verify_manifest(bytes, &sidecar("someone-else", &key(3), bytes), &pinned()).is_err());
+        // One pinned key's signature under the other's id.
+        assert!(verify_manifest(bytes, &sidecar("claktory-recovery-1", &key(1), bytes), &pinned()).is_err());
+        // Malformed sidecars.
+        for bad in [&b""[..], b"claktory-release-1", b"claktory-release-1:not base64!", b"claktory-release-1:AAAA", b"\xff\xfe"] {
+            assert!(verify_manifest(bytes, bad, &pinned()).is_err(), "{bad:?}");
+        }
+        // No keys at all: nothing verifies.
+        assert!(verify_manifest(bytes, &sidecar("claktory-release-1", &key(1), bytes), &[]).is_err());
+    }
+
+    /// What `scripts/publish.sh` writes (OpenSSL 3's `pkeyutl -sign -rawin`,
+    /// pure Ed25519) verifies here: a throwaway key, made once for this test.
+    #[test]
+    fn a_signature_made_with_openssl_verifies() {
+        let manifest = br#"{"version":"v0.1.9","note":"interop fixture"}"#;
+        let key = public_key("8crb3Obm8e2Xkauy1SvgpKQxzHdTzLGwHJopYdDnX3w=").expect("key");
+        let sidecar = b"claktory-release-1:cnAZ3VpFcWU5mRJzz8WMr/HlnwZbUVDV6lYqFfhTixLrBrINVZG8f3i2RM1HZ0/mLjfD3dbWT+CZh6O1pgABBg==\n";
+        assert_eq!(verify_manifest(manifest, sidecar, &[("claktory-release-1".into(), key)]), Ok(()));
+        assert!(verify_manifest(b"{}", sidecar, &[("claktory-release-1".into(), key)]).is_err());
+    }
+
+    #[test]
+    fn the_pinned_release_keys_all_read() {
+        // Never none: with no keys every online update is refused, and "none"
+        // must never come to mean "don't check".
+        assert!(!RELEASE_KEYS.is_empty(), "release keys are pinned");
+        assert_eq!(release_keys().len(), RELEASE_KEYS.len(), "every pinned key is a valid ed25519 public key");
+        let mut ids: Vec<&str> = RELEASE_KEYS.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), RELEASE_KEYS.len(), "key ids are unique");
+        assert_eq!(public_key(&STANDARD.encode(key(1).verifying_key().to_bytes())), Some(key(1).verifying_key()));
+        assert_eq!(public_key("AAAA"), None);
+    }
+
+    #[test]
+    fn only_a_channel_in_a_folder_goes_unsigned() {
+        assert!(!requires_signature("file:///tmp/channel/latest.json"));
+        assert!(requires_signature("https://github.com/claktor/claktory/releases/latest/download/latest.json"));
+        assert!(requires_signature("http://example.com/latest.json"));
+        assert!(requires_signature("FILE:///tmp/latest.json"), "anything that isn't exactly a folder's is signed");
+    }
+
+    #[test]
+    fn the_team_comes_from_a_developer_id_signature_only() {
+        assert_eq!(team_in("Identifier=dev.factory.factoryd\nTeamIdentifier=AB12CD34EF\n"), Some("AB12CD34EF".into()));
+        assert_eq!(team_in("Signature=adhoc\nTeamIdentifier=not set\n"), None);
+        assert_eq!(team_in("code object is not signed at all"), None);
+        assert_eq!(team_in("TeamIdentifier=AB\" or 1=1"), None);
+    }
+
+    /// codesign takes the requirement as it's written, and an app signed ad
+    /// hoc (which `--verify` alone accepts) doesn't meet it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_team_requirement_turns_away_code_signed_ad_hoc() {
+        let dir = std::env::temp_dir().join(format!("factoryd-team-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let binary = dir.join("adhoc");
+        std::fs::copy("/usr/bin/true", &binary).expect("copy");
+        let signed = std::process::Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(&binary).output().expect("sign");
+        assert!(signed.status.success());
+        let plain = std::process::Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&binary).status().expect("verify");
+        assert!(plain.success(), "ad hoc passes a plain verify");
+        let pinned = std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(team_requirement("AB12CD34EF"))
+            .arg(&binary)
+            .output()
+            .expect("verify");
+        assert!(!pinned.status.success(), "the team requirement refuses it");
+        assert!(String::from_utf8_lossy(&pinned.stderr).contains("requirement"), "refused for the requirement, not its syntax");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn manifest(json: serde_json::Value) -> Result<Manifest, ChannelError> {
         Manifest::parse(json.to_string().as_bytes())

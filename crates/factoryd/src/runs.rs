@@ -12,7 +12,7 @@ use factory_agent::{Finished, Task};
 use serde::Deserialize;
 
 use crate::config::State;
-use crate::factory::{Factory, Inner, OpenError, Queued, Runtime};
+use crate::factory::{Factory, Inner, OpenError, Queued, Runtime, host_event};
 use crate::home::Home;
 use crate::store::{Outcome, Store};
 use crate::update::VERSION;
@@ -125,7 +125,7 @@ impl Factory {
         let mut resuming = Vec::new();
         for id in agents {
             let messages = waiting.remove(&id).unwrap_or_default();
-            if inner.config.agent(&id).is_none() {
+            if inner.config.agent(&id).is_none() && !crate::chats::kept(self, &id) {
                 self.settle(&messages, Outcome::Dropped);
                 continue;
             }
@@ -181,13 +181,7 @@ fn resume_note(stopped_on: &str, rebooted: bool) -> (String, factory_agent::Even
     let text = format!(
         "{summary} while you were working. Whatever you were doing when it stopped may not have finished (a tool call shows \"Interrupted\" if so), so check before relying on it, then carry on with your task."
     );
-    let event = factory_agent::Event {
-        source: factory_agent::EventSource::Host,
-        from: "Claktory".to_owned(),
-        id: String::new(),
-        summary,
-        transient: false,
-    };
+    let event = host_event(summary);
     (text, event)
 }
 

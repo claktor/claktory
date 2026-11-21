@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "pageChanged",
+  "arguments": {
+    "page_1based": 3,
+    "page_count": 12
+  }
+}

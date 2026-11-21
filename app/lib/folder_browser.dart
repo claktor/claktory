@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
@@ -6,6 +7,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// Lets the person pick a folder on the machine a Factory runs on, which
@@ -117,8 +119,8 @@ class _FolderBrowserState extends State<FolderBrowser> {
       fields: [
         if (list != null) _Crumbs(list: list, onOpen: _open),
         const SizedBox(height: Space.s),
-        Row(
-          children: [
+        _Tools(
+          start: [
             Button(
               label: 'Up',
               onPressed: list == null || list.parent.isEmpty
@@ -132,10 +134,12 @@ class _FolderBrowserState extends State<FolderBrowser> {
                   ? null
                   : () => _open(list.home.isEmpty ? '~' : list.home),
             ),
-            const Spacer(),
+          ],
+          end: [
             Text(
               'Show hidden',
-              style: TextStyles.caption.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textMuted),
             ),
             const SizedBox(width: Space.s),
             Toggle(
@@ -147,7 +151,10 @@ class _FolderBrowserState extends State<FolderBrowser> {
         ),
         const SizedBox(height: Space.s),
         Container(
-          height: 280,
+          // A phone's sheet has room for more of a finger's rows.
+          height: isPhoneLayout(context)
+              ? math.max(280, MediaQuery.sizeOf(context).height * 0.45)
+              : 280,
           decoration: BoxDecoration(
             color: palette.sidebar,
             border: Border.all(color: palette.hairline),
@@ -160,7 +167,8 @@ class _FolderBrowserState extends State<FolderBrowser> {
                   padding: const EdgeInsets.all(Space.m),
                   child: Text(
                     'No folders here.',
-                    style: TextStyles.body.copyWith(color: palette.textFaint),
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.textFaint),
                   ),
                 )
               : ListView.builder(
@@ -185,9 +193,42 @@ class _FolderBrowserState extends State<FolderBrowser> {
             padding: const EdgeInsets.only(top: Space.xs),
             child: Text(
               'Only the first 5,000 folders here are shown.',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// The browser's tools: Up and Home at the start, Show hidden at the end;
+/// on a phone they wrap onto two lines when the text is large.
+class _Tools extends StatelessWidget {
+  const _Tools({required this.start, required this.end});
+
+  final List<Widget> start;
+  final List<Widget> end;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPhoneLayout(context)) {
+      return Row(children: [...start, const Spacer(), ...end]);
+    }
+    // A finger's room between Up and Home.
+    final spaced = [
+      for (final (i, child) in start.indexed) ...[
+        if (i > 0) const SizedBox(width: Space.xs),
+        child,
+      ],
+    ];
+    return Wrap(
+      spacing: Space.l,
+      runSpacing: Space.s,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Row(mainAxisSize: MainAxisSize.min, children: spaced),
+        Row(mainAxisSize: MainAxisSize.min, children: end),
       ],
     );
   }
@@ -214,22 +255,35 @@ class _Crumbs extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 2),
               child: Text(
                 '/',
-                style: TextStyles.body.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
               ),
             ),
           i == crumbs.length - 1
               ? Text(
                   crumbs[i].$1,
-                  style: TextStyles.label.copyWith(color: palette.text),
+                  style: TypeScale.of(context).label
+                      .copyWith(color: palette.text),
                 )
               : Pressable(
                   onTap: () => onOpen(crumbs[i].$2),
-                  builder: (context, hovered) => Text(
-                    crumbs[i].$1,
-                    style: TextStyles.body.copyWith(
-                      color: hovered ? palette.text : palette.textMuted,
-                    ),
-                  ),
+                  builder: (context, hovered) {
+                    final crumb = Text(
+                      crumbs[i].$1,
+                      style: TypeScale.of(context).body.copyWith(
+                        color: hovered ? palette.text : palette.textMuted,
+                      ),
+                    );
+                    // A finger's height on a phone.
+                    if (!isPhoneLayout(context)) return crumb;
+                    return ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minHeight: Touch.target,
+                        minWidth: Touch.target,
+                      ),
+                      child: Center(widthFactor: 1, child: crumb),
+                    );
+                  },
                 ),
         ],
       ],
@@ -268,7 +322,10 @@ class _FolderRow extends StatelessWidget {
     return Pressable(
       onTap: onOpen,
       builder: (context, hovered) => Container(
-        height: 28,
+        height: isPhoneLayout(context) ? null : 28,
+        constraints: isPhoneLayout(context)
+            ? const BoxConstraints(minHeight: Touch.target)
+            : null,
         padding: const EdgeInsets.symmetric(horizontal: Space.s),
         decoration: BoxDecoration(
           color: hovered ? palette.hover : null,
@@ -285,7 +342,7 @@ class _FolderRow extends StatelessWidget {
                 folder.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyles.body.copyWith(color: color),
+                style: TypeScale.of(context).body.copyWith(color: color),
               ),
             ),
             Chevron(color: palette.textFaint, down: false),

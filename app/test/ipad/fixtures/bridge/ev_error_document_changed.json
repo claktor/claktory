@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "error",
+  "arguments": {
+    "code": "document_hash_mismatch",
+    "recoverable": true,
+    "expected_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "actual_sha256": "a4b9149c7ff314aff27d59b78af001dce3b22194c0e8bc97aab8f4acac6f6306"
+  }
+}

@@ -64,9 +64,14 @@ struct Render<'a> {
     secrets: &'a BTreeMap<String, String>,
 }
 
-/// Where an agent works, and what else its file tools may reach: the Factory
-/// home, which they may change (so it can change Factory's settings, itself
-/// included), and the project's other folders, which they may only read.
+/// Where an agent works, and what else its file tools may reach: its own
+/// folder in the Factory home (uploads, its tasks' logs, its archives) and,
+/// for an admin agent or one given the Claktory manual, `config.json`, which
+/// they may change; and, only to read, the project's other folders, the
+/// checkouts and what pipes brought in. The rest of the home — `auth.json`,
+/// `factory.db`, the vault, other agents' folders — isn't supplied at all,
+/// so the file tools refuse it (the same-user shell can still reach it; this
+/// is a guardrail, not a sandbox).
 pub(crate) struct Places {
     pub(crate) folder: PathBuf,
     pub(crate) extra_dirs: Vec<PathBuf>,
@@ -94,7 +99,22 @@ pub(crate) fn checkout(home: &Home, config: &Config, agent: &AgentConfig) -> Opt
     checkout.exists().then_some(checkout)
 }
 
-pub(crate) fn places(home: &Home, config: &Config, agent: &AgentConfig) -> Places {
+/// The outboxes of the pipes `agent` may use: it sends a pipe's files from
+/// there ("Files you send come from its outbox"), so `places` keeps them
+/// writable even when the pipe's project folder is otherwise read only for
+/// a folder-scoped agent.
+pub(crate) fn pipe_outboxes(factory: &crate::factory::Factory, config: &Config, agent: &str) -> Vec<PathBuf> {
+    factory
+        .pipes
+        .all()
+        .into_iter()
+        .filter(|record| record.granted() && record.members.iter().any(|member| member == agent))
+        .filter_map(|record| crate::pipes::folder_of(config, &record).map(|folder| folder.join("outbox")))
+        .collect()
+}
+
+/// `pipe_outboxes` doesn't change `folder`: call sites after only that pass none.
+pub(crate) fn places(home: &Home, config: &Config, agent: &AgentConfig, pipe_outboxes: &[PathBuf]) -> Places {
     let project = agent.project.as_deref().and_then(|project| config.project(project));
     let source = source_folder(home, config, agent);
     let mut read_only = Vec::new();
@@ -107,6 +127,9 @@ pub(crate) fn places(home: &Home, config: &Config, agent: &AgentConfig) -> Place
     }
     // Other agents' checkouts; its own is more specific, so it stays writable.
     read_only.push(crate::trees::trees_dir(home));
+    // Files other Claktories' agents sent through pipes, which pipe_read
+    // hands out by path.
+    read_only.push(home.root().join("pipes").join("incoming"));
     // With a checkout of its own, the main checkout is only to read.
     let folder = match checkout(home, config, agent) {
         Some(checkout) => {
@@ -115,7 +138,16 @@ pub(crate) fn places(home: &Home, config: &Config, agent: &AgentConfig) -> Place
         }
         None => source,
     };
-    Places { folder, extra_dirs: vec![home.root().to_path_buf()], read_only }
+    let mut extra_dirs = vec![home.agent_dir(&agent.id)];
+    if crate::proposals::is_admin(agent) || crate::extensions::enabled(agent, "memory:factory") {
+        // The manual tells these agents to change Claktory's settings by
+        // editing config.json with their file tools.
+        extra_dirs.push(home.config_path());
+    }
+    // More specific than a read-only project folder, so the most-specific
+    // rule lets the outbox be written inside it.
+    extra_dirs.extend(pipe_outboxes.iter().cloned());
+    Places { folder, extra_dirs, read_only }
 }
 
 /// The folders of `agent`'s project, when it has any: folder id ("" for the
@@ -286,6 +318,7 @@ fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>) -> Tool {
         _ if app.is_some() => {
             format!("You no longer have {name} of the {} app, so it doesn't work any more.", app.unwrap_or_default())
         }
+        _ if name.starts_with("pipe_") => format!("You no longer have a pipe, so {name} doesn't work any more."),
         Some(manifest) if !crate::extensions::enabled(agent, manifest.id) => {
             format!("The {} extension is turned off for you, so {name} doesn't work any more.", manifest.name)
         }
@@ -299,7 +332,7 @@ fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>) -> Tool {
 }
 
 /// The model a frame was written for.
-fn frame_model(frame: &Frame) -> String {
+pub(crate) fn frame_model(frame: &Frame) -> String {
     let settings: serde_json::Value = serde_json::from_str(&frame.settings).unwrap_or_default();
     settings.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned()
 }
@@ -501,13 +534,17 @@ fn extension_news(
 impl Factory {
     /// Works until the agent's queue is empty, then marks it idle.
     pub(crate) async fn run(self: Arc<Self>, id: String) {
+        // A chat runs as an agent does, on a frame of its own (`crate::chats`).
+        if crate::chats::is_chat(&id) {
+            return crate::chats::run(self, id).await;
+        }
         loop {
             if let Err(error) = self.ensure_loaded(&id).await {
                 tracing::error!(agent = %id, %error, "could not load transcript");
                 let mut inner = self.lock();
                 if let Some(runtime) = inner.agents.get_mut(&id) {
                     runtime.running = false;
-                    let dropped = std::mem::take(&mut runtime.queue);
+                    let dropped = runtime.take_ready();
                     self.settle(&dropped, Outcome::Dropped);
                     if self.end_run(runtime, "failed") {
                         self.mark_unseen(&mut inner, &id);
@@ -575,7 +612,7 @@ impl Factory {
         let agent = inner.config.agent(id).cloned();
         let compact_at = inner.config.compact_at_tokens;
         let models = inner.models.clone();
-        let places = agent.as_ref().map(|agent| places(&self.home, &inner.config, agent));
+        let places = agent.as_ref().map(|agent| places(&self.home, &inner.config, agent, &pipe_outboxes(self, &inner.config, &agent.id)));
         let cache_ttl = agent.as_ref().and_then(|agent| inner.config.cache_ttl(&agent.model)).unwrap_or_default();
         let archived = agent.as_ref().is_some_and(|agent| inner.config.archived(agent));
         let runtime = inner.agents.get_mut(id)?;
@@ -595,10 +632,10 @@ impl Factory {
         }
         // New work came before compacting while idle began: it goes first,
         // on the conversation as it is.
-        if runtime.compact == Some(Reason::Idle) && !runtime.queue.is_empty() {
+        if runtime.compact == Some(Reason::Idle) && runtime.has_ready() {
             runtime.compact = None;
         }
-        if runtime.queue.is_empty() && runtime.compact.is_none() {
+        if !runtime.has_ready() && runtime.compact.is_none() {
             runtime.running = false;
             runtime.idle = false;
             let outcome = if runtime.failed { "failed" } else { "finished" };
@@ -624,7 +661,7 @@ impl Factory {
         // A new run: a stop before now was of the one that ended.
         runtime.stopped = false;
         runtime.wait_said = None;
-        let mut prompts = std::mem::take(&mut runtime.queue);
+        let mut prompts = runtime.take_ready();
         prompts.splice(0..0, note.into_iter().chain(cleared));
         let (epoch, compact) = (runtime.epoch, runtime.compact.take());
         let frame = runtime
@@ -651,13 +688,14 @@ impl Factory {
     pub(crate) fn take_changes(&self, inner: &mut Inner, id: &str, current: &[ToolSpec]) -> Option<Queued> {
         let agent = inner.config.agent(id)?.clone();
         let mut frame = inner.agents.get(id)?.transcript.as_ref()?.frame()?.clone();
-        let folder = places(&self.home, &inner.config, &agent).folder;
+        let folder = places(&self.home, &inner.config, &agent, &[]).folder;
         let key = settings_key(&inner.config, &agent, &folder);
         let roster = crate::extensions::agents::roster(&inner.config, &agent);
         let folders = folder_lines(&inner.config, &agent);
         let names = model_lines(&inner.models);
         let secrets = self.vault.granted(id);
         let apps = crate::apps::granted(self, &inner.config, id);
+        let pipes = crate::pipes::agents::granted(self, &inner.config, id);
         // tree_land in its tools, or reached through extension_call.
         let can_land = frame.tools.iter().any(|tool| tool.name == "tree_land" || tool.name == EXTENSION_CALL);
         let (settings, turned_on) = match settings_note(frame.told(), &self.home, &inner.config, &agent, &folder, can_land, &frame.tools) {
@@ -672,8 +710,9 @@ impl Factory {
             (settings, news) => settings.or(news),
         };
         let apps_note = app_changes(&frame, &apps, &crate::apps::sections_by_app(self, &inner.config, id));
+        let pipes_note = crate::pipes::agents::changes(&inner.config, &frame.pipes, &pipes);
         let notes: Vec<String> =
-            [settings, changes(&frame, &roster, &names, &folders, &secrets), apps_note].into_iter().flatten().collect();
+            [settings, changes(&frame, &roster, &names, &folders, &secrets), apps_note, pipes_note].into_iter().flatten().collect();
         if notes.is_empty() {
             return None;
         }
@@ -683,6 +722,7 @@ impl Factory {
         frame.folders = folders;
         frame.secrets = secrets;
         frame.apps = apps;
+        frame.pipes = pipes;
         // Left out of compaction: the next frame says it all.
         let event =
             Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary: String::new(), transient: true };
@@ -713,7 +753,7 @@ impl Factory {
             let (sections, pinned) = self.sections(&mut inner, id, &agent, &enabled_extensions(&agent));
             let roster = crate::extensions::agents::roster(&inner.config, &agent);
             let folders = folder_lines(&inner.config, &agent);
-            let places = places(&self.home, &inner.config, &agent);
+            let places = places(&self.home, &inner.config, &agent, &pipe_outboxes(self, &inner.config, id));
             let settings = settings_key(&inner.config, &agent, &places.folder);
             let folder_name = inner.config.agent_folder(&agent).map(|folder| folder.name.clone());
             let compact_at = inner.config.compact_at_tokens;
@@ -722,6 +762,7 @@ impl Factory {
         };
         let secrets = self.vault.granted(id);
         let apps = crate::apps::granted(self, &self.lock().config, id);
+        let pipes = crate::pipes::agents::granted(self, &self.lock().config, id);
         let render = Render {
             agent: &agent,
             project: project.as_ref(),
@@ -745,6 +786,7 @@ impl Factory {
             folders,
             secrets,
             apps,
+            pipes,
             announced,
         };
         let mut inner = self.lock();
@@ -776,6 +818,7 @@ impl Factory {
             }
         }
         sections.extend(crate::apps::sections(self, &inner.config, id));
+        sections.extend(crate::pipes::agents::prompt_section(self, &inner.config, id));
         let Some(transcript) = inner.agents.get_mut(id).and_then(|runtime| runtime.transcript.as_mut()) else {
             return (sections, written.into_iter().map(|(_, text)| text).collect());
         };
@@ -854,6 +897,19 @@ impl Factory {
                 tokio::spawn(async move { factory.refresh_models().await });
             })
         };
+        // The model a refused step is retried on: the agent's own, or the
+        // Claktory-wide default; it must be another model whose provider is
+        // signed in, or there's none.
+        let fallback_model = {
+            let named = {
+                let config = &self.lock().config;
+                let own = config.agent(id).map(|agent| agent.fallback_model.clone()).unwrap_or_default();
+                if own.is_empty() { config.default_fallback_model.clone() } else { own }
+            };
+            (!named.is_empty() && named != job.agent.model && job.models.iter().any(|model| model.id == named))
+                .then(|| self.models.resolve(&named))
+                .flatten()
+        };
         let mut agent = Agent::new(AgentOptions {
             system_prompt,
             model,
@@ -864,11 +920,13 @@ impl Factory {
             session_id: Some(id.to_owned()),
             transform_context: None,
             should_stop_after_turn: None,
-            before_tool_call: None,
+            // Once it has read a pipe, its secrets wait for the person.
+            before_tool_call: Some(crate::pipes::agents::gate(self, id)),
             compact_at: Some(job.compact_at),
             inbox: Some(self.inbox(id, job.epoch)),
             after_compaction: Some(after_compaction),
             secrets: Some(self.secrets(id)),
+            fallback_model,
         });
         agent.state.cache_ttl = job.cache_ttl;
         agent.wait_out_with(crate::waits::wait_out(Arc::downgrade(self), id.to_owned(), job.epoch));
@@ -895,7 +953,7 @@ impl Factory {
         if let Some(reason) = job.compact {
             let idle = reason == Reason::Idle;
             // Work that came meanwhile wins over compacting while idle.
-            let skip = idle && self.lock().agents.get(id).is_none_or(|runtime| !runtime.queue.is_empty() || runtime.stopped);
+            let skip = idle && self.lock().agents.get(id).is_none_or(|runtime| runtime.has_ready() || runtime.stopped);
             match if skip { Err(factory_agent::Error::Aborted) } else { agent.compact_for(reason).await } {
                 Ok(()) => {}
                 Err(factory_agent::Error::Aborted) => prompts.clear(),
@@ -932,7 +990,7 @@ impl Factory {
 
     /// Whether the run, so far, ended in an error it didn't recover from
     /// (see `Runtime::failed`).
-    fn latch_failure(&self, id: &str, epoch: u64, failed: bool) {
+    pub(crate) fn latch_failure(&self, id: &str, epoch: u64, failed: bool) {
         let mut inner = self.lock();
         if let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) {
             runtime.failed = failed;
@@ -952,6 +1010,7 @@ impl Factory {
             tools.extend(extension.tools(self, id));
         }
         tools.extend(crate::apps::tools(self, id));
+        tools.extend(crate::pipes::agents::tools(self, id));
         tools.push(self.extension_call(id));
         tools
     }
@@ -961,6 +1020,7 @@ impl Factory {
         let Some(agent) = self.lock().config.agent(id).cloned() else { return Vec::new() };
         let mut tools: Vec<Tool> = enabled_extensions(&agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
         tools.extend(crate::apps::tools(self, id));
+        tools.extend(crate::pipes::agents::tools(self, id));
         tools
     }
 
@@ -971,28 +1031,23 @@ impl Factory {
     /// Calls a tool of the agent's extensions by name, as its settings are
     /// now: how it uses an extension turned on since its context began.
     fn extension_call(self: &Arc<Self>, id: &str) -> Tool {
-        let factory = Arc::downgrade(self);
-        let agent = id.to_owned();
         let parameters = serde_json::json!({
             "type": "object",
             "required": ["tool"],
             "properties": {"tool": {"type": "string"}, "args": {"type": "object"}},
             "additionalProperties": false,
         });
-        let handler: factory_agent::Handler = Arc::new(move |args| {
-            let (factory, agent) = (factory.upgrade(), agent.clone());
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                let name = args.get("tool").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-                let tools = factory.extension_tools(&agent);
-                let Some(tool) = tools.into_iter().find(|tool| tool.spec.name == name) else {
-                    return Err(factory_agent::Error::Other(format!(
-                        "No tool \"{name}\" of an extension is on for you; extension_call reaches only those Claktory told you of."
-                    )));
-                };
-                let args = args.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-                tool.execute(&args, &tokio_util::sync::CancellationToken::new(), &|_| {}).await
-            })
+        let handler: factory_agent::Handler = crate::extensions::agent_handler(self, id, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let name = args.get("tool").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+            let tools = factory.extension_tools(&agent);
+            let Some(tool) = tools.into_iter().find(|tool| tool.spec.name == name) else {
+                return Err(factory_agent::Error::Other(format!(
+                    "No tool \"{name}\" of an extension is on for you; extension_call reaches only those Claktory told you of."
+                )));
+            };
+            let args = args.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            tool.execute(&args, &tokio_util::sync::CancellationToken::new(), &|_| {}).await
         });
         let mut tool = Tool::custom(EXTENSION_CALL, "Extension tool", EXTENSION_CALL_ABOUT, parameters, handler);
         tool.spec.constrained_sampling = serde_json::Value::Null;
@@ -1032,7 +1087,7 @@ impl Factory {
         let then: serde_json::Value = serde_json::from_str(&frame.settings).unwrap_or_default();
         let now = {
             let inner = self.lock();
-            settings_key(&inner.config, &agent, &places(&self.home, &inner.config, &agent).folder)
+            settings_key(&inner.config, &agent, &places(&self.home, &inner.config, &agent, &[]).folder)
         };
         let now: serde_json::Value = serde_json::from_str(&now).unwrap_or_default();
         let changed = |keys: &[&str]| keys.iter().any(|key| then.get(key) != now.get(key));
@@ -1059,14 +1114,14 @@ impl Factory {
         let (agent, places) = {
             let inner = self.lock();
             let agent = inner.config.agent(id)?.clone();
-            let places = places(&self.home, &inner.config, &agent);
+            let places = places(&self.home, &inner.config, &agent, &pipe_outboxes(self, &inner.config, id));
             (agent, places)
         };
         Some(self.build_tools(id, &places, &enabled_extensions(&agent)))
     }
 
     /// Records an agent event: updates the transcript, tells clients, saves.
-    async fn apply(&self, id: &str, epoch: u64, event: AgentEvent) {
+    pub(crate) async fn apply(&self, id: &str, epoch: u64, event: AgentEvent) {
         // A file it wrote: apps showing it, and comments on it, follow at once.
         if let AgentEvent::ToolExecutionEnd { tool_name, result, is_error: false, .. } = &event
             && matches!(tool_name.as_str(), "write_file" | "edit_file")
@@ -1074,7 +1129,7 @@ impl Factory {
         {
             let folder = {
                 let inner = self.lock();
-                inner.config.agent(id).map(|agent| places(&self.home, &inner.config, agent).folder)
+                inner.config.agent(id).map(|agent| places(&self.home, &inner.config, agent, &[]).folder)
             };
             if let Some(folder) = folder {
                 crate::annotations::written(self, id, &folder, path);
@@ -1086,10 +1141,15 @@ impl Factory {
             if matches!(event, AgentEvent::MessageEnd { .. } | AgentEvent::Compacted { .. })
                 && let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.epoch == epoch)
             {
-                let (model, name) = inner.config.agent(id).map(|agent| (agent.model.as_str(), agent.name.as_str())).unwrap_or_default();
+                let (model, name) = inner
+                    .config
+                    .agent(id)
+                    .map(|agent| (agent.model.clone(), agent.name.clone()))
+                    .or_else(|| self.chats.model_and_name(id))
+                    .unwrap_or_default();
                 let db = self.store.db();
-                crate::account::analytics::record(&db, runtime.run, model, &event);
-                crate::usage_report::record(&db, id, name, model, &event);
+                crate::account::analytics::record(&db, runtime.run, &model, &event);
+                crate::usage_report::record(&db, id, &name, &model, &event);
             }
             let Some(runtime) = inner.agents.get_mut(id) else { return };
             // A run of a conversation the person cleared.
@@ -1144,7 +1204,7 @@ impl Factory {
     /// was still starting.
     /// Also keeps what moves its bash command to the background when a
     /// message comes (see `make_way`).
-    fn set_abort(&self, id: &str, handles: Option<(factory_agent::AbortHandle, factory_agent::DetachHandle)>) -> bool {
+    pub(crate) fn set_abort(&self, id: &str, handles: Option<(factory_agent::AbortHandle, factory_agent::DetachHandle)>) -> bool {
         let mut inner = self.lock();
         let Some(runtime) = inner.agents.get_mut(id) else { return false };
         if runtime.stopped && handles.is_some() {
@@ -1154,7 +1214,7 @@ impl Factory {
         true
     }
 
-    fn notice(&self, id: &str, epoch: u64, text: String, level: NoticeLevel) {
+    pub(crate) fn notice(&self, id: &str, epoch: u64, text: String, level: NoticeLevel) {
         let mut inner = self.lock();
         let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) else { return };
         let Some(transcript) = runtime.transcript.as_mut() else { return };
@@ -1163,7 +1223,7 @@ impl Factory {
     }
 
     /// Shows prompts that never reached the model, and why.
-    fn unsent(&self, id: &str, prompts: &[Queued], problem: String, level: NoticeLevel) {
+    pub(crate) fn unsent(&self, id: &str, prompts: &[Queued], problem: String, level: NoticeLevel) {
         self.settle(prompts, Outcome::Dropped);
         let mut inner = self.lock();
         if let Some(runtime) = inner.agents.get_mut(id) {
@@ -1183,7 +1243,7 @@ impl Factory {
     /// What arrived for a working agent since its last step: the person's
     /// messages and events, which it reads before its next model call. None
     /// once the person stopped it.
-    fn inbox(self: &Arc<Self>, id: &str, epoch: u64) -> Inbox {
+    pub(crate) fn inbox(self: &Arc<Self>, id: &str, epoch: u64) -> Inbox {
         let factory = Arc::downgrade(self);
         let agent = id.to_owned();
         Arc::new(move || {
@@ -1199,7 +1259,7 @@ impl Factory {
                     }
                     let note = factory.take_changes(&mut inner, &agent, &current);
                     let Some(runtime) = inner.agents.get_mut(&agent) else { return Arrived::default() };
-                    let mut arrived = std::mem::take(&mut runtime.queue);
+                    let mut arrived = runtime.take_ready();
                     arrived.splice(0..0, note);
                     if !arrived.is_empty() {
                         let run = factory.begin_run(&agent, runtime);
@@ -1359,7 +1419,7 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
 /// A queued message as the agent gets it. The person's attached images go
 /// in as images too when its model takes them (`images`) and they're small
 /// enough; every attachment is also named by path.
-fn user_message(queued: Queued, images: bool) -> UserMessage {
+pub(crate) fn user_message(queued: Queued, images: bool) -> UserMessage {
     let now = factory_agent::clock::now_ms();
     match queued.event {
         Some(event) => UserMessage::event(queued.text, event, now),
@@ -1368,7 +1428,13 @@ fn user_message(queued: Queued, images: bool) -> UserMessage {
             if images && let UserContent::Parts(parts) = &mut message.content {
                 parts.extend(queued.attachments.iter().filter_map(factory_agent::Attachment::image));
             }
-            UserMessage { sent_from: queued.sent_from, client_id: queued.client_id, attachments: queued.attachments, ..message }
+            UserMessage {
+                sent_from: queued.sent_from,
+                client_id: queued.client_id,
+                attachments: queued.attachments,
+                voice: queued.voice.as_ref().and_then(crate::speech::voice::Voice::heard),
+                ..message
+            }
         }
     }
 }
@@ -1385,6 +1451,108 @@ impl Factory {
 mod tests {
     use super::*;
 
+    /// The home isn't the agent's: its file tools reach only its own folder
+    /// there (and config.json when it's an admin or has the manual), never
+    /// auth.json, factory.db or another agent's folder. #209's finding.
+    #[tokio::test]
+    async fn file_tools_reach_only_the_agents_own_corner_of_the_home() {
+        let dir = std::env::temp_dir().join(format!("factoryd-places-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let home = Home::new(dir.clone());
+        let mine = home.agent_dir("a");
+        std::fs::create_dir_all(mine.join("uploads")).expect("uploads");
+        std::fs::create_dir_all(home.workspace()).expect("workspace");
+        std::fs::create_dir_all(home.root().join("pipes/incoming/p/1")).expect("pipes");
+        std::fs::write(home.root().join("auth.json"), "{\"secret\": true}").expect("auth");
+        std::fs::write(home.config_path(), "{}").expect("config");
+        std::fs::write(home.root().join("factory.db"), "db").expect("db");
+        std::fs::write(mine.join("uploads/u.txt"), "up").expect("upload");
+        std::fs::write(home.root().join("pipes/incoming/p/1/f.txt"), "from the pipe").expect("pipe file");
+        let project = dir.join("proj");
+        std::fs::create_dir_all(project.join("app")).expect("project");
+        std::fs::create_dir_all(project.join("pipes/ops/outbox")).expect("outbox");
+        let config = Config::parse(
+            &serde_json::json!({"projects": [
+                {"id": "p", "name": "P", "path": project,
+                 "folders": [{"id": "app", "name": "App", "path": project.join("app")}]},
+            ], "agents": [
+                {"id": "a", "name": "A", "model": "m/one", "effort": "high", "prompt": ""},
+                {"id": "rivet", "name": "Rivet", "model": "m/one", "effort": "high", "prompt": "",
+                 "extensions": {"agents": {"admin": true}}},
+                {"id": "f", "name": "F", "model": "m/one", "effort": "high", "prompt": "",
+                 "project": "p", "folder": "app"},
+            ]})
+            .to_string(),
+        )
+        .expect("config");
+
+        let tools_with = |id: &str, outboxes: &[PathBuf]| {
+            let placed = places(&home, &config, config.agent(id).expect("agent"), outboxes);
+            let mut tools = factory_agent::coding_tools(&placed.folder, &placed.extra_dirs, None);
+            factory_agent::tools::read_only(&mut tools, &placed.read_only);
+            tools
+        };
+        let tools = |id: &str| tools_with(id, &[]);
+        let run = async |id: &str, tool: &str, args: serde_json::Value| {
+            let tool = tools(id).into_iter().find(|candidate| candidate.spec.name == tool).expect("tool");
+            tool.execute(&args, &tokio_util::sync::CancellationToken::new(), &|_| {}).await
+        };
+        let path = |at: PathBuf| at.display().to_string();
+
+        // Its own corner works, reading and writing.
+        run("a", "read_file", serde_json::json!({"path": path(mine.join("uploads/u.txt"))})).await.expect("its upload reads");
+        run("a", "write_file", serde_json::json!({"path": path(mine.join("notes.txt")), "content": "ok"}))
+            .await
+            .expect("its folder writes");
+        // What a pipe brought in reads, and only reads.
+        run("a", "read_file", serde_json::json!({"path": path(home.root().join("pipes/incoming/p/1/f.txt"))}))
+            .await
+            .expect("pipe files read");
+        run("a", "write_file", serde_json::json!({"path": path(home.root().join("pipes/incoming/p/1/f.txt")), "content": "x"}))
+            .await
+            .expect_err("pipe files don't write");
+        // The rest of the home is out of reach, for reading and writing.
+        for target in ["auth.json", "factory.db"] {
+            run("a", "read_file", serde_json::json!({"path": path(home.root().join(target))})).await.expect_err(target);
+            run("a", "write_file", serde_json::json!({"path": path(home.root().join(target)), "content": "x"})).await.expect_err(target);
+        }
+        run("a", "read_file", serde_json::json!({"path": path(home.config_path())})).await.expect_err("config.json refused");
+        run("a", "read_file", serde_json::json!({"path": path(home.agent_dir("rivet").join("x"))}))
+            .await
+            .expect_err("another agent's folder refused");
+
+        // An admin agent still changes config.json with its file tools, as
+        // the manual tells it to, and still can't read auth.json.
+        run(
+            "rivet",
+            "edit_file",
+            serde_json::json!({"path": path(home.config_path()), "edits": [{"oldText": "{}", "newText": "{ }", "replaceAll": false}]}),
+        )
+        .await
+        .expect("the admin edits config.json");
+        run("rivet", "read_file", serde_json::json!({"path": path(home.root().join("auth.json"))}))
+            .await
+            .expect_err("auth.json refused for the admin too");
+
+        // A folder-scoped agent granted a pipe writes the pipe's outbox
+        // ("Files you send come from its outbox"), inside the project's
+        // otherwise read-only own folder, and nothing else of it.
+        let outbox = project.join("pipes/ops/outbox");
+        let scoped = async |tool: &str, args: serde_json::Value| {
+            let tool = tools_with("f", std::slice::from_ref(&outbox)).into_iter().find(|t| t.spec.name == tool).expect("tool");
+            tool.execute(&args, &tokio_util::sync::CancellationToken::new(), &|_| {}).await
+        };
+        scoped("write_file", serde_json::json!({"path": path(outbox.join("report.txt")), "content": "out"}))
+            .await
+            .expect("the pipe's outbox writes");
+        scoped("read_file", serde_json::json!({"path": path(outbox.join("report.txt"))})).await.expect("and reads");
+        scoped("write_file", serde_json::json!({"path": path(project.join("notes.txt")), "content": "x"}))
+            .await
+            .expect_err("the project's own folder stays read only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn what_changed_is_said_in_one_note() {
         let map = |pairs: &[(&str, &str)]| pairs.iter().map(|(id, label)| ((*id).to_owned(), (*label).to_owned())).collect();
@@ -1398,6 +1566,7 @@ mod tests {
             folders: BTreeMap::new(),
             secrets: BTreeMap::new(),
             apps: BTreeMap::new(),
+            pipes: BTreeMap::new(),
             announced: Vec::new(),
         };
         assert_eq!(changes(&frame, &frame.roster, &frame.models, &frame.folders, &frame.secrets), None);

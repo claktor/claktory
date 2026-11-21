@@ -7,14 +7,14 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Weak};
 
-use factory_agent::{Event, EventSource, Tool, ToolResult};
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection, factory_tool, switch};
 use crate::config::{AgentConfig, Config};
-use crate::factory::{Factory, Inner};
+use crate::factory::{Factory, Inner, host_event};
 use crate::store::TaskRow;
 use crate::transcript::now_ms;
 
@@ -206,7 +206,7 @@ fn run_list(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<T
 /// Whose tasks `asker` asks about: Some(agent), or None for everyone's.
 fn whose(factory: &Factory, asker: &str, agent: Option<&str>) -> Result<Option<String>, String> {
     let inner = factory.lock();
-    let Some(me) = inner.config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let me = super::caller(&inner.config, asker)?;
     let agent = agent.map(str::trim).filter(|agent| !agent.is_empty() && *agent != asker);
     match agent {
         None => Ok(Some(asker.to_owned())),
@@ -338,13 +338,7 @@ fn alert(factory: &Arc<Factory>) -> rusqlite::Result<()> {
             task.log
         );
         for admin in admins {
-            let event = Event {
-                source: EventSource::Host,
-                from: "Claktory".to_owned(),
-                id: String::new(),
-                summary: String::new(),
-                transient: false,
-            };
+            let event = host_event(String::new());
             factory.deliver_event(&admin, text.clone(), event);
         }
         factory.store.task_alerted(&task.agent, &task.task)?;

@@ -300,7 +300,22 @@ void main() {
   testWidgets('on a phone the actions wrap instead of overflowing', (
     tester,
   ) async {
-    await showSettings(tester, withKeys(), size: const Size(390, 844));
+    final harness = await showSettings(
+      tester,
+      withKeys(),
+      size: const Size(390, 844),
+    );
+    // A phone lists the sections: Providers opens as a page of its own.
+    harness.backend.settingsSection.value = 'providers';
+    await pumpFrames(tester);
+    expect(tester.takeException(), isNull);
+    // A phone's finger-sized controls put the accounts below the fold.
+    await tester.scrollUntilVisible(
+      find.text('Try again'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await settle(tester);
     expect(tester.takeException(), isNull);
     expect(find.text('Try again'), findsOneWidget);
   });

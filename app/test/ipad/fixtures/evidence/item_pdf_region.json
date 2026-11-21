@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "annotation_id": "ann-41",
+  "thread": "t-41",
+  "ink_layer_id": "layer-paper-p3",
+  "layer_revision": 2,
+  "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+  "anchor": {
+    "kind": "pdf",
+    "selectors": [
+      {
+        "type": "FragmentSelector",
+        "conformsTo": "http://tools.ietf.org/rfc/rfc8118",
+        "value": "page=3",
+        "refinedBy": {
+          "type": "ClaktoryPageRegion",
+          "version": 1,
+          "box": "crop",
+          "rotation": 0,
+          "units": "normalized",
+          "origin": "top_left_unrotated",
+          "x": 0.12,
+          "y": 0.31,
+          "w": 0.5,
+          "h": 0.18
+        }
+      }
+    ]
+  },
+  "region": {
+    "x": 0.12,
+    "y": 0.31,
+    "w": 0.5,
+    "h": 0.18
+  },
+  "context_composite": {
+    "png_blob_id": "blob-t-41-r2-context",
+    "sha256": "bc5ac270fdc51b3289101f3729b71a9965730fef7a5ee9f9e855bcc1512db57e",
+    "pixel_width": 2048,
+    "pixel_height": 1188,
+    "bytes": 611204,
+    "region": {
+      "x": 0.08,
+      "y": 0.27,
+      "w": 0.58,
+      "h": 0.26
+    },
+    "crop_to_document_transform": [
+      0.17332,
+      0,
+      0,
+      -0.17332,
+      48.96,
+      578.16
+    ]
+  },
+  "question": "Why does this step follow?",
+  "excerpt_text": null,
+  "recognized_text": {
+    "text": "why does this step follow?",
+    "layer_revision": 2,
+    "languages": [
+      "en-US"
+    ],
+    "recognizer_version": "<PKStrokeRecognizer.recognitionVersion>"
+  },
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

@@ -9,6 +9,9 @@ import 'controls.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/lines.dart';
+import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
@@ -28,7 +31,7 @@ class ResourcesView extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final store = AppScope.of(context).workspace;
-    final caption = TextStyles.caption.copyWith(
+    final caption = TypeScale.of(context).caption.copyWith(
       color: palette.textFaint,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
@@ -202,25 +205,23 @@ class _Heading extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final style = TextStyles.caption.copyWith(
-      color: palette.textFaint,
-      fontWeight: FontWeight.w500,
-    );
+    final style = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
-      child: Row(
-        children: [
-          Expanded(child: Text(text, style: style)),
-          if (trailing case final trailing?)
-            Text(
-              trailing,
-              style: TextStyles.caption.copyWith(
-                color: palette.textFaint,
-                fontFeatures: const [FontFeature.tabularFigures()],
+      child: trailing == null
+          ? Text(text, style: style)
+          : ActionLine(
+              lead: Text(text, style: style),
+              gap: 0,
+              action: Text(
+                trailing!,
+                style: TypeScale.of(context).caption.copyWith(
+                  color: palette.textFaint,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
             ),
-        ],
-      ),
     );
   }
 }
@@ -238,7 +239,8 @@ class _Empty extends StatelessWidget {
     ),
     child: Text(
       text,
-      style: TextStyles.body.copyWith(color: Palette.of(context).textFaint),
+      style: TypeScale.of(context).body
+          .copyWith(color: Palette.of(context).textFaint),
     ),
   );
 }
@@ -268,7 +270,7 @@ class _Alert extends StatelessWidget {
           Expanded(
             child: Text(
               text,
-              style: TextStyles.body.copyWith(color: palette.danger),
+              style: TypeScale.of(context).body.copyWith(color: palette.danger),
             ),
           ),
         ],
@@ -339,25 +341,23 @@ class _Gauge extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyles.body.copyWith(color: palette.text),
-                ),
+          // At the largest text on a phone, how much is used goes under
+          // its name.
+          ActionLine(
+            lead: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TypeScale.of(context).body.copyWith(color: palette.text),
+            ),
+            gap: largeText(context) ? 0 : Space.s,
+            action: Text(
+              value,
+              style: TypeScale.of(context).caption.copyWith(
+                color: high ? palette.danger : palette.textMuted,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
-              const SizedBox(width: Space.s),
-              Text(
-                value,
-                style: TextStyles.caption.copyWith(
-                  color: high ? palette.danger : palette.textMuted,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: Space.xs),
           _Meter(fraction: fraction, high: high),
@@ -366,7 +366,8 @@ class _Gauge extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 note,
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             ),
         ],
@@ -393,6 +394,41 @@ class _History extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // On a phone its columns are as wide as the text is large; at the
+    // largest text, the name and value go over the line.
+    final phone = isPhoneLayout(context);
+    final wide = phone ? MediaQuery.textScalerOf(context).scale(13) / 11 : 1.0;
+    if (phone && largeText(context)) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Space.s,
+          vertical: Space.xs,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '$label · $now',
+              style: TypeScale.of(context).caption.copyWith(
+                color: palette.textMuted,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            Semantics(
+              label: '$label over the last hour',
+              child: CustomPaint(
+                size: const Size.fromHeight(24),
+                painter: _SparklinePainter(
+                  samples: samples,
+                  line: palette.textMuted,
+                  base: palette.hairline,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: Space.s,
@@ -401,10 +437,11 @@ class _History extends StatelessWidget {
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            width: 80 * wide,
             child: Text(
               label,
-              style: TextStyles.caption.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textMuted),
             ),
           ),
           Expanded(
@@ -422,11 +459,11 @@ class _History extends StatelessWidget {
           ),
           const SizedBox(width: Space.s),
           SizedBox(
-            width: 56,
+            width: 56 * wide,
             child: Text(
               now,
               textAlign: TextAlign.right,
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: palette.textMuted,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
@@ -505,11 +542,16 @@ class _ProcessRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final numbers = TextStyles.caption.copyWith(
+    final numbers = TypeScale.of(context).caption.copyWith(
       color: palette.textMuted,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
     final agent = process.agentId.isEmpty ? null : store.agent(process.agentId);
+    // On a phone its columns are as wide as the text is large; at the
+    // largest text, the numbers go under its name instead.
+    final phone = isPhoneLayout(context);
+    final wide = phone ? MediaQuery.textScalerOf(context).scale(13) / 11 : 1.0;
+    final under = phone && largeText(context);
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: Space.s,
@@ -538,39 +580,45 @@ class _ProcessRow extends StatelessWidget {
                   process.label,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
-                if (agent != null || process.processes > 1)
+                if (agent != null || process.processes > 1 || under)
                   Text(
                     [
                       ?agent?.name,
                       if (process.processes > 1)
                         '${process.processes} processes',
+                      if (under) ...[
+                        _percent(process.cpuPercent),
+                        formatBytes(process.memory),
+                      ],
                     ].join(' · '),
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
                   ),
               ],
             ),
           ),
-          const SizedBox(width: Space.s),
-          SizedBox(
-            width: 40,
-            child: Text(
-              _percent(process.cpuPercent),
-              textAlign: TextAlign.right,
-              style: numbers,
+          if (!under) ...[
+            const SizedBox(width: Space.s),
+            SizedBox(
+              width: 40 * wide,
+              child: Text(
+                _percent(process.cpuPercent),
+                textAlign: TextAlign.right,
+                style: numbers,
+              ),
             ),
-          ),
-          SizedBox(
-            width: 64,
-            child: Text(
-              formatBytes(process.memory),
-              textAlign: TextAlign.right,
-              style: numbers,
+            SizedBox(
+              width: 64 * wide,
+              child: Text(
+                formatBytes(process.memory),
+                textAlign: TextAlign.right,
+                style: numbers,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -616,73 +664,82 @@ class _DiskRowState extends State<_DiskRow> {
     final usage = widget.usage;
     final agent = usage.kind == 'agent' ? widget.store.agent(usage.id) : null;
     final opens = usage.parts.isNotEmpty;
+    // At the largest text on a phone, its size and Clean go under it.
+    final under = isPhoneLayout(context) && largeText(context);
     Widget line(DiskUsage usage, {required bool part}) {
       final copyOnWrite = part && usage.kind == 'checkout';
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    if (!part && agent != null) ...[
-                      AgentCharacter(agent: agent, size: 20),
-                      const SizedBox(width: Space.xs),
-                    ],
-                    Flexible(
-                      child: Text(
-                        usage.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyles.body.copyWith(
-                          color: part ? palette.textMuted : palette.text,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (copyOnWrite)
-                  Text(
-                    'Shares most of its space with the folder it was copied '
-                    'from, so it really takes less.',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
-                  )
-                else if (!part && usage.path.isNotEmpty)
-                  Text(
-                    shortPath(usage.path),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: Space.s),
-          Text(
-            usage.partial
-                ? 'at least ${formatBytes(usage.bytes)}'
-                : formatBytes(usage.bytes),
-            style: TextStyles.caption.copyWith(
-              color: palette.textMuted,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          // A build cache can be cleared now; builds fill it again.
-          if (part && usage.kind == 'build_cache') ...[
-            const SizedBox(width: Space.s),
-            Button(
+      final size = Text(
+        usage.partial
+            ? 'at least ${formatBytes(usage.bytes)}'
+            : formatBytes(usage.bytes),
+        style: TypeScale.of(context).caption.copyWith(
+          color: palette.textMuted,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      );
+      // A build cache can be cleared now; builds fill it again.
+      final clean = part && usage.kind == 'build_cache'
+          ? Button(
               label: _cleaning.contains(usage.path) ? 'Cleaning…' : 'Clean',
               onPressed: _cleaning.contains(usage.path)
                   ? null
                   : () => _clean(usage.path),
+            )
+          : null;
+      final about = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (!part && agent != null) ...[
+                AgentCharacter(agent: agent, size: 20),
+                const SizedBox(width: Space.xs),
+              ],
+              Flexible(
+                child: Text(
+                  usage.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TypeScale.of(context).body
+                      .copyWith(color: part ? palette.textMuted : palette.text),
+                ),
+              ),
+            ],
+          ),
+          if (copyOnWrite)
+            Text(
+              'Shares most of its space with the folder it was copied '
+              'from, so it really takes less.',
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
+            )
+          else if (!part && usage.path.isNotEmpty)
+            Text(
+              shortPath(usage.path),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
+        ],
+      );
+      if (under) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            about,
+            size,
+            if (clean != null) ...[const SizedBox(height: Space.xs), clean],
           ],
+        );
+      }
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: about),
+          const SizedBox(width: Space.s),
+          size,
+          if (clean != null) ...[const SizedBox(width: Space.s), clean],
         ],
       );
     }
@@ -734,14 +791,24 @@ class _DiskRowState extends State<_DiskRow> {
       ),
     );
     if (!opens) return row;
-    return Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => DecoratedBox(
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
+    return Semantics(
+      container: true,
+      expanded: _open,
+      child: Pressable(
+        onTap: () => setState(() => _open = !_open),
+        builder: (context, hovered) => DecoratedBox(
+          decoration: BoxDecoration(
+            color: hovered ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: ConstrainedBox(
+            // A finger's height on a phone.
+            constraints: BoxConstraints(
+              minHeight: isPhoneLayout(context) ? Touch.target : 0,
+            ),
+            child: row,
+          ),
         ),
-        child: row,
       ),
     );
   }

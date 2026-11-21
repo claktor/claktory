@@ -10,7 +10,11 @@
 #
 #   scripts/build-linux.sh ARCH OUT [PACKAGE]
 #       ARCH: x86_64 or aarch64; OUT: the binary to write; PACKAGE: factoryd
-#       (the default), claktory-apps (the apps host) or claktory-account
+#       (the default), claktory-apps (the apps host), claktory-account,
+#       claktory-speech or claktory-qa
+#
+#   FACTORY_LINUX_SRC=DIR      build this source tree instead of the checkout
+#       (scripts/qa.sh --container builds a commit's `git archive` this way)
 #
 #   FACTORY_CONTAINER=docker   the container engine (podman unless it's missing)
 #   FACTORY_LINUX_JOBS=N       parallel jobs (2: more can run a small VM out of memory)
@@ -21,16 +25,29 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="${1:-}" OUT="${2:-}" PACKAGE="${3:-factoryd}"
-usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account]" >&2; exit 2; }
+usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account|claktory-speech|claktory-qa]" >&2; exit 2; }
 case "$ARCH" in
   x86_64 | aarch64) ;;
   *) usage ;;
 esac
 [[ -n "$OUT" ]] || usage
 case "$PACKAGE" in
-  factoryd | claktory-apps | claktory-account) ;;
+  factoryd | claktory-apps | claktory-account | claktory-speech | claktory-qa) ;;
   *) usage ;;
 esac
+SRC_ROOT="${FACTORY_LINUX_SRC:-$ROOT}"
+
+# claktory-speech builds ggml (C++, cmake) into itself. A release must not
+# take the build machine's CPU as the floor: every x86_64 since Haswell
+# (2013) has AVX2, FMA and F16C, which is what claktory-speech check asks
+# for; plain NEON is every aarch64.
+SPEECH_CMAKE_ARGS=""
+if [[ "$PACKAGE" == claktory-speech ]]; then
+  case "$ARCH" in
+    x86_64) SPEECH_CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON" ;;
+    aarch64) SPEECH_CMAKE_ARGS="-DGGML_NATIVE=OFF" ;;
+  esac
+fi
 
 ENGINE="${FACTORY_CONTAINER:-}"
 if [[ -z "$ENGINE" ]]; then
@@ -58,11 +75,14 @@ IMAGE="docker.io/library/rust:1-alpine"
 # The checkout goes in read-only and is copied, so nothing in it changes; the
 # copy leaves out the Mac's build output and the app.
 "$ENGINE" run --rm --platform "$PLATFORM" \
-  -v "$ROOT:/src:ro" -v "$OUT_DIR:/out" \
+  -v "$SRC_ROOT:/src:ro" -v "$OUT_DIR:/out" \
   -v "factory-linux-target-$ARCH:/target" -v "factory-linux-cargo:/usr/local/cargo/registry" \
   -e FACTORY_VERSION -e FACTORY_UPDATE_URL -e CARGO_TARGET_DIR=/target \
+  -e TRANSCRIBE_CMAKE_ARGS="$SPEECH_CMAKE_ARGS" \
   "$IMAGE" sh -euc '
     apk add --no-cache musl-dev zig cargo-zigbuild file >/dev/null
+    # claktory-speech builds its C++ engine with cmake.
+    [ "$4" != claktory-speech ] || apk add --no-cache cmake make >/dev/null
     rustup target add "$3" >/dev/null 2>&1
     mkdir /work
     cd /src
@@ -81,6 +101,8 @@ IMAGE="docker.io/library/rust:1-alpine"
         factoryd) "$file" not-a-command 2>&1 | grep -q usage ;;
         # Frames on stdin: with none, it stops cleanly.
         claktory-apps) "$file" </dev/null >/dev/null 2>&1 ;;
+        claktory-speech) "$file" help 2>&1 | grep -q usage && "$file" check | grep -q supported ;;
+        claktory-qa) "$file" help 2>&1 | grep -q claktory-qa ;;
         *) "$file" help 2>&1 | grep -q Usage: ;;
       esac
     fi

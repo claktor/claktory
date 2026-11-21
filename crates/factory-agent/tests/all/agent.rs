@@ -26,6 +26,7 @@ fn options(cwd: &std::path::Path, stream: StreamFn) -> AgentOptions {
         inbox: None,
         after_compaction: None,
         secrets: None,
+        fallback_model: None,
     }
 }
 
@@ -180,7 +181,11 @@ async fn before_tool_call_can_block_and_abort_stops_the_batch() {
     let mut blocking = options(dir.path(), single(vec![call.clone()], None));
     blocking.before_tool_call = Some(Arc::new(|name, args| {
         Box::pin(async move {
-            (name == "write_file" && args["path"] == "x").then_some(Block { reason: Some("Denied by user".into()), terminate: false })
+            (name == "write_file" && args["path"] == "x").then_some(Block {
+                reason: Some("Denied by user".into()),
+                terminate: false,
+                details: serde_json::Value::Null,
+            })
         })
     }));
     let mut agent = Agent::new(blocking);

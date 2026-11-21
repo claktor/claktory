@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -8,6 +9,7 @@ import 'agent_view.dart';
 import 'backend.dart' show fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
+import 'chats.dart' show ChatView, selectedChat;
 import 'compatibility.dart';
 import 'connect_step.dart';
 import 'map.dart';
@@ -15,14 +17,18 @@ import 'pairing.dart';
 import 'marketplace.dart';
 import 'account.dart';
 import 'model_step.dart';
+import 'mobile/presentation.dart' show SheetOverlay;
+import 'move.dart' show BackendMove, MoveGate;
 import 'name_step.dart';
 import 'phone.dart';
+import 'pipes.dart';
 import 'controls.dart';
 import 'extensions.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'ipad/workbench.dart' show Workbench, workbenchRailWidth;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'rail.dart' show ClaktoriesBackStrip, railWidth;
+import 'rail.dart' show railWidth;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'setup.dart';
@@ -30,7 +36,9 @@ import 'sidebar.dart';
 import 'state.dart';
 import 'update.dart';
 import 'screens.dart';
+import 'inbox.dart' show InboxView;
 import 'usage_view.dart';
+import 'your_claktories.dart' show DeviceBanners, SignInRequiredView;
 
 /// The window: the sidebar on the left, the selected agent in the middle under
 /// the update banner, and its open extension panel on the right. Hosts the
@@ -47,8 +55,6 @@ class Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<Shell> {
-  late final _root = OverlayEntry(builder: _buildWindow);
-
   /// The sidebar's and the panel's widths while the person drags their
   /// edge; null otherwise, when they're the backend's (`Settings`).
   final _sidebarDrag = ValueNotifier<double?>(null);
@@ -59,8 +65,6 @@ class _ShellState extends State<Shell> {
 
   @override
   void dispose() {
-    _root.remove();
-    _root.dispose();
     for (final waiting in _settling.values) {
       _store?.removeListener(waiting);
     }
@@ -117,7 +121,7 @@ class _ShellState extends State<Shell> {
     if (waiting != null) _store?.removeListener(waiting);
   }
 
-  Widget _buildWindow(BuildContext context) => ListenableBuilder(
+  Widget _buildSteps(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([
       AppScope.of(context).workspace,
       signInPutOff(AppScope.of(context)),
@@ -155,6 +159,7 @@ class _ShellState extends State<Shell> {
       final window = _layout(
         context,
         bannerOnTop: setupStep == null && question != null,
+        covered: step != null,
       );
       // What agents show the person opens here, unless a step covers it.
       if (step == null) return ScreenOpener(covered: false, child: window);
@@ -163,25 +168,32 @@ class _ShellState extends State<Shell> {
       // works, so one that can't go on (too old, say) never traps them.
       final rail = widget.rail == null || isPhoneLayout(context)
           ? 0.0
+          : _workbench(context)
+          ? workbenchRailWidth
           : railWidth;
       return ScreenOpener(
         covered: true,
         child: Stack(
           fit: StackFit.expand,
           children: [
-            ExcludeFocus(child: window),
+            // Dimmed by the step's scrim, which takes every touch but the
+            // rail's, and out of focus. A phone's window (no rail) is
+            // wholly inert until the step is done: no touches, and
+            // VoiceOver reads only the step and what's drawn above it.
+            ExcludeFocus(
+              child: isPhoneLayout(context)
+                  ? IgnorePointer(child: window)
+                  : window,
+            ),
             Positioned.fill(
               left: rail,
-              child: NameStepBarrier(child: step),
-            ),
-            // A phone has no rail: the way back to its Claktories sits on top.
-            if (isPhoneLayout(context))
-              const Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: ClaktoriesBackStrip(),
+              child: BlockSemantics(
+                blocking: isPhoneLayout(context),
+                child: NameStepBarrier(child: step),
               ),
+            ),
+            // A phone has no rail: the step's page (StepCard) has the way
+            // back to its Claktories along its top.
           ],
         ),
       );
@@ -189,8 +201,14 @@ class _ShellState extends State<Shell> {
   );
 
   /// The window. With [bannerOnTop], the update banner is drawn above
-  /// what's laid over the window, so it's clickable over a step.
-  Widget _layout(BuildContext context, {bool bannerOnTop = false}) {
+  /// what's laid over the window, so it's clickable over a step. [covered]
+  /// by a step, VoiceOver reaches only what still works under it: the rail
+  /// and the update banner.
+  Widget _layout(
+    BuildContext context, {
+    bool bannerOnTop = false,
+    bool covered = false,
+  }) {
     final palette = Palette.of(context);
     if (isPhoneLayout(context)) {
       return DefaultTextStyle(
@@ -216,8 +234,12 @@ class _ShellState extends State<Shell> {
                 final scope = AppScope.scope(context);
                 final store = scope.backend.workspace;
                 final workspace = store.workspace;
-                // The extension bar and panel belong to the agent view.
-                final agent = scope.page.value == AppPage.agent
+                // The extension bar and panel belong to the agent view (a
+                // pipe, shown instead, has neither).
+                final agent =
+                    scope.page.value == AppPage.agent &&
+                        selectedPipe(workspace) == null &&
+                        selectedChat(workspace) == null
                     ? store.selectedAgent
                     : null;
                 final panel = openPanelOf(workspace, agent);
@@ -277,123 +299,147 @@ class _ShellState extends State<Shell> {
                 // this LayoutBuilder (a hover's fade, say) lays it out again,
                 // which would otherwise repaint the whole window each frame.
                 Widget part(Widget child) => RepaintBoundary(child: child);
+                // Under a step: dimmed, and silent to VoiceOver.
+                Widget behind(Widget child) =>
+                    covered ? ExcludeSemantics(child: child) : child;
                 final railView = widget.rail;
+                final content = updateOffered(workspace, scope.appBuild.version)
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          bannerOnTop
+                              ? const _LiftedBanner()
+                              : const UpdateBanner(),
+                          Expanded(
+                            child: behind(
+                              const DeviceBanners(child: _Content()),
+                            ),
+                          ),
+                        ],
+                      )
+                    : behind(const DeviceBanners(child: _Content()));
+                // An iPad's window wide enough for panes: the workbench
+                // (ipad/workbench.dart) lays out the same parts, finger-sized,
+                // and decides where the panel fits.
+                if (railView != null && _workbench(context)) {
+                  final kept = keptWidth(
+                    settings.panelWidth,
+                    panelWidth,
+                    panelMinWidth,
+                    panelMaxWidth,
+                  );
+                  return _History(
+                    back: back,
+                    forward: forward,
+                    child: Workbench(
+                      rail: railView,
+                      sidebar: (width) => behind(Sidebar(width: width)),
+                      sidebarWidth: sidebar,
+                      extensionBar: agent == null
+                          ? null
+                          : behind(ExtensionBar(agent: agent)),
+                      content: content,
+                      panel: panel != null && agent != null
+                          ? behind(
+                              ExtensionPanel(
+                                key: ValueKey('${panel.id}/${agent.id}'),
+                                extension: panel,
+                                agent: agent,
+                                width: kept,
+                              ),
+                            )
+                          : null,
+                      panelWidth: kept,
+                      agent: agent,
+                    ),
+                  );
+                }
                 final row = Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (railView != null) part(railView),
-                    part(Sidebar(width: sidebar)),
-                    part(ExtensionBar(agent: agent)),
-                    Expanded(
-                      child: part(
-                        updateOffered(workspace, scope.appBuild.version)
-                            ? Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  bannerOnTop
-                                      ? const _LiftedBanner()
-                                      : const UpdateBanner(),
-                                  const Expanded(child: _Content()),
-                                ],
-                              )
-                            : const _Content(),
-                      ),
-                    ),
-                    if (pane != null) part(pane),
+                    part(behind(Sidebar(width: sidebar))),
+                    part(behind(ExtensionBar(agent: agent))),
+                    Expanded(child: part(content)),
+                    if (pane != null) part(behind(pane)),
                   ],
                 );
-                return CallbackShortcuts(
-                  bindings: {
-                    const SingleActivator(
-                      LogicalKeyboardKey.bracketLeft,
-                      meta: true,
-                    ): back,
-                    const SingleActivator(
-                      LogicalKeyboardKey.bracketRight,
-                      meta: true,
-                    ): forward,
-                  },
-                  child: Listener(
-                    behavior: HitTestBehavior.translucent,
-                    onPointerDown: (event) {
-                      if (event.buttons & kBackMouseButton != 0) back();
-                      if (event.buttons & kForwardMouseButton != 0) forward();
-                    },
-                    child: Stack(
-                      children: [
-                        Positioned.fill(child: row),
+                return _History(
+                  back: back,
+                  forward: forward,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(child: row),
+                      Positioned(
+                        left:
+                            rail + sidebar - ResizeHandle.widthOf(context) / 2,
+                        top: 0,
+                        bottom: 0,
+                        child: ResizeHandle(
+                          key: const ValueKey('sidebar-edge'),
+                          onDragStart: () {
+                            _stopSettling(_sidebarDrag);
+                            _dragFrom = sidebar;
+                          },
+                          onDrag: (dx) => _sidebarDrag.value = (_dragFrom + dx)
+                              .clamp(sidebarMinWidth, sidebarMaxWidth)
+                              .roundToDouble(),
+                          onDragEnd: () {
+                            final width = _sidebarDrag.value;
+                            if (width == null) return;
+                            _keep(
+                              _sidebarDrag,
+                              UpdateSettings(sidebarWidth: width),
+                              (settings) => settings.sidebarWidth,
+                            );
+                          },
+                          onReset: () {
+                            _sidebarDrag.value = sidebarWidth;
+                            _keep(
+                              _sidebarDrag,
+                              UpdateSettings(sidebarWidth: 0),
+                              (settings) => settings.sidebarWidth,
+                            );
+                          },
+                        ),
+                      ),
+                      if (panelShown)
                         Positioned(
-                          left: rail + sidebar - ResizeHandle.width / 2,
+                          right: panelAt - ResizeHandle.widthOf(context) / 2,
                           top: 0,
                           bottom: 0,
                           child: ResizeHandle(
-                            key: const ValueKey('sidebar-edge'),
+                            key: const ValueKey('panel-edge'),
                             onDragStart: () {
-                              _stopSettling(_sidebarDrag);
-                              _dragFrom = sidebar;
+                              _stopSettling(_panelDrag);
+                              _dragFrom = panelAt;
                             },
-                            onDrag: (dx) =>
-                                _sidebarDrag.value = (_dragFrom + dx)
-                                    .clamp(sidebarMinWidth, sidebarMaxWidth)
-                                    .roundToDouble(),
+                            onDrag: (dx) => _panelDrag.value = (_dragFrom - dx)
+                                .clamp(
+                                  panelMinWidth,
+                                  math.max(panelMinWidth, panelRoom),
+                                )
+                                .roundToDouble(),
                             onDragEnd: () {
-                              final width = _sidebarDrag.value;
+                              final width = _panelDrag.value;
                               if (width == null) return;
                               _keep(
-                                _sidebarDrag,
-                                UpdateSettings(sidebarWidth: width),
-                                (settings) => settings.sidebarWidth,
+                                _panelDrag,
+                                UpdateSettings(panelWidth: width),
+                                (settings) => settings.panelWidth,
                               );
                             },
                             onReset: () {
-                              _sidebarDrag.value = sidebarWidth;
+                              _panelDrag.value = panelWidth;
                               _keep(
-                                _sidebarDrag,
-                                UpdateSettings(sidebarWidth: 0),
-                                (settings) => settings.sidebarWidth,
+                                _panelDrag,
+                                UpdateSettings(panelWidth: 0),
+                                (settings) => settings.panelWidth,
                               );
                             },
                           ),
                         ),
-                        if (panelShown)
-                          Positioned(
-                            right: panelAt - ResizeHandle.width / 2,
-                            top: 0,
-                            bottom: 0,
-                            child: ResizeHandle(
-                              key: const ValueKey('panel-edge'),
-                              onDragStart: () {
-                                _stopSettling(_panelDrag);
-                                _dragFrom = panelAt;
-                              },
-                              onDrag: (dx) =>
-                                  _panelDrag.value = (_dragFrom - dx)
-                                      .clamp(
-                                        panelMinWidth,
-                                        math.max(panelMinWidth, panelRoom),
-                                      )
-                                      .roundToDouble(),
-                              onDragEnd: () {
-                                final width = _panelDrag.value;
-                                if (width == null) return;
-                                _keep(
-                                  _panelDrag,
-                                  UpdateSettings(panelWidth: width),
-                                  (settings) => settings.panelWidth,
-                                );
-                              },
-                              onReset: () {
-                                _panelDrag.value = panelWidth;
-                                _keep(
-                                  _panelDrag,
-                                  UpdateSettings(panelWidth: 0),
-                                  (settings) => settings.panelWidth,
-                                );
-                              },
-                            ),
-                          ),
-                      ],
-                    ),
+                    ],
                   ),
                 );
               },
@@ -404,13 +450,61 @@ class _ShellState extends State<Shell> {
     );
   }
 
+  /// Whether the window is an iPad's wide enough for panes: the
+  /// workbench's.
+  static bool _workbench(BuildContext context) =>
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      deviceIdiom(context) == Idiom.pad;
+
   @override
   Widget build(BuildContext context) =>
       // One clock for every agent character in the window.
-      CharacterHost(child: Overlay(initialEntries: [_root]));
+      CharacterHost(
+        // While the agents are paused for a move to another computer, its
+        // screen takes the window, all but the rail: the backend serves
+        // nothing else then. It takes the window's overlay with it, and
+        // with that every sheet, dialog, menu and popover in it (and their
+        // places in Back): nothing shown before the pause outlives it, and
+        // the window that comes back has none.
+        child: MoveGate(
+          source: BackendMove(AppScope.of(context)),
+          rail: isPhoneLayout(context) ? null : widget.rail,
+          child: _WindowOverlay(builder: _buildSteps),
+        ),
+      );
 }
 
-/// The selected agent, or what to do when there isn't one.
+/// The window's overlay, that menus, dialogs, sheets and popovers float in
+/// ([SheetOverlay]): made with the window and gone with it.
+class _WindowOverlay extends StatefulWidget {
+  const _WindowOverlay({required this.builder});
+
+  final WidgetBuilder builder;
+
+  @override
+  State<_WindowOverlay> createState() => _WindowOverlayState();
+}
+
+class _WindowOverlayState extends State<_WindowOverlay> {
+  late final _root = OverlayEntry(
+    builder: (context) => SheetOverlay(
+      overlay: Overlay.of(context),
+      child: Builder(builder: widget.builder),
+    ),
+  );
+
+  @override
+  void dispose() {
+    _root.remove();
+    _root.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Overlay(initialEntries: [_root]);
+}
+
+/// The selected agent or pipe, or what to do when there isn't one.
 class _Content extends StatelessWidget {
   const _Content();
 
@@ -423,12 +517,22 @@ class _Content extends StatelessWidget {
         backend.workspace,
         backend.connected,
         backend.pairing,
+        backend.signInRequired,
         scope.page,
       ]),
       builder: (context, _) {
+        final waiting = scope.connections.current;
+        // Another Claktory that lets this device in only once it's signed
+        // in to the person's account.
+        if (backend.signInRequired.value != null && waiting != null) {
+          return SignInRequiredView(
+            onCancel: waiting.fromAccount
+                ? () => scope.connections.forget(waiting)
+                : null,
+          );
+        }
         // Another Claktory's code used, waiting to be allowed there: the
         // number to compare.
-        final waiting = scope.connections.current;
         if (backend.pairing.value != null && waiting != null) {
           return PairingWaitView(
             onCancel: () => scope.connections.forget(waiting),
@@ -445,10 +549,22 @@ class _Content extends StatelessWidget {
             return const MapView();
           case AppPage.usage:
             return const UsageView();
+          case AppPage.inbox:
+            return const InboxView();
           case AppPage.agent:
         }
         final store = backend.workspace;
         final workspace = store.workspace;
+        // One of the person's chats, in place of a conversation.
+        final chat = selectedChat(workspace);
+        if (chat != null) {
+          return ChatView(key: ValueKey('chat/${chat.id}'), chat: chat);
+        }
+        // A pipe to another Claktory, opened from its project.
+        final pipe = selectedPipe(workspace);
+        if (pipe != null) {
+          return PipeView(key: ValueKey('pipe/${pipe.id}'), pipe: pipe);
+        }
         final agent = store.selectedAgent;
         if (agent != null) {
           // The whole conversation is faintly washed in the agent's color, so
@@ -460,7 +576,28 @@ class _Content extends StatelessWidget {
             child: AgentView(key: ValueKey(agent.id), agent: agent),
           );
         }
-        if (!backend.connected.value) {
+        return const NoAgentView();
+      },
+    );
+  }
+}
+
+/// What shows with no agent chosen: "Connecting…", how to start when
+/// there are no agents, or "Select an agent", with signing in when no
+/// model can run.
+class NoAgentView extends StatelessWidget {
+  const NoAgentView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: Listenable.merge([backend.workspace, backend.connected]),
+      builder: (context, _) {
+        final workspace = backend.workspace.workspace;
+        // Until this Claktory's workspace is here, nothing is known about
+        // it: an empty one isn't "no agents yet".
+        if (!backend.connected.value || !backend.workspace.received) {
           return const _EmptyState(title: 'Connecting…');
         }
         final signIn = workspace.models.isEmpty;
@@ -472,6 +609,8 @@ class _Content extends StatelessWidget {
             body: noProjects
                 ? 'Agents work in projects. Start a project, then add agents '
                       'to it.'
+                : isPhoneLayout(context)
+                ? "Add one from a project's ⋯ in the menu."
                 : 'Add one with + Agent in a project.',
             action: noProjects ? 'New project' : null,
             onAction: noProjects
@@ -516,7 +655,7 @@ class _EmptyState extends StatelessWidget {
         // With no header bar, the window is dragged by this band.
         const TitleSpace(),
         Expanded(
-          child: Center(
+          child: _Scrolls(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 360),
               child: Column(
@@ -623,6 +762,59 @@ class _LiftedBannerState extends State<_LiftedBanner> {
           ),
         ),
       ),
+    ),
+  );
+}
+
+/// [child] in the middle; on a phone, where large text can make it taller
+/// than the screen, scrolling then.
+class _Scrolls extends StatelessWidget {
+  const _Scrolls({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPhoneLayout(context)) return Center(child: child);
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: Space.l),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Center(child: child),
+        ),
+      ),
+    );
+  }
+}
+
+/// Back and forward through the agents followed from messages, as in a
+/// browser: ⌘[ and ⌘], or the mouse's side buttons.
+class _History extends StatelessWidget {
+  const _History({
+    required this.back,
+    required this.forward,
+    required this.child,
+  });
+
+  final VoidCallback back;
+  final VoidCallback forward;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: {
+      const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true): back,
+      const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
+          forward,
+    },
+    child: Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (event.buttons & kBackMouseButton != 0) back();
+        if (event.buttons & kForwardMouseButton != 0) forward();
+      },
+      child: child,
     ),
   );
 }

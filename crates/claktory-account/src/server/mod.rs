@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::protocol::{self, ErrorBody};
 pub use mail::{Mail, MailError, Mailer};
-pub use secrets::Secrets;
+pub use secrets::{Rotate, Secrets};
 
 /// The time, in unix seconds; tests set their own.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
@@ -247,6 +247,7 @@ impl Service {
             (&Method::POST, "/v1/share") => api::share(self, call).await,
             (&Method::POST, "/v1/check-in") => api::check_in(self, call),
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
+            (&Method::POST, "/v1/move") => api::move_claktory(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),

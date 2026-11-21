@@ -57,29 +57,21 @@ impl Extension for Tree {
         if !in_repo {
             return Vec::new();
         }
-        let factory = Arc::downgrade(factory);
-        let agent = agent.to_owned();
-        let handler: factory_agent::Handler = Arc::new(move |_args| {
-            let factory = factory.upgrade();
-            let agent = agent.clone();
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                let checkout = {
-                    let inner = factory.lock();
-                    let Some(me) = inner.config.agent(&agent) else {
-                        return Err(factory_agent::Error::Other("You're no longer in this Claktory.".into()));
-                    };
-                    crate::runner::checkout(&factory.home, &inner.config, me)
-                };
-                let Some(checkout) = checkout else {
-                    return Err(factory_agent::Error::Other("You have no checkout of your own to land.".into()));
-                };
-                let landed = tokio::task::spawn_blocking(move || trees::land(&checkout))
-                    .await
-                    .map_err(|error| factory_agent::Error::Other(error.to_string()))?;
-                let text = landed.map_err(factory_agent::Error::Other)?;
-                Ok(ToolResult::text(text, json!({})))
-            })
+        let handler: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, _args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let checkout = {
+                let inner = factory.lock();
+                let me = super::caller(&inner.config, &agent).map_err(factory_agent::Error::Other)?;
+                crate::runner::checkout(&factory.home, &inner.config, me)
+            };
+            let Some(checkout) = checkout else {
+                return Err(factory_agent::Error::Other("You have no checkout of your own to land.".into()));
+            };
+            let landed = tokio::task::spawn_blocking(move || trees::land(&checkout))
+                .await
+                .map_err(|error| factory_agent::Error::Other(error.to_string()))?;
+            let text = landed.map_err(factory_agent::Error::Other)?;
+            Ok(ToolResult::text(text, json!({})))
         });
         let parameters = json!({"type": "object", "properties": {}, "additionalProperties": false});
         vec![super::tool("tree_land", "Land work", LAND, parameters, handler)]

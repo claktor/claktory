@@ -6,6 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'identity.dart';
+import 'mobile/input.dart';
+import 'mobile/metrics.dart';
+import 'mobile/presentation.dart';
 import 'selection.dart';
 
 /// Moves the window: dragging anywhere in [child] drags the window, and
@@ -82,7 +85,8 @@ class TitleSpace extends StatelessWidget {
       : const WindowDrag(child: SizedBox(height: titleBarHeight));
 }
 
-/// A clickable region that tells its builder whether the pointer is over it.
+/// A clickable region that tells its builder whether the pointer is over
+/// it, or a finger is down on it (a phone has no pointer to hover).
 class Pressable extends StatefulWidget {
   const Pressable({
     super.key,
@@ -104,26 +108,38 @@ class Pressable extends StatefulWidget {
 class _PressableState extends State<Pressable> {
   var _hovered = false;
 
+  /// A finger is down on it.
+  var _pressed = false;
+
+  void _press(bool pressed) {
+    if (mounted && pressed != _pressed) setState(() => _pressed = pressed);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final tappable = widget.onTap != null;
     return MouseRegion(
-      cursor: widget.onTap == null
-          ? SystemMouseCursors.basic
-          : SystemMouseCursors.click,
+      cursor: tappable ? SystemMouseCursors.click : SystemMouseCursors.basic,
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
+        onTapDown: tappable
+            ? (details) => _press(details.kind == PointerDeviceKind.touch)
+            : null,
+        onTapUp: tappable ? (_) => _press(false) : null,
+        onTapCancel: tappable ? () => _press(false) : null,
         onSecondaryTap: widget.onSecondaryTap,
-        child: widget.builder(context, _hovered),
+        child: widget.builder(context, _hovered || _pressed),
       ),
     );
   }
 }
 
 /// A small text button. `primary` is the one main action of a form; it's
-/// filled with the text color, since signal is never a large fill.
+/// filled with the text color, since signal is never a large fill. On a
+/// phone it's a finger's size: 44pt tall, its label in 17pt.
 class Button extends StatefulWidget {
   const Button({
     super.key,
@@ -144,6 +160,9 @@ class _ButtonState extends State<Button> {
   var _hovered = false;
   var _focused = false;
 
+  /// A finger is down on it.
+  var _pressed = false;
+
   @override
   Widget build(BuildContext context) =>
       // A control's label is no part of a selection.
@@ -152,57 +171,90 @@ class _ButtonState extends State<Button> {
   Widget _control(BuildContext context) {
     final palette = Palette.of(context);
     final enabled = widget.onPressed != null;
+    final phone = touchFirst(context);
+    final hovered = _hovered || _pressed;
     final Color background;
     final Color foreground;
     if (widget.primary) {
       background = enabled
-          ? palette.text.withValues(alpha: _hovered ? 0.88 : 1)
+          ? palette.text.withValues(alpha: hovered ? 0.88 : 1)
           : palette.selected;
       foreground = enabled ? palette.canvas : palette.textFaint;
+    } else if (phone) {
+      // With no pointer to hover, a quiet button shows it's one at rest:
+      // a faint fill, as iOS's gray buttons have.
+      background = !enabled
+          ? palette.hover.withValues(alpha: palette.hover.a / 2)
+          : hovered
+          ? palette.selected
+          : palette.hover;
+      foreground = enabled ? palette.text : palette.textFaint;
     } else {
-      background = _hovered && enabled
-          ? palette.hover
-          : const Color(0x00000000);
+      background = hovered && enabled ? palette.hover : const Color(0x00000000);
       foreground = !enabled
           ? palette.textFaint
-          : _hovered
+          : hovered
           ? palette.text
           : palette.textMuted;
     }
-    return FocusableActionDetector(
+    // A button to a screen reader (TalkBack, VoiceOver), dimmed while it
+    // can't be pressed.
+    return Semantics(
+      button: true,
       enabled: enabled,
-      mouseCursor: enabled
-          ? SystemMouseCursors.click
-          : SystemMouseCursors.basic,
-      onShowHoverHighlight: (value) => setState(() => _hovered = value),
-      onShowFocusHighlight: (value) => setState(() => _focused = value),
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onPressed?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onPressed,
-        child: Container(
-          height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: Space.m),
-          decoration: BoxDecoration(
-            color: background,
-            borderRadius: BorderRadius.circular(Radii.control),
-            border: Border.all(
-              color: _focused ? palette.signal : const Color(0x00000000),
-            ),
+      child: FocusableActionDetector(
+        enabled: enabled,
+        mouseCursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        onShowHoverHighlight: (value) => setState(() => _hovered = value),
+        onShowFocusHighlight: (value) => setState(() => _focused = value),
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onPressed?.call();
+              return null;
+            },
           ),
-          // As wide as its label, wherever it's placed.
-          child: Center(
-            widthFactor: 1,
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              style: TextStyles.label.copyWith(color: foreground),
+        },
+        child: GestureDetector(
+          onTap: widget.onPressed,
+          onTapDown: enabled
+              ? (details) => setState(
+                  () => _pressed = details.kind == PointerDeviceKind.touch,
+                )
+              : null,
+          onTapUp: enabled ? (_) => setState(() => _pressed = false) : null,
+          onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
+          child: Container(
+            // At least a finger's height on a phone, taller with larger text.
+            height: phone ? null : 28,
+            constraints: phone
+                ? BoxConstraints(minHeight: Metrics.of(context).target)
+                : null,
+            padding: EdgeInsets.symmetric(
+              horizontal: phone ? Touch.gutter : Space.m,
+              vertical: phone ? Space.s : 0,
+            ),
+            decoration: BoxDecoration(
+              color: background,
+              borderRadius: BorderRadius.circular(Radii.control),
+              border: Border.all(
+                color: _focused ? palette.signal : const Color(0x00000000),
+              ),
+            ),
+            // As wide as its label, wherever it's placed.
+            child: Center(
+              widthFactor: 1,
+              child: Text(
+                widget.label,
+                maxLines: phone ? null : 1,
+                textAlign: TextAlign.center,
+                style: (phone ? PhoneType.label : TextStyles.label).copyWith(
+                  color: foreground,
+                  fontWeight: phone && widget.primary ? FontWeight.w600 : null,
+                ),
+              ),
             ),
           ),
         ),
@@ -211,8 +263,38 @@ class _ButtonState extends State<Button> {
   }
 }
 
+/// The box a [TextField] without a border sits in, drawn by its owner (the
+/// message box, a search field): makes the whole box the field, to a finger
+/// and to a screen reader, as a bordered field's own box is. A tap anywhere
+/// in it, or a screen reader's double tap, focuses the field; it's one
+/// element as big as the box, with the field's label, text and editing
+/// actions. Give the field the same [focusNode].
+class TextFieldBox extends StatelessWidget {
+  const TextFieldBox({super.key, required this.focusNode, required this.child});
+
+  final FocusNode focusNode;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => MergeSemantics(
+    child: Semantics(
+      onTap: focusNode.requestFocus,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: focusNode.requestFocus,
+        excludeFromSemantics: true,
+        child: child,
+      ),
+    ),
+  );
+}
+
 /// A text field on the widgets layer: an [EditableText] with mouse selection,
 /// a placeholder, and a hairline border that turns signal when focused.
+///
+/// On an iPhone it selects as iOS does (handles, the magnifier, the
+/// system's edit menu: mobile/input.dart) and brings the keyboard [kind]
+/// asks for; on a phone its text is 17pt in a field at least 44pt tall.
 class TextField extends StatefulWidget {
   const TextField({
     super.key,
@@ -225,6 +307,16 @@ class TextField extends StatefulWidget {
     this.onSubmitted,
     this.bordered = true,
     this.obscureText = false,
+    this.kind,
+    this.keyboardType,
+    this.textInputAction,
+    this.autofillHints,
+    this.textCapitalization,
+    this.inputFormatters,
+    this.autocorrect,
+    this.scrollPadding = const EdgeInsets.all(20),
+    this.editItems,
+    this.semanticsLabel,
   });
 
   final TextEditingController controller;
@@ -240,6 +332,27 @@ class TextField extends StatefulWidget {
 
   /// Hides what's typed, for secrets.
   final bool obscureText;
+
+  /// What it's for: the keyboard, autofill and corrections to offer. The
+  /// fields after it override what it sets.
+  final InputKind? kind;
+  final TextInputType? keyboardType;
+  final TextInputAction? textInputAction;
+  final Iterable<String>? autofillHints;
+  final TextCapitalization? textCapitalization;
+  final List<TextInputFormatter>? inputFormatters;
+  final bool? autocorrect;
+
+  /// How much room to keep around it when it's scrolled into view.
+  final EdgeInsets scrollPadding;
+
+  /// More items for the iPhone's edit menu, after Copy and Paste.
+  final ExtraEditItems<EditableTextState>? editItems;
+
+  /// What the field is, to a screen reader (TalkBack, VoiceOver), typed in
+  /// or not: "Message to June". Without it the placeholder speaks for it
+  /// while it's empty, and nothing once it isn't.
+  final String? semanticsLabel;
 
   @override
   State<TextField> createState() => _TextFieldState();
@@ -273,10 +386,34 @@ class _TextFieldState extends State<TextField>
   static bool _isActive(AppLifecycleState? state) =>
       state == null || state == AppLifecycleState.resumed;
 
+  /// The focus node listened to, to build the field again when it gains or
+  /// loses focus: the editable's semantics (focused, and its editing
+  /// actions for a screen reader) follow its build, which a gained focus
+  /// alone doesn't bring when the selection is already valid.
+  FocusNode? _listened;
+
+  void _listen() {
+    final node = _focusNode;
+    if (node == _listened) return;
+    _listened?.removeListener(_focusChanged);
+    _listened = node..addListener(_focusChanged);
+  }
+
+  void _focusChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _listen();
+  }
+
+  @override
+  void didUpdateWidget(TextField old) {
+    super.didUpdateWidget(old);
+    _listen();
   }
 
   @override
@@ -288,6 +425,7 @@ class _TextFieldState extends State<TextField>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _listened?.removeListener(_focusChanged);
     _ownFocusNode?.dispose();
     super.dispose();
   }
@@ -295,8 +433,12 @@ class _TextFieldState extends State<TextField>
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final style = TextStyles.body.copyWith(color: palette.text);
+    final phone = touchFirst(context);
+    final style = TypeScale.of(context).body.copyWith(color: palette.text);
     final singleLine = widget.maxLines == 1;
+    final setup = widget.kind?.setup;
+    final obscure = widget.obscureText || (setup?.obscureText ?? false);
+    final native = nativeTextSelection(context, extra: widget.editItems);
     final editable = EditableText(
       key: editableTextKey,
       controller: widget.controller,
@@ -310,37 +452,56 @@ class _TextFieldState extends State<TextField>
       maxLines: widget.maxLines,
       minLines: widget.minLines,
       autofocus: widget.autofocus,
-      obscureText: widget.obscureText,
-      autocorrect: !widget.obscureText,
-      enableSuggestions: !widget.obscureText,
-      keyboardType: singleLine ? TextInputType.text : TextInputType.multiline,
-      textInputAction: singleLine
-          ? TextInputAction.done
-          : TextInputAction.newline,
+      obscureText: obscure,
+      autocorrect: widget.autocorrect ?? setup?.autocorrect ?? !obscure,
+      enableSuggestions: !obscure && (setup?.enableSuggestions ?? true),
+      keyboardType:
+          widget.keyboardType ??
+          setup?.keyboardType ??
+          (singleLine ? TextInputType.text : TextInputType.multiline),
+      textInputAction:
+          widget.textInputAction ??
+          setup?.textInputAction ??
+          (singleLine ? TextInputAction.done : TextInputAction.newline),
+      autofillHints: widget.autofillHints ?? setup?.autofillHints,
+      textCapitalization:
+          widget.textCapitalization ??
+          setup?.textCapitalization ??
+          TextCapitalization.none,
+      inputFormatters: widget.inputFormatters ?? setup?.inputFormatters,
+      scrollPadding: widget.scrollPadding,
+      selectionControls: native.controls,
+      contextMenuBuilder: native.contextMenuBuilder,
+      magnifierConfiguration: native.magnifier,
       onSubmitted: widget.onSubmitted,
       rendererIgnoresPointer: true,
     );
     // Several lines of placeholder take turns, one at a time.
     final hints = placeholderLines(widget.placeholder);
     final hintStyle = style.copyWith(color: palette.textFaint);
+    final label = widget.semanticsLabel;
+    final placeholder = ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) => widget.controller.text.isNotEmpty
+          ? const SizedBox.shrink()
+          : hints.length > 1
+          ? RotatingText(lines: hints, style: hintStyle, paused: _hovered)
+          : Text(
+              hints.firstOrNull ?? '',
+              style: hintStyle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+    );
     final field = Stack(
       children: [
-        ListenableBuilder(
-          listenable: widget.controller,
-          builder: (context, _) => widget.controller.text.isNotEmpty
-              ? const SizedBox.shrink()
-              : hints.length > 1
-              ? RotatingText(lines: hints, style: hintStyle, paused: _hovered)
-              : Text(
-                  hints.firstOrNull ?? '',
-                  style: hintStyle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-        ),
+        // With a label, it speaks for the field instead, once.
+        label == null ? placeholder : ExcludeSemantics(child: placeholder),
         _gestures.buildGestureDetector(
           behavior: HitTestBehavior.translucent,
-          child: editable,
+          child: label == null
+              ? editable
+              : Semantics(label: label, child: editable),
         ),
       ],
     );
@@ -348,29 +509,62 @@ class _TextFieldState extends State<TextField>
       cursor: SystemMouseCursors.text,
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
-      child: Listener(
-        onPointerDown: (_) => _focusNode.requestFocus(),
-        child: field,
-      ),
+      // On an iPhone a tap focuses it once the finger lifts, as iOS does,
+      // so a scroll that starts on it doesn't bring the keyboard up.
+      child: nativeSelectionHere
+          ? field
+          : Listener(
+              onPointerDown: (_) => _focusNode.requestFocus(),
+              child: field,
+            ),
     );
     if (!widget.bordered) return input;
-    return ListenableBuilder(
-      listenable: _focusNode,
-      builder: (context, child) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s + 2,
-          vertical: Space.s - 2,
-        ),
-        decoration: BoxDecoration(
-          color: palette.canvas,
-          borderRadius: BorderRadius.circular(Radii.control),
-          border: Border.all(
-            color: _focusNode.hasFocus ? palette.signal : palette.hairline,
+    // The whole box is the field, to a finger and to a screen reader: a tap
+    // on its padding focuses it too, and it's one element as big as the box
+    // (its label, text and editing actions merged into it).
+    // A screen reader's double tap focuses it, as a finger's does (the
+    // gestures inside say nothing to one). A field without a border is in
+    // a box of its owner's, which does the same for it (TextFieldBox).
+    void focus() => editableTextKey.currentState?.requestKeyboard();
+    return MergeSemantics(
+      child: Semantics(
+        onTap: focus,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: focus,
+          excludeFromSemantics: true,
+          child: ListenableBuilder(
+            listenable: _focusNode,
+            builder: (context, child) => Container(
+              // A finger's height on a phone, growing with its text.
+              constraints: phone
+                  ? BoxConstraints(minHeight: Metrics.of(context).target)
+                  : null,
+              alignment: phone && singleLine ? Alignment.centerLeft : null,
+              padding: phone
+                  ? const EdgeInsets.symmetric(
+                      horizontal: Space.m,
+                      vertical: 10,
+                    )
+                  : const EdgeInsets.symmetric(
+                      horizontal: Space.s + 2,
+                      vertical: Space.s - 2,
+                    ),
+              decoration: BoxDecoration(
+                color: palette.canvas,
+                borderRadius: BorderRadius.circular(Radii.control),
+                border: Border.all(
+                  color: _focusNode.hasFocus
+                      ? palette.signal
+                      : palette.hairline,
+                ),
+              ),
+              child: child,
+            ),
+            child: input,
           ),
         ),
-        child: child,
       ),
-      child: input,
     );
   }
 }
@@ -562,18 +756,23 @@ class SelectOption<T> {
 }
 
 /// A dropdown. Opens with a click, Enter, Space or Down; arrow keys move,
-/// Enter picks, Esc or a click outside closes.
+/// Enter picks, Esc or a click outside closes. On a phone it's 44pt tall
+/// and a tap opens the choices in a sheet ([showChoice]) titled [title].
 class Select<T> extends StatefulWidget {
   const Select({
     super.key,
     required this.value,
     required this.options,
     required this.onChanged,
+    this.title,
   });
 
   final T value;
   final List<SelectOption<T>> options;
   final ValueChanged<T> onChanged;
+
+  /// What's chosen, over the phone's sheet of choices ("Model").
+  final String? title;
 
   @override
   State<Select<T>> createState() => _SelectState<T>();
@@ -602,6 +801,10 @@ class _SelectState<T> extends State<Select<T>> {
 
   void _open() {
     if (widget.options.isEmpty) return;
+    if (isPhoneLayout(context)) {
+      unawaited(_choose());
+      return;
+    }
     _focusNode.requestFocus();
     setState(() => _highlighted = _selectedIndex);
     _menu.show();
@@ -609,6 +812,17 @@ class _SelectState<T> extends State<Select<T>> {
 
   void _close() {
     if (_menu.isShowing) _menu.hide();
+  }
+
+  /// A phone's sheet of choices.
+  Future<void> _choose() async {
+    final chosen = await showChoice<T>(
+      context,
+      title: widget.title,
+      options: widget.options,
+      selected: widget.value,
+    );
+    if (chosen != null && chosen != widget.value) widget.onChanged(chosen);
   }
 
   void _pick(int index) {
@@ -655,6 +869,7 @@ class _SelectState<T> extends State<Select<T>> {
 
   Widget _control(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = touchFirst(context);
     final label = widget.options.isEmpty
         ? ''
         : widget.options[_selectedIndex].label;
@@ -677,9 +892,13 @@ class _SelectState<T> extends State<Select<T>> {
                 child: GestureDetector(
                   onTap: () => _menu.isShowing ? _close() : _open(),
                   child: Container(
-                    height: 30,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Space.s + 2,
+                    height: phone ? null : 30,
+                    constraints: phone
+                        ? BoxConstraints(minHeight: Metrics.of(context).target)
+                        : null,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: phone ? Space.m : Space.s + 2,
+                      vertical: phone ? Space.s : 0,
                     ),
                     decoration: BoxDecoration(
                       color: _hovered ? palette.hover : palette.canvas,
@@ -695,11 +914,10 @@ class _SelectState<T> extends State<Select<T>> {
                         Expanded(
                           child: Text(
                             label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyles.body.copyWith(
-                              color: palette.text,
-                            ),
+                            maxLines: phone ? null : 1,
+                            overflow: phone ? null : TextOverflow.ellipsis,
+                            style: TypeScale.of(context).body
+                                .copyWith(color: palette.text),
                           ),
                         ),
                         const SizedBox(width: Space.s),
@@ -786,11 +1004,13 @@ class _SelectState<T> extends State<Select<T>> {
 }
 
 /// Shows a dialog over the whole window. The builder gets a `close` callback;
-/// Esc and a click on the scrim close it too.
+/// Esc and a click on the scrim close it too. On a phone it's a sheet from
+/// the bottom instead ([PhoneSheet]), which dragging down closes too.
 Future<void> showModal(
   BuildContext context,
   Widget Function(BuildContext context, VoidCallback close) builder,
 ) {
+  if (isPhoneLayout(context)) return showModalSheet(context, builder);
   final overlay = Overlay.of(context);
   final done = Completer<void>();
   late final OverlayEntry entry;
@@ -944,7 +1164,16 @@ class _HoverCardState extends State<HoverCard> {
   Timer? _closing;
 
   @override
+  void initState() {
+    super.initState();
+    // A sheet rising over the screen hides the card, which would stay
+    // painted over it.
+    sheetsPresented.addListener(_hide);
+  }
+
+  @override
   void dispose() {
+    sheetsPresented.removeListener(_hide);
     _wait?.cancel();
     _closing?.cancel();
     super.dispose();
@@ -1614,29 +1843,45 @@ class GlyphButton extends StatelessWidget {
   Widget _control(BuildContext context) {
     final palette = Palette.of(context);
     return Semantics(
+      // On a phone, its own element for VoiceOver: a row or field beside it
+      // isn't read as part of it.
+      container: touchFirst(context),
       button: true,
       label: label,
       child: Pressable(
         onTap: onTap,
-        builder: (context, hovered) => AnimatedContainer(
-          duration: Motion.fast,
-          width: 28,
-          height: 28,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active
-                ? palette.selected
-                : hovered
-                ? palette.hover
-                : const Color(0x00000000),
-            borderRadius: BorderRadius.circular(Radii.control),
+        builder: (context, hovered) => _phoneTarget(
+          context,
+          AnimatedContainer(
+            duration: Motion.fast,
+            width: 28,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active
+                  ? palette.selected
+                  : hovered
+                  ? palette.hover
+                  : const Color(0x00000000),
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            child: glyph(active || hovered ? palette.text : palette.textMuted),
           ),
-          child: glyph(active || hovered ? palette.text : palette.textMuted),
         ),
       ),
     );
   }
 }
+
+/// On touch, [visual] in the middle of a finger's target (44pt on an
+/// iPhone or iPad, 48dp on Android; less where its parent has less room);
+/// with a pointer, [visual] itself.
+Widget _phoneTarget(BuildContext context, Widget visual) => touchFirst(context)
+    ? SizedBox.square(
+        dimension: Metrics.of(context).target,
+        child: Center(child: visual),
+      )
+    : visual;
 
 /// A 16px cog, for Settings.
 class CogGlyph extends StatelessWidget {
@@ -1951,6 +2196,11 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'arrow-down': _drawArrowDown,
   'arrow-left': _drawArrowLeft,
   'chevron-left': _drawChevronLeft,
+  'menu': _drawMenu,
+  'search': _drawSearch,
+  'list-filter': _drawListFilter,
+  'mic': _drawMic,
+  'check': _drawCheck,
   'image': _drawImage,
   'minus': _drawMinus,
   'rotate-cw': _drawRotateCw,
@@ -1981,7 +2231,18 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'film': _drawFilm,
   'chart-column': _drawChartColumn,
   'upload': _drawUpload,
+  'inbox': _drawInbox,
+  'message-circle-question': _drawMessageCircleQuestion,
+  'shield-alert': _drawShieldAlert,
 };
+
+final _drawShieldAlert = _paths(const [
+  'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 '
+      '0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 '
+      '5 19 5a1 1 0 0 1 1 1z',
+  'M12 8v4',
+  'M12 16h.01',
+]);
 
 final _drawEllipsis = _paths(const [
   'M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
@@ -1990,6 +2251,35 @@ final _drawEllipsis = _paths(const [
 ]);
 
 final _drawChevronLeft = _paths(const ['m15 18-6-6 6-6']);
+
+final _drawMessageCircleQuestion = _paths(const [
+  'M7.9 20A9 9 0 1 0 4 16.1L2 22Z',
+  'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3',
+  'M12 17h.01',
+]);
+
+final _drawInbox = _paths(const [
+  'M22 12h-6l-2 3h-4l-2-3H2',
+  'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
+      'A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z',
+]);
+
+final _drawMenu = _paths(const ['M4 12h16', 'M4 18h16', 'M4 6h16']);
+
+final _drawSearch = _paths(const [
+  'M3 11a8 8 0 1 0 16 0a8 8 0 1 0-16 0',
+  'm21 21-4.34-4.34',
+]);
+
+final _drawListFilter = _paths(const ['M2 5h20', 'M6 12h12', 'M9 19h6']);
+
+final _drawCheck = _paths(const ['M20 6 9 17l-5-5']);
+
+final _drawMic = _paths(const [
+  'M12 19v3',
+  'M19 10v2a7 7 0 0 1-14 0v-2',
+  'M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z',
+]);
 
 final _drawImage = _paths(const [
   'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
@@ -2245,27 +2535,30 @@ class Toggle extends StatelessWidget {
       label: label,
       child: Pressable(
         onTap: enabled ? () => onChanged!(!value) : null,
-        builder: (context, hovered) => AnimatedContainer(
-          duration: Motion.fast,
-          curve: Curves.easeOut,
-          width: 28,
-          height: 16,
-          padding: const EdgeInsets.all(2),
-          alignment: value ? Alignment.centerRight : Alignment.centerLeft,
-          decoration: BoxDecoration(
-            color: value
-                ? palette.signal.withValues(alpha: enabled ? 1 : 0.5)
-                : hovered
-                ? palette.text.withValues(alpha: 0.2)
-                : palette.text.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Container(
-            width: 12,
-            height: 12,
+        builder: (context, hovered) => _phoneTarget(
+          context,
+          AnimatedContainer(
+            duration: Motion.fast,
+            curve: Curves.easeOut,
+            width: 28,
+            height: 16,
+            padding: const EdgeInsets.all(2),
+            alignment: value ? Alignment.centerRight : Alignment.centerLeft,
             decoration: BoxDecoration(
-              color: value ? const Color(0xFF000000) : palette.canvas,
-              shape: BoxShape.circle,
+              color: value
+                  ? palette.signal.withValues(alpha: enabled ? 1 : 0.5)
+                  : hovered
+                  ? palette.text.withValues(alpha: 0.2)
+                  : palette.text.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: value ? const Color(0xFF000000) : palette.canvas,
+                shape: BoxShape.circle,
+              ),
             ),
           ),
         ),
@@ -2379,8 +2672,9 @@ class Arrival extends StatelessWidget {
 
 /// An edge the person drags to resize what's beside it, laid over its
 /// hairline: a thin hit area with the resize cursor that shows a subtle
-/// line while hovered or dragged. [onDrag] gets how far the pointer has
-/// moved since the drag started; a double click resets it ([onReset]).
+/// line while hovered or dragged, a finger's width on touch
+/// ([widthOf]). [onDrag] gets how far the pointer has moved since the drag
+/// started; a double click (a double tap) resets it ([onReset]).
 class ResizeHandle extends StatefulWidget {
   const ResizeHandle({
     super.key,
@@ -2391,8 +2685,14 @@ class ResizeHandle extends StatefulWidget {
     this.axis = Axis.horizontal,
   });
 
-  /// How wide the area that takes the drag is, centered on the edge.
+  /// How wide the area that takes the drag is, centered on the edge, with
+  /// a pointer.
   static const width = 8.0;
+
+  /// How wide it is here: [width], or a finger's on touch. Callers place
+  /// it centred on the edge with this.
+  static double widthOf(BuildContext context) =>
+      touchFirst(context) ? Metrics.of(context).target : width;
 
   final VoidCallback onDragStart;
   final ValueChanged<double> onDrag;
@@ -2470,8 +2770,8 @@ class _ResizeHandleState extends State<ResizeHandle> {
         onVerticalDragCancel: across ? null : _end,
         onDoubleTap: widget.onReset,
         child: SizedBox(
-          width: across ? ResizeHandle.width : null,
-          height: across ? null : ResizeHandle.width,
+          width: across ? ResizeHandle.widthOf(context) : null,
+          height: across ? null : ResizeHandle.widthOf(context),
           child: Center(child: line),
         ),
       ),

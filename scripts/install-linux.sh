@@ -26,9 +26,18 @@
 # not running (the reason on stderr), 1 anything else.
 set -euo pipefail
 
-RELEASE="${1:?usage: install-linux.sh RELEASE_DIR [--no-pair]}"
+RELEASE="${1:?usage: install-linux.sh RELEASE_DIR [--no-pair] [--hold]}"
 PAIR=true
-[[ "${2:-}" == "--no-pair" ]] && PAIR=false
+HOLD=false
+for flag in "${@:2}"; do
+  case "$flag" in
+    --no-pair) PAIR=false ;;
+    # Installed and enabled but not started: the online installer's --import
+    # runs `factoryd import` first, then installs again without --hold.
+    --hold) HOLD=true ;;
+    *) echo "install-linux.sh doesn't know $flag" >&2; exit 1 ;;
+  esac
+done
 HOME_DIR="$HOME/.factory"
 BIN="$HOME_DIR/bin/factoryd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -67,6 +76,12 @@ if [[ -f "$RELEASE/claktory-apps" ]]; then
   cp "$RELEASE/claktory-apps" "$HOME_DIR/bin/claktory-apps.new"
   chmod 755 "$HOME_DIR/bin/claktory-apps.new"
   mv -f "$HOME_DIR/bin/claktory-apps.new" "$HOME_DIR/bin/claktory-apps"
+fi
+# The speech host, beside them (releases before voice have none).
+if [[ -f "$RELEASE/claktory-speech" ]]; then
+  cp "$RELEASE/claktory-speech" "$HOME_DIR/bin/claktory-speech.new"
+  chmod 755 "$HOME_DIR/bin/claktory-speech.new"
+  mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
 fi
 cp "$RELEASE/factoryd" "$BIN-supervisor.new"
 chmod 755 "$BIN-supervisor.new"
@@ -122,6 +137,12 @@ if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
 fi
 systemctl --user daemon-reload
 systemctl --user enable factoryd.service >/dev/null 2>&1
+if $HOLD; then
+  # Started later: a backend would refuse to run mid-import anyway.
+  systemctl --user stop factoryd.service 2>/dev/null || true
+  echo "Claktory installed but not started (--hold)."
+  exit 0
+fi
 log_start=0
 [[ -f "$HOME_DIR/factoryd.log" ]] && log_start="$(stat -c %s "$HOME_DIR/factoryd.log")"
 systemctl --user restart factoryd.service

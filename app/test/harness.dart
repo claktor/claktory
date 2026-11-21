@@ -1,6 +1,9 @@
+import 'package:cupertino_ui/cupertino_ui.dart'
+    show DefaultCupertinoLocalizations;
 import 'package:factory_app/app_update.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/device_account.dart' show DeviceAccount;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/history.dart';
 import 'package:factory_app/login.dart';
@@ -83,6 +86,7 @@ class RecordingBackend extends Backend {
     String text, {
     String clientId = '',
     List<Attachment> attachments = const [],
+    bool voice = false,
   }) => _record(
     ClientMessage(
       sendMessage: SendMessage(
@@ -90,9 +94,80 @@ class RecordingBackend extends Backend {
         text: text,
         clientId: clientId,
         attachments: attachments,
+        voice: voice,
       ),
     ),
   );
+
+  @override
+  Future<void> installSpeechModel() =>
+      _record(ClientMessage(installSpeechModel: InstallSpeechModel()));
+
+  @override
+  Future<void> removeSpeechModel() =>
+      _record(ClientMessage(removeSpeechModel: RemoveSpeechModel()));
+
+  @override
+  Future<void> retryVoiceMessage(String agentId, Int64 messageId) => _record(
+    ClientMessage(
+      retryVoiceMessage: RetryVoiceMessage(
+        agentId: agentId,
+        messageId: messageId,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> discardVoiceMessage(String agentId, Int64 messageId) => _record(
+    ClientMessage(
+      discardVoiceMessage: DiscardVoiceMessage(
+        agentId: agentId,
+        messageId: messageId,
+      ),
+    ),
+  );
+
+  /// Uploads are taken whole at once, each put in the agent's uploads as
+  /// it's named.
+  @override
+  Future<int> startUpload(
+    String uploadId,
+    String agentId, {
+    required String name,
+    required int size,
+    String mime = '',
+  }) async {
+    await _record(
+      ClientMessage(
+        startUpload: StartUpload(
+          uploadId: uploadId,
+          agentId: agentId,
+          name: name,
+          size: Int64(size),
+          mime: mime,
+        ),
+      ),
+    );
+    _uploads[uploadId] = (agentId, name, size, mime);
+    return 0;
+  }
+
+  final _uploads = <String, (String, String, int, String)>{};
+
+  @override
+  Future<int> uploadChunk(String uploadId, int offset, List<int> data) async =>
+      offset + data.length;
+
+  @override
+  Future<Attachment> finishUpload(String uploadId) async {
+    final (agentId, name, size, mime) = _uploads.remove(uploadId)!;
+    return Attachment(
+      path: '/uploads/$agentId/$name',
+      name: name,
+      size: Int64(size),
+      mime: mime,
+    );
+  }
 
   @override
   Future<void> stopAgent(String agentId) =>
@@ -104,10 +179,12 @@ class RecordingBackend extends Backend {
     String proposalId, {
     required bool approve,
     String comment = '',
+    String chatId = '',
   }) => _record(
     ClientMessage(
       decideProposal: DecideProposal(
         agentId: agentId,
+        chatId: chatId,
         proposalId: proposalId,
         approve: approve,
         comment: comment,
@@ -273,6 +350,15 @@ class RecordingBackend extends Backend {
   @override
   Future<void> unpairDevice(String deviceId) =>
       _record(ClientMessage(unpairDevice: UnpairDevice(deviceId: deviceId)));
+
+  @override
+  Future<void> confirmDevice(String deviceId) =>
+      _record(ClientMessage(confirmDevice: ConfirmDevice(deviceId: deviceId)));
+
+  @override
+  Future<void> confirmThisDevice(String assertion) => _record(
+    ClientMessage(confirmDevice: ConfirmDevice(assertion: assertion)),
+  );
 
   @override
   Future<void> approveDevice(String deviceId) =>
@@ -503,7 +589,9 @@ class RecordingBackend extends Backend {
 
   @override
   Future<void> screenOpened(String id, bool opened) => _record(
-    ClientMessage(screenOpened: ScreenOpened(id: id, opened: opened)),
+    ClientMessage(
+      screenOpened: ScreenOpened(id: id, opened: opened),
+    ),
   );
 
   @override
@@ -511,8 +599,8 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(setZoom: SetZoom(zoom: zoom)));
 
   @override
-  Future<void> shuffleAvatar() =>
-      _record(ClientMessage(shuffleAvatar: ShuffleAvatar()));
+  Future<void> shuffleAvatar({int? choice}) =>
+      _record(ClientMessage(shuffleAvatar: ShuffleAvatar(choice: choice)));
 
   /// What [useUsageReset] answers.
   var usageResetAnswer = UsageResetAnswer(reset: true, message: 'Reset.');
@@ -670,6 +758,7 @@ class RecordingBackend extends Backend {
     String description = '',
     Map<String, String> aliases = const {},
     bool asIs = false,
+    bool approveOnly = false,
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -683,6 +772,7 @@ class RecordingBackend extends Backend {
         description: description,
         aliases: aliases.entries,
         asIs: asIs,
+        approveOnly: approveOnly,
       ),
     ),
   );
@@ -711,10 +801,6 @@ class RecordingBackend extends Backend {
   @override
   Future<void> accountResend() =>
       _record(ClientMessage(accountResend: AccountResend()));
-
-  @override
-  Future<void> skipAccountSignIn() =>
-      _record(ClientMessage(skipAccountSignIn: SkipAccountSignIn()));
 
   @override
   Future<void> accountSignOut() =>
@@ -845,12 +931,11 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> setAppSecret(String appId, String name, String value) =>
-      _record(
-        ClientMessage(
-          setAppSecret: SetAppSecret(appId: appId, name: name, value: value),
-        ),
-      );
+  Future<void> setAppSecret(String appId, String name, String value) => _record(
+    ClientMessage(
+      setAppSecret: SetAppSecret(appId: appId, name: name, value: value),
+    ),
+  );
 
   /// What [listConnectChoices] answers.
   var connectChoices = ConnectChoices();
@@ -889,6 +974,245 @@ class RecordingBackend extends Backend {
     forwardedPorts.add(port);
     return forwarded(port);
   }
+
+  // Pipes (#196, Priya's pipes_test).
+
+  /// What [createPipeInvite] answers.
+  PipeInvite pipeInvite = PipeInvite(
+    pipeId: 'p1',
+    code: 'claktory-pipe://?w=x&s=y',
+  );
+
+  @override
+  Future<PipeInvite> createPipeInvite(
+    String projectId,
+    String name,
+    String purpose,
+  ) async {
+    await _record(
+      ClientMessage(
+        createPipeInvite: CreatePipeInvite(
+          projectId: projectId,
+          name: name,
+          purpose: purpose,
+        ),
+      ),
+    );
+    return pipeInvite;
+  }
+
+  /// What [readPipeInvite] answers.
+  PipeInvitePreview pipeInvitePreview = PipeInvitePreview();
+
+  @override
+  Future<PipeInvitePreview> readPipeInvite(String code) async {
+    await _record(ClientMessage(readPipeInvite: ReadPipeInvite(code: code)));
+    return pipeInvitePreview;
+  }
+
+  @override
+  Future<void> acceptPipeInvite(
+    String code,
+    String projectId, {
+    String name = '',
+    String purpose = '',
+  }) => _record(
+    ClientMessage(
+      acceptPipeInvite: AcceptPipeInvite(
+        code: code,
+        projectId: projectId,
+        name: name,
+        purpose: purpose,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> approvePipe(ApprovePipe approve) =>
+      _record(ClientMessage(approvePipe: approve));
+
+  @override
+  Future<void> updatePipe(UpdatePipe update) =>
+      _record(ClientMessage(updatePipe: update));
+
+  @override
+  Future<void> setPipeState(String pipeId, PipeAction action) => _record(
+    ClientMessage(
+      setPipeState: SetPipeState(pipeId: pipeId, action: action),
+    ),
+  );
+
+  @override
+  Future<void> selectPipe(String pipeId) =>
+      _record(ClientMessage(selectPipe: SelectPipe(pipeId: pipeId)));
+
+  @override
+  Future<void> sendPipeMessage(String pipeId, String text) => _record(
+    ClientMessage(
+      sendPipeMessage: SendPipeMessage(pipeId: pipeId, text: text),
+    ),
+  );
+
+  @override
+  Future<void> decidePipeMessage(String pipeId, int seq, bool allow) =>
+      _record(
+        ClientMessage(
+          decidePipeMessage: DecidePipeMessage(
+            pipeId: pipeId,
+            seq: Int64(seq),
+            allow: allow,
+          ),
+        ),
+      );
+
+  @override
+  Future<void> loadPipeMessages(String pipeId) => _record(
+    ClientMessage(loadPipeMessages: LoadPipeMessages(pipeId: pipeId)),
+  );
+
+  @override
+  Future<void> addPipeLiaison(String pipeId, String name) => _record(
+    ClientMessage(
+      addPipeLiaison: AddPipeLiaison(pipeId: pipeId, name: name),
+    ),
+  );
+
+  /// What [fetchEntry] answers, by "agent/seq" (Priya's inbox_test).
+  final entriesById = <String, Entry>{};
+
+  @override
+  Future<Entry?> fetchEntry(String agentId, int seq) async {
+    await _record(
+      ClientMessage(
+        loadEntries: LoadEntries(
+          agentId: agentId,
+          beforeSeq: Int64(seq + 1),
+          fromSeq: Int64(seq),
+        ),
+      ),
+    );
+    return entriesById['$agentId/$seq'];
+  }
+
+  /// What [fetchChatEntry] answers, by "chat/seq" (Priya's inbox_test).
+  final chatEntriesById = <String, Entry>{};
+
+  @override
+  Future<Entry?> fetchChatEntry(String chatId, int seq) async {
+    await _record(
+      ClientMessage(
+        loadChatEntries: LoadChatEntries(
+          chatId: chatId,
+          beforeSeq: Int64(seq + 1),
+          fromSeq: Int64(seq),
+        ),
+      ),
+    );
+    return chatEntriesById['$chatId/$seq'];
+  }
+
+  /// What [fetchPipeMessage] answers, by "pipe/seq".
+  final pipeMessagesById = <String, PipeMessage>{};
+
+  @override
+  Future<PipeMessage?> fetchPipeMessage(String pipeId, int seq) async {
+    await _record(
+      ClientMessage(
+        loadPipeMessages: LoadPipeMessages(
+          pipeId: pipeId,
+          beforeSeq: Int64(seq + 1),
+          limit: 1,
+        ),
+      ),
+    );
+    return pipeMessagesById['$pipeId/$seq'];
+  }
+
+  @override
+  Future<void> answerAsk(
+    String agentId,
+    int seq, {
+    String text = '',
+    bool dismiss = false,
+  }) => _record(
+    ClientMessage(
+      answerAsk: AnswerAsk(
+        agentId: agentId,
+        seq: Int64(seq),
+        text: text,
+        dismiss: dismiss,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> decideSecretApproval(String agentId, int seq, bool allow) =>
+      _record(
+        ClientMessage(
+          decideSecretApproval: DecideSecretApproval(
+            agentId: agentId,
+            seq: Int64(seq),
+            allow: allow,
+          ),
+        ),
+      );
+
+  // Chats (#213).
+
+  @override
+  Future<void> createChat({String text = '', String clientId = ''}) => _record(
+    ClientMessage(
+      createChat: CreateChat(text: text, clientId: clientId),
+    ),
+  );
+
+  @override
+  Future<void> selectChat(String chatId) =>
+      _record(ClientMessage(selectChat: SelectChat(chatId: chatId)));
+
+  @override
+  Future<void> sendChatMessage(
+    String chatId,
+    String text, {
+    String clientId = '',
+  }) => _record(
+    ClientMessage(
+      sendChatMessage: SendChatMessage(
+        chatId: chatId,
+        text: text,
+        clientId: clientId,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> stopChat(String chatId) =>
+      _record(ClientMessage(stopChat: StopChat(chatId: chatId)));
+
+  @override
+  Future<void> deleteChat(String chatId) =>
+      _record(ClientMessage(deleteChat: DeleteChat(chatId: chatId)));
+
+  @override
+  Future<void> renameChat(String chatId, String title) => _record(
+    ClientMessage(
+      renameChat: RenameChat(chatId: chatId, title: title),
+    ),
+  );
+
+  @override
+  Future<void> startMove(String code) =>
+      _record(ClientMessage(startMove: StartMove(code: code)));
+
+  @override
+  Future<void> confirmMove() =>
+      _record(ClientMessage(confirmMove: ConfirmMove()));
+
+  @override
+  Future<void> cancelMove() => _record(ClientMessage(cancelMove: CancelMove()));
+
+  @override
+  Future<void> freezeMove() => _record(ClientMessage(freezeMove: FreezeMove()));
 }
 
 /// Updates this app from another machine without touching the disk: it
@@ -944,6 +1268,7 @@ class Harness {
     Drafts? drafts,
     bool localBackend = true,
     bool named = true,
+    this._account,
   }) : drafts = drafts ?? Drafts(MemoryDraftStorage()),
        backend = RecordingBackend(localBackend: localBackend) {
     // Whatever a test or the backend applies later gets the name too.
@@ -992,7 +1317,14 @@ class Harness {
 
   /// Which Factory shows, kept in memory as a device would keep it.
   final connectionStorage = MemoryConnectionStorage();
-  late final connections = Connections(connectionStorage);
+  final DeviceAccount? _account;
+  late final connections = Connections(
+    connectionStorage,
+    null,
+    null,
+    null,
+    _account,
+  );
 
   /// The drafts kept on this device.
   final Drafts drafts;
@@ -1007,9 +1339,11 @@ class Harness {
   final camera = FakeCamera();
 
   /// A Mac window; a phone's screen is `Size(390, 844)`.
+  /// [home] in place of the whole window, to try a view on its own.
   Future<void> show(
     WidgetTester tester, {
     Size size = const Size(1200, 900),
+    Widget? home,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -1017,6 +1351,8 @@ class Harness {
     await tester.pumpWidget(
       WidgetsApp(
         color: const Color(0xFF000000),
+        // As the app has them (main.dart): the iPhone's text menu's words.
+        localizationsDelegates: const [DefaultCupertinoLocalizations.delegate],
         builder: (context, _) => AppScope(
           backend: backend,
           login: login,
@@ -1031,7 +1367,12 @@ class Harness {
           history: history,
           connections: connections,
           camera: camera,
-          child: const AppZoom(child: Shell()),
+          child: AppZoom(
+            child: home == null
+                ? const Shell()
+                // The window's own overlay, as the shell has one.
+                : Overlay(initialEntries: [OverlayEntry(builder: (_) => home)]),
+          ),
         ),
       ),
     );

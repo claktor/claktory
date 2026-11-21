@@ -12,6 +12,7 @@
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,6 +58,11 @@ enum MainError {
     Signal(std::io::Error),
     #[error(transparent)]
     Remote(#[from] factoryd::remote::RemoteError),
+    #[error(transparent)]
+    Import(#[from] factoryd::move_import::ImportError),
+    /// An import into this home hasn't finished: it doesn't start half made.
+    #[error("{0}")]
+    ImportUnfinished(String),
 }
 
 fn main() -> ExitCode {
@@ -81,6 +87,15 @@ fn main() -> ExitCode {
         let mut flags: Vec<String> = args[..at].to_vec();
         flags.extend_from_slice(&args[at + 1..]);
         return if args[at] == "install" { factoryd::install::main(&flags) } else { factoryd::uninstall::main(&flags) };
+    }
+    // Moving a Claktory to another computer (#217): no logs on stdout,
+    // which says what happened (one JSON line with --json).
+    if let Some(at) = args.iter().position(|arg| arg != "--dev")
+        && (args[at] == "export" || args[at] == "move")
+    {
+        let dev = args.iter().any(|arg| arg == "--dev");
+        let rest: Vec<String> = args[at + 1..].iter().filter(|arg| *arg != "--dev").cloned().collect();
+        return if args[at] == "export" { factoryd::move_export::main(dev, &rest) } else { factoryd::move_source::main(dev, &rest) };
     }
     // The commands for setting Claktory up from a shell, with --json: they
     // talk to the running backend, and print one JSON line, so no logs.
@@ -183,6 +198,8 @@ async fn run() -> Result<(), MainError> {
             println!("Allowed {}: it can connect now.", device.name);
             Ok(())
         }
+        [command, rest @ ..] if command == "import" => import(&instance, rest),
+        [command, rest @ ..] if command == "receive" => receive(&instance, rest).await,
         [deny, device @ ..] if deny == "deny" && !device.is_empty() => {
             let device = factoryd::remote::deny(&instance.home, &device.join(" "))?;
             println!("Not allowed. {} can't connect. To try again, run factoryd pair.", device.name);
@@ -214,6 +231,152 @@ async fn run() -> Result<(), MainError> {
             Ok(())
         }
         _ => Err(MainError::Usage),
+    }
+}
+
+/// `factoryd import BUNDLE [--map FROM=TO]… [--passphrase-stdin]`, or
+/// `factoryd import --abandon`.
+fn import(instance: &Instance, args: &[String]) -> Result<(), MainError> {
+    use factoryd::move_import::{ImportError, Request};
+    let mut request = Request { bundle: PathBuf::new(), passphrase: None, map: Vec::new(), same_identity: false };
+    let (mut abandon, mut stdin) = (false, false);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!(
+                    "usage: factoryd import BUNDLE [--map FROM=TO]… [--passphrase-stdin] [--same-identity] | factoryd import --abandon"
+                );
+                return Ok(());
+            }
+            "--abandon" => abandon = true,
+            "--passphrase-stdin" => stdin = true,
+            "--same-identity" => request.same_identity = true,
+            "--map" => {
+                let pair = args.next().ok_or_else(|| ImportError::Refused("--map takes FROM=TO".to_owned()))?;
+                request.map.push(factoryd::move_import::parse_pair(pair).map_err(ImportError::Refused)?);
+            }
+            flag if flag.starts_with('-') => return Err(ImportError::Refused(format!("{flag} isn't an option of import")).into()),
+            bundle if request.bundle.as_os_str().is_empty() => request.bundle = PathBuf::from(bundle),
+            _ => return Err(MainError::Usage),
+        }
+    }
+    if !abandon && request.bundle.as_os_str().is_empty() {
+        return Err(MainError::Usage);
+    }
+    let done = if abandon {
+        factoryd::move_import::abandon(&instance.home)
+    } else {
+        // A folder is a bundle already unpacked; a file needs its passphrase.
+        (|| {
+            if factoryd::move_import::needs_passphrase(&instance.home, &request.bundle) {
+                request.passphrase = Some(if stdin {
+                    let mut line = String::new();
+                    std::io::stdin()
+                        .read_line(&mut line)
+                        .map_err(|error| ImportError::Failed(format!("Can't read the passphrase: {error}")))?;
+                    line.trim().to_owned()
+                } else {
+                    factoryd::move_import::ask_passphrase().map_err(ImportError::Refused)?
+                });
+            }
+            factoryd::move_import::import(&instance.home, instance.addr, &request).map(|imported| imported.text)
+        })()
+    };
+    match done {
+        Ok(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        // Said plainly, for the person or the installer: 3 when it's
+        // refused (nothing to fix but what it says), 1 when it failed.
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(if matches!(error, ImportError::Refused(_)) { 3 } else { 1 });
+        }
+    }
+}
+
+/// `factoryd receive [--committed]`: shows a code, and takes in the
+/// Claktory a source moves here with it (docs/MOVE.md, "The handshake").
+async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> {
+    use factoryd::move_import::ImportError;
+    use factoryd::move_import::receive::{self, Options, Ui};
+    let mut options = Options::default();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!("usage: factoryd receive [--committed]");
+                return Ok(());
+            }
+            "--committed" => options.committed = true,
+            other => return Err(ImportError::Refused(format!("{other} isn't an option of receive")).into()),
+        }
+    }
+    // The person's answers, a line at a time; lines typed when nothing was
+    // asked are dropped before asking.
+    let (typed, lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if typed.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let lines = Arc::new(tokio::sync::Mutex::new(lines));
+    let terminal = std::io::stdout().is_terminal();
+    let ui = Ui {
+        code: Arc::new(move |code| {
+            let text = code.text();
+            if let Some(lines) = terminal.then(|| factoryd::terminal_qr::lines(&text)).flatten() {
+                println!("\nScan this with Claktory on your iPhone, or paste the code below:\n");
+                for line in lines {
+                    println!("  {line}");
+                }
+            }
+            println!(
+                "\nOn the computer you're moving from, open Claktory and choose Move to another computer… (Settings, This Claktory), then paste this code:\n\n{text}\n\nKeep this running until the move is done."
+            );
+        }),
+        say: Arc::new(|text| println!("{text}")),
+        confirm: Arc::new(move |asked| {
+            let lines = lines.clone();
+            Box::pin(async move {
+                println!(
+                    "\n{} ({}) wants to move its Claktory here. Check that it shows these digits:\n\n    {}\n\nType yes if they match, or no:",
+                    asked.machine, asked.platform, asked.digits
+                );
+                let mut lines = lines.lock().await;
+                while lines.try_recv().is_ok() {}
+                loop {
+                    match lines.recv().await.map(|line| line.trim().to_lowercase()) {
+                        Some(answer) if answer == "yes" || answer == "y" => return true,
+                        Some(answer) if answer == "no" || answer == "n" => return false,
+                        Some(_) => println!("Type yes or no:"),
+                        None => return false,
+                    }
+                }
+            })
+        }),
+    };
+    let done = tokio::select! {
+        done = receive::receive(&instance.home, instance.addr, &options, &ui) => done,
+        _ = tokio::signal::ctrl_c() => {
+            receive::forget_unclaimed(&instance.home);
+            println!("\nStopped. Run factoryd receive again to carry on.");
+            std::process::exit(130);
+        }
+    };
+    match done {
+        Ok(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(if matches!(error, ImportError::Refused(_)) { 3 } else { 1 });
+        }
     }
 }
 
@@ -421,15 +584,32 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
 
 async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
     let Instance { home, addr } = instance;
+    // Never half started: an import that didn't finish is finished first.
+    if let Some(why) = factoryd::move_import::unfinished(&home) {
+        return Err(MainError::ImportUnfinished(why));
+    }
     let listener = TcpListener::bind(addr).await.map_err(|source| match source.kind() {
         std::io::ErrorKind::AddrInUse => MainError::PortInUse(addr.port()),
         _ => MainError::Bind { addr, source },
     })?;
+    // Moving to another computer, frozen for its last part: only the
+    // move's progress is served, before anything else (moved.json included).
+    if let Some(saved) = factoryd::move_run::frozen(&home) {
+        factoryd::move_run::serve_frozen(listener, &home, saved, handed).await;
+        return Ok(());
+    }
+    // Moved to another computer: nothing of it opens here.
+    if let Some(moved) = factoryd::move_import::moved::read(&home) {
+        factoryd::move_import::moved::serve(listener, &home, moved).await;
+        return Ok(());
+    }
     let models = Arc::new(Registry::new(home.auth_path()));
     let factory = Factory::open(home.clone(), models).await?;
     if let Some(handed) = handed {
         factory.take_vault_key(handed);
     }
+    // A move a restart interrupted while copying carries on.
+    factoryd::move_run::resume(&factory);
     // Factories installed from published releases download newer ones.
     if let Some(url) = factoryd::channel::url() {
         tokio::spawn(factoryd::channel::poll(home.clone(), url));

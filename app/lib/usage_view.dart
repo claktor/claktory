@@ -9,11 +9,27 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
 import 'pane_chrome.dart' show InPane;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
-import 'usage.dart' show UsageCard, usageMeters;
+import 'mobile/haptics.dart';
+import 'mobile/lines.dart' show ActionLine;
+import 'usage.dart'
+    show
+        UsageCard,
+        UsageMeter,
+        UsageRing,
+        accountState,
+        formatAge,
+        formatPercent,
+        formatReset,
+        headlineWindow,
+        usageMeters;
+import 'usage_resets.dart'
+    show resetCount, resetCue, resetsLeft, useResetDialog;
 
 /// How often the numbers are asked for again while they show.
 const usageRefresh = Duration(seconds: 30);
@@ -228,31 +244,41 @@ class _UsageViewState extends State<UsageView> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (!inPane)
-              WindowDrag(
-                child: Container(
-                  height: titleBarHeight,
-                  padding: const EdgeInsets.only(
-                    left: Space.xl,
-                    right: Space.m,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: palette.hairline)),
-                  ),
-                  child: Row(
-                    children: [
-                      Text(
+              isPhoneLayout(context)
+                  ? PhoneHeader(
+                      leading: HeaderButton.back(onTap: close),
+                      title: Text(
                         'Usage',
-                        style: TextStyles.label.copyWith(
-                          color: palette.text,
-                          fontWeight: FontWeight.w600,
+                        style: PhoneType.emphasis.copyWith(color: palette.text),
+                      ),
+                    )
+                  : WindowDrag(
+                      child: Container(
+                        height: titleBarHeight,
+                        padding: const EdgeInsets.only(
+                          left: Space.xl,
+                          right: Space.m,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: palette.hairline),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              'Usage',
+                              style: TypeScale.of(context).label.copyWith(
+                                color: palette.text,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            Button(label: 'Done', onPressed: close),
+                          ],
                         ),
                       ),
-                      const Spacer(),
-                      Button(label: 'Done', onPressed: close),
-                    ],
-                  ),
-                ),
-              ),
+                    ),
             Expanded(
               child: SelectableArea(
                 child: ListenableBuilder(
@@ -286,6 +312,45 @@ class _UsageViewState extends State<UsageView> {
       for (final meter in usageMeters(workspace.providers))
         if (meter.usage != null) meter,
     ];
+    final reportPart = [
+      if (report == null)
+        Text(
+          _error ?? (_loading ? 'Loading usage…' : ''),
+          style: TypeScale.of(context).body.copyWith(
+            color: _error == null ? palette.textFaint : palette.danger,
+          ),
+        )
+      else
+        ..._report_(context, palette, workspace, report),
+      if (_error != null && report != null)
+        Padding(
+          padding: const EdgeInsets.only(top: Space.s),
+          child: Text(
+            _error!,
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.danger),
+          ),
+        ),
+    ];
+    // On a phone, what's left of each subscription first (what Usage is
+    // opened for), its details a tap away; then the range, as a segmented
+    // control, and the report.
+    if (isPhoneLayout(context)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (meters.isNotEmpty) ...[
+            _PhoneLimits(meters: meters),
+            const SizedBox(height: Space.xl),
+          ],
+          Unselectable(
+            child: _RangeSegments(selected: _range, choose: _choose),
+          ),
+          const SizedBox(height: Space.l),
+          ...reportPart,
+        ],
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -303,23 +368,7 @@ class _UsageViewState extends State<UsageView> {
           ),
         ),
         const SizedBox(height: Space.l),
-        if (report == null)
-          Text(
-            _error ?? (_loading ? 'Loading usage…' : ''),
-            style: TextStyles.body.copyWith(
-              color: _error == null ? palette.textFaint : palette.danger,
-            ),
-          )
-        else
-          ..._report_(context, palette, workspace, report),
-        if (_error != null && report != null)
-          Padding(
-            padding: const EdgeInsets.only(top: Space.s),
-            child: Text(
-              _error!,
-              style: TextStyles.caption.copyWith(color: palette.danger),
-            ),
-          ),
+        ...reportPart,
         if (meters.isNotEmpty) ...[
           const SizedBox(height: Space.xl),
           const _Heading('Subscription limits'),
@@ -360,7 +409,7 @@ class _UsageViewState extends State<UsageView> {
           _range == UsageRange.today
               ? 'No usage yet today.'
               : 'No usage in this period.',
-          style: TextStyles.body.copyWith(color: palette.textFaint),
+          style: TypeScale.of(context).body.copyWith(color: palette.textFaint),
         ),
       ];
     }
@@ -420,14 +469,15 @@ class _UsageViewState extends State<UsageView> {
           children: [
             TextSpan(
               text: formatTokens(all),
-              style: TextStyles.title.copyWith(
+              style: TypeScale.of(context).title.copyWith(
                 color: palette.text,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
             TextSpan(
               text: '  tokens',
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
           ],
         ),
@@ -441,7 +491,7 @@ class _UsageViewState extends State<UsageView> {
           'Kept ready ${formatTokens(total.cacheWrite.toInt())}',
           '${_grouped(requests)} ${requests == 1 ? 'request' : 'requests'}',
         ].join(' · '),
-        style: TextStyles.caption.copyWith(
+        style: TypeScale.of(context).caption.copyWith(
           color: palette.textMuted,
           fontFeatures: const [FontFeature.tabularFigures()],
         ),
@@ -491,7 +541,8 @@ class _UsageViewState extends State<UsageView> {
           'Claktory has counted usage by agent since '
           '${_day(DateTime.fromMillisecondsSinceEpoch(agentsSince))}. '
           'Anything before that shows as Earlier.',
-          style: TextStyles.caption.copyWith(color: palette.textFaint),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textFaint),
         ),
       ],
     ];
@@ -519,7 +570,7 @@ class _Heading extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: Space.s),
     child: Text(
       text,
-      style: TextStyles.caption.copyWith(
+      style: TypeScale.of(context).caption.copyWith(
         color: Palette.of(context).textFaint,
         fontWeight: FontWeight.w500,
       ),
@@ -549,9 +600,12 @@ class _RangeTab extends StatelessWidget {
       child: Pressable(
         onTap: onTap,
         builder: (context, hovered) => Container(
-          height: 28,
+          // A finger's height on a phone, growing with the text there.
+          height: isPhoneLayout(context) ? null : 28,
+          constraints: isPhoneLayout(context)
+              ? const BoxConstraints(minHeight: Touch.target)
+              : null,
           padding: const EdgeInsets.symmetric(horizontal: Space.xs),
-          alignment: Alignment.center,
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(
@@ -560,10 +614,15 @@ class _RangeTab extends StatelessWidget {
               ),
             ),
           ),
-          child: Text(
-            label,
-            style: TextStyles.body.copyWith(
-              color: selected || hovered ? palette.text : palette.textMuted,
+          // As wide as its word: the tabs sit in a row (a Container
+          // aligning its child would take the whole line).
+          child: Align(
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TypeScale.of(context).body.copyWith(
+                color: selected || hovered ? palette.text : palette.textMuted,
+              ),
             ),
           ),
         ),
@@ -610,13 +669,14 @@ class _LineRow extends StatelessWidget {
                   line.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
               ),
               const SizedBox(width: Space.s),
               Text(
                 formatTokens(line.total),
-                style: TextStyles.body.copyWith(
+                style: TypeScale.of(context).body.copyWith(
                   color: palette.text,
                   fontFeatures: const [FontFeature.tabularFigures()],
                 ),
@@ -626,7 +686,7 @@ class _LineRow extends StatelessWidget {
                 child: Text(
                   percent >= 1 || percent == 0 ? '${percent.round()}%' : '<1%',
                   textAlign: TextAlign.right,
-                  style: TextStyles.caption.copyWith(
+                  style: TypeScale.of(context).caption.copyWith(
                     color: palette.textFaint,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
@@ -660,7 +720,8 @@ class _LineRow extends StatelessWidget {
               padding: const EdgeInsets.only(left: 16 + Space.s, top: 2),
               child: Text(
                 line.detail,
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
               ),
             ),
         ],
@@ -713,7 +774,7 @@ class _UsageChartState extends State<UsageChart> {
       children: [
         Text(
           caption,
-          style: TextStyles.caption.copyWith(
+          style: TypeScale.of(context).caption.copyWith(
             color: hovered == null ? palette.textFaint : palette.textMuted,
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
@@ -807,4 +868,506 @@ class _ChartPainter extends CustomPainter {
     }
     return true;
   }
+}
+
+/// The ranges on a phone, as iOS's segmented control: a 44pt track in
+/// `hover` with the four in equal parts, their words in 15pt weight 500,
+/// the chosen one raised on the canvas's color with the floating shadow,
+/// in weight 600. Where the words won't fit four across (large text
+/// sizes), two rows of two.
+class _RangeSegments extends StatelessWidget {
+  const _RangeSegments({required this.selected, required this.choose});
+
+  final UsageRange selected;
+  final void Function(UsageRange range) choose;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    // Words a notch smaller than a button's, as iOS's segmented control
+    // has them, so the four fit across an iPhone's column.
+    final rest = type.secondary.copyWith(fontWeight: FontWeight.w500);
+    final style = type.secondary.copyWith(fontWeight: FontWeight.w600);
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The widest word, with room either side, against a quarter.
+        var widest = 0.0;
+        for (final range in UsageRange.values) {
+          final painter = TextPainter(
+            text: TextSpan(text: range.label, style: style),
+            textDirection: TextDirection.ltr,
+            textScaler: scaler,
+            maxLines: 1,
+          )..layout();
+          widest = math.max(widest, painter.width);
+          painter.dispose();
+        }
+        const inset = 2.0;
+        final across =
+            constraints.maxWidth / UsageRange.values.length >=
+                widest + Space.s * 2 + inset * 2
+            ? UsageRange.values.length
+            : 2;
+        Widget segment(UsageRange range) {
+          final chosen = range == selected;
+          return Expanded(
+            child: Semantics(
+              button: true,
+              selected: chosen,
+              inMutuallyExclusiveGroup: true,
+              label: range.label,
+              onTap: () => _tap(range),
+              excludeSemantics: true,
+              child: Pressable(
+                onTap: () => _tap(range),
+                // The track's inset is inside each segment's target, so
+                // every one is a finger's 44pt tall.
+                builder: (context, pressed) => Padding(
+                  padding: const EdgeInsets.all(inset),
+                  child: AnimatedContainer(
+                    duration: Motion.fast,
+                    curve: Curves.easeOut,
+                    constraints: const BoxConstraints(
+                      minHeight: Touch.target - inset * 2,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Space.xs,
+                      vertical: Space.xs,
+                    ),
+                    decoration: BoxDecoration(
+                      color: chosen ? palette.canvas : const Color(0x00000000),
+                      borderRadius: BorderRadius.circular(Radii.panel - inset),
+                      boxShadow: chosen ? floatingShadow : null,
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      range.label,
+                      textAlign: TextAlign.center,
+                      style: (chosen ? style : rest).copyWith(
+                        color: chosen || pressed
+                            ? palette.text
+                            : palette.textMuted,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        final rows = [
+          for (var i = 0; i < UsageRange.values.length; i += across)
+            UsageRange.values.sublist(i, i + across),
+        ];
+        return Container(
+          decoration: BoxDecoration(
+            color: palette.hover,
+            borderRadius: BorderRadius.circular(Radii.panel),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final row in rows)
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [for (final range in row) segment(range)],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _tap(UsageRange range) {
+    if (range == selected) return;
+    unawaited(Haptics.selection());
+    choose(range);
+  }
+}
+
+/// A phone's subscription limits: a group per provider under its name,
+/// each account a row with its ring, who it is and its limits at a glance;
+/// a tap opens the rest under it (every limit with when it resets, its
+/// state, its usage resets with Use…) and another folds it away. Which
+/// rows are open lasts while the page shows.
+class _PhoneLimits extends StatefulWidget {
+  const _PhoneLimits({required this.meters});
+
+  final List<UsageMeter> meters;
+
+  @override
+  State<_PhoneLimits> createState() => _PhoneLimitsState();
+}
+
+class _PhoneLimitsState extends State<_PhoneLimits> {
+  final _open = <String>{};
+
+  static String _key(UsageMeter meter) =>
+      '${meter.provider.id}/${meter.account?.id ?? ''}';
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final providers = <String, List<UsageMeter>>{};
+    for (final meter in widget.meters) {
+      (providers[meter.provider.id] ??= []).add(meter);
+    }
+    final now = DateTime.now();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final (index, meters) in providers.values.indexed) ...[
+          if (index > 0) const SizedBox(height: Space.l),
+          _Heading(meters.first.provider.name),
+          Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: palette.sidebar,
+              border: Border.all(color: palette.hairline),
+              borderRadius: BorderRadius.circular(Radii.panel),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final (row, meter) in meters.indexed) ...[
+                  if (row > 0)
+                    Container(
+                      height: 1,
+                      margin: const EdgeInsetsDirectional.only(
+                        start: Space.m + _ringCell + Space.m,
+                      ),
+                      color: palette.hairline,
+                    ),
+                  _LimitRow(
+                    meter: meter,
+                    now: now,
+                    open: _open.contains(_key(meter)),
+                    toggle: () => setState(() {
+                      if (!_open.remove(_key(meter))) _open.add(_key(meter));
+                    }),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// A limit row's ring, and the cell it sits in.
+const _ringSize = 28.0;
+const _ringCell = 32.0;
+
+/// [usage]'s limits, the weekly one first.
+List<UsageWindow> _windowsOf(ProviderUsage? usage) => usage == null
+    ? const []
+    : [
+        ...usage.windows.where((w) => w.id == headlineWindow),
+        ...usage.windows.where((w) => w.id != headlineWindow),
+      ];
+
+class _LimitRow extends StatelessWidget {
+  const _LimitRow({
+    required this.meter,
+    required this.now,
+    required this.open,
+    required this.toggle,
+  });
+
+  final UsageMeter meter;
+  final DateTime now;
+  final bool open;
+  final VoidCallback toggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final usage = meter.usage;
+    final account = meter.account;
+    final windows = _windowsOf(usage);
+    final state = account == null
+        ? null
+        : accountState(meter.provider, account, now);
+    // At a glance: the first two limits' shares used, or why there are
+    // none; a state to act on (a limit reached, out of credit) instead.
+    final String glance;
+    var problem = false;
+    final limited =
+        account != null &&
+        account.exhaustedUntil.toInt() > now.millisecondsSinceEpoch;
+    if (state != null && (state.problem || limited)) {
+      glance = state.text;
+      problem = state.problem;
+    } else if (usage != null && usage.error.isNotEmpty && windows.isEmpty) {
+      glance = "Couldn't check usage";
+      problem = true;
+    } else if (windows.isEmpty) {
+      glance = usage != null && usage.updated > 0
+          ? 'No limits reported.'
+          : 'Usage not checked yet.';
+    } else {
+      // "Used:" settles what the numbers are; the labels follow it in
+      // lowercase ("Used: weekly 92% · 5-hour 34%").
+      String lower(String label) =>
+          label.isEmpty ? label : label[0].toLowerCase() + label.substring(1);
+      final used = [
+        for (final window in windows.take(2))
+          '${lower(window.label)} ${formatPercent(window.usedPercent)}',
+      ];
+      glance = 'Used: ${used.join(' · ')}';
+    }
+    final resets = resetsLeft(meter).fold(0, (sum, r) => sum + r.left);
+    final title = meter.who.isNotEmpty
+        ? meter.who
+        : meter.plan.isNotEmpty
+        ? meter.plan
+        : meter.provider.name;
+    final row = Semantics(
+      button: true,
+      expanded: open,
+      onTap: toggle,
+      child: Pressable(
+        onTap: toggle,
+        builder: (context, pressed) => Container(
+          constraints: const BoxConstraints(minHeight: Touch.row),
+          color: pressed ? palette.hover : null,
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.m,
+            vertical: Space.s,
+          ),
+          child: Row(
+            children: [
+              ExcludeSemantics(
+                child: UsageRing(
+                  meter: meter,
+                  size: _ringSize,
+                  cell: _ringCell,
+                ),
+              ),
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: type.body.copyWith(color: palette.text)),
+                    Text(
+                      glance,
+                      style: type.secondary.copyWith(
+                        color: problem ? palette.danger : palette.textMuted,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    if (resets > 0)
+                      Text(
+                        resets == 1
+                            ? '1 usage reset left'
+                            : '$resets usage resets left',
+                        style: type.secondary.copyWith(
+                          color: resetCue(meter)
+                              ? palette.signal
+                              : palette.textMuted,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: Space.s),
+              ExcludeSemantics(
+                child: AnimatedRotation(
+                  turns: open ? 0.5 : 0,
+                  duration: Motion.fast,
+                  child: Chevron(color: palette.textFaint, down: true),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        AnimatedSize(
+          duration: Motion.fast,
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: open
+              ? _LimitDetail(meter: meter, now: now, windows: windows)
+              : const SizedBox(width: double.infinity),
+        ),
+      ],
+    );
+  }
+}
+
+/// An open limit row: the plan and the account's state, each limit with a
+/// bar of its share and when it resets, when it was checked, then its
+/// usage resets with Use…, lined up under the row's words.
+class _LimitDetail extends StatelessWidget {
+  const _LimitDetail({
+    required this.meter,
+    required this.now,
+    required this.windows,
+  });
+
+  final UsageMeter meter;
+  final DateTime now;
+  final List<UsageWindow> windows;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final muted = type.secondary.copyWith(color: palette.textMuted);
+    final faint = type.caption.copyWith(color: palette.textFaint);
+    final usage = meter.usage;
+    final account = meter.account;
+    final state = account == null
+        ? null
+        : accountState(meter.provider, account, now);
+    final color = providerColor(meter.provider.id, palette);
+    final read = usage != null && usage.updated > 0;
+    final about = [
+      if (meter.who.isNotEmpty && meter.plan.isNotEmpty) meter.plan,
+      if (account == null) 'Signed in with ${meter.provider.signedInWith}',
+      if (state != null && state.text.isNotEmpty && !state.problem) state.text,
+    ].join(' · ');
+    final resets = resetsLeft(meter);
+    return Padding(
+      padding: const EdgeInsetsDirectional.fromSTEB(
+        Space.m + _ringCell + Space.m,
+        0,
+        Space.m,
+        Space.m,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (about.isNotEmpty) Text(about, style: muted),
+          if (state != null && state.problem)
+            Text(state.text, style: muted.copyWith(color: palette.danger)),
+          for (final window in windows)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.m),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          window.label,
+                          style: type.body.copyWith(color: palette.text),
+                        ),
+                      ),
+                      Text(
+                        formatPercent(window.usedPercent),
+                        style: type.body.copyWith(
+                          color: palette.text,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: Space.xs),
+                  _Share(
+                    of: window.usedPercent.clamp(0, 100) / 100,
+                    color: color,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Text(formatReset(window.resetsAt.toInt(), now), style: muted),
+                ],
+              ),
+            ),
+          if (usage != null && usage.error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.m),
+              child: Text(
+                "Couldn't check usage: ${usage.error}",
+                style: muted.copyWith(color: palette.danger),
+              ),
+            ),
+          if (read)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text(
+                '${usage.error.isEmpty ? 'Checked' : 'Last checked'} '
+                '${formatAge(usage.updated.toInt(), now)}',
+                style: faint,
+              ),
+            ),
+          if (resets.isNotEmpty) ...[
+            const SizedBox(height: Space.l),
+            Text(
+              'Usage resets',
+              style: type.emphasis.copyWith(color: palette.text),
+            ),
+            for (final reset in resets)
+              Padding(
+                padding: const EdgeInsets.only(top: Space.s),
+                child: ActionLine(
+                  lead: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        reset.label,
+                        style: type.body.copyWith(color: palette.text),
+                      ),
+                      Text(resetCount(reset, now), style: muted),
+                      if (!reset.usable && reset.unavailable.isNotEmpty)
+                        Text(reset.unavailable, style: faint),
+                    ],
+                  ),
+                  action: Button(
+                    label: 'Use…',
+                    onPressed: () => unawaited(
+                      useResetDialog(context, meter: meter, reset: reset),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A limit's share used: a 4pt bar in the provider's color over
+/// `selected`, rounded.
+class _Share extends StatelessWidget {
+  const _Share({required this.of, required this.color});
+
+  final double of;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+    borderRadius: BorderRadius.circular(2),
+    child: SizedBox(
+      height: 4,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(color: Palette.of(context).selected),
+          FractionallySizedBox(
+            alignment: AlignmentDirectional.centerStart,
+            widthFactor: of,
+            child: ColoredBox(color: color),
+          ),
+        ],
+      ),
+    ),
+  );
 }

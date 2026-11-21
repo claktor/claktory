@@ -5,6 +5,8 @@ import 'connections.dart' show thisMacName;
 import 'controls.dart';
 import 'forms.dart' show ColorPicker;
 import 'identity.dart';
+import 'mobile/input.dart' show InputKind;
+import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow;
@@ -83,35 +85,49 @@ class _ClaktoryIdentityState extends State<ClaktoryIdentity>
       children: [
         SettingRow(
           label: 'Claktory name',
-          child: Row(
-            children: [
-              SizedBox(
-                width: 200,
-                child: TextField(
-                  controller: _name,
-                  // What an empty name goes back to.
-                  placeholder: widget.workspace.remote.machine,
-                  onSubmitted: (_) => _save(),
-                ),
-              ),
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: ListenableBuilder(
-                  listenable: _name,
-                  builder: (context, _) => _name.text.trim() == settings.name
-                      ? Text(
-                          'Shown on every device connected to this Claktory.',
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
-                        )
-                      : Align(
-                          alignment: Alignment.centerLeft,
-                          child: Button(label: 'Save', onPressed: _save),
-                        ),
-                ),
-              ),
-            ],
+          child: Builder(
+            builder: (context) {
+              final field = TextField(
+                controller: _name,
+                // What an empty name goes back to.
+                placeholder: widget.workspace.remote.machine,
+                semanticsLabel: 'Claktory name',
+                kind: InputKind.text,
+                onSubmitted: (_) => _save(),
+              );
+              final after = ListenableBuilder(
+                listenable: _name,
+                builder: (context, _) => _name.text.trim() == settings.name
+                    ? Text(
+                        'Shown on every device connected to this Claktory.',
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.textFaint),
+                      )
+                    : Align(
+                        alignment: Alignment.centerLeft,
+                        child: Button(label: 'Save', onPressed: _save),
+                      ),
+              );
+              // On a phone the field is the screen's width, the note or
+              // Save under it.
+              if (isPhoneLayout(context)) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    field,
+                    const SizedBox(height: Space.s),
+                    after,
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  SizedBox(width: 200, child: field),
+                  const SizedBox(width: Space.m),
+                  Expanded(child: after),
+                ],
+              );
+            },
           ),
         ),
         SettingRow(

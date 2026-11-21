@@ -16,6 +16,7 @@ pub mod login;
 pub mod oauth;
 pub mod providers;
 pub mod reasoning;
+pub mod refusal;
 pub mod schema;
 pub mod secrets;
 pub mod sse;
@@ -35,5 +36,5 @@ pub use tools::bash::{Background, Finished, Task};
 pub use tools::{Handler, Tool, ToolSpec, coding_prompt, coding_tools};
 pub use types::{
     AgentEvent, AssistantMessage, AssistantPart, Attachment, Event, EventSource, Message, Model, SentFrom, StopReason, StreamEvent,
-    SystemMessage, ToolResult, ToolResultMessage, ToolResultPart, Usage, UserContent, UserMessage, UserPart,
+    SystemMessage, ToolResult, ToolResultMessage, ToolResultPart, Usage, UserContent, UserMessage, UserPart, Voice,
 };

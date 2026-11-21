@@ -15,7 +15,7 @@
 mod account;
 pub(crate) mod asks;
 pub(crate) mod connections;
-mod crypto;
+pub(crate) mod crypto;
 pub(crate) mod env;
 pub mod handoff;
 pub mod memory;
@@ -182,6 +182,15 @@ ALTER TABLE connect_proposals ADD COLUMN region TEXT NOT NULL DEFAULT '';
 ALTER TABLE grants ADD COLUMN aliases TEXT NOT NULL DEFAULT '';
 -- When the agent last changed its request; 0 if never.
 ALTER TABLE requests ADD COLUMN updated INTEGER NOT NULL DEFAULT 0;
+",
+    "
+-- The person approves the need and an admin agent does the vault work
+-- (state 'approved'): when they approved, which admin agent it passed to
+-- (picked when the request is made), and whether that agent's add-secret
+-- card is open (secrets_collect).
+ALTER TABLE requests ADD COLUMN approved INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN admin TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN collecting INTEGER NOT NULL DEFAULT 0;
 ",
 ];
 
@@ -375,6 +384,12 @@ fn private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// The schema version this backend writes: a vault above it was made by a
+/// newer one.
+pub(crate) fn schema_version() -> i64 {
+    MIGRATIONS.len() as i64 + 1
+}
+
 fn open_db(path: &Path) -> Result<Connection, VaultError> {
     let db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -432,7 +447,12 @@ impl Vault {
     }
 
     fn auto_vmk(&self, inner: &Inner) -> Option<Key> {
-        let text = Zeroizing::new(std::fs::read_to_string(self.auto_path()).ok()?);
+        Self::vmk_with_key_file(inner, &self.auto_path())
+    }
+
+    /// The vault's key, if the key on disk at `path` opens it.
+    fn vmk_with_key_file(inner: &Inner, path: &Path) -> Option<Key> {
+        let text = Zeroizing::new(std::fs::read_to_string(path).ok()?);
         let bytes = Zeroizing::new(crypto::unhex(&text)?);
         let kek: [u8; 32] = bytes.as_slice().try_into().ok()?;
         let sealed: Vec<u8> = inner
@@ -692,6 +712,37 @@ impl Vault {
         Ok(text)
     }
 
+    /// A new key on disk for a vault that moved to this computer
+    /// (`move_import`), so the old key, which the move carried, no longer
+    /// opens it; its values are unchanged. Safe to run again after an
+    /// interruption: a new key whose protector was saved before it was moved
+    /// into place (`auto.key.new`) is moved into place. Ok(false) when the
+    /// vault keeps no key on disk (locked mode, or opened by the account).
+    pub(crate) fn rotate_auto_key(&self) -> Result<bool, VaultError> {
+        let next = self.dir.join("auto.key.new");
+        let mut inner = self.lock();
+        let has_auto: bool =
+            Self::db(&inner)?.query_row("SELECT COUNT(*) > 0 FROM protectors WHERE kind = 'auto'", [], |row| row.get(0))?;
+        if inner.locked_mode || !has_auto {
+            return Ok(false);
+        }
+        if inner.vmk.is_none()
+            && let Some(vmk) = Self::vmk_with_key_file(&inner, &next)
+        {
+            std::fs::rename(&next, self.auto_path())?;
+            Self::set_open(&mut inner, &vmk);
+            return Ok(true);
+        }
+        let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
+        let kek = crypto::new_key();
+        private_file(&next, crypto::hex(kek.as_slice()).as_bytes())?;
+        let sealed_vmk = crypto::seal(&kek, vmk.as_slice(), &aad(&["vmk", &inner.vault_id, "auto"]));
+        let protector = Protector { kind: "auto".to_owned(), params: "file".to_owned(), salt: Vec::new(), sealed_vmk };
+        Self::save_protector(Self::db(&inner)?, &protector)?;
+        std::fs::rename(&next, self.auto_path())?;
+        Ok(true)
+    }
+
     /// Locked mode on: the key on disk is deleted. Off: it's kept again.
     pub(crate) fn set_locked_mode(&self, locked_mode: bool) -> Result<(), VaultError> {
         let mut inner = self.lock();
@@ -871,7 +922,9 @@ impl Vault {
                 )));
             }
             if variables.contains(alias) {
-                return Err(VaultError::Invalid(format!("{name} sets {alias} already.")));
+                return Err(VaultError::Invalid(format!(
+                    "{name} sets {alias} already. Aliases go the other way: each name asked for, to the variable of {name} it stands for; with a single mismatch on each side, leave aliases out and they pair by themselves."
+                )));
             }
             if !variables.contains(variable) {
                 return Err(VaultError::Invalid(format!("{name} has no variable {variable}.")));

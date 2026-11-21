@@ -4,6 +4,9 @@ use crate::text::utf16_len;
 
 pub fn parameters(tool: &str) -> Value {
     match tool {
+        "read_image" => {
+            json!({"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}, "additionalProperties": false})
+        }
         "read_file" => {
             json!({"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "offset": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "limit": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 2000}, {"type": "null"}]}}, "additionalProperties": false})
         }

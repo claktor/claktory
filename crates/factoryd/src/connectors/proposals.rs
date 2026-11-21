@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::Spec;
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 use crate::vault::connections::ConnectionMeta;
 
 /// The tool agents propose with.
@@ -226,16 +226,6 @@ fn show(factory: &Factory, proposal: &v1::ConnectProposal) {
         factory.send_change(&inner, &proposal.agent_id, crate::transcript::Change::Entry(entry));
         // Whether it waits for the person shows with the agent.
         factory.broadcast_workspace(&inner);
-    }
-}
-
-fn host_event(summary: String) -> factory_agent::Event {
-    factory_agent::Event {
-        source: factory_agent::EventSource::Host,
-        from: "Claktory".to_owned(),
-        id: String::new(),
-        summary,
-        transient: false,
     }
 }
 

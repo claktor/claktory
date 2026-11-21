@@ -502,10 +502,10 @@ impl Factory {
         let backend = self.home.backend();
         let new_backend = tokio::fs::read(release.join("factoryd")).await?;
         let supervised = std::env::var_os(SUPERVISED).is_some();
-        // The apps host first: the backend going in is what makes it count.
+        // The helpers first: the backend going in is what makes it count.
         let home = self.home.clone();
-        let host = release.join(APPS_HOST);
-        tokio::task::spawn_blocking(move || stage_apps_host(&home, &host)).await.map_err(std::io::Error::other)??;
+        let from = release.clone();
+        tokio::task::spawn_blocking(move || stage_helpers(&home, &from)).await.map_err(std::io::Error::other)??;
         let replaced = async {
             if supervised {
                 let running = tokio::fs::read(std::env::current_exe()?).await?;
@@ -516,9 +516,9 @@ impl Factory {
             write_durably(backend.clone(), new_backend).await
         };
         if let Err(error) = replaced.await {
-            // The backend stays as it was, so its host goes back too.
-            if let Err(error) = restore_apps_host(&self.home) {
-                tracing::error!(%error, "could not put the apps host back");
+            // The backend stays as it was, so its helpers go back too.
+            if let Err(error) = restore_helpers(&self.home) {
+                tracing::error!(%error, "could not put the helpers back");
             }
             return Err(error.into());
         }
@@ -608,32 +608,46 @@ async fn write_durably(path: std::path::PathBuf, bytes: Vec<u8>) -> std::io::Res
 }
 
 /// Puts `bin/factoryd.previous` back as `bin/factoryd`, durably, and the
-/// apps host that went with it.
+/// helpers that went with it.
 fn restore_previous(home: &Home) -> std::io::Result<()> {
     let previous = std::fs::read(home.previous_backend())?;
     write_executable(&home.backend(), &previous)?;
-    restore_apps_host(home)
+    restore_helpers(home)
 }
 
 /// The host that runs apps, in a release and in `<home>/bin`, beside
 /// factoryd (where the backend looks for it).
 pub const APPS_HOST: &str = "claktory-apps";
 
-fn apps_host(home: &Home) -> std::path::PathBuf {
-    home.root().join("bin").join(APPS_HOST)
+/// Speech recognition for voice messages, beside factoryd like the apps host.
+pub const SPEECH_HOST: &str = "claktory-speech";
+
+/// The programs a release carries beside factoryd, which updates put in
+/// `<home>/bin` and roll back with it.
+pub const HELPERS: [&str; 2] = [APPS_HOST, SPEECH_HOST];
+
+fn helper(home: &Home, name: &str) -> std::path::PathBuf {
+    home.root().join("bin").join(name)
 }
 
-fn previous_apps_host(home: &Home) -> std::path::PathBuf {
-    home.root().join("bin").join(format!("{APPS_HOST}.previous"))
+fn previous_helper(home: &Home, name: &str) -> std::path::PathBuf {
+    home.root().join("bin").join(format!("{name}.previous"))
 }
 
-/// Before an update's backend goes in: the release's apps host (`new`, if
-/// it carries one) replaces `bin/claktory-apps`, which is kept as
-/// `bin/claktory-apps.previous` for a roll-back. A release without one
-/// leaves the host alone, and forgets an older `.previous` so a roll-back
-/// doesn't put back a host from before.
-fn stage_apps_host(home: &Home, new: &Path) -> std::io::Result<()> {
-    let (current, previous) = (apps_host(home), previous_apps_host(home));
+/// Before an update's backend goes in: each helper the release carries
+/// (`claktory-apps`, `claktory-speech`) replaces `bin/<name>`, which is
+/// kept as `bin/<name>.previous` for a roll-back. A release without one
+/// leaves what's there alone, and forgets an older `.previous` so a
+/// roll-back doesn't put back a helper from before.
+fn stage_helpers(home: &Home, release: &Path) -> std::io::Result<()> {
+    for name in HELPERS {
+        stage_helper(home, name, &release.join(name))?;
+    }
+    Ok(())
+}
+
+fn stage_helper(home: &Home, name: &str, new: &Path) -> std::io::Result<()> {
+    let (current, previous) = (helper(home, name), previous_helper(home, name));
     if !new.is_file() {
         return remove(&previous);
     }
@@ -645,13 +659,21 @@ fn stage_apps_host(home: &Home, new: &Path) -> std::io::Result<()> {
     write_executable(&current, &std::fs::read(new)?)
 }
 
-/// Puts `bin/claktory-apps.previous` back, if the update kept one.
-fn restore_apps_host(home: &Home) -> std::io::Result<()> {
-    match std::fs::read(previous_apps_host(home)) {
-        Ok(bytes) => write_executable(&apps_host(home), &bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+/// Puts each `bin/<name>.previous` back, if the update kept one; tries
+/// them all before reporting the first failure.
+fn restore_helpers(home: &Home) -> std::io::Result<()> {
+    let mut failed = Ok(());
+    for name in HELPERS {
+        let restored = match std::fs::read(previous_helper(home, name)) {
+            Ok(bytes) => write_executable(&helper(home, name), &bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+        if failed.is_ok() {
+            failed = restored;
+        }
     }
+    failed
 }
 
 /// For the supervisor, when the backend keeps failing to start outside an
@@ -758,11 +780,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod apps_host_tests {
+mod helpers_tests {
     use super::*;
 
     fn home(name: &str) -> (Home, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("factoryd-apps-host-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("factoryd-helpers-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("home/bin")).expect("bin");
         std::fs::create_dir_all(dir.join("release")).expect("release");
@@ -774,50 +796,66 @@ mod apps_host_tests {
     }
 
     #[test]
-    fn an_update_replaces_the_host_and_a_roll_back_puts_it_back_with_the_backend() {
+    fn an_update_replaces_the_helpers_and_a_roll_back_puts_them_back_with_the_backend() {
         let (home, dir) = home("replace");
-        std::fs::write(apps_host(&home), "host 1").expect("host");
+        std::fs::write(helper(&home, APPS_HOST), "host 1").expect("host");
+        std::fs::write(helper(&home, SPEECH_HOST), "speech 1").expect("speech");
         std::fs::write(home.backend(), "backend 2").expect("backend");
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
         std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("new host");
+        std::fs::write(dir.join("release/claktory-speech"), "speech 2").expect("new speech");
 
-        stage_apps_host(&home, &dir.join("release/claktory-apps")).expect("staged");
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 2"));
-        assert_eq!(read(&previous_apps_host(&home)).as_deref(), Some("host 1"));
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 2"));
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 2"));
+        assert_eq!(read(&previous_helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
+        assert_eq!(read(&previous_helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(apps_host(&home)).expect("meta").permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::metadata(helper(&home, APPS_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
 
         roll_back(&home, "It stopped.").expect("rolled back");
         assert_eq!(read(&home.backend()).as_deref(), Some("backend 1"));
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"), "the host that went with it");
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"), "the host that went with it");
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"), "the speech host that went with it");
 
         // The supervisor's fall-back does the same.
         std::fs::write(home.backend(), "backend 2").expect("backend");
-        std::fs::write(apps_host(&home), "host 2").expect("host");
+        std::fs::write(helper(&home, APPS_HOST), "host 2").expect("host");
+        std::fs::write(helper(&home, SPEECH_HOST), "speech 2").expect("speech");
         assert!(fall_back(&home, "It stopped by itself."));
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_first_host_has_nothing_to_go_back_to_and_a_release_without_one_leaves_it_alone() {
+    fn a_first_helper_has_nothing_to_go_back_to_and_a_release_without_one_leaves_it_alone() {
         let (home, dir) = home("first");
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
         std::fs::write(dir.join("release/claktory-apps"), "host 1").expect("new host");
-        stage_apps_host(&home, &dir.join("release/claktory-apps")).expect("staged");
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
-        assert!(!previous_apps_host(&home).exists());
+        // This release carries no claktory-speech, like ones from before it.
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
+        assert!(!previous_helper(&home, APPS_HOST).exists());
+        assert!(!helper(&home, SPEECH_HOST).exists());
         restore_previous(&home).expect("restored");
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"), "nothing kept to put back");
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"), "nothing kept to put back");
 
-        // A release without a host: the installed one stays, and an old
+        // A release without a helper: the installed one stays, and an old
         // `.previous` is forgotten so a roll-back can't bring it back.
-        std::fs::write(previous_apps_host(&home), "host 0").expect("stale");
-        stage_apps_host(&home, &dir.join("release/none")).expect("staged");
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
-        assert!(!previous_apps_host(&home).exists());
+        std::fs::write(helper(&home, SPEECH_HOST), "speech 1").expect("speech");
+        std::fs::write(previous_helper(&home, APPS_HOST), "host 0").expect("stale");
+        std::fs::write(previous_helper(&home, SPEECH_HOST), "speech 0").expect("stale");
+        std::fs::remove_file(dir.join("release/claktory-apps")).expect("removed");
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
+        assert!(!previous_helper(&home, APPS_HOST).exists());
+        assert!(!previous_helper(&home, SPEECH_HOST).exists());
         restore_previous(&home).expect("restored");
-        assert_eq!(read(&apps_host(&home)).as_deref(), Some("host 1"));
+        assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
+        assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

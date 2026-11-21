@@ -40,6 +40,9 @@ pub struct ModelInfo {
     pub context_window: u64,
     /// Reasoning efforts the model accepts, weakest first. A model without reasoning accepts only `Off`.
     pub efforts: Vec<ThinkingLevel>,
+    /// The model takes image input (the catalog's input list, the same
+    /// source as read_image's gate).
+    pub image_input: bool,
 }
 
 /// One of a provider's accounts, as a client shows it.
@@ -90,15 +93,31 @@ pub type Notes = Arc<dyn Fn(AccountNote) + Send + Sync>;
 /// provider nor its usage says when the limit resets.
 const UNKNOWN_RESET_MS: u64 = 15 * 60 * 1000;
 
-/// Whether requests can go to the account at `now`: past any limit's
-/// reset, and with credit (or out of it long enough to try again).
-fn has_capacity(account: &Account, now: u64) -> bool {
-    account.exhausted_until <= now && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
+/// Whether the model's usage counts against Anthropic's Fable pool. Fable
+/// has a weekly limit of its own (`weekly_fable`) on top of the shared
+/// ones, and the Opus and Sonnet weekly caps don't cover it, so each pool
+/// learns its own state: a mark on one doesn't stop the other's requests
+/// (at worst the provider refuses the probe and the pool is marked too).
+/// Every other model, and every other provider, draws on the normal pool.
+fn fable_pool(model: &Model) -> bool {
+    model.provider == "anthropic" && model.id.starts_with("claude-fable")
 }
 
-/// The first account with capacity at `now`, leaving out `tried`.
-fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], now: u64) -> Option<(usize, &'a Account)> {
-    accounts.iter().enumerate().find(|(_, account)| has_capacity(account, now) && !tried.contains(&account.id))
+/// When the account's limit for the pool resets; 0 when it has capacity.
+fn pool_until(account: &Account, fable: bool) -> u64 {
+    if fable { account.fable_exhausted_until } else { account.exhausted_until }
+}
+
+/// Whether requests for the pool's models can go to the account at `now`:
+/// past the pool's limit reset, and with credit (or out of it long enough
+/// to try again).
+fn has_capacity(account: &Account, fable: bool, now: u64) -> bool {
+    pool_until(account, fable) <= now && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
+}
+
+/// The first account with capacity for the pool at `now`, leaving out `tried`.
+fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], fable: bool, now: u64) -> Option<(usize, &'a Account)> {
+    accounts.iter().enumerate().find(|(_, account)| has_capacity(account, fable, now) && !tried.contains(&account.id))
 }
 
 /// How an account's request failed for good on that account.
@@ -152,13 +171,21 @@ fn failed(model: &Model, text: String) -> StreamEvent {
     StreamEvent::Error { reason: StopReason::Error, error: message }
 }
 
+/// The state of a key in the environment (it isn't stored): when each
+/// pool's limit resets and since when out of credit.
+#[derive(Clone, Copy, Default)]
+struct EnvState {
+    exhausted_until: u64,
+    fable_exhausted_until: u64,
+    out_of_credit_since: u64,
+}
+
 struct Inner {
     providers: Vec<Provider>,
     store: FileCredentialStore,
     env: Env,
-    /// The state of the keys in the environment, by provider id: when the
-    /// limit resets and since when out of credit (they aren't stored).
-    env_state: Mutex<HashMap<String, (u64, u64)>>,
+    /// The state of the keys in the environment, by provider id.
+    env_state: Mutex<HashMap<String, EnvState>>,
 }
 
 #[derive(Clone)]
@@ -215,6 +242,7 @@ impl Registry {
                     name: model.name.clone(),
                     context_window: model.context_window,
                     efforts: supported_thinking_levels(model),
+                    image_input: model.input.iter().any(|input| input == "image"),
                 });
             }
         }
@@ -238,7 +266,8 @@ impl Registry {
     pub async fn accounts(&self, id: &str) -> Result<Vec<AccountInfo>, Error> {
         let now = now_ms();
         let accounts = self.candidates(id).await?;
-        let in_use = with_capacity(&accounts, &[], now).map(|(position, _)| position);
+        // As shown: the normal pool, which is what most models draw on.
+        let in_use = with_capacity(&accounts, &[], false, now).map(|(position, _)| position);
         Ok(accounts
             .into_iter()
             .enumerate()
@@ -259,13 +288,14 @@ impl Registry {
     async fn candidates(&self, id: &str) -> Result<Vec<Account>, Error> {
         let mut accounts = credential_result(self.inner.store.accounts(id).await, "read", id)?;
         if let Some((variable, key)) = self.env_key(id) {
-            let (exhausted_until, out_of_credit_since) = self.inner.env_state.lock().get(id).copied().unwrap_or_default();
+            let state = self.inner.env_state.lock().get(id).copied().unwrap_or_default();
             accounts.push(Account {
                 id: ENV_ACCOUNT.into(),
                 label: variable,
                 identity: String::new(),
-                exhausted_until,
-                out_of_credit_since,
+                exhausted_until: state.exhausted_until,
+                fable_exhausted_until: state.fable_exhausted_until,
+                out_of_credit_since: state.out_of_credit_since,
                 credential: Credential::ApiKey { key, extra: Map::new() },
             });
         }
@@ -279,14 +309,21 @@ impl Registry {
         Some((resolved.source, resolved.auth.api_key?))
     }
 
-    /// Changes an account's limit and credit state, stored or not; returns
-    /// the provider's accounts then.
-    async fn set_state(&self, id: &str, account: &str, change: impl FnOnce(&mut u64, &mut u64) + Send) -> Result<Vec<Account>, Error> {
+    /// Changes an account's limit state (the pool `fable` names) and credit
+    /// state, stored or not; returns the provider's accounts then.
+    async fn set_state(
+        &self,
+        id: &str,
+        account: &str,
+        fable: bool,
+        change: impl FnOnce(&mut u64, &mut u64) + Send,
+    ) -> Result<Vec<Account>, Error> {
         if account == ENV_ACCOUNT {
             {
                 let mut states = self.inner.env_state.lock();
                 let state = states.entry(id.to_owned()).or_default();
-                change(&mut state.0, &mut state.1);
+                let until = if fable { &mut state.fable_exhausted_until } else { &mut state.exhausted_until };
+                change(until, &mut state.out_of_credit_since);
             }
             return self.candidates(id).await;
         }
@@ -296,7 +333,8 @@ impl Registry {
             .store
             .modify_accounts(id, |mut accounts| async move {
                 let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
-                change(&mut stored.exhausted_until, &mut stored.out_of_credit_since);
+                let until = if fable { &mut stored.fable_exhausted_until } else { &mut stored.exhausted_until };
+                change(until, &mut stored.out_of_credit_since);
                 Ok(Some(accounts))
             })
             .await;
@@ -329,7 +367,7 @@ impl Registry {
             credential_result(renamed, "modify", id)?;
         }
         if retry {
-            self.set_state(id, account, |_, since| *since = 0).await?;
+            self.set_state(id, account, false, |_, since| *since = 0).await?;
         }
         Ok(())
     }
@@ -367,7 +405,10 @@ impl Registry {
                 None => stored.first(),
             };
             if let Some(reset_account) = reset_account.map(|stored| stored.id.clone()) {
-                self.set_state(id, &reset_account, |until, _| *until = 0).await?;
+                // A reset refills limits; which pools have room again, the
+                // next request finds out, so both get to try.
+                self.set_state(id, &reset_account, false, |until, _| *until = 0).await?;
+                self.set_state(id, &reset_account, true, |until, _| *until = 0).await?;
             }
         }
         Ok(Some(answer))
@@ -618,10 +659,11 @@ impl Registry {
         Ok(())
     }
 
-    /// Marks an account as having reached its usage limit until it resets:
-    /// when the provider said, or else when its usage read now says its full
-    /// limits do, or else in a while. Returns the provider's accounts then.
-    async fn exhaust(&self, id: &str, account: &str, resets_at: Option<u64>) -> Result<Vec<Account>, Error> {
+    /// Marks an account as having reached its usage limit for the pool
+    /// (`fable` or not) until it resets: when the provider said, or else
+    /// when its usage read now says the pool's full limits do, or else in a
+    /// while. Returns the provider's accounts then.
+    async fn exhaust(&self, id: &str, account: &str, fable: bool, resets_at: Option<u64>) -> Result<Vec<Account>, Error> {
         let now = now_ms();
         let resets_at = match resets_at.filter(|at| *at > now) {
             Some(at) => Some(at),
@@ -630,6 +672,17 @@ impl Registry {
                     .limits
                     .iter()
                     .filter(|limit| limit.used_percent >= 100.0)
+                    // Only limits the pool draws on. Fable requests pass
+                    // the 5-hour gate, the weekly one (it applies across
+                    // all models, Anthropic says) and Fable's own; the
+                    // other models everything but Fable's.
+                    .filter(|limit| {
+                        if fable {
+                            matches!(limit.id.as_str(), "five_hour" | "weekly" | "weekly_fable")
+                        } else {
+                            limit.id != "weekly_fable"
+                        }
+                    })
                     .map(|limit| limit.resets_at)
                     .filter(|at| *at > now)
                     .max(),
@@ -641,7 +694,7 @@ impl Registry {
             },
         };
         let until = resets_at.unwrap_or(now + UNKNOWN_RESET_MS);
-        self.set_state(id, account, move |exhausted_until, _| *exhausted_until = until).await
+        self.set_state(id, account, fable, move |exhausted_until, _| *exhausted_until = until).await
     }
 
     async fn open(&self, model: &Model, context: LlmContext, options: StreamOptions, account: Option<&str>) -> Result<EventStream, Error> {
@@ -685,6 +738,7 @@ impl Registry {
             let (sink, stream) = event_stream();
             let (registry, model, notes) = (registry.clone(), model.clone(), notes.clone());
             tokio::spawn(async move {
+                let fable = fable_pool(&model);
                 let mut tried = Vec::new();
                 loop {
                     let accounts = match registry.candidates(&model.provider).await {
@@ -694,7 +748,7 @@ impl Registry {
                             return;
                         }
                     };
-                    let chosen = with_capacity(&accounts, &tried, now_ms()).map(|(_, account)| account.clone());
+                    let chosen = with_capacity(&accounts, &tried, fable, now_ms()).map(|(_, account)| account.clone());
                     if chosen.is_none() && !accounts.is_empty() {
                         sink.push(registry.none_left(&model, &accounts));
                         return;
@@ -759,7 +813,7 @@ impl Registry {
                         }
                         // A key out of credit that answered has some again.
                         if let (true, Some(chosen)) = (done, chosen.filter(|chosen| chosen.out_of_credit_since != 0)) {
-                            match registry.set_state(&model.provider, &chosen.id, |_, since| *since = 0).await {
+                            match registry.set_state(&model.provider, &chosen.id, fable, |_, since| *since = 0).await {
                                 Ok(_) => {
                                     if let Some(notes) = &notes {
                                         notes(AccountNote::Changed);
@@ -772,8 +826,8 @@ impl Registry {
                     };
                     tried.push(account.clone());
                     let marked = match gone {
-                        Spent::Limit(resets_at) => registry.exhaust(&model.provider, &account, resets_at).await,
-                        Spent::Credit => registry.set_state(&model.provider, &account, |_, since| *since = now_ms()).await,
+                        Spent::Limit(resets_at) => registry.exhaust(&model.provider, &account, fable, resets_at).await,
+                        Spent::Credit => registry.set_state(&model.provider, &account, fable, |_, since| *since = now_ms()).await,
                     };
                     let accounts = match marked {
                         Ok(accounts) => accounts,
@@ -785,7 +839,7 @@ impl Registry {
                     // In the log too, so it can be seen and watched for.
                     let why = match gone {
                         Spent::Limit(_) => {
-                            let until = accounts.iter().find(|stored| stored.id == account).map_or(0, |stored| stored.exhausted_until);
+                            let until = accounts.iter().find(|stored| stored.id == account).map_or(0, |stored| pool_until(stored, fable));
                             let resets = if until > now_ms() { crate::clock::iso_from_ms(until) } else { "unknown".to_owned() };
                             tracing::info!(provider = %model.provider, %account, %resets, "account reached its usage limit");
                             format!("usage limit, resets {resets}")
@@ -795,7 +849,7 @@ impl Registry {
                             "out of credit".to_owned()
                         }
                     };
-                    let Some((position, next)) = with_capacity(&accounts, &tried, now_ms()) else {
+                    let Some((position, next)) = with_capacity(&accounts, &tried, fable, now_ms()) else {
                         tracing::info!(provider = %model.provider, "no account left with capacity ({why} on account {account})");
                         if let Some(notes) = &notes {
                             notes(AccountNote::Exhausted);
@@ -819,11 +873,13 @@ impl Registry {
 
     /// The error a request ends with when no account can take it: saying
     /// why, marked with when the first account to reset does (none when
-    /// they're out of credit, which waits for the person).
+    /// they're out of credit, which waits for the person). Judged for the
+    /// model's pool: another pool's limit doesn't hold its requests back.
     fn none_left(&self, model: &Model, accounts: &[Account]) -> StreamEvent {
         let now = now_ms();
-        let until = accounts.iter().map(|account| account.exhausted_until).filter(|at| *at > now).min();
-        let mut event = failed(model, self.exhausted(&model.provider, accounts));
+        let fable = fable_pool(model);
+        let until = accounts.iter().map(|account| pool_until(account, fable)).filter(|at| *at > now).min();
+        let mut event = failed(model, self.exhausted(&model.provider, accounts, fable));
         if let StreamEvent::Error { error, .. } = &mut event {
             mark_none_left(error, until);
         }
@@ -836,14 +892,14 @@ impl Registry {
     }
 
     /// Why a request can't go to any of the provider's `accounts`: all are at
-    /// their limit, and when the first resets.
-    fn exhausted(&self, id: &str, accounts: &[Account]) -> String {
+    /// their limit for the model's pool, and when the first resets.
+    fn exhausted(&self, id: &str, accounts: &[Account], fable: bool) -> String {
         let first = accounts
             .iter()
             .enumerate()
-            .filter(|(_, account)| account.exhausted_until > 0)
-            .min_by_key(|(_, account)| account.exhausted_until);
-        let first = first.map(|(position, account)| (account_name(&shown_label(account), position), account.exhausted_until));
+            .filter(|(_, account)| pool_until(account, fable) > 0)
+            .min_by_key(|(_, account)| pool_until(account, fable));
+        let first = first.map(|(position, account)| (account_name(&shown_label(account), position), pool_until(account, fable)));
         let credit = accounts.iter().any(|account| account.out_of_credit_since != 0);
         exhausted_message(&self.noun(id), accounts.len(), first.as_ref().map(|(name, at)| (name.as_str(), *at)), credit)
     }

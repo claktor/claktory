@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 pub use host::{AppsLink, Launcher};
 
 use crate::config::Config;
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 use bundle::{Bundle, Manifest, Tier};
 use host::Host;
 
@@ -805,13 +805,7 @@ fn crashed(factory: &Arc<Factory>, app: &str, problem: &str) -> Option<Duration>
             "The {name} app crashed {CRASHES_TO_PAUSE} times in 10 minutes, so Claktory paused it. The last error: {problem} \
              It stays off until the person starts it again in Settings → Apps."
         );
-        let event = factory_agent::Event {
-            source: factory_agent::EventSource::Host,
-            from: "Claktory".to_owned(),
-            id: String::new(),
-            summary: format!("The {name} app was paused after crashing"),
-            transient: false,
-        };
+        let event = host_event(format!("The {name} app was paused after crashing"));
         if factory.lock().config.agent(crate::config::RIVET).is_some() {
             factory.deliver_event(crate::config::RIVET, text, event);
         }

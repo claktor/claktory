@@ -1,4 +1,4 @@
-use claktory_account::server::{Secrets, db, stats};
+use claktory_account::server::{Rotate, Secrets, db, stats};
 
 use crate::support::*;
 
@@ -215,4 +215,42 @@ fn the_resend_key_goes_in_and_the_keys_stay() {
     assert!(Secrets::set_resend_key(&path, "").is_err());
     assert!(Secrets::set_resend_key(&path, "re_a b").is_err());
     assert!(Secrets::set_resend_key(&dir.path().join("missing.json"), "re_x").is_err());
+}
+
+#[test]
+fn each_key_rotates_on_its_own_and_the_file_before_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.json");
+    let made = Secrets::create(&path).unwrap();
+    Secrets::set_cloudflare_token(&path, "cf_token").unwrap();
+    assert!(Secrets::rotate(&path, Rotate::default(), 1).is_err(), "a key has to be named");
+
+    // The signing key alone: k_share, the token and the bearer stay.
+    let (signing, before) = Secrets::rotate(&path, Rotate { signing_key: true, k_share: false }, 100).unwrap();
+    assert_ne!(signing.signing_key.to_bytes(), made.signing_key.to_bytes());
+    assert_eq!(*signing.k_share, *made.k_share);
+    assert_eq!(signing.cloudflare_api_token.as_deref(), Some("cf_token"));
+    assert_eq!(signing.relay_bearer, made.relay_bearer);
+    assert_eq!(before, dir.path().join("secrets.json.before-100"));
+    let kept = Secrets::load(&before).unwrap();
+    assert_eq!(kept.signing_key.to_bytes(), made.signing_key.to_bytes(), "the file as it was");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for file in [&path, &before] {
+            assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    // k_share alone: the signing key stays.
+    let (share, _) = Secrets::rotate(&path, Rotate { signing_key: false, k_share: true }, 200).unwrap();
+    assert_ne!(*share.k_share, *made.k_share);
+    assert_eq!(share.signing_key.to_bytes(), signing.signing_key.to_bytes());
+
+    // Both, and never over an earlier copy.
+    let (both, _) = Secrets::rotate(&path, Rotate { signing_key: true, k_share: true }, 300).unwrap();
+    assert_ne!(*both.k_share, *share.k_share);
+    assert_ne!(both.signing_key.to_bytes(), share.signing_key.to_bytes());
+    assert!(Secrets::rotate(&path, Rotate { signing_key: true, k_share: false }, 300).is_err(), "the copy at 300 is there");
+    assert_eq!(Secrets::load(&path).unwrap().signing_key.to_bytes(), both.signing_key.to_bytes(), "nothing changed then");
 }

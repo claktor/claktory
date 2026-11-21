@@ -10,6 +10,11 @@ dependencies:
   flutter:
     sdk: flutter
   crypto: ^3.0.6
+  # The iPhone's own text selection: handles, magnifier, edit menu.
+  cupertino_ui: ^1.1.7
+  # Android's own behavior (android/behavior_policy.dart): its pages,
+  # selection handles and edit menu. Nothing else of Material is used.
+  material_ui: ^1.11.1
   fixnum: ^1.1.1
   protobuf: ^6.1.0
   markdown: ^7.3.1

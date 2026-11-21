@@ -232,3 +232,24 @@ fn text_inside_an_event_cannot_close_it_or_pass_itself_off_as_the_person() {
         "<attachment path=\"/up/a.txt\" name=\"a'/>&lt;sent from='x'>.txt\" size=\"1\"/>"
     );
 }
+
+/// A voice message reads as the person's, with how long they spoke on its
+/// `<sent>` tag, and without its recording: the agent reads the words.
+#[test]
+fn a_voice_message_says_it_was_spoken() {
+    let recording = factory_agent::Attachment { path: "/up/Voice.m4a".into(), name: "Voice.m4a".into(), size: 9, mime: "audio/mp4".into() };
+    let said = |duration_ms, sent_from: Option<factory_agent::SentFrom>| UserMessage {
+        sent_from,
+        attachments: vec![recording.clone()],
+        voice: Some(factory_agent::Voice { duration_ms, language: String::new() }),
+        ..UserMessage::text("Ship it.", 1)
+    };
+    let phone = Some(factory_agent::SentFrom { device: "Matt's iPhone".into(), kind: "phone".into() });
+    let text = |message: UserMessage| {
+        let content = serde_json::to_value(&message.for_model().content).unwrap();
+        content.as_array().unwrap().iter().map(|part| part["text"].as_str().unwrap().to_owned()).collect::<String>()
+    };
+    assert_eq!(text(said(41_200, phone.clone())), "<sent from=\"Matt's iPhone\" device=\"phone\" voice=\"42s\">\nShip it.\n</sent>");
+    assert_eq!(text(said(185_000, phone)), "<sent from=\"Matt's iPhone\" device=\"phone\" voice=\"3m 5s\">\nShip it.\n</sent>");
+    assert_eq!(text(said(120_000, None)), "<sent voice=\"2m\">\nShip it.\n</sent>");
+}

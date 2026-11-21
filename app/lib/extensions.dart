@@ -9,6 +9,8 @@ import 'database.dart';
 import 'extension_about.dart';
 import 'highlights.dart';
 import 'identity.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
 import 'memory.dart';
 import 'messaging.dart';
 import 'monitors.dart';
@@ -147,8 +149,62 @@ class ExtensionPanel extends StatelessWidget {
   /// Its sheet's width on a phone.
   final double width;
 
+  String _title(ExtensionView? view) =>
+      view == null || view.title.isEmpty ? extension.name : view.title;
+
+  void _close(Backend backend) => fireAndLog(backend.openPanel(agent.id, ''));
+
+  /// On a phone, a sheet's content: its name and Close in a row a finger's
+  /// height, as a sheet's title is, over the panel.
+  Widget _phone(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.extensionView,
+      builder: (context, _) {
+        final view = backend.extensionView.of(extension.id, agent.id);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsetsDirectional.only(
+                start: Touch.gutter,
+                end: Space.xs,
+              ),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: Touch.target),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          _title(view),
+                          style: PhoneType.emphasis.copyWith(
+                            color: palette.text,
+                          ),
+                        ),
+                      ),
+                    ),
+                    HeaderButton(
+                      label: 'Close ${extension.name}',
+                      onTap: () => _close(backend),
+                      glyph: (color) => CloseGlyph(color: color),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(child: SelectableArea(child: _body(context, view))),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (isPhoneLayout(context)) return _phone(context);
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
     return DecoratedBox(
@@ -178,21 +234,17 @@ class ExtensionPanel extends StatelessWidget {
                       children: [
                         Expanded(
                           child: Text(
-                            view == null || view.title.isEmpty
-                                ? extension.name
-                                : view.title,
+                            _title(view),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyles.label.copyWith(
-                              color: palette.text,
-                            ),
+                            style: TypeScale.of(context).label
+                                .copyWith(color: palette.text),
                           ),
                         ),
                         GlyphButton(
                           label: 'Close ${extension.name}',
                           active: false,
-                          onTap: () =>
-                              fireAndLog(backend.openPanel(agent.id, '')),
+                          onTap: () => _close(backend),
                           glyph: (color) => CloseGlyph(color: color),
                         ),
                       ],
@@ -239,7 +291,8 @@ class ExtensionPanel extends StatelessWidget {
           padding: const EdgeInsets.all(Space.l),
           child: Text(
             'This panel needs a newer Claktory.',
-            style: TextStyles.body.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textFaint),
           ),
         );
     }
@@ -336,7 +389,7 @@ class _ChecklistViewState extends State<ChecklistView> {
         padding: const EdgeInsets.all(Space.l),
         child: Text(
           'Nothing on the checklist yet.',
-          style: TextStyles.body.copyWith(color: palette.textFaint),
+          style: TypeScale.of(context).body.copyWith(color: palette.textFaint),
         ),
       );
     }
@@ -401,10 +454,8 @@ class _ChecklistViewState extends State<ChecklistView> {
       ),
     );
     if (_pinned) _followSoon();
-    final caption = TextStyles.caption.copyWith(
-      color: palette.textFaint,
-      fontWeight: FontWeight.w500,
-    );
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500);
     Widget heading(String left, String right) => Padding(
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Row(
@@ -414,10 +465,13 @@ class _ChecklistViewState extends State<ChecklistView> {
         ],
       ),
     );
+    // On a phone the progress scrolls with the list: held above it, it'd
+    // leave no room for the list at the largest text.
+    final phone = isPhoneLayout(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Progress(items: checklist.items),
+        if (!phone) _Progress(items: checklist.items),
         Expanded(
           child: Stack(
             children: [
@@ -438,6 +492,7 @@ class _ChecklistViewState extends State<ChecklistView> {
                       Space.l,
                     ),
                     children: [
+                      if (phone) _Progress(items: checklist.items),
                       for (final (day, finishedThen) in history) ...[
                         heading(dayLabel(day, now), doneLabel(days[day]!)),
                         for (final done in finishedThen) item(done),
@@ -505,7 +560,8 @@ class _Progress extends StatelessWidget {
     final dropped = count(ChecklistStatus.CHECKLIST_STATUS_DROPPED);
     final counted = items.length - dropped;
     final open = counted - done - working - blocked;
-    final style = TextStyles.caption.copyWith(color: palette.textMuted);
+    final style = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
     return Container(
       padding: const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, Space.s),
       decoration: BoxDecoration(
@@ -564,8 +620,8 @@ class _LatestButton extends StatelessWidget {
       child: Pressable(
         onTap: onTap,
         builder: (context, hovered) => Container(
-          width: 28,
-          height: 28,
+          width: isPhoneLayout(context) ? Touch.target : 28,
+          height: isPhoneLayout(context) ? Touch.target : 28,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: hovered ? palette.sidebar : palette.canvas,
@@ -608,127 +664,186 @@ class _ItemState extends State<_Item> {
         item.status == ChecklistStatus.CHECKLIST_STATUS_DONE ||
         item.status == ChecklistStatus.CHECKLIST_STATUS_DROPPED;
     final owner = item.owner.isEmpty ? null : widget.store.agent(item.owner);
-    return Pressable(
-      onTap: item.log.isEmpty ? null : () => setState(() => _open = !_open),
-      builder: (context, hovered) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s,
-          vertical: Space.s - 2,
-        ),
-        decoration: BoxDecoration(
-          color: hovered && item.log.isNotEmpty ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              // Centers the 14px mark on the first line of text.
-              padding: const EdgeInsets.only(top: 2.5),
-              child: StatusMark(status: item.status),
-            ),
-            const SizedBox(width: Space.s),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.text,
-                    style: TextStyles.body.copyWith(
-                      color: finished ? palette.textMuted : palette.text,
-                      decoration:
-                          item.status ==
-                              ChecklistStatus.CHECKLIST_STATUS_DROPPED
-                          ? TextDecoration.lineThrough
-                          : null,
-                      decorationColor: palette.textMuted,
-                    ),
-                  ),
-                  // What a blocked item waits on.
-                  if (item.status == ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
-                      item.note.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        item.note,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      Text(
-                        '#${item.id}',
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                      const SizedBox(width: Space.s),
-                      Text(
-                        statusLabel(item.status),
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textMuted,
-                        ),
-                      ),
-                      const SizedBox(width: Space.s),
-                      if (item.owner.isEmpty)
-                        Flexible(
-                          child: Text(
-                            'Unassigned',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyles.caption.copyWith(
-                              color: palette.textFaint,
-                            ),
-                          ),
-                        )
-                      else ...[
-                        owner == null
-                            ? const UnknownCharacter(size: 20)
-                            : AgentCharacter(agent: owner, size: 20),
-                        const SizedBox(width: Space.xs),
-                        Flexible(
-                          child: Text(
-                            owner?.name ?? item.owner,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyles.caption.copyWith(
-                              color: palette.textMuted,
-                            ),
-                          ),
-                        ),
-                      ],
-                      if (widget.added != null) ...[
-                        const SizedBox(width: Space.s),
-                        Flexible(
-                          child: Text(
-                            widget.added!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyles.caption.copyWith(
-                              color: palette.textFaint,
-                            ),
-                          ),
-                        ),
-                      ],
-                      if (item.log.isNotEmpty) ...[
-                        const Spacer(),
-                        Chevron(color: palette.textFaint, down: _open),
-                      ],
-                    ],
-                  ),
-                  if (_open) ...[
-                    const SizedBox(height: Space.s),
-                    for (final update in item.log)
-                      _LogLine(update: update, store: widget.store),
-                  ],
-                ],
+    final phone = isPhoneLayout(context);
+    return Semantics(
+      container: true,
+      expanded: item.log.isEmpty ? null : _open,
+      child: Pressable(
+        onTap: item.log.isEmpty ? null : () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.s,
+            vertical: Space.s - 2,
+          ),
+          decoration: BoxDecoration(
+            color: hovered && item.log.isNotEmpty ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                // Centers the 14px mark on the first line of text.
+                padding: const EdgeInsets.only(top: 2.5),
+                child: StatusMark(status: item.status),
               ),
-            ),
-          ],
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.text,
+                      style: TypeScale.of(context).body.copyWith(
+                        color: finished ? palette.textMuted : palette.text,
+                        decoration:
+                            item.status ==
+                                ChecklistStatus.CHECKLIST_STATUS_DROPPED
+                            ? TextDecoration.lineThrough
+                            : null,
+                        decorationColor: palette.textMuted,
+                      ),
+                    ),
+                    // What a blocked item waits on.
+                    if (item.status ==
+                            ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
+                        item.note.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          item.note,
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
+                        ),
+                      ),
+                    const SizedBox(height: 2),
+                    if (phone)
+                      // At the largest text, onto as many lines as it needs.
+                      Wrap(
+                        spacing: Space.s,
+                        runSpacing: 2,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            '#${item.id}',
+                            style: TypeScale.of(context).caption.copyWith(
+                              color: palette.textFaint,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            statusLabel(item.status),
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textMuted),
+                          ),
+                          if (item.owner.isEmpty)
+                            Text(
+                              'Unassigned',
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textFaint),
+                            )
+                          else
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                owner == null
+                                    ? const UnknownCharacter(size: 20)
+                                    : AgentCharacter(agent: owner, size: 20),
+                                const SizedBox(width: Space.xs),
+                                Flexible(
+                                  child: Text(
+                                    owner?.name ?? item.owner,
+                                    style: TypeScale.of(context).caption
+                                        .copyWith(color: palette.textMuted),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          if (widget.added != null)
+                            Text(
+                              widget.added!,
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textFaint),
+                            ),
+                          if (item.log.isNotEmpty)
+                            Chevron(color: palette.textFaint, down: _open),
+                        ],
+                      )
+                    else
+                      Row(
+                        children: [
+                          Text(
+                            '#${item.id}',
+                            style: TypeScale.of(context).caption.copyWith(
+                              color: palette.textFaint,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: Space.s),
+                          Text(
+                            statusLabel(item.status),
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textMuted),
+                          ),
+                          const SizedBox(width: Space.s),
+                          if (item.owner.isEmpty)
+                            Flexible(
+                              child: Text(
+                                'Unassigned',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              ),
+                            )
+                          else ...[
+                            owner == null
+                                ? const UnknownCharacter(size: 20)
+                                : AgentCharacter(agent: owner, size: 20),
+                            const SizedBox(width: Space.xs),
+                            Flexible(
+                              child: Text(
+                                owner?.name ?? item.owner,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textMuted),
+                              ),
+                            ),
+                          ],
+                          if (widget.added != null) ...[
+                            const SizedBox(width: Space.s),
+                            Flexible(
+                              child: Text(
+                                widget.added!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              ),
+                            ),
+                          ],
+                          if (item.log.isNotEmpty) ...[
+                            const Spacer(),
+                            Chevron(color: palette.textFaint, down: _open),
+                          ],
+                        ],
+                      ),
+                    if (_open) ...[
+                      const SizedBox(height: Space.s),
+                      for (final update in item.log)
+                        _LogLine(update: update, store: widget.store),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -775,7 +890,7 @@ class _LogLine extends StatelessWidget {
             ),
           ],
         ),
-        style: TextStyles.caption,
+        style: TypeScale.of(context).caption,
       ),
     );
   }

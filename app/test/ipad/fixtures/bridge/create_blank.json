@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "kind": "creation_params",
+  "view_type": "claktory/ink",
+  "arguments": {
+    "schema_version": 1,
+    "leaf_id": "leaf-7f3a",
+    "surface": "blank",
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/project/sketches/sketch-2026-11-21.png",
+      "sha256": null,
+      "mime": "image/png",
+      "size": null
+    },
+    "document": {
+      "blank": {
+        "width": 1024,
+        "height": 768
+      }
+    },
+    "layers": [],
+    "drawing_policy": "default",
+    "persistence": {
+      "mode": "online"
+    },
+    "active": true,
+    "ink": {
+      "paper": "#FFFFFFFF",
+      "appearance": "light"
+    }
+  }
+}

@@ -6,10 +6,17 @@ import 'account.dart';
 import 'apps.dart' show AppsSettings;
 import 'avatar.dart';
 import 'backend.dart';
-import 'claktory_identity.dart' show ClaktoryIdentity;
+import 'claktory_identity.dart' show ClaktoryIdentity, claktoryName;
 import 'controls.dart';
 import 'devices.dart';
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/header.dart';
+import 'mobile/input.dart' show InputKind;
+import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
+import 'mobile/metrics.dart';
+import 'mobile/navigation.dart';
+import 'move.dart' show BackendMove, MoveSettingRow;
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'provider_picker.dart' show ProviderSettings;
@@ -20,6 +27,7 @@ import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
+import 'voice.dart' show VoiceSettings, voiceKnown;
 import 'zoom.dart' show ZoomSetting;
 
 /// Factory-wide settings: provider sign-in and the defaults for new agents.
@@ -27,7 +35,11 @@ import 'zoom.dart' show ZoomSetting;
 /// no agent to show it beside, it replaces the agent view until closed with
 /// Done or Esc.
 class SettingsView extends StatelessWidget {
-  const SettingsView({super.key});
+  const SettingsView({super.key, this.section});
+
+  /// On a phone, the section this page shows (its id, "devices"); null
+  /// lists them all.
+  final String? section;
 
   @override
   Widget build(BuildContext context) {
@@ -36,6 +48,13 @@ class SettingsView extends StatelessWidget {
     void close() => scope.page.value = AppPage.agent;
     // Beside a conversation, the pane's header names and closes it.
     final inPane = InPane.of(context);
+    // A phone lists the sections, each a page of its own.
+    if (!inPane && isPhoneLayout(context)) {
+      final section = this.section;
+      return section == null
+          ? const _PhoneSettings()
+          : _PhoneSettingsPage(id: section);
+    }
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
@@ -59,7 +78,7 @@ class SettingsView extends StatelessWidget {
                       Expanded(
                         child: Text(
                           'Settings',
-                          style: TextStyles.label.copyWith(
+                          style: TypeScale.of(context).label.copyWith(
                             color: palette.text,
                             fontWeight: FontWeight.w600,
                           ),
@@ -82,76 +101,14 @@ class SettingsView extends StatelessWidget {
                         controller: controller,
                         padding: const EdgeInsets.symmetric(vertical: Space.xl),
                         children: [
-                          _Section(
-                            title: 'Profile',
-                            children: [
-                              _YourName(workspace: workspace),
-                              _Avatar(person: workspace.person),
-                            ],
-                          ),
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'General',
-                            children: [ClaktoryIdentity(workspace: workspace)],
-                          ),
-                          // Only while the backend has the account on.
-                          if (workspace.hasAccount() &&
-                              workspace.account.state !=
-                                  ClaktoryAccountState
-                                      .CLAKTORY_ACCOUNT_STATE_UNSPECIFIED) ...[
-                            const SizedBox(height: Space.xxl),
+                          for (final (i, section) in settingsSectionsOf(
+                            context,
+                            workspace,
+                          ).indexed) ...[
+                            if (i > 0) const SizedBox(height: Space.xxl),
                             _Section(
-                              title: 'Account',
-                              children: [
-                                AccountSettings(account: workspace.account),
-                              ],
-                            ),
-                          ],
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'Providers',
-                            children: [ProviderSettings(workspace: workspace)],
-                          ),
-                          const SizedBox(height: Space.xxl),
-                          const _Section(
-                            title: 'Secrets',
-                            children: [SecretsSettings()],
-                          ),
-                          // Apps shows only where the backend runs them (the
-                          // dev Claktory, until Apps ships).
-                          if (workspace.appsAvailable) ...const [
-                            SizedBox(height: Space.xxl),
-                            _Section(title: 'Apps', children: [AppsSettings()]),
-                          ],
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'Defaults',
-                            children: [_Defaults(workspace: workspace)],
-                          ),
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'Devices',
-                            children: [DevicesSettings(workspace: workspace)],
-                          ),
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'Resources',
-                            children: [_ResourceAlerts(workspace: workspace)],
-                          ),
-                          const SizedBox(height: Space.xxl),
-                          _Section(
-                            title: 'Display',
-                            children: [
-                              const ZoomSetting(),
-                              _Highlights(workspace: workspace),
-                            ],
-                          ),
-                          // Removing Claktory, from the Mac it runs on.
-                          if (canRemoveThisMac(context)) ...const [
-                            SizedBox(height: Space.xxl),
-                            _Section(
-                              title: 'This Mac',
-                              children: [RemoveThisMac()],
+                              title: section.title,
+                              children: section.children,
                             ),
                           ],
                         ],
@@ -163,6 +120,407 @@ class SettingsView extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A section of Settings: its title (its id in lower case, as show_screen
+/// names it), what's in it, and on a phone, where each is a page of its
+/// own, its glyph and a word on what it's set to.
+class SettingsSection {
+  const SettingsSection({
+    required this.title,
+    required this.children,
+    required this.glyph,
+    this.summary = '',
+    this.group = 0,
+  });
+
+  final String title;
+  final List<Widget> children;
+  final Widget Function(Color color) glyph;
+
+  /// What it's set to, at the end of its row on a phone ("Matt").
+  final String summary;
+
+  /// Rows of one group sit together on a phone, apart from the next.
+  final int group;
+
+  String get id => title.toLowerCase();
+}
+
+/// The models a step a model declines can be tried again on: [emptyLabel]
+/// for none chosen ('', no fallback or the default's), then the models
+/// there are, and [current] as "No model available" if it isn't one of
+/// them.
+List<SelectOption<String>> fallbackModelOptions(
+  Workspace workspace,
+  String current, {
+  required String emptyLabel,
+}) => [
+  SelectOption('', emptyLabel),
+  for (final model in workspace.models)
+    SelectOption(model.id, modelLabel(model)),
+  if (current.isNotEmpty &&
+      !workspace.models.any((model) => model.id == current))
+    SelectOption(current, 'No model available'),
+];
+
+/// The sections Settings shows now, in order.
+List<SettingsSection> settingsSectionsOf(
+  BuildContext context,
+  Workspace workspace,
+) {
+  Widget Function(Color) lucide(String icon) =>
+      (color) => ExtensionGlyph(icon: icon, name: '', color: color);
+  final settings = workspace.settings;
+  Model? model;
+  for (final candidate in workspace.models) {
+    if (candidate.id == settings.defaultModel) model = candidate;
+  }
+  return [
+    SettingsSection(
+      title: 'Profile',
+      glyph: lucide('user'),
+      summary: settings.userName,
+      children: [
+        _YourName(workspace: workspace),
+        _Avatar(person: workspace.person),
+      ],
+    ),
+    SettingsSection(
+      title: 'General',
+      glyph: (color) => CogGlyph(color: color),
+      summary: claktoryName(AppScope.of(context)),
+      children: [
+        ClaktoryIdentity(workspace: workspace),
+        // Moving this Claktory to another computer, from any device.
+        MoveSettingRow(source: BackendMove(AppScope.of(context))),
+      ],
+    ),
+    // Only while the backend has the account on.
+    if (workspace.hasAccount() &&
+        workspace.account.state !=
+            ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_UNSPECIFIED)
+      SettingsSection(
+        title: 'Account',
+        glyph: lucide('globe'),
+        summary: workspace.account.email,
+        children: [AccountSettings(account: workspace.account)],
+      ),
+    SettingsSection(
+      title: 'Providers',
+      group: 1,
+      glyph: lucide('sparkles'),
+      summary: [
+        for (final provider in workspace.providers)
+          if (provider.accounts.isNotEmpty || provider.signedInWith.isNotEmpty)
+            provider.name,
+      ].join(', '),
+      children: [ProviderSettings(workspace: workspace)],
+    ),
+    SettingsSection(
+      title: 'Secrets',
+      group: 2,
+      glyph: lucide('key-round'),
+      children: const [SecretsSettings()],
+    ),
+    // Apps shows only where the backend runs them (the dev Claktory, until
+    // Apps ships).
+    if (workspace.appsAvailable)
+      SettingsSection(
+        title: 'Apps',
+        group: 2,
+        glyph: lucide('panels-top-left'),
+        children: const [AppsSettings()],
+      ),
+    SettingsSection(
+      title: 'Defaults',
+      group: 1,
+      glyph: lucide('brain'),
+      summary: model == null ? '' : modelLabel(model),
+      children: [_Defaults(workspace: workspace)],
+    ),
+    // Only where the Claktory knows voice messages.
+    if (voiceKnown(workspace))
+      SettingsSection(
+        title: 'Voice',
+        group: 1,
+        glyph: lucide('mic'),
+        children: [VoiceSettings(model: workspace.speechModel)],
+      ),
+    SettingsSection(
+      title: 'Devices',
+      group: 2,
+      glyph: lucide('monitor-smartphone'),
+      children: [DevicesSettings(workspace: workspace)],
+    ),
+    SettingsSection(
+      title: 'Resources',
+      group: 3,
+      glyph: lucide('gauge'),
+      children: [_ResourceAlerts(workspace: workspace)],
+    ),
+    SettingsSection(
+      title: 'Display',
+      group: 3,
+      glyph: lucide('monitor'),
+      children: [
+        const ZoomSetting(),
+        _Highlights(workspace: workspace),
+      ],
+    ),
+    // Removing Claktory, from the Mac it runs on.
+    if (canRemoveThisMac(context))
+      SettingsSection(
+        title: 'This Mac',
+        group: 4,
+        glyph: lucide('laptop-minimal'),
+        children: const [RemoveThisMac()],
+      ),
+  ];
+}
+
+/// Settings on a phone: a page listing the sections, each opening as a
+/// page of its own, with Back. A section an agent opens (show_screen)
+/// opens over the list.
+class _PhoneSettings extends StatefulWidget {
+  const _PhoneSettings();
+
+  @override
+  State<_PhoneSettings> createState() => _PhoneSettingsState();
+}
+
+class _PhoneSettingsState extends State<_PhoneSettings> {
+  ValueNotifier<String?>? _section;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final section = AppScope.of(context).settingsSection;
+    if (section == _section) return;
+    _section?.removeListener(_wanted);
+    _section = section..addListener(_wanted);
+    _wanted();
+  }
+
+  @override
+  void dispose() {
+    _section?.removeListener(_wanted);
+    super.dispose();
+  }
+
+  void _wanted() {
+    if (_section?.value == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final section = _section;
+      final id = section?.value;
+      if (!mounted || section == null || id == null) return;
+      section.value = null;
+      final workspace = AppScope.of(context).workspace.workspace;
+      // Not in Settings now (Account while signed out, say): the list.
+      if (settingsSectionsOf(context, workspace).any((s) => s.id == id)) {
+        _open(id);
+      }
+    });
+    // Asked for between frames: one to run it in.
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _open(String id) => PhoneRoutes.of(context)?.push<void>(
+    PhoneRoute(
+      id: 'settings:$id',
+      builder: (context) => SettingsView(section: id),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
+    void close() => scope.page.value = AppPage.agent;
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          PhoneHeader(
+            leading: HeaderButton.back(onTap: close),
+            title: Text(
+              'Settings',
+              style: PhoneType.emphasis.copyWith(color: palette.text),
+            ),
+          ),
+          Expanded(
+            child: ListenableBuilder(
+              listenable: scope.backend.workspace,
+              builder: (context, _) {
+                // In their groups: who you are and this Claktory; models;
+                // what agents can reach; this computer and the screen.
+                final all = settingsSectionsOf(
+                  context,
+                  scope.backend.workspace.workspace,
+                );
+                final sections = [
+                  for (var group = 0; group <= 4; group++)
+                    ...all.where((section) => section.group == group),
+                ];
+                return ListView(
+                  padding: const EdgeInsets.symmetric(vertical: Space.s),
+                  children: [
+                    for (final (i, section) in sections.indexed) ...[
+                      if (i > 0 && sections[i - 1].group != section.group)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Touch.gutter,
+                            vertical: Space.s,
+                          ),
+                          child: Container(height: 1, color: palette.hairline),
+                        ),
+                      _SectionRow(
+                        section: section,
+                        onTap: () => _open(section.id),
+                      ),
+                    ],
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A section's row in a phone's Settings: its glyph, its title, what it's
+/// set to, and a chevron to its page. At large text sizes what it's set to
+/// goes under the title.
+class _SectionRow extends StatelessWidget {
+  const _SectionRow({required this.section, required this.onTap});
+
+  final SettingsSection section;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final large = largeText(context);
+    final title = Text(
+      section.title,
+      style: PhoneType.body.copyWith(color: palette.text),
+    );
+    final summary = section.summary.isEmpty
+        ? null
+        : Text(
+            section.summary,
+            maxLines: large ? 2 : 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: large ? TextAlign.start : TextAlign.end,
+            style: (large ? PhoneType.secondary : PhoneType.body).copyWith(
+              color: palette.textMuted,
+            ),
+          );
+    return Semantics(
+      container: true,
+      button: true,
+      onTap: onTap,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, pressed) => Container(
+          constraints: const BoxConstraints(minHeight: Touch.row),
+          color: pressed ? palette.hover : const Color(0x00000000),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Touch.gutter,
+            vertical: Space.s,
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 36,
+                child: Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: section.glyph(palette.textMuted),
+                ),
+              ),
+              if (large)
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [title, ?summary],
+                  ),
+                )
+              else ...[
+                title,
+                const SizedBox(width: Space.m),
+                Expanded(child: summary ?? const SizedBox.shrink()),
+              ],
+              const SizedBox(width: Space.s),
+              Chevron(color: palette.textFaint, down: false),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A section of Settings as a page of its own on a phone, with Back to the
+/// list.
+class _PhoneSettingsPage extends StatelessWidget {
+  const _PhoneSettingsPage({required this.id});
+
+  final String id;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
+    void back() => PhoneRoutes.of(context)?.pop<void>();
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): back},
+      child: ListenableBuilder(
+        listenable: scope.backend.workspace,
+        builder: (context, _) {
+          SettingsSection? section;
+          for (final candidate in settingsSectionsOf(
+            context,
+            scope.backend.workspace.workspace,
+          )) {
+            if (candidate.id == id) section = candidate;
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PhoneHeader(
+                leading: HeaderButton.back(onTap: back),
+                title: Text(
+                  section?.title ?? '',
+                  style: PhoneType.emphasis.copyWith(color: palette.text),
+                ),
+              ),
+              Expanded(
+                child: SelectableArea(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(
+                      Touch.gutter,
+                      Space.l,
+                      Touch.gutter,
+                      Space.xl,
+                    ),
+                    children: [
+                      for (final child in section?.children ?? <Widget>[]) ...[
+                        child,
+                        const SizedBox(height: Space.s),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -190,7 +548,8 @@ class _Section extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: TextStyles.emphasis.copyWith(color: palette.text),
+                  style: TypeScale.of(context).emphasis
+                      .copyWith(color: palette.text),
                 ),
                 const SizedBox(height: Space.m),
                 for (final child in children) ...[
@@ -300,10 +659,11 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
           child: workspace.models.isEmpty
               ? Text(
                   'No model available. Sign in to a provider above.',
-                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
                 )
               : SizedBox(
-                  width: 280,
+                  width: controlWidth(context, 280),
                   child: Select(
                     value: model?.id ?? '',
                     options: [
@@ -334,7 +694,7 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
           SettingRow(
             label: 'Reasoning effort',
             child: SizedBox(
-              width: 280,
+              width: controlWidth(context, 280),
               child: Select(
                 value: model.efforts.contains(settings.defaultEffort)
                     ? settings.defaultEffort
@@ -353,28 +713,62 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
               ),
             ),
           ),
+        if (workspace.models.isNotEmpty)
+          SettingRow(
+            label: 'Default fallback model',
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: controlWidth(context, 280),
+                  child: Select(
+                    value: settings.defaultFallbackModel,
+                    options: fallbackModelOptions(
+                      workspace,
+                      settings.defaultFallbackModel,
+                      emptyLabel: 'None',
+                    ),
+                    onChanged: (id) =>
+                        _update(UpdateSettings(defaultFallbackModel: id)),
+                  ),
+                ),
+                const SizedBox(height: Space.xs),
+                Text(
+                  'When a model declines a step for safety reasons, Claktory '
+                  "tries it again on this one. An agent's settings can choose "
+                  'another.',
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
+                ),
+              ],
+            ),
+          ),
         SettingRow(
           label: 'Summarize conversations at',
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
+              _Line(
                 children: [
                   SizedBox(
-                    width: 96,
+                    width: isPhoneLayout(context) ? 120 : 96,
                     child: TextField(
                       controller: _compactAt,
+                      // "400k": digits first, the letters a tap away.
+                      keyboardType: const TextInputType.numberWithOptions(
+                        signed: true,
+                      ),
+                      autocorrect: false,
                       onSubmitted: (_) => _saveCompactAt(),
                     ),
                   ),
-                  const SizedBox(width: Space.s),
                   Text(
                     'tokens',
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.textMuted),
                   ),
-                  const SizedBox(width: Space.m),
                   ListenableBuilder(
                     listenable: _compactAt,
                     builder: (context, _) =>
@@ -389,7 +783,8 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
               Text(
                 'When a conversation gets this long, older messages are '
                 'summarized so the agent can keep going.',
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             ],
           ),
@@ -463,7 +858,8 @@ class _ResourceAlertsState extends State<_ResourceAlerts> with SettingRequests {
           padding: const EdgeInsets.only(bottom: Space.m),
           child: Text(
             'Rivet tells you when this computer runs low. Alert when:',
-            style: TextStyles.caption.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
           ),
         ),
         _Threshold(
@@ -587,7 +983,7 @@ class _ThresholdState extends State<_Threshold> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final words = TextStyles.body.copyWith(color: palette.textMuted);
+    final words = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     return SettingRow(
       label: widget.label,
       child: Wrap(
@@ -601,6 +997,11 @@ class _ThresholdState extends State<_Threshold> {
               width: 56,
               child: TextField(
                 controller: _fields[i],
+                // Digits, with Return to save (a number pad has none).
+                keyboardType: const TextInputType.numberWithOptions(
+                  signed: true,
+                ),
+                autocorrect: false,
                 onSubmitted: (_) => _save(),
               ),
             ),
@@ -614,9 +1015,8 @@ class _ThresholdState extends State<_Threshold> {
                 ? const SizedBox.shrink()
                 : Text(
                     widget.note,
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
                   ),
           ),
         ],
@@ -672,6 +1072,46 @@ class _YourNameState extends State<_YourName> with SettingRequests {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final field = TextField(
+      controller: _name,
+      placeholder: 'First name',
+      kind: InputKind.name,
+      onSubmitted: (_) => _save(),
+    );
+    if (isPhoneLayout(context)) {
+      // The field as wide as the screen, Save or the note under it.
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SettingRow(
+            label: 'Your name',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                field,
+                const SizedBox(height: Space.s),
+                ListenableBuilder(
+                  listenable: _name,
+                  builder: (context, _) =>
+                      _name.text.trim() == widget.workspace.settings.userName
+                      ? Text(
+                          'Your agents call you by it.',
+                          style: PhoneType.caption.copyWith(
+                            color: palette.textFaint,
+                          ),
+                        )
+                      : Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: Button(label: 'Save', onPressed: _save),
+                        ),
+                ),
+              ],
+            ),
+          ),
+          failureLine(palette),
+        ],
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -679,14 +1119,7 @@ class _YourNameState extends State<_YourName> with SettingRequests {
           label: 'Your name',
           child: Row(
             children: [
-              SizedBox(
-                width: 200,
-                child: TextField(
-                  controller: _name,
-                  placeholder: 'First name',
-                  onSubmitted: (_) => _save(),
-                ),
-              ),
+              SizedBox(width: 200, child: field),
               const SizedBox(width: Space.m),
               Expanded(
                 child: ListenableBuilder(
@@ -695,9 +1128,8 @@ class _YourNameState extends State<_YourName> with SettingRequests {
                       _name.text.trim() == widget.workspace.settings.userName
                       ? Text(
                           'Your agents call you by it.',
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
                         )
                       : Align(
                           alignment: Alignment.centerLeft,
@@ -714,8 +1146,82 @@ class _YourNameState extends State<_YourName> with SettingRequests {
   }
 }
 
-/// The person's avatar (Workspace.person), with Shuffle for new colors,
-/// and the account they're signed in as, when they are.
+/// The avatar's colors as swatches, each its gradient, the chosen one
+/// ringed, as the agents' colors are (ColorPicker): a finger's target on
+/// a phone, wrapping onto more lines.
+class _AvatarColors extends StatelessWidget {
+  const _AvatarColors({
+    required this.choices,
+    required this.chosen,
+    required this.onChanged,
+  });
+
+  final List<AvatarColors> choices;
+  final int chosen;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
+    // At least the platform's floor where it's used with a finger
+    // (Android's 48); a Mac's and an iPad's stay as they were.
+    final size = PhonePlatformPolicy.least(
+      context,
+      phone ? Touch.target : 26.0,
+    );
+    return Wrap(
+      spacing: phone ? Space.xs : Space.s,
+      runSpacing: phone ? Space.xs : Space.s,
+      children: [
+        for (final (i, choice) in choices.indexed)
+          Semantics(
+            key: ValueKey('avatar-color-$i'),
+            button: true,
+            selected: i == chosen,
+            label: choice.name,
+            child: Pressable(
+              onTap: i == chosen ? null : () => onChanged(i),
+              builder: (context, hovered) => AnimatedContainer(
+                duration: Motion.fast,
+                width: size,
+                height: size,
+                padding: EdgeInsets.all(phone ? 5 : 3),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    width: 2,
+                    color: i == chosen
+                        ? palette.text
+                        : hovered
+                        ? palette.textFaint
+                        : const Color(0x00000000),
+                  ),
+                ),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        hexColor(choice.from) ?? palette.textFaint,
+                        hexColor(choice.to) ?? palette.textFaint,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// The person's avatar (Workspace.person): its colors to pick from
+/// (Person.avatar_choices) and Shuffle, and the account they're signed in
+/// as, when they are.
 class _Avatar extends StatefulWidget {
   const _Avatar({required this.person});
 
@@ -735,22 +1241,68 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
       children: [
         SettingRow(
           label: 'Avatar',
-          child: Row(
-            children: [
-              PersonAvatar(person: person, size: 40),
-              const SizedBox(width: Space.m),
-              Button(
+          child: Builder(
+            builder: (context) {
+              final avatar = PersonAvatar(person: person, size: 40);
+              final shuffle = Button(
                 label: 'Shuffle colors',
                 onPressed: () => run(AppScope.of(context).shuffleAvatar),
-              ),
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: Text(
-                  'Shows beside your messages and comments, on every device.',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
-                ),
-              ),
-            ],
+              );
+              final caption = Text(
+                'Shows beside your messages and comments, on every device.',
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
+              );
+              final colors = person.avatarChoices.isEmpty
+                  ? null
+                  : _AvatarColors(
+                      choices: person.avatarChoices,
+                      chosen: person.avatarChoice,
+                      onChanged: (choice) => run(
+                        () =>
+                            AppScope.of(context).shuffleAvatar(choice: choice),
+                      ),
+                    );
+              // A phone's finger-sized button leaves the words no room
+              // beside it: they go under.
+              if (isPhoneLayout(context)) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: Space.m,
+                      runSpacing: Space.s,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [avatar, shuffle],
+                    ),
+                    const SizedBox(height: Space.s),
+                    caption,
+                    if (colors != null) ...[
+                      const SizedBox(height: Space.m),
+                      colors,
+                    ],
+                  ],
+                );
+              }
+              final line = Row(
+                children: [
+                  avatar,
+                  const SizedBox(width: Space.m),
+                  shuffle,
+                  const SizedBox(width: Space.m),
+                  Expanded(child: caption),
+                ],
+              );
+              if (colors == null) return line;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  line,
+                  const SizedBox(height: Space.m),
+                  colors,
+                ],
+              );
+            },
           ),
         ),
         if (person.email.isNotEmpty)
@@ -758,7 +1310,7 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
             label: 'Signed in as',
             child: Text(
               person.email,
-              style: TextStyles.body.copyWith(color: palette.text),
+              style: TypeScale.of(context).body.copyWith(color: palette.text),
             ),
           ),
         failureLine(palette),
@@ -809,9 +1361,8 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
                     'A soft glow on what changes: new agents, projects and '
                     'folders, checklist updates, messages between agents, '
                     'and what an agent points out to you.',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
                   ),
                 ),
               ],
@@ -861,14 +1412,15 @@ class _Switch extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  style: TextStyles.body.copyWith(
+                  style: TypeScale.of(context).body.copyWith(
                     color: enabled ? palette.text : palette.textFaint,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   note,
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textMuted),
                 ),
               ],
             ),
@@ -917,7 +1469,8 @@ class SettingRow extends StatelessWidget {
           children: [
             Text(
               label,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
             const SizedBox(height: Space.xs),
             Align(alignment: Alignment.centerLeft, child: child),
@@ -936,7 +1489,8 @@ class SettingRow extends StatelessWidget {
             width: 160,
             child: Text(
               label,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
           ),
           Expanded(
@@ -947,6 +1501,42 @@ class SettingRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// How wide a control in Settings is: [width] on a Mac, the screen's width
+/// on a phone.
+double controlWidth(BuildContext context, double width) =>
+    isPhoneLayout(context) ? double.infinity : width;
+
+/// Controls in a line: a field, its unit, Save. A Mac keeps them on one
+/// line, with [Space.s] then [Space.m] before the last; a phone wraps them
+/// onto more lines when the text is large.
+class _Line extends StatelessWidget {
+  const _Line({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    if (isPhoneLayout(context)) {
+      return Wrap(
+        spacing: Space.s,
+        runSpacing: Space.s,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: children,
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final (i, child) in children.indexed) ...[
+          if (i > 0)
+            SizedBox(width: i == children.length - 1 ? Space.m : Space.s),
+          child,
+        ],
+      ],
     );
   }
 }

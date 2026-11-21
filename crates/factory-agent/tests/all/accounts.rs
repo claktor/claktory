@@ -219,7 +219,14 @@ fn model(provider: &str, id: &str, base_url: &str) -> Model {
 }
 
 fn claude(base_url: &str) -> Model {
-    let id = catalog::models("anthropic").into_iter().next().expect("a Claude model").id;
+    // A model of the normal pool: Fable draws on a weekly pool of its own
+    // (see the fable pool tests).
+    let id = catalog::models("anthropic").into_iter().find(|model| !model.id.starts_with("claude-fable")).expect("a Claude model").id;
+    model("anthropic", &id, base_url)
+}
+
+fn fable(base_url: &str) -> Model {
+    let id = catalog::models("anthropic").into_iter().find(|model| model.id.starts_with("claude-fable")).expect("a Fable model").id;
     model("anthropic", &id, base_url)
 }
 
@@ -491,6 +498,57 @@ async fn one_account_over_its_limit_fails_as_a_usage_limit_without_a_note() {
     assert!(error.starts_with("Your Claude account reached its usage limit; it resets "), "{error}");
     assert!(error.ends_with("(in 1 h 30 min)."), "{error}");
     assert_eq!(*said.lock(), [AccountNote::Exhausted]);
+}
+
+/// Fable draws on a weekly limit of its own on top of the shared ones, so
+/// a mark on the normal pool doesn't stop a Fable request from trying:
+/// whether it passes (an Opus-only cap, say) or not (the weekly limit
+/// covers all models), the provider's answer settles the Fable pool's own
+/// state.
+#[tokio::test]
+async fn a_mark_on_the_normal_pool_does_not_stop_fable_from_trying() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 90 * 60;
+    let server = mock(Arc::new(move |seen| if seen.body.contains("claude-fable") { claude_reply() } else { claude_limit(resets) })).await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, said) = recorder();
+
+    let error = ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await.expect_err("at the limit");
+    assert!(error.starts_with("Your Claude account reached its usage limit"), "{error}");
+    assert_eq!(*said.lock(), [AccountNote::Exhausted]);
+
+    // Fable still goes straight through, on the account's own capacity.
+    let reply = ask(&registry, &notes, &fable(&server.base_url), StreamOptions::default()).await.expect("Fable runs");
+    assert_eq!(reply, "hi");
+    assert_eq!(said.lock().len(), 1, "no switching or exhaustion for Fable");
+}
+
+/// And the other way round: a mark on the Fable pool (its own weekly
+/// limit) leaves the normal models' capacity alone.
+#[tokio::test]
+async fn a_fable_mark_does_not_block_the_normal_models() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 90 * 60;
+    let server = mock(Arc::new(move |seen| if seen.body.contains("claude-fable") { claude_limit(resets) } else { claude_reply() })).await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, said) = recorder();
+
+    let error = ask(&registry, &notes, &fable(&server.base_url), StreamOptions::default()).await.expect_err("at the limit");
+    assert!(error.starts_with("Your Claude account reached its usage limit"), "{error}");
+    assert_eq!(*said.lock(), [AccountNote::Exhausted]);
+
+    let reply = ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await.expect("the normal pool runs");
+    assert_eq!(reply, "hi");
+    assert_eq!(said.lock().len(), 1, "no switching or exhaustion for the normal pool");
+
+    // The Fable mark survives the file: it's stored with the account.
+    let stored = std::fs::read_to_string(&file).expect("auth.json");
+    assert!(stored.contains("factoryFableExhaustedUntil"), "{stored}");
+    assert!(!stored.contains("\"factoryExhaustedUntil\""), "{stored}");
 }
 
 #[tokio::test]
@@ -879,6 +937,47 @@ async fn a_claude_reset_is_claimed_for_its_organization_and_the_account_gets_req
     assert_eq!(registry.accounts("anthropic").await.expect("accounts")[0].exhausted_until, 0, "requests go to it again");
 }
 
+/// The "N resets left" people see counts every grant of the kind, from a
+/// usage read after the claim: the claim's own resets_left is only the
+/// used grant's, and another grant may hold more (#230). A read that
+/// still shows the used grant unspent doesn't overcount it.
+#[tokio::test]
+async fn the_resets_left_count_spans_every_grant_of_the_kind_from_a_fresh_read() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(move |seen| match seen.path.as_str() {
+        "/api/oauth/profile" => json_answer(200, Vec::new(), json!({"organization": {"uuid": "org-1"}})),
+        "/api/organizations/org-1/reset_rate_limits" => {
+            // The used grant has none left; its sibling isn't counted here.
+            json_answer(200, Vec::new(), json!({"result": "reset", "resets_left": 0, "cleared": ["seven_day"]}))
+        }
+        path if path.starts_with("/api/oauth/usage") => json_answer(
+            200,
+            Vec::new(),
+            json!({"cedar_ember": {"eligible": true, "grants": [
+                // The read lags the claim: fable_a still shows the reset
+                // the claim just spent.
+                {"id": "fable_a", "gives_back_weekly": true, "resets_left": 1, "clears": [], "usable_now": false},
+                {"id": "fable_b", "gives_back_weekly": true, "resets_left": 1, "clears": [], "usable_now": true}
+            ]}}),
+        ),
+        _ => json_answer(404, Vec::new(), json!({})),
+    }))
+    .await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let answer =
+        registry.use_reset("anthropic", Some("a"), reset("fable_a", "Fable reset", 1)).await.expect("used").expect("a subscription");
+    assert_eq!(
+        answer,
+        ResetAnswer {
+            reset: true,
+            message: "What Fable used is back in your weekly limit. 1 Fable reset left.".into(),
+            fallback_url: String::new()
+        }
+    );
+}
+
 /// A claim Anthropic refuses, or one it answers without a reset, uses
 /// nothing and leaves the account as it was; a refusal of Claktory points
 /// to claude.ai.
@@ -893,6 +992,8 @@ async fn a_claude_reset_anthropic_refuses_uses_nothing_and_points_to_claude_ai()
     let next = answers.clone();
     let server = mock(Arc::new(move |seen| match seen.path.as_str() {
         "/api/oauth/profile" => json_answer(200, Vec::new(), json!({"organization": {"uuid": "org-1"}})),
+        // The usage read after a claim; failing, it changes no message.
+        path if path.starts_with("/api/oauth/usage") => json_answer(404, Vec::new(), json!({})),
         _ => match next.lock().pop() {
             Some(answer) => json_answer(200, Vec::new(), answer),
             None => json_answer(403, Vec::new(), json!({"error": {"message": "Forbidden"}})),

@@ -30,13 +30,15 @@ class SentFile {
 /// [RequestFailure] when the backend refuses or the connection drops.
 abstract interface class OutboxBackend {
   /// Sends one of the person's messages, tagged with [clientId], with the
-  /// files already uploaded.
+  /// files already uploaded; with [voice], files[0] is a recording, for
+  /// the Claktory to transcribe.
   Future<void> send(
     String agentId,
     String text,
     String clientId,
-    List<SentFile> files,
-  );
+    List<SentFile> files, {
+    bool voice = false,
+  });
 
   /// Starts sending [file] to [agentId] as [uploadId], or picks it up where
   /// it stopped: answers how many of its bytes the backend has.
@@ -77,7 +79,7 @@ class OutgoingFile {
 /// once, until the backend's own (queued, or in the transcript) takes its
 /// place.
 class Outgoing {
-  Outgoing._(this.agentId, this.text, this.clientId, this.files);
+  Outgoing._(this.agentId, this.text, this.clientId, this.files, this.voice);
 
   final String agentId;
   final String text;
@@ -88,6 +90,10 @@ class Outgoing {
 
   /// What goes with it, uploading first.
   final List<OutgoingFile> files;
+
+  /// A voice message: how long its recording (files[0]) is; null for any
+  /// other message.
+  final Duration? voice;
 
   /// Why it wasn't sent; null while it's on its way.
   String? failure;
@@ -118,15 +124,18 @@ class Outbox extends ChangeNotifier {
       if (message.agentId == agentId) message,
   ];
 
-  /// Sends [text] to [agentId] with [files], showing it at once.
+  /// Sends [text] to [agentId] with [files], showing it at once. With
+  /// [voice], it's a voice message: files[0] is its recording, that long,
+  /// and [text] is empty.
   Outgoing send(
     String agentId,
     String text, {
     List<LocalFile> files = const [],
+    Duration? voice,
   }) {
     final message = Outgoing._(agentId, text, _newId(), [
       for (final file in files) OutgoingFile._(file, _newId()),
-    ]);
+    ], voice);
     _messages.add(message);
     notifyListeners();
     unawaited(_try(message));
@@ -171,7 +180,7 @@ class Outbox extends ChangeNotifier {
       }
       await _backend.send(message.agentId, message.text, message.clientId, [
         for (final file in message.files) file.done!,
-      ]);
+      ], voice: message.voice != null);
     } on RequestFailure catch (failure) {
       if (!_messages.contains(message)) return;
       message.failure = failure.message;
@@ -240,11 +249,13 @@ class BackendOutbox implements OutboxBackend {
     String agentId,
     String text,
     String clientId,
-    List<SentFile> files,
-  ) => _backend.sendMessage(
+    List<SentFile> files, {
+    bool voice = false,
+  }) => _backend.sendMessage(
     agentId,
     text,
     clientId: clientId,
+    voice: voice,
     attachments: [
       for (final file in files)
         Attachment(

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 
+import 'package:flutter/services.dart' show TextCapitalization;
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -12,6 +13,9 @@ import 'controls.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/lines.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -436,7 +440,7 @@ class ConnectProgress extends StatelessWidget {
               TextField(
                 controller: run.token,
                 placeholder: 'Paste token',
-                obscureText: true,
+                kind: InputKind.secret,
                 autofocus: true,
                 onSubmitted: (_) => run.sendToken(),
               ),
@@ -444,7 +448,8 @@ class ConnectProgress extends StatelessWidget {
                 const SizedBox(height: Space.xs),
                 Text(
                   why,
-                  style: TextStyles.caption.copyWith(color: palette.danger),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.danger),
                 ),
               ],
             ],
@@ -490,7 +495,10 @@ class ConnectProgress extends StatelessWidget {
               const SizedBox(width: Space.s),
             ],
             Expanded(
-              child: Text(line, style: TextStyles.body.copyWith(color: tone)),
+              child: Text(
+                line,
+                style: TypeScale.of(context).body.copyWith(color: tone),
+              ),
             ),
           ],
         ),
@@ -498,7 +506,8 @@ class ConnectProgress extends StatelessWidget {
           const SizedBox(height: Space.xs),
           Text(
             detail,
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textFaint),
           ),
         ],
         if (input != null) ...[const SizedBox(height: Space.s), input],
@@ -582,7 +591,8 @@ class _ConnectFields {
             children: [
               Text(
                 connector.setupNote,
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
               ),
               if (connector.setupUrl.isNotEmpty) ...[
                 const SizedBox(height: Space.xs),
@@ -616,7 +626,8 @@ class _ConnectFields {
           padding: const EdgeInsets.only(bottom: Space.l),
           child: Text(
             chosen.why,
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
           ),
         ),
       for (final field in connector.fields)
@@ -626,6 +637,9 @@ class _ConnectFields {
           child: TextField(
             controller: values[field.id]!,
             placeholder: field.placeholder,
+            // A site's address, an account's id: as typed.
+            autocorrect: false,
+            textCapitalization: TextCapitalization.none,
             onSubmitted: (_) => onSubmit(),
           ),
         ),
@@ -744,9 +758,8 @@ class _ConnectServiceFormState extends State<ConnectServiceForm> {
                   'Connecting gives no agent access. Afterwards, you or Rivet '
                   'give an agent a secret made from it, with only what it '
                   'needs.',
-                  style: TextStyles.caption.copyWith(
-                    color: Palette.of(context).textFaint,
-                  ),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: Palette.of(context).textFaint),
                 ),
               ),
             ],
@@ -797,7 +810,8 @@ class _ConnectServiceFormState extends State<ConnectServiceForm> {
             padding: const EdgeInsets.only(bottom: Space.l),
             child: Text(
               'No services to connect yet.',
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
           ),
         for (final connector in connectors)
@@ -824,16 +838,14 @@ class _ConnectServiceFormState extends State<ConnectServiceForm> {
                           children: [
                             Text(
                               connector.name,
-                              style: TextStyles.label.copyWith(
-                                color: palette.text,
-                              ),
+                              style: TypeScale.of(context).label
+                                  .copyWith(color: palette.text),
                             ),
                             if (connector.description.isNotEmpty)
                               Text(
                                 connector.description,
-                                style: TextStyles.caption.copyWith(
-                                  color: palette.textMuted,
-                                ),
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textMuted),
                               ),
                           ],
                         ),
@@ -970,10 +982,8 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
               Flexible(
                 child: Text(
                   '$name suggests connecting $service',
-                  style: TextStyles.caption.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: color, fontWeight: FontWeight.w600),
                 ),
               ),
             ],
@@ -990,7 +1000,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
             const SizedBox(height: Space.s),
             Text(
               'What it needs',
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: palette.textFaint,
                 fontWeight: FontWeight.w500,
               ),
@@ -1005,14 +1015,15 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
             const SizedBox(height: Space.s),
             Text(
               'Region',
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: palette.textFaint,
                 fontWeight: FontWeight.w500,
               ),
             ),
             Text(
               proposal.region,
-              style: TextStyles.code.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).code
+                  .copyWith(color: palette.textMuted),
             ),
           ],
           if (proposal.statements.isNotEmpty) ...[
@@ -1050,7 +1061,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
       return [
         Text(
           "Claktory can't connect $service yet.",
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.m),
         _dismissRow(agent),
@@ -1074,43 +1085,34 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
         onChanged: () => setState(() {}),
         onSubmit: () => _connect(run),
       ),
-      Row(
-        children: [
-          Expanded(
-            child: Text(
-              _error ??
-                  'Connecting gives $agent nothing yet. You or Rivet then '
-                      'give it only the access it needs.',
-              style: TextStyles.caption.copyWith(
-                color: _error == null ? palette.textFaint : palette.danger,
-              ),
-            ),
+      ActionLine(
+        lead: Text(
+          _error ??
+              'Connecting gives $agent nothing yet. You or Rivet then '
+                  'give it only the access it needs.',
+          style: TypeScale.of(context).caption.copyWith(
+            color: _error == null ? palette.textFaint : palette.danger,
           ),
-          const SizedBox(width: Space.s),
-          Button(
-            label: phone ? 'Connect' : 'Connect $service',
-            primary: true,
-            onPressed: _dismissing ? null : () => _connect(run),
-          ),
-        ],
+        ),
+        action: Button(
+          label: phone ? 'Connect' : 'Connect $service',
+          primary: true,
+          onPressed: _dismissing ? null : () => _connect(run),
+        ),
       ),
       const SizedBox(height: Space.m),
       _dismissRow(agent),
     ];
   }
 
-  Widget _dismissRow(String agent) => Row(
-    children: [
-      Expanded(
-        child: TextField(
-          controller: _comment,
-          placeholder: 'Tell $agent why (optional)',
-          onSubmitted: (_) => _dismiss(),
-        ),
-      ),
-      const SizedBox(width: Space.s),
-      Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
-    ],
+  Widget _dismissRow(String agent) => ActionLine(
+    lead: TextField(
+      controller: _comment,
+      placeholder: 'Tell $agent why (optional)',
+      kind: InputKind.text,
+      onSubmitted: (_) => _dismiss(),
+    ),
+    action: Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
   );
 
   List<Widget> _decided(Palette palette, Color color, String service) {
@@ -1149,7 +1151,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
                     ),
                 ],
               ),
-              style: TextStyles.caption,
+              style: TypeScale.of(context).caption,
             ),
           ),
         ],
@@ -1158,7 +1160,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
         const SizedBox(height: Space.xs),
         Text(
           '“${proposal.comment}”',
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
       ],
     ];
@@ -1204,9 +1206,8 @@ class OtherConnectFlows extends StatelessWidget {
                         : 'Connecting '
                               '${serviceName(backend, flow.connectorId)} on '
                               '${flow.deviceName}…',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
                   ),
                 ),
               ],
@@ -1245,14 +1246,16 @@ class ConnectionHeadline extends StatelessWidget {
             '$service connection',
             if (connection.account.isNotEmpty) connection.account,
           ].join(' · '),
-          style: TextStyles.caption.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textMuted),
         ),
         if (needs)
           Text(
             connection.problem.isEmpty
                 ? 'Connect again to keep using it.'
                 : connection.problem,
-            style: TextStyles.caption.copyWith(color: palette.danger),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.danger),
           ),
       ],
     );
@@ -1306,7 +1309,7 @@ class ExportHeadline extends StatelessWidget {
         else if (export.expiresMs > 0)
           'Renewed before it expires',
       ].join(' · '),
-      style: TextStyles.caption.copyWith(color: palette.textMuted),
+      style: TypeScale.of(context).caption.copyWith(color: palette.textMuted),
     );
   }
 }
@@ -1334,14 +1337,14 @@ class AccessLines extends StatelessWidget {
       padding: const EdgeInsets.only(top: Space.s),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
-    Widget line(String text) =>
-        Text(text, style: TextStyles.body.copyWith(color: palette.textMuted));
+    Widget line(String text) => Text(
+      text,
+      style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+    );
     final dates = [
       if (expiresMs > 0)
         'Valid until ${logTime(DateTime.fromMillisecondsSinceEpoch(expiresMs))}',
@@ -1364,7 +1367,8 @@ class AccessLines extends StatelessWidget {
             padding: const EdgeInsets.only(top: Space.s),
             child: Text(
               dates.join(' · '),
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ),
       ],
@@ -1437,7 +1441,8 @@ class _ConnectionDetailsState extends State<ConnectionDetails> {
                       'access an agent needs, then give that secret.'
                 : 'Agents use it only through secrets made from it: '
                       '${made.map((secret) => secret.name).join(', ')}.',
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textFaint),
           ),
           if (run.shown) ...[
             const SizedBox(height: Space.m),
@@ -1613,14 +1618,14 @@ class _DisconnectFormState extends State<_DisconnectForm> {
                   children: [
                     Text(
                       'Also cancel it at $service',
-                      style: TextStyles.body.copyWith(color: palette.text),
+                      style: TypeScale.of(context).body
+                          .copyWith(color: palette.text),
                     ),
                     Text(
                       'So keys made from it stop working everywhere, even '
                       'where they were copied.',
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textMuted,
-                      ),
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textMuted),
                     ),
                   ],
                 ),
@@ -1840,19 +1845,28 @@ class _DeriveSecretFormState extends State<DeriveSecretForm> {
       fields: [
         Field(
           label: 'Name',
-          child: TextField(controller: _name, autofocus: true),
+          child: TextField(
+            controller: _name,
+            autofocus: true,
+            kind: InputKind.text,
+          ),
         ),
         Field(
           label: 'Description',
           note: 'What it’s for. Agents and the Map show it.',
-          child: TextField(controller: _description, maxLines: 3),
+          child: TextField(
+            controller: _description,
+            kind: InputKind.multiline,
+            maxLines: 3,
+          ),
         ),
         if (choices == null)
           Padding(
             padding: const EdgeInsets.only(bottom: Space.l),
             child: Text(
               'Asking ${serviceName(AppScope.of(context), widget.connection.connection.connectorId)} what it can reach…',
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
           )
         else ...[
@@ -1861,7 +1875,8 @@ class _DeriveSecretFormState extends State<DeriveSecretForm> {
               padding: const EdgeInsets.only(bottom: Space.l),
               child: Text(
                 _rules,
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
               ),
             ),
           if (accounts.isNotEmpty)
@@ -1984,16 +1999,14 @@ class _Checks extends StatelessWidget {
                             children: [
                               Text(
                                 choice.label,
-                                style: TextStyles.body.copyWith(
-                                  color: palette.text,
-                                ),
+                                style: TypeScale.of(context).body
+                                    .copyWith(color: palette.text),
                               ),
                               if (choice.why.isNotEmpty)
                                 Text(
                                   choice.why,
-                                  style: TextStyles.caption.copyWith(
-                                    color: palette.textMuted,
-                                  ),
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textMuted),
                                 ),
                             ],
                           ),
@@ -2043,9 +2056,8 @@ class _PolicyStatementsState extends State<PolicyStatements> {
                   : count == 1
                   ? 'Show exact permissions (1 rule)'
                   : 'Show exact permissions ($count rules)',
-              style: TextStyles.caption.copyWith(
-                color: hovered ? palette.text : palette.textMuted,
-              ),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: hovered ? palette.text : palette.textMuted),
             ),
           ),
         ),
@@ -2071,15 +2083,13 @@ class _Statement extends StatelessWidget {
       padding: const EdgeInsets.only(top: Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
     Widget lines(Iterable<String> lines, Color color) => Text(
       lines.join('\n'),
-      style: TextStyles.code.copyWith(fontSize: 12, color: color),
+      style: TypeScale.of(context).code.copyWith(fontSize: 12, color: color),
     );
     final condition = conditionLines(statement.condition);
     return Container(
@@ -2097,7 +2107,7 @@ class _Statement extends StatelessWidget {
         children: [
           Text(
             'Allows',
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: palette.textFaint,
               fontWeight: FontWeight.w500,
             ),

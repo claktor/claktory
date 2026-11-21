@@ -1,6 +1,7 @@
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/sidebar.dart' show sidebarHoldToDrag;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,10 +74,16 @@ void main() {
   }
 
   /// Drags [name]'s row to [target], in small steps as a hand would.
-  Future<void> drag(WidgetTester tester, String name, Offset target) async {
+  Future<void> drag(
+    WidgetTester tester,
+    String name,
+    Offset target, {
+    PointerDeviceKind kind = PointerDeviceKind.mouse,
+    Duration hold = const Duration(milliseconds: 50),
+  }) async {
     final from = tester.getCenter(find.text(name));
-    final gesture = await tester.startGesture(from);
-    await tester.pump(const Duration(milliseconds: 50));
+    final gesture = await tester.startGesture(from, kind: kind);
+    await tester.pump(hold);
     for (var i = 1; i <= 10; i++) {
       await gesture.moveTo(Offset.lerp(from, target, i / 10)!);
       await tester.pump(const Duration(milliseconds: 16));
@@ -205,6 +212,24 @@ void main() {
     await settle(tester);
     // The sidebar's row, not the header that now shows it too.
     expect(tester.getTopLeft(find.text('Back').first).dx, indent);
+  });
+
+  testWidgets('a finger that moves at once scrolls; one that holds first '
+      'moves the agent', (tester) async {
+    final harness = await show(tester, workspace());
+    final target = row(tester, 'Back').bottomCenter - const Offset(0, 3);
+    await drag(tester, 'Solo', target, kind: PointerDeviceKind.touch);
+    expect(harness.backend.sent, isEmpty);
+
+    await drag(
+      tester,
+      'Solo',
+      target,
+      kind: PointerDeviceKind.touch,
+      hold: sidebarHoldToDrag + const Duration(milliseconds: 50),
+    );
+    expect(harness.last.arrangeAgent.agentId, 'solo');
+    expect(harness.last.arrangeAgent.parentId, 'lead');
   });
 
   testWidgets('a drag let go over its own row changes nothing', (tester) async {

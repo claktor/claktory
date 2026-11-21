@@ -46,6 +46,9 @@ class FakeTunnel implements Tunnel {
   final int port;
 
   @override
+  final requestPath = '/${'5e' * 32}';
+
+  @override
   TunnelStatus status = tunnelStatus();
 
   var closed = false;
@@ -224,10 +227,12 @@ void main() {
   });
 
   test('a Factory with an endpoint id is reached only through its tunnel: '
-      'plain ws to the tunnel\'s port, the token in Hello', () async {
+      'plain ws to the tunnel\'s port and path, the token in Hello', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final hello = Completer<ClientMessage>();
+    final asked = <String>[];
     server.listen((request) async {
+      asked.add(request.uri.path);
       final socket = await WebSocketTransformer.upgrade(request);
       socket.listen((frame) {
         if (!hello.isCompleted) {
@@ -243,6 +248,8 @@ void main() {
 
     final message = await hello.future.timeout(const Duration(seconds: 5));
     expect(message.hello.token, _token);
+    // At the tunnel's own path: only that is forwarded.
+    expect(asked, [tunnels.tunnel.requestPath]);
     final (key, endpoint, relays) = tunnels.opened.single;
     expect(key, 'k' * 64);
     expect(endpoint, _endpoint);

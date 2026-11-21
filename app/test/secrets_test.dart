@@ -521,7 +521,7 @@ void main() {
     matching: find.byType(EditableText),
   );
 
-  testWidgets("a request like none of the person's secrets: Add new, filled "
+  testWidgets("a request like none of the person's secrets: New secret, filled "
       'in from it', (tester) async {
     final harness = Harness(_workspace());
     final request = resend();
@@ -576,7 +576,32 @@ void main() {
     );
   });
 
-  testWidgets('a request like one of them: Choose one, picked, Give it', (
+  testWidgets("a request's fields keep their names for a screen reader once "
+      'typed in: the labels over them may have scrolled away', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final harness = Harness(_workspace());
+    await _show(tester, harness, SecretRequestCard(resend()));
+    await tester.enterText(field('Paste the value'), 're_123456789');
+    await tester.enterText(field('Tell June why (optional)'), 'Not yet');
+    await tester.pump();
+    for (final label in [
+      'Name',
+      secretGrantsLabel,
+      'RESEND_API_KEY',
+      'Tell June why (optional)',
+    ]) {
+      expect(
+        find.semantics.byPredicate(
+          (node) => node.label == label && node.flagsCollection.isTextField,
+        ),
+        findsOne,
+        reason: label,
+      );
+    }
+    semantics.dispose();
+  });
+
+  testWidgets('a request like one of them: Your secrets, picked, Give it', (
     tester,
   ) async {
     final harness = Harness(_workspace());
@@ -631,12 +656,18 @@ void main() {
     await _show(tester, harness, SecretRequestCard(cloudflare()));
     expect(
       find.text(
-        'June asked for CLOUDFLARE_API_TOKEN, but CF_CLAKTORY_DNS sets '
-        'CF_CLAKTORY_DNS.',
+        'This secret sets CF_CLAKTORY_DNS, not CLOUDFLARE_API_TOKEN. Check '
+        "it's the one June needs.",
       ),
       findsOneWidget,
     );
     expect(find.text('Also give it as CLOUDFLARE_API_TOKEN'), findsOneWidget);
+    expect(
+      find.text(
+        'June gets its value as CF_CLAKTORY_DNS and CLOUDFLARE_API_TOKEN.',
+      ),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Give CF_CLAKTORY_DNS to June'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -646,6 +677,74 @@ void main() {
     expect(decided.secretId, 'cf');
     expect(decided.aliases, {'CLOUDFLARE_API_TOKEN': 'CF_CLAKTORY_DNS'});
     expect(decided.asIs, isFalse);
+  });
+
+  test('what a secret chosen for a request leaves out, in its variables', () {
+    String line(List<String> asked, List<String> sets) =>
+        mismatchLine(agent: 'Sam', asked: asked, sets: sets);
+    expect(
+      line(['ANTHROPIC_API_KEY'], ['CF_CLAKTORY_DNS']),
+      'This secret sets CF_CLAKTORY_DNS, not ANTHROPIC_API_KEY. Check '
+      "it's the one Sam needs.",
+    );
+    expect(
+      line(['AWS_KEY', 'AWS_SECRET'], ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_KEY']),
+      "This secret doesn't set AWS_KEY or AWS_SECRET. Check it's the one Sam "
+      'needs.',
+    );
+    expect(
+      line(['A', 'B', 'C'], ['D']),
+      "This secret doesn't set A, B or C. Check it's the one Sam needs.",
+    );
+    // Some match: only what it leaves out, no check.
+    expect(line(['A', 'B'], ['A', 'C']), "This secret doesn't set B.");
+  });
+
+  testWidgets('a secret with several variables, for several names: a row '
+      'per name, the same as which of them', (tester) async {
+    final harness = Harness(
+      _workspace(
+        secrets: [
+          SecretInfo(
+            id: 'aws',
+            name: 'AWS deploy',
+            variables: [
+              SecretVariable(name: 'AWS_ACCESS_KEY_ID'),
+              SecretVariable(name: 'AWS_SECRET_ACCESS_KEY'),
+            ],
+          ),
+        ],
+      ),
+    );
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        resend()
+          ..newSecret.name = 'AWS deploy'
+          ..newSecret.variables.clear()
+          ..newSecret.variables.addAll([
+            SecretVariable(name: 'AWS_KEY'),
+            SecretVariable(name: 'AWS_SECRET'),
+          ]),
+      ),
+    );
+    expect(
+      find.text(
+        "This secret doesn't set AWS_KEY or AWS_SECRET. Check it's the one "
+        'June needs.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Also give it under the names June asked for'),
+      findsOneWidget,
+    );
+    expect(find.text('AWS_KEY'), findsOneWidget);
+    expect(find.text('Leave it out'), findsNWidgets(2));
+    await tester.tap(find.text('Leave it out').first);
+    await pumpFrames(tester);
+    expect(find.text('Same as AWS_ACCESS_KEY_ID'), findsWidgets);
   });
 
   testWidgets('or as it is', (tester) async {
@@ -708,6 +807,166 @@ void main() {
     );
   });
 
+  test('a request in Needs you, in a line', () {
+    final workspace = _workspace();
+    final asked = resend();
+    expect(secretRequestSummary(asked, workspace), 'Asks for Resend');
+    final passed = resend()..adminAgentId = 'mike';
+    expect(secretRequestSummary(passed, workspace), 'Needs a secret: Resend');
+    passed.state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+    expect(
+      secretRequestSummary(passed, workspace),
+      'Mike is finding it: Resend',
+    );
+    passed.collecting = true;
+    expect(
+      secretRequestSummary(passed, workspace, shownIn: 'mike'),
+      'Asks you to add a secret for June: Resend',
+    );
+    expect(
+      secretRequestSummary(passed, workspace, shownIn: 'june'),
+      'Mike is finding it: Resend',
+    );
+  });
+
+  group('with an admin agent to pass it to', () {
+    SecretRequest approval() => resend()..adminAgentId = 'mike';
+
+    testWidgets('the need is approved, not matched: Approve passes it on', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(tester, harness, SecretRequestCard(approval()));
+      expect(find.text('June needs a secret: Resend'), findsOneWidget);
+      expect(find.text('Sets RESEND_API_KEY'), findsOneWidget);
+      expect(
+        find.text('Mike finds the right one, or asks you to add it.'),
+        findsOneWidget,
+      );
+      // No matching on this card.
+      expect(find.text('Your secrets'), findsNothing);
+      expect(find.text('Paste the value'), findsNothing);
+      await tester.tap(find.text('Approve'));
+      await pumpFrames(tester);
+      final decided = _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest;
+      expect(decided.approve, isTrue);
+      expect(decided.approveOnly, isTrue);
+      expect(decided.agentId, 'june');
+      expect(decided.entries, isEmpty);
+    });
+
+    testWidgets('approved, it says who is on it and keeps Dismiss and the '
+        'direct way', (tester) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          approval()
+            ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED
+            ..approvedMs = Int64(1000),
+        ),
+      );
+      expect(find.text('Approved. Mike is finding it.'), findsOneWidget);
+      expect(find.text('Approve'), findsNothing);
+      expect(find.text('Dismiss'), findsOneWidget);
+      expect(find.text('Choose a secret…'), findsOneWidget);
+    });
+
+    testWidgets("Choose a secret… gives one directly, in a dialog that "
+        'closes once given', (tester) async {
+      final harness = Harness(_workspace());
+      await _show(tester, harness, SecretRequestCard(approval()));
+      await tester.tap(find.text('Choose a secret…'));
+      await pumpFrames(tester);
+      expect(find.text('Choose a secret for June'), findsOneWidget);
+      expect(find.text('Your secrets'), findsOneWidget);
+      await tester.tap(find.text('Your secrets'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Choose a secret'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('AWS').last);
+      await pumpFrames(tester);
+      await tester.tap(find.text('Give AWS to June'));
+      await pumpFrames(tester);
+      final decided = _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest;
+      expect(decided.secretId, 's1');
+      expect(decided.approveOnly, isFalse);
+      expect(find.text('Choose a secret for June'), findsNothing);
+    });
+
+    testWidgets("in the admin agent's conversation, the secret it collects: "
+        'added and given from here; the asker\'s card says where', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      final collecting = approval()
+        ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED
+        ..approvedMs = Int64(1000)
+        ..collecting = true;
+      await _show(
+        tester,
+        harness,
+        Column(
+          children: [
+            SecretRequestCard(collecting, shownIn: 'june'),
+            const SizedBox(height: 24),
+            SecretRequestCard(collecting, shownIn: 'mike'),
+          ],
+        ),
+      );
+      expect(
+        find.text("Waiting for you to add it in Mike's conversation."),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Mike asks you to add a secret for June: Resend'),
+        findsOneWidget,
+      );
+      // Only the new secret, filled in.
+      expect(find.text('Your secrets'), findsNothing);
+      await tester.enterText(field('Paste the value'), 're_123');
+      await tester.tap(find.text('Add and give to June'));
+      await pumpFrames(tester);
+      final decided = _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest;
+      expect(decided.agentId, 'june');
+      expect(decided.requestId, 'r1');
+      expect(decided.approveOnly, isFalse);
+      expect(decided.entries.single.variable, 'RESEND_API_KEY');
+      expect(decided.entries.single.value, 're_123');
+    });
+
+    testWidgets('given after approval, it says what the agent got', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          approval()
+            ..state = SecretRequestState.SECRET_REQUEST_STATE_GRANTED
+            ..approvedMs = Int64(1000)
+            ..givenSecretName = 'Resend mail'
+            ..decidedMs = Int64(2000),
+        ),
+      );
+      expect(
+        find.textContaining('June got Resend mail · ', findRichText: true),
+        findsOneWidget,
+      );
+    });
+  });
+
   testWidgets('a request the agent withdrew says so and takes no answer', (
     tester,
   ) async {
@@ -725,12 +984,12 @@ void main() {
       ),
     );
     expect(
-      find.textContaining('Withdrawn by June · ', findRichText: true),
+      find.textContaining('June withdrew it · ', findRichText: true),
       findsOneWidget,
     );
     expect(find.text('“Found another way.”'), findsOneWidget);
     expect(find.text('Dismiss'), findsNothing);
-    expect(find.text('Choose one'), findsNothing);
+    expect(find.text('Your secrets'), findsNothing);
   });
 
   testWidgets('a request the agent updated says when, and its form follows', (
@@ -763,18 +1022,17 @@ void main() {
     );
   });
 
-  testWidgets('Choose one with nothing chosen says what to do', (tester) async {
+  testWidgets('Your secrets with nothing chosen says what to do', (
+    tester,
+  ) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));
-    await tester.tap(find.text('Choose one'));
+    await tester.tap(find.text('Your secrets'));
     await tester.pump();
     expect(find.text('Choose a secret'), findsOneWidget);
     await tester.tap(find.text('Give'));
     await tester.pump();
-    expect(
-      find.text('Choose a secret to give, or add a new one.'),
-      findsOneWidget,
-    );
+    expect(find.text('Choose a secret, or add a new one.'), findsOneWidget);
     expect(_sent(harness, (m) => m.hasDecideSecretRequest()), isEmpty);
     await tester.tap(find.text('Choose a secret'));
     await pumpFrames(tester);
@@ -791,15 +1049,18 @@ void main() {
     );
   });
 
-  testWidgets("no secrets: Choose one says so, and it starts on Add new", (
+  testWidgets("no secrets: Your secrets says so, and it starts on New secret", (
     tester,
   ) async {
     final harness = Harness(_workspace(secrets: []));
     await _show(tester, harness, SecretRequestCard(resend()));
     expect(find.text('Add and give to June'), findsOneWidget);
-    await tester.tap(find.text('Choose one'));
+    await tester.tap(find.text('Your secrets'));
     await tester.pump();
-    expect(find.text("You don't have any secrets yet."), findsOneWidget);
+    expect(
+      find.text("You don't have any secrets yet. Add one under New secret."),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Dismiss tells the agent why, and the card shows it', (
@@ -884,7 +1145,7 @@ void main() {
     );
     expect(find.text('Dismiss'), findsNothing);
     expect(find.textContaining('Give'), findsNothing);
-    expect(find.text('Choose one'), findsNothing);
+    expect(find.text('Your secrets'), findsNothing);
   });
 
   testWidgets('a decision on a request that just expired shows why', (
@@ -912,7 +1173,7 @@ void main() {
     );
     await _show(tester, harness, SecretRequestCard(request));
     expect(find.text('June asks for AWS'), findsOneWidget);
-    expect(find.text('Choose one'), findsNothing);
+    expect(find.text('Your secrets'), findsNothing);
     await tester.tap(find.text('Give AWS to June'));
     await pumpFrames(tester);
     final decided = _sent(

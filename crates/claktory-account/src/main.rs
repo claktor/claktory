@@ -12,6 +12,7 @@ claktory-account: Claktory's account service
 Usage:
   claktory-account [serve] --db FILE --secrets FILE [options]
   claktory-account init-secrets FILE
+  claktory-account rotate-secrets FILE [--signing-key] [--k-share]
   claktory-account stats --db FILE
   claktory-account backup --db FILE --to DIR [--keep N]
   claktory-account set-cloudflare-token FILE (the token on standard input)
@@ -39,7 +40,13 @@ serve options:
   --relay URL             a relay for Claktories to use; repeat for more
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
-signing_key offline. To send email, set-cloudflare-token puts a Cloudflare API
+signing_key offline.
+
+rotate-secrets replaces the keys named (at least one), keeping the rest, after
+copying FILE as it was to FILE.before-<time>. A new signing key: every
+Claktory signs in again, and its secrets open by themselves after. A new
+k_share: every Claktory's secrets open only with its recovery key, once.
+Restart the service to use them. To send email, set-cloudflare-token puts a Cloudflare API
 token with Email Sending: Edit in it (or set-resend-key a Resend key).
 
 backup writes a consistent copy of the database to DIR, while it's in use, and
@@ -56,6 +63,7 @@ fn main() -> ExitCode {
     let result = match command.as_str() {
         "serve" => serve(&args),
         "init-secrets" => init_secrets(&args),
+        "rotate-secrets" => rotate_secrets(&args),
         "stats" => stats(&args),
         "backup" => backup(&args),
         "set-resend-key" => set_resend_key(&args),
@@ -240,6 +248,48 @@ fn init_secrets(args: &[String]) -> Result<(), String> {
     let secrets = Secrets::create(&PathBuf::from(path))?;
     println!("Wrote {path}. The service key is {}.", claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes()));
     println!("Back up its k_share and signing_key offline: without them no Claktory can unlock after a restart.");
+    Ok(())
+}
+
+fn rotate_secrets(args: &[String]) -> Result<(), String> {
+    let mut path = None;
+    let mut rotate = claktory_account::server::Rotate::default();
+    for arg in args {
+        match arg.as_str() {
+            "--signing-key" => rotate.signing_key = true,
+            "--k-share" => rotate.k_share = true,
+            flag if flag.starts_with('-') => return Err(format!("unknown option {flag}\n\n{USAGE}")),
+            file if path.is_none() => path = Some(PathBuf::from(file)),
+            _ => return Err(format!("rotate-secrets takes one file\n\n{USAGE}")),
+        }
+    }
+    let Some(path) = path else { return Err(format!("rotate-secrets takes the secrets file\n\n{USAGE}")) };
+    if !rotate.signing_key && !rotate.k_share {
+        return Err(format!("say which key to rotate: --signing-key, --k-share, or both\n\n{USAGE}"));
+    }
+    let (secrets, before) = Secrets::rotate(&path, rotate, jiff::Timestamp::now().as_second())?;
+    let mut said = vec![format!(
+        "Rotated {}.",
+        if rotate.signing_key && rotate.k_share {
+            "the signing key and k_share"
+        } else if rotate.signing_key {
+            "the signing key"
+        } else {
+            "k_share"
+        }
+    )];
+    said.push(format!("The file as it was is {}: delete it once the service runs with the new keys.", before.display()));
+    if rotate.signing_key {
+        said.push(format!(
+            "The service key is now {}. Every Claktory signs in again; their secrets open by themselves after.",
+            claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes())
+        ));
+    }
+    if rotate.k_share {
+        said.push("Every Claktory's secrets now open only with its recovery key, once.".to_owned());
+    }
+    said.push("Back up the new keys offline, then restart the service.".to_owned());
+    println!("{}", said.join("\n"));
     Ok(())
 }
 

@@ -119,7 +119,7 @@ async fn admin_agents_read_factorys_records_but_not_agents_memory() {
     let tables = call(&mut client, &mut view, "rivet", "db_schema", r#"{"instance": "factory"}"#).await;
     assert!(tables.contains("messages (") && tables.contains("runs (") && !tables.contains("memory_"), "{tables}");
     let memory = call(&mut client, &mut view, "rivet", "db_query", r#"{"sql": "SELECT * FROM memory_notes", "instance": "factory"}"#).await;
-    assert!(memory.contains("isn't readable"), "{memory}");
+    assert!(memory.contains("aren't readable"), "{memory}");
     // Without an instance it's Rivet's own database.
     assert_eq!(call(&mut client, &mut view, "rivet", "db_schema", "{}").await, "No tables yet; create them with db_exec.");
 

@@ -43,6 +43,12 @@ class MainFlutterWindow: NSWindow {
     Setup.register(with: flutterViewController.engine.binaryMessenger)
     // Links the app opens, such as claktory://add?code=… (AppDelegate.swift).
     Links.register(with: flutterViewController.engine.binaryMessenger)
+    // Voice messages' microphone (Recorder.swift).
+    Recorder.register(with: flutterViewController.engine.binaryMessenger)
+    // And playing them back (AudioPlayer.swift).
+    AudioPlayer.register(with: flutterViewController.engine.binaryMessenger)
+    // The network path, to reconnect the moment it changes (NetworkPath.swift).
+    NetworkPath.register(with: flutterViewController.engine.binaryMessenger)
 
     windowChannel = FlutterMethodChannel(
       name: "factory/window", binaryMessenger: flutterViewController.engine.binaryMessenger)
@@ -339,8 +345,8 @@ class MainFlutterWindow: NSWindow {
     return true
   }
 
-  // Files dragged onto the window from the Finder go to the message box of
-  // the agent showing (app/lib/attachments.dart), while there is one.
+  // Files dragged onto the window from the Finder go to the message box
+  // showing (app/lib/attachments.dart), while it takes files.
   private var takesFiles = false
 
   private func files(in sender: NSDraggingInfo) -> [String] {
@@ -351,10 +357,11 @@ class MainFlutterWindow: NSWindow {
 
   @objc func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
     let count = files(in: sender).count
-    guard takesFiles, count > 0 else { return [] }
-    // How many, for the conversation's drop overlay to say.
+    guard count > 0 else { return [] }
+    // How many, for the window's drop overlay to say: where they'd go, or
+    // why they can't go anywhere here (app/lib/drop.dart).
     windowChannel?.invokeMethod("filesOver", arguments: count)
-    return .copy
+    return takesFiles ? .copy : []
   }
 
   @objc func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {

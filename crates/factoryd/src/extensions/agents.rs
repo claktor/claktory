@@ -314,7 +314,7 @@ fn map_line(config: &Config, asker: &AgentConfig, agent: &AgentConfig) -> String
 fn map(factory: &Factory, asker: &str, agent: Option<&str>) -> Result<String, String> {
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(asker) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let asker = super::caller(config, asker)?;
     let Some(name) = agent.map(str::trim).filter(|name| !name.is_empty()) else {
         let lines: Vec<String> = config.agents.iter().map(|agent| map_line(config, asker, agent)).collect();
         return Ok(lines.join("\n"));
@@ -459,7 +459,7 @@ fn suggest(factory: &Factory, proposer: &str, args: SuggestArgs) -> Result<ToolR
     }
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(from) = config.agent(proposer) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let from = super::caller(config, proposer)?;
     let agent = resolve(config, from, &args.agent)?;
     let said = format!(
         "Suggested. {} sees a card with a button that opens {}'s conversation with your message drafted; nothing is sent until they send it.",
@@ -497,7 +497,7 @@ pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String)
     let target = {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(from) = config.agent(sender) else { return Err("You're no longer in this Claktory.".to_owned()) };
+        let from = super::caller(config, sender)?;
         resolve(config, from, to)?.id.clone()
     };
     let delivered = deliver(factory, sender, &[target], &text);
@@ -530,7 +530,7 @@ fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text:
     {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(from) = config.agent(sender) else { return Err("You're no longer in this Claktory.".to_owned()) };
+        let from = super::caller(config, sender)?;
         for name in names {
             let name = name.as_str();
             if name.trim() == from.id || name.trim().eq_ignore_ascii_case(&from.name) {
@@ -611,13 +611,13 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
             if !others.is_empty() {
                 let _ = write!(text, "\n\nAlso sent to: {}.", others.join(", "));
             }
-            let event = Event {
-                source: EventSource::Agent,
-                from: signed(config, from, agent),
-                id: sender.to_owned(),
-                summary: String::new(),
-                transient: false,
-            };
+            // Read a pipe: those it messages know it.
+            let mut signature = signed(config, from, agent);
+            if !factory.pipes.tainted(sender).is_empty() {
+                signature.push_str(crate::pipes::agents::TAINT_LABEL);
+            }
+            let event =
+                Event { source: EventSource::Agent, from: signature, id: sender.to_owned(), summary: String::new(), transient: false };
             letters.push((agent.id.clone(), text, event));
             reached.push(Recipient {
                 id: agent.id.clone(),
@@ -660,7 +660,7 @@ pub(crate) fn status(factory: &Factory, asker: &str, only: Option<&str>) -> Resu
     let times = factory.store.run_times().map_err(|error| format!("Couldn't read runs: {error}"))?;
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(from) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let from = super::caller(config, asker)?;
     let agents = match only {
         Some(only) => vec![resolve(config, from, only)?],
         None => reachable(config, from),
@@ -742,7 +742,7 @@ fn team_lines(factory: &Factory, asker: &str) -> Result<ToolResult, String> {
     let times = factory.store.run_times().map_err(|error| format!("Couldn't read runs: {error}"))?;
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let me = super::caller(config, asker)?;
     let now = now_ms();
     let team: Vec<&AgentConfig> = std::iter::once(me).chain(led(config, me)).collect();
     let mut lines = Vec::new();
@@ -771,7 +771,7 @@ fn inspect(factory: &Factory, asker: &str, wanted: &str) -> Result<ToolResult, S
     let (id, mut text) = {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(me) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+        let me = super::caller(config, asker)?;
         let team: Vec<&AgentConfig> = std::iter::once(me).chain(led(config, me)).collect();
         let agent = match find(config, me, &team, wanted)? {
             Some(agent) => agent,
@@ -830,7 +830,7 @@ fn setup(factory: &Factory, inner: &Inner, times: &crate::store::RunTimes, me: &
         text.push_str(" (you)");
     }
     let project = agent.project.as_deref().and_then(|project| config.project(project));
-    let folder = crate::runner::places(&factory.home, config, agent).folder;
+    let folder = crate::runner::places(&factory.home, config, agent, &[]).folder;
     match (project, config.agent_folder(agent)) {
         (Some(project), Some(named)) => {
             let _ = write!(text, "\nProject: {}, folder {} ({})", project.name, named.name, folder.display());

@@ -17,12 +17,19 @@ import 'forms.dart';
 import 'history.dart';
 import 'identity.dart';
 import 'login.dart';
+import 'mobile/drawer.dart' show PhoneDrawerHost;
+import 'mobile/haptics.dart';
+import 'mobile/input.dart' show InputKind;
+import 'mobile/metrics.dart'
+    show DenseList, DenseType, PhoneType, Touch, TypeScale;
+import 'mobile/platform_policy.dart';
 import 'phone.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
 import 'usage_wait.dart' show atWork;
-import 'waiting.dart' show waitingIn, waitingLabel;
+import 'inbox.dart' show needsYouCount;
+import 'waiting.dart' show waitingLabel;
 
 /// The rail of Claktories at the window's far left, as thin as the
 /// extension bar.
@@ -112,6 +119,14 @@ class Claktories extends ChangeNotifier {
           )
         : AppLifecycleListener(
             onResume: () {
+              for (final claktory in _open.values) {
+                claktory.backend.check();
+              }
+            },
+            // The screen unlocked (a Mac reports it as shown): checked
+            // before the first frame after, so a connection that died
+            // asleep doesn't show as it was.
+            onShow: () {
               for (final claktory in _open.values) {
                 claktory.backend.check();
               }
@@ -306,7 +321,7 @@ class _Glance {
     connected = backend.connected.value;
     working = connected && agents.any(atWork);
     unseen = agents.any((agent) => agent.unseen);
-    waiting = waitingIn(agents);
+    waiting = needsYouCount(workspace);
     connection = Connection(backend);
     problem = connection.problem ? connection.line : null;
   }
@@ -315,7 +330,8 @@ class _Glance {
   late final bool working;
   late final bool unseen;
 
-  /// What waits for the person's answer in its agents' conversations.
+  /// What waits for the person's answer there, everything Needs you counts:
+  /// agents', chats' and pipes'.
   late final int waiting;
 
   /// How it's connected.
@@ -538,6 +554,7 @@ class _Tile extends StatelessWidget {
     required this.glance,
     required this.selected,
     required this.hovered,
+    this.size = 28,
   });
 
   final Claktory claktory;
@@ -545,6 +562,9 @@ class _Tile extends StatelessWidget {
   final _Glance glance;
   final bool selected;
   final bool hovered;
+
+  /// 28px in the rail and the list; larger in a phone's drawer.
+  final double size;
 
   @override
   Widget build(BuildContext context) {
@@ -554,7 +574,7 @@ class _Tile extends StatelessWidget {
         ? palette.textFaint
         : own ?? (selected || hovered ? palette.text : palette.textMuted);
     return SizedBox.square(
-      dimension: 28,
+      dimension: size,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -595,7 +615,7 @@ class _Tile extends StatelessWidget {
           Center(
             child: claktory.key.isEmpty
                 ? CustomPaint(
-                    size: const Size.square(16),
+                    size: Size.square(16 * size / 28),
                     painter: _LaptopPainter(color),
                   )
                 : Text(
@@ -604,6 +624,9 @@ class _Tile extends StatelessWidget {
                       color: color,
                       fontWeight: FontWeight.w600,
                       height: 1,
+                      fontSize: size == 28
+                          ? null
+                          : (TextStyles.caption.fontSize ?? 11) * size / 28,
                     ),
                   ),
           ),
@@ -793,7 +816,9 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
           child: TextField(
             controller: _name,
             placeholder: machine,
-            autofocus: true,
+            kind: InputKind.text,
+            // Not over a phone's form: the name is there already.
+            autofocus: !touchFirst(context),
             onSubmitted: (_) => _save(),
           ),
         ),
@@ -877,7 +902,7 @@ class ClaktoriesBackRow extends StatelessWidget {
         waiting: others.any((other) => _Glance(other).waiting > 0),
         onTap: back.back,
         // How the one showing is connected, at the top of its agents.
-        trailing: _PhoneConnection(shown.backend),
+        trailing: PhoneConnectionWord(shown.backend),
       ),
     );
   }
@@ -900,7 +925,7 @@ class _BackRow extends StatelessWidget {
   /// place of the news dot.
   final bool waiting;
 
-  /// At its end, such as [_PhoneConnection].
+  /// At its end, such as [PhoneConnectionWord].
   final Widget? trailing;
 
   @override
@@ -912,8 +937,11 @@ class _BackRow extends StatelessWidget {
         label: 'Back to $label',
         child: Pressable(
           onTap: onTap,
-          builder: (context, hovered) => SizedBox(
-            height: 44,
+          // The whole row takes the tap, not only its words.
+          builder: (context, hovered) => Container(
+            color: const Color(0x00000000),
+            // A finger's height, taller as the text grows.
+            constraints: const BoxConstraints(minHeight: 44),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: Space.s),
               child: Row(
@@ -924,10 +952,14 @@ class _BackRow extends StatelessWidget {
                     color: hovered ? palette.text : palette.textMuted,
                   ),
                   const SizedBox(width: Space.xs),
-                  Text(
-                    label,
-                    style: TextStyles.label.copyWith(
-                      color: hovered ? palette.text : palette.textMuted,
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: PhoneType.label.copyWith(
+                        color: hovered ? palette.text : palette.textMuted,
+                      ),
                     ),
                   ),
                   if (waiting || news) ...[
@@ -937,10 +969,13 @@ class _BackRow extends StatelessWidget {
                       size: 7,
                     ),
                   ],
-                  if (trailing case final trailing?) ...[
-                    const Spacer(),
-                    trailing,
-                  ],
+                  if (trailing case final trailing?)
+                    Expanded(
+                      child: Align(
+                        alignment: AlignmentDirectional.centerEnd,
+                        child: trailing,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -953,8 +988,8 @@ class _BackRow extends StatelessWidget {
 
 /// On a phone, the connection of the Claktory showing, in a word with its
 /// mark ("Connected", "Reconnecting…"); a tap opens [ConnectionDialog].
-class _PhoneConnection extends StatelessWidget {
-  const _PhoneConnection(this.backend);
+class PhoneConnectionWord extends StatelessWidget {
+  const PhoneConnectionWord(this.backend, {super.key});
 
   final Backend backend;
 
@@ -971,25 +1006,40 @@ class _PhoneConnection extends StatelessWidget {
           (context, close) => ConnectionDialog(backend: backend, close: close),
         ),
         builder: (context, hovered) => ExcludeSemantics(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Space.xs,
-              vertical: Space.s,
+          child: ConstrainedBox(
+            // A finger's height, however short the word; a row's in the
+            // drawer.
+            constraints: BoxConstraints(
+              minHeight: PhonePlatformPolicy.least(
+                context,
+                DenseList.of(context) ? Touch.denseLine : Touch.target,
+              ),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ConnectionDot(link: connection.link),
-                const SizedBox(width: Space.xs + 2),
-                Text(
-                  connection.short,
-                  style: TextStyles.caption.copyWith(
-                    color: connection.problem
-                        ? palette.danger
-                        : palette.textFaint,
-                  ),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              widthFactor: 1,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ConnectionDot(link: connection.link),
+                    const SizedBox(width: Space.xs + 2),
+                    Flexible(
+                      child: Text(
+                        connection.short,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TypeScale.of(context).caption.copyWith(
+                          color: connection.problem
+                              ? palette.danger
+                              : palette.textFaint,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -1040,10 +1090,16 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
     final Widget child;
     switch (_screen) {
       case _PhoneScreen.claktory:
+        // The drawer sits over the Claktory's window, so it stays open as
+        // another takes its place.
         child = _BackToList(
           key: const ValueKey('claktory'),
           back: () => _go(_PhoneScreen.list),
-          child: widget.shell,
+          child: PhoneDrawerHost(
+            rail: PhoneClaktoryRail(onAdd: () => _go(_PhoneScreen.adding)),
+            onClaktories: () => _go(_PhoneScreen.list),
+            child: widget.shell,
+          ),
         );
       case _PhoneScreen.list:
         child = _PhoneScreenFrame(
@@ -1076,6 +1132,150 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
       child: child,
+    );
+  }
+}
+
+/// The drawer's rail: a row for each Claktory, its tile in the middle.
+const _railRow = 46.0;
+const _railTile = 36.0;
+
+/// The Claktories at the drawer's leading edge on a phone: a 36pt tile for
+/// each in a 46pt row, the one showing marked at the edge, then "+" to add
+/// one. A tap shows another (the drawer stays open, to choose an agent in
+/// it); a touch and hold renames or removes one.
+class PhoneClaktoryRail extends StatelessWidget {
+  const PhoneClaktoryRail({super.key, required this.onAdd});
+
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final claktories = ClaktoriesScope.of(context);
+    if (claktories == null) return const SizedBox.shrink();
+    final selected = claktories.selected;
+    return Unselectable(
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: Space.s),
+        children: [
+          for (final claktory in claktories.all)
+            _PhoneRailTile(
+              key: ValueKey(claktory.key),
+              claktory: claktory,
+              selected: claktory == selected,
+              onTap: () {
+                if (claktory == selected) return;
+                unawaited(Haptics.selection());
+                claktories.select(claktory);
+              },
+            ),
+          Semantics(
+            button: true,
+            label: 'Add a Claktory',
+            excludeSemantics: true,
+            child: Pressable(
+              onTap: onAdd,
+              builder: (context, hovered) => SizedBox(
+                height: _railRow,
+                child: Center(
+                  child: Container(
+                    width: _railTile,
+                    height: _railTile,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: hovered ? palette.hover : null,
+                      borderRadius: BorderRadius.circular(Radii.control),
+                      border: Border.all(color: palette.hairline),
+                    ),
+                    child: ExtensionGlyph(
+                      icon: 'plus',
+                      name: '+',
+                      color: palette.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PhoneRailTile extends StatelessWidget {
+  const _PhoneRailTile({
+    super.key,
+    required this.claktory,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Claktory claktory;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return ListenableBuilder(
+      listenable: _Glance.of(claktory),
+      builder: (context, _) {
+        final glance = _Glance(claktory);
+        final name = claktoryName(claktory.backend);
+        return Semantics(
+          button: true,
+          selected: selected,
+          label: name,
+          child: GestureDetector(
+            onLongPress: () => showModal(
+              context,
+              (context, close) =>
+                  ClaktoryForm(claktory: claktory, close: close),
+            ),
+            child: Pressable(
+              onTap: onTap,
+              builder: (context, hovered) => SizedBox(
+                height: _railRow,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // The one showing: a signal mark at the edge.
+                    PositionedDirectional(
+                      start: 0,
+                      top: 10,
+                      bottom: 10,
+                      child: AnimatedOpacity(
+                        duration: Motion.fast,
+                        opacity: selected ? 1 : 0,
+                        child: Container(
+                          width: 3,
+                          decoration: BoxDecoration(
+                            color: palette.signal,
+                            borderRadius:
+                                const BorderRadiusDirectional.horizontal(
+                                  end: Radius.circular(2),
+                                ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    _Tile(
+                      claktory: claktory,
+                      name: name,
+                      glance: glance,
+                      selected: selected,
+                      hovered: hovered,
+                      size: _railTile,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1119,7 +1319,7 @@ class _PhoneScreenFrame extends StatelessWidget {
   }
 }
 
-/// The phone's list of Claktories: a 52pt row for each (its tile, its
+/// The phone's list of Claktories: a 44pt row for each (its tile, its
 /// name and how it's doing), the one showing tinted, and "Add a Claktory".
 /// A long press renames or removes one.
 class ClaktoryList extends StatelessWidget {
@@ -1146,7 +1346,7 @@ class ClaktoryList extends StatelessWidget {
             ),
             child: Text(
               'Claktories',
-              style: TextStyles.title.copyWith(color: palette.text),
+              style: DenseType.title.copyWith(color: palette.text),
             ),
           ),
           for (final claktory in claktories.all)
@@ -1162,8 +1362,13 @@ class ClaktoryList extends StatelessWidget {
             child: Pressable(
               onTap: onAdd,
               builder: (context, hovered) => Container(
-                height: 52,
-                padding: const EdgeInsets.symmetric(horizontal: Space.s),
+                constraints: BoxConstraints(
+                  minHeight: PhonePlatformPolicy.least(context, Touch.denseRow),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.s,
+                  vertical: Space.xs,
+                ),
                 decoration: BoxDecoration(
                   color: hovered ? palette.hover : null,
                   borderRadius: BorderRadius.circular(Radii.control),
@@ -1181,9 +1386,13 @@ class ClaktoryList extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: Space.m),
-                    Text(
-                      'Add a Claktory',
-                      style: TextStyles.body.copyWith(color: palette.textMuted),
+                    Expanded(
+                      child: Text(
+                        'Add a Claktory',
+                        style: DenseType.body.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1229,8 +1438,13 @@ class _ListRow extends StatelessWidget {
             child: Pressable(
               onTap: onTap,
               builder: (context, hovered) => Container(
-                height: 52,
-                padding: const EdgeInsets.symmetric(horizontal: Space.s),
+                constraints: BoxConstraints(
+                  minHeight: PhonePlatformPolicy.least(context, Touch.denseRow),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.s,
+                  vertical: Space.xs,
+                ),
                 decoration: BoxDecoration(
                   color: selected
                       ? palette.selected
@@ -1258,7 +1472,7 @@ class _ListRow extends StatelessWidget {
                             name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyles.body.copyWith(
+                            style: DenseType.body.copyWith(
                               color: palette.text,
                               fontWeight: glance.unseen
                                   ? FontWeight.w600
@@ -1272,7 +1486,7 @@ class _ListRow extends StatelessWidget {
                                 : glance.connection.short,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyles.caption.copyWith(
+                            style: DenseType.caption.copyWith(
                               color: glance.problem != null
                                   ? palette.danger
                                   : palette.textFaint,

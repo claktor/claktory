@@ -50,9 +50,11 @@ Finder _labeled(String label) => find.byWidgetPredicate(
   (widget) => widget is Semantics && widget.properties.label == label,
 );
 
+/// A line in the conversation that isn't the person's: what they haven't
+/// answered yet.
 Entry _entry(int seq) => Entry(
   seq: Int64(seq),
-  user: UserText(text: 'message $seq'),
+  notice: Notice(text: 'message $seq', level: NoticeLevel.NOTICE_LEVEL_INFO),
 );
 
 Transcript _transcript(String agentId, Iterable<int> seqs) => Transcript(
@@ -113,9 +115,11 @@ void main() {
       findsOneWidget,
     );
     expect(_labeled('June has something new'), findsNothing);
-    final mark = find.byType(NeedsYouMark);
     expect(
-      find.descendant(of: mark.first, matching: find.text('2')),
+      find.descendant(
+        of: _labeled('June has 2 things waiting for your answer'),
+        matching: find.text('2'),
+      ),
       findsOneWidget,
     );
     // Only news: the dot, as before.
@@ -124,7 +128,9 @@ void main() {
       _labeled('Omar has 12 things waiting for your answer'),
       findsOneWidget,
     );
-    expect(find.text('9+'), findsOneWidget);
+    // Omar's 12, and Needs you's 14 at the top of the sidebar.
+    expect(find.text('9+'), findsNWidgets(2));
+    expect(_labeled('14 things are waiting for your answer'), findsOneWidget);
   });
 
   testWidgets('what waits out of sight shows where it is folded away', (
@@ -202,8 +208,138 @@ void main() {
     await settle(tester);
     expect(_onScreen(tester, 'message 99', height: 900), isTrue);
     await tester.tap(find.text('Lena').first);
-    await settle(tester);
+    await pumpFrames(tester);
     expect(_atTop(tester, 'message 40'), isTrue);
+  });
+
+  /// Lena's conversation, [seqs], with the person's own message at each of
+  /// [mine]; selecting an agent loads its conversation, as the backend does.
+  Harness withConversations(
+    Workspace snapshot,
+    Map<String, Transcript> conversations,
+  ) {
+    final harness = Harness(snapshot);
+    harness.backend.onSend = (message) {
+      if (!message.hasSelectAgent()) return;
+      final id = message.selectAgent.agentId;
+      harness.backend.workspace.apply(
+        harness.backend.workspace.workspace.deepCopy()..selectedAgentId = id,
+      );
+      final conversation = conversations[id];
+      if (conversation != null) harness.backend.transcript.load(conversation);
+    };
+    return harness;
+  }
+
+  Transcript lenas({List<int> mine = const []}) => Transcript(
+    agentId: 'lena',
+    entries: [
+      for (var i = 0; i < 100; i++)
+        mine.contains(i)
+            ? Entry(
+                seq: Int64(i),
+                user: UserText(text: 'message $i'),
+              )
+            : _entry(i),
+    ],
+  );
+
+  testWidgets("a card the person has written past is old news: the "
+      "conversation opens at its end, and the card's mark goes to it", (
+    tester,
+  ) async {
+    final harness = withConversations(
+      _workspace([
+        _agent('june', 'June'),
+        _agent('lena', 'Lena', waiting: [40]),
+      ])..selectedAgentId = 'june',
+      {
+        'lena': lenas(mine: [60]),
+      },
+    );
+    harness.backend.transcript.load(_transcript('june', [1, 2]));
+    await harness.show(tester);
+    await settle(tester);
+
+    await tester.tap(find.text('Lena'));
+    await pumpFrames(tester);
+    expect(_onScreen(tester, 'message 99', height: 900), isTrue);
+    expect(find.text('message 40'), findsNothing);
+
+    await tester.tap(_labeled('Lena has something waiting for your answer'));
+    await pumpFrames(tester);
+    expect(_atTop(tester, 'message 40'), isTrue);
+  });
+
+  testWidgets('selecting the open agent again keeps the conversation where '
+      'it is', (tester) async {
+    final harness = withConversations(
+      _workspace([_agent('june', 'June'), _agent('lena', 'Lena')])
+        ..selectedAgentId = 'june',
+      {'lena': lenas()},
+    );
+    harness.backend.transcript.load(_transcript('june', [1, 2]));
+    await harness.show(tester);
+    await settle(tester);
+    await tester.tap(find.text('Lena'));
+    await pumpFrames(tester);
+    await tester.drag(find.text('message 95'), const Offset(0, 600));
+    await pumpFrames(tester);
+    final shown = [
+      for (var i = 0; i < 100; i++)
+        if (_onScreen(tester, 'message $i', height: 900)) i,
+    ].first;
+    final place = tester.getTopLeft(find.text('message $shown'));
+    final loads = harness.backend.transcript.loads;
+
+    await tester.tap(find.text('Lena').first);
+    await pumpFrames(tester);
+    expect(harness.backend.transcript.loads, loads, reason: 'not reloaded');
+    expect(tester.getTopLeft(find.text('message $shown')), place);
+  });
+
+  testWidgets("switching back after changing the other agent's settings "
+      'opens at the end', (tester) async {
+    final harness = withConversations(
+      _workspace([_agent('mike', 'Mike'), _agent('rivet', 'Rivet')])
+        ..selectedAgentId = 'rivet',
+      {
+        'rivet': Transcript(
+          agentId: 'rivet',
+          entries: [for (var i = 0; i < 100; i++) _entry(i)],
+        ),
+        'mike': Transcript(
+          agentId: 'mike',
+          entries: [for (var i = 0; i < 100; i++) _entry(i)],
+        ),
+      },
+    );
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'rivet',
+        entries: [for (var i = 0; i < 100; i++) _entry(i)],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(_onScreen(tester, 'message 99', height: 900), isTrue);
+
+    // Mike's model changes, as its settings form does.
+    await harness.apply(
+      tester,
+      harness.backend.workspace.workspace.deepCopy()
+        ..agents.firstWhere((a) => a.id == 'mike').model =
+            'anthropic/claude-fable-5',
+    );
+    await tester.tap(find.text('Mike'));
+    await pumpFrames(tester);
+    expect(_onScreen(tester, 'message 99', height: 900), isTrue);
+    expect(find.text('message 0'), findsNothing);
+
+    await tester.tap(find.text('Rivet'));
+    await pumpFrames(tester);
+    expect(_onScreen(tester, 'message 99', height: 900), isTrue);
+    expect(find.text('message 0'), findsNothing);
   });
 
   group('the conversation', () {
@@ -277,13 +413,47 @@ void main() {
       );
       expect(_onScreen(tester, 'message 399'), isTrue);
 
-      reveal.value = (agentId: 'a', seq: 150);
+      reveal.reach(Agent(id: 'a', waitingSeqs: [Int64(150)]));
       // Earlier ones than it are still loading, so nothing settles.
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
       expect(asked, [150]);
       expect(_atTop(tester, 'message 150'), isTrue);
+      expect(reveal.value, isNull);
+    });
+
+    testWidgets('goes to the card in the very next frame, with no frame '
+        'of the old place in between', (tester) async {
+      final store = TranscriptStore()
+        ..load(_transcript('a', [for (var i = 0; i < 200; i++) i]));
+      final reveal = EntryReveal();
+      await showView(tester, store, reveal);
+      expect(_onScreen(tester, 'message 199'), isTrue);
+      reveal.reach(Agent(id: 'a', waitingSeqs: [Int64(120)]));
+      await tester.pump();
+      expect(_atTop(tester, 'message 120'), isTrue);
+    });
+
+    testWidgets('opening an agent leaves a card older than what it opened '
+        'with where it is', (tester) async {
+      final store = TranscriptStore()
+        ..load(
+          _transcript('a', [for (var i = 300; i < 400; i++) i])
+            ..hasEarlier = true,
+        );
+      final reveal = EntryReveal();
+      final asked = <int>[];
+      await showView(
+        tester,
+        store,
+        reveal,
+        loadFrom: (seq) async => asked.add(seq),
+      );
+      reveal.oldestWaiting(Agent(id: 'a', waitingSeqs: [Int64(150)]));
+      await tester.pumpAndSettle();
+      expect(asked, isEmpty);
+      expect(_onScreen(tester, 'message 399'), isTrue);
       expect(reveal.value, isNull);
     });
 

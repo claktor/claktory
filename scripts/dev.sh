@@ -20,7 +20,7 @@ APP_ID="dev.factory.app.dev"
 APP="$ROOT/app/build/Factory Dev.app"
 
 backend() {
-  cargo build --manifest-path "$ROOT/Cargo.toml" -p factoryd -p claktory-apps
+  cargo build --manifest-path "$ROOT/Cargo.toml" -p factoryd -p claktory-apps -p claktory-speech
   mkdir -p "$DEV_HOME/bin"
   local pidfile="$DEV_HOME/factoryd.pid"
   if [[ -f "$pidfile" ]]; then
@@ -39,6 +39,9 @@ backend() {
   # The host that runs apps, which factoryd finds beside itself.
   cp "$ROOT/target/debug/claktory-apps" "$DEV_HOME/bin/claktory-apps.new"
   mv -f "$DEV_HOME/bin/claktory-apps.new" "$DEV_HOME/bin/claktory-apps"
+  # Speech recognition for voice messages, which factoryd also finds beside itself.
+  cp "$ROOT/target/debug/claktory-speech" "$DEV_HOME/bin/claktory-speech.new"
+  mv -f "$DEV_HOME/bin/claktory-speech.new" "$DEV_HOME/bin/claktory-speech"
   rm -f "$DEV_HOME/bin/trial.json"
   # Own session: the backend outlives this script and whatever ran it.
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$ROOT/target/debug/factoryd" --dev supervise \

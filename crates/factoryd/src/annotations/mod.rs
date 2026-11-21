@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime};
 
-use factory_agent::{Event, EventSource};
 use factory_protocol::v1::{self, server_message::Body};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -35,7 +34,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use self::anchor::{Doc, Mapping, Quote, Space};
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 use crate::transcript::now_ms;
 
 pub(crate) const SCHEMA: &str = "
@@ -850,7 +849,7 @@ impl Factory {
             && self.lock().config.agent(&agent).is_some()
         {
             let text = format!("{summary}\n{details}");
-            let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+            let event = host_event(summary);
             self.deliver_event(&agent, text, event);
         }
         Ok(())
@@ -979,7 +978,7 @@ impl Factory {
             }
             (text, summary)
         };
-        let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+        let event = host_event(summary);
         self.deliver_event(agent, text, event);
         Ok(())
     }

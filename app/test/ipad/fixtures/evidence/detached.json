@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "thread": {
+    "id": "t-63",
+    "status": "DETACHED",
+    "anchored_sha256": "4d967f33427815e06ce250dc49ab7cf4545ac738e5f98cc6aa1efcbe94b1c427",
+    "current_sha256": "f721c45d8a3099c22c1ab580fcc85aa05940aef7ae02771a226d6e345c418d74"
+  },
+  "item": {
+    "annotation_id": "ann-63",
+    "ink_layer_id": "layer-derivation-excerpt-1",
+    "layer_revision": 1,
+    "source_sha256": "4d967f33427815e06ce250dc49ab7cf4545ac738e5f98cc6aa1efcbe94b1c427",
+    "excerpt_text": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0."
+  }
+}

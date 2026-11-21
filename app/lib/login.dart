@@ -9,6 +9,9 @@ import 'backend.dart';
 import 'controls.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'identity.dart';
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/lines.dart';
 import 'loopback_forward.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -251,7 +254,7 @@ class _LoginPanelState extends State<LoginPanel> {
               failed
                   ? "Couldn't sign in with ${widget.method}"
                   : 'Signing in with ${widget.method}…',
-              style: TextStyles.label.copyWith(color: palette.text),
+              style: TypeScale.of(context).label.copyWith(color: palette.text),
             ),
           ),
         ],
@@ -270,7 +273,7 @@ class _LoginPanelState extends State<LoginPanel> {
           flow.error,
           about:
               "Signing in to ${flow.providerId} with ${widget.method} didn't work.",
-          style: TextStyles.body.copyWith(color: palette.danger),
+          style: TypeScale.of(context).body.copyWith(color: palette.danger),
         ),
       );
       add(
@@ -306,10 +309,12 @@ class _LoginPanelState extends State<LoginPanel> {
                 flow.instructions.isEmpty
                     ? 'Finish signing in with your browser.'
                     : flow.instructions,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textMuted),
               ),
               const SizedBox(height: Space.s),
-              Row(
+              ControlsLine(
+                gap: Space.xs,
                 children: [
                   Button(
                     label: scope.login.opened(flow.url)
@@ -320,7 +325,6 @@ class _LoginPanelState extends State<LoginPanel> {
                       setState(() {});
                     },
                   ),
-                  const SizedBox(width: Space.xs),
                   Button(
                     label: _copied == flow.url ? 'Copied' : 'Copy link',
                     onPressed: () => _copy(flow.url),
@@ -350,7 +354,8 @@ class _LoginPanelState extends State<LoginPanel> {
         add(
           Text(
             'Starting…',
-            style: TextStyles.body.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textFaint),
           ),
         );
       }
@@ -358,7 +363,8 @@ class _LoginPanelState extends State<LoginPanel> {
         add(
           Text(
             flow.progress,
-            style: TextStyles.caption.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
           ),
         );
       }
@@ -401,12 +407,13 @@ class _LoginPanelState extends State<LoginPanel> {
       children: [
         Text(
           host.isEmpty ? 'Enter this code' : 'Enter this code at $host',
-          style: TextStyles.caption.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.xs),
         Text(
           flow.userCode,
-          style: TextStyles.title.copyWith(
+          style: TypeScale.of(context).title.copyWith(
             fontFamily: TextStyles.mono,
             fontSize: 28,
             letterSpacing: 2,
@@ -414,15 +421,14 @@ class _LoginPanelState extends State<LoginPanel> {
           ),
         ),
         const SizedBox(height: Space.s),
-        Row(
+        ControlsLine(
+          gap: Space.xs,
           children: [
-            if (flow.verificationUrl.isNotEmpty) ...[
+            if (flow.verificationUrl.isNotEmpty)
               Button(
                 label: 'Open $host',
                 onPressed: () => scope.login.open(flow.verificationUrl),
               ),
-              const SizedBox(width: Space.xs),
-            ],
             Button(
               label: _copied == flow.userCode ? 'Copied' : 'Copy code',
               onPressed: () => _copy(flow.userCode),
@@ -474,7 +480,7 @@ class _PromptViewState extends State<_PromptView> {
           if (prompt.message.isNotEmpty) ...[
             Text(
               prompt.message,
-              style: TextStyles.body.copyWith(color: palette.text),
+              style: TypeScale.of(context).body.copyWith(color: palette.text),
             ),
             const SizedBox(height: Space.s),
           ],
@@ -506,40 +512,41 @@ class _PromptViewState extends State<_PromptView> {
         if (message.isNotEmpty) ...[
           Text(
             message,
-            style: (code ? TextStyles.caption : TextStyles.body).copyWith(
-              color: code ? palette.textMuted : palette.text,
-            ),
+            style:
+                (code
+                        ? TypeScale.of(context).caption
+                        : TypeScale.of(context).body)
+                    .copyWith(color: code ? palette.textMuted : palette.text),
           ),
           const SizedBox(height: Space.xs + 2),
         ],
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _answer,
-                placeholder: prompt.placeholder.isNotEmpty
-                    ? prompt.placeholder
-                    : code
-                    ? 'Address or code'
-                    : prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET
-                    ? 'Paste your API key'
-                    : '',
-                obscureText:
-                    prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET,
-                autofocus: !code,
-                onSubmitted: (_) => _submit(),
-              ),
+        ActionLine(
+          lead: TextField(
+            controller: _answer,
+            placeholder: prompt.placeholder.isNotEmpty
+                ? prompt.placeholder
+                : code
+                ? 'Address or code'
+                : prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET
+                ? 'Paste your API key'
+                : '',
+            kind: prompt.kind == LoginPromptKind.LOGIN_PROMPT_KIND_SECRET
+                ? InputKind.secret
+                : InputKind.text,
+            // An address, a code, a key: as typed.
+            autocorrect: false,
+            textCapitalization: TextCapitalization.none,
+            autofocus: !code,
+            onSubmitted: (_) => _submit(),
+          ),
+          action: ListenableBuilder(
+            listenable: _answer,
+            builder: (context, _) => Button(
+              label: 'Continue',
+              primary: !code,
+              onPressed: _answer.text.trim().isEmpty ? null : _submit,
             ),
-            const SizedBox(width: Space.s),
-            ListenableBuilder(
-              listenable: _answer,
-              builder: (context, _) => Button(
-                label: 'Continue',
-                primary: !code,
-                onPressed: _answer.text.trim().isEmpty ? null : _submit,
-              ),
-            ),
-          ],
+          ),
         ),
       ],
     );
@@ -619,7 +626,8 @@ class _ProviderCardState extends State<ProviderCard> {
                   children: [
                     Text(
                       provider.name,
-                      style: TextStyles.label.copyWith(color: palette.text),
+                      style: TypeScale.of(context).label
+                          .copyWith(color: palette.text),
                     ),
                     if (!listsAccounts) ...[
                       const SizedBox(height: 2),
@@ -627,7 +635,7 @@ class _ProviderCardState extends State<ProviderCard> {
                         signedIn
                             ? 'Signed in with ${provider.signedInWith}'
                             : 'Not signed in',
-                        style: TextStyles.caption.copyWith(
+                        style: TypeScale.of(context).caption.copyWith(
                           color: signedIn
                               ? palette.textMuted
                               : palette.textFaint,
@@ -667,7 +675,8 @@ class _ProviderCardState extends State<ProviderCard> {
               Text(
                 'When one account reaches its limit, Claktory switches to '
                 'the next. When all have, agents wait until one resets.',
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
               ),
             ],
           ],
@@ -682,7 +691,8 @@ class _ProviderCardState extends State<ProviderCard> {
               children: [
                 Text(
                   'Keep conversations ready',
-                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
                 ),
                 SizedBox(
                   width: 140,
@@ -711,7 +721,8 @@ class _ProviderCardState extends State<ProviderCard> {
               '${provider.name} keeps a conversation ready so the next '
               'message is cheaper. An hour costs a bit more each time (2× '
               'instead of 1.25×) and saves money after longer breaks.',
-              style: TextStyles.caption.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textMuted),
             ),
           ],
           if (flow != null) ...[
@@ -910,7 +921,7 @@ class _AccountRowState extends State<_AccountRow> {
       active: account.exhaustedUntil > 0,
       builder: (context, now) {
         final state = accountState(provider, account, now);
-        final caption = TextStyles.caption.copyWith(
+        final caption = TypeScale.of(context).caption.copyWith(
           color: palette.textMuted,
           fontFeatures: const [FontFeature.tabularFigures()],
         );
@@ -921,7 +932,8 @@ class _AccountRowState extends State<_AccountRow> {
             '${formatPercent(weekly.usedPercent)} of the weekly limit used',
         ];
         final billing = _billingUrl(provider.id);
-        final danger = TextStyles.caption.copyWith(color: palette.danger);
+        final danger = TypeScale.of(context).caption
+            .copyWith(color: palette.danger);
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: Space.s),
           child: Row(
@@ -957,6 +969,7 @@ class _AccountRowState extends State<_AccountRow> {
                           child: TextField(
                             controller: name,
                             placeholder: 'Name',
+                            kind: InputKind.text,
                             autofocus: true,
                             onSubmitted: (_) => _saveName(),
                           ),
@@ -969,7 +982,8 @@ class _AccountRowState extends State<_AccountRow> {
                             : account.label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyles.body.copyWith(color: palette.text),
+                        style: TypeScale.of(context).body
+                            .copyWith(color: palette.text),
                       ),
                     Text(details.join(' · '), style: caption),
                     if (account.outOfCredit)

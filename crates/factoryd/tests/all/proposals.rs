@@ -21,6 +21,7 @@ fn decide(agent: &str, proposal: &str, approve: bool, comment: &str) -> client_m
         proposal_id: proposal.into(),
         approve,
         comment: comment.into(),
+        ..Default::default()
     })
 }
 

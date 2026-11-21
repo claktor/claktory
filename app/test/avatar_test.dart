@@ -8,12 +8,14 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'map_fixture.dart';
+import 'mobile_settings_test.dart' show avatarChoices;
 
 Person _matt({String initials = 'MS'}) => Person(
   name: initials.isEmpty ? '' : 'Matt Smith',
   initials: initials,
   avatarFrom: '#4F46E5',
   avatarTo: '#7C3AED',
+  avatarChoices: avatarChoices,
 );
 
 Workspace _workspace({Person? person}) => Workspace(
@@ -121,6 +123,17 @@ void main() {
     await tester.tap(find.text('Shuffle colors'));
     await settle(tester);
     expect(harness.backend.sent.last.hasShuffleAvatar(), isTrue);
+    // A plain shuffle names no color.
+    expect(harness.backend.sent.last.shuffleAvatar.hasChoice(), isFalse);
+
+    // Or a color picked from the ones there are; the shown one is ringed
+    // and picks nothing.
+    await tester.tap(find.byKey(const ValueKey('avatar-color-0')));
+    await settle(tester);
+    expect(harness.backend.sent.last.shuffleAvatar.hasChoice(), isFalse);
+    await tester.tap(find.byKey(const ValueKey('avatar-color-8')));
+    await settle(tester);
+    expect(harness.backend.sent.last.shuffleAvatar.choice, 8);
 
     // The backend's new colors show at once, everywhere.
     harness.backend.workspace.apply(

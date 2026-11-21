@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Builds Claktory for iPhone, for the Simulator, and with --run opens it there.
 #
-#   scripts/ios.sh [--dev] [--run]
+#   scripts/ios.sh [--dev] [--run] [--target FILE] [--device UDID]
+#                  [--define KEY=VALUE]…
 #
 # --dev builds Claktory Dev (bundle id com.claktory.app.dev, its own icon and
 # keychain), as scripts/dev.sh does for the Mac; without it, Claktory
 # (com.claktory.app). --run installs it in the booted Simulator, booting an
-# iPhone first when none is, and opens it.
+# iPhone first when none is, and opens it; with --device, in that Simulator
+# instead (its UDID, from `xcrun simctl list devices`), so each agent keeps
+# to its own.
+#
+# --target builds another entry point than lib/main.dart, such as an
+# integration test, and --define passes it a --dart-define. That's how to
+# run an integration test as Claktory Dev, paired as it already is: `flutter
+# test integration_test/… -d` would build com.claktory.app instead.
+#
+#   scripts/ios.sh --dev --run --device <UDID> \
+#     --target integration_test/mobile_navigation_test.dart \
+#     --define REPORT=/tmp/navigation.txt
 #
 # The phone app has no backend of its own: it pairs with a Claktory through
 # the private tunnel. Signing for a device, TestFlight and push aren't set up.
@@ -15,20 +27,27 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dev=false
 run=false
-for arg in "$@"; do
-  case "$arg" in
+target=""
+device=""
+defines=()
+usage="usage: scripts/ios.sh [--dev] [--run] [--target FILE] [--device UDID] [--define KEY=VALUE]…"
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dev) dev=true ;;
     --run) run=true ;;
-    *) echo "usage: scripts/ios.sh [--dev] [--run]" >&2; exit 2 ;;
+    --target) target="${2:?$usage}"; shift ;;
+    --device) device="${2:?$usage}"; shift ;;
+    --define) defines+=("--dart-define=${2:?$usage}"); shift ;;
+    *) echo "$usage" >&2; exit 2 ;;
   esac
+  shift
 done
+build=(flutter build ios --simulator --debug)
+if [ -n "$target" ]; then build+=("--target=$target"); fi
 
 cd "$root/app"
-if $dev; then
-  flutter build ios --simulator --debug --dart-define=FACTORY_DEV=true
-else
-  flutter build ios --simulator --debug
-fi
+if $dev; then build+=(--dart-define=FACTORY_DEV=true); fi
+"${build[@]}" ${defines[@]+"${defines[@]}"}
 app="$root/app/build/ios/iphonesimulator/Runner.app"
 id=com.claktory.app
 
@@ -54,7 +73,17 @@ if $dev; then
 fi
 echo "Built $app ($id)"
 
-if $run; then
+if $run && [ -n "$device" ]; then
+  if ! xcrun simctl list devices booted | grep -q "$device"; then
+    xcrun simctl boot "$device"
+  fi
+  # The on-screen keyboard even with the Mac's keyboard attached, as on a
+  # phone: else the Simulator hides it, and what's typed covers nothing.
+  xcrun simctl spawn "$device" defaults write com.apple.keyboard.preferences \
+    AutomaticMinimizationEnabled -bool false
+  xcrun simctl install "$device" "$app"
+  xcrun simctl launch "$device" "$id"
+elif $run; then
   if ! xcrun simctl list devices booted | grep -q Booted; then
     device="$(xcrun simctl list devices available | sed -n 's/^ *\(iPhone [^(]*\) (\([0-9A-F-]*\)).*/\2/p' | head -1)"
     xcrun simctl boot "$device"

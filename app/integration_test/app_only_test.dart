@@ -54,9 +54,9 @@ void main() {
         await step();
       }
       final view = binding.renderViews.first;
+      // The view's layer is already scaled to physical pixels.
       final image = await (view.debugLayer! as OffsetLayer).toImage(
-        Offset.zero & view.size,
-        pixelRatio: view.flutterView.devicePixelRatio,
+        Offset.zero & view.size * view.flutterView.devicePixelRatio,
       );
       final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
       final file = File('$_shots/$name.png');

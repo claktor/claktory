@@ -86,7 +86,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 20] = [
+const MIGRATIONS: [&str; 26] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -166,6 +166,12 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::usage_report::SCHEMA,
     crate::extensions::devices::SCHEMA,
     crate::onboarding::SCHEMA,
+    crate::pipe_link::SCHEMA,
+    crate::pipes::SCHEMA,
+    crate::speech::voice::SCHEMA,
+    crate::extensions::ask::SCHEMA,
+    crate::chats::SCHEMA,
+    crate::move_import::SCHEMA,
 ];
 
 /// A background task as recorded.
@@ -209,6 +215,12 @@ pub(crate) enum Outcome {
 
 pub(crate) struct Store {
     db: Mutex<Connection>,
+}
+
+/// The schema version this backend writes: a database above it was made by
+/// a newer one.
+pub(crate) fn schema_version() -> i64 {
+    MIGRATIONS.len() as i64 + 1
 }
 
 /// Creates version 1 when needed, then applies later schemas in order, each in its own transaction.
@@ -263,12 +275,20 @@ impl Store {
         let sent_from = queued.sent_from.as_ref().and_then(|from| serde_json::to_string(from).ok());
         let client_id = Some(queued.client_id.as_str()).filter(|id| !id.is_empty());
         let attachments = Some(&queued.attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
+        let voice = queued.voice.as_ref().and_then(|voice| serde_json::to_string(voice).ok());
         let db = self.db();
         db.execute(
-            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from, client_id, attachments],
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from, client_id, attachments, voice],
         )?;
         Ok(db.last_insert_rowid())
+    }
+
+    /// A voice message's transcription changed: what was heard, and how.
+    pub(crate) fn set_voice(&self, id: i64, text: &str, voice: &crate::speech::voice::Voice) -> Result<(), rusqlite::Error> {
+        let voice = serde_json::to_string(voice).unwrap_or_default();
+        self.db().execute("UPDATE messages SET text = ?2, voice = ?3 WHERE id = ?1", params![id, text, voice])?;
+        Ok(())
     }
 
     pub(crate) fn settle(&self, messages: &[Queued], outcome: Outcome) -> Result<(), rusqlite::Error> {
@@ -291,7 +311,7 @@ impl Store {
     pub(crate) fn waiting(&self) -> Result<BTreeMap<String, Vec<Queued>>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
+            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
         )?;
         let mut rows = statement.query([])?;
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
@@ -311,6 +331,7 @@ impl Store {
                 sent_from,
                 client_id: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
                 attachments: row.get::<_, Option<String>>(10)?.and_then(|list| serde_json::from_str(&list).ok()).unwrap_or_default(),
+                voice: row.get::<_, Option<String>>(11)?.and_then(|voice| serde_json::from_str(&voice).ok()),
             });
         }
         Ok(waiting)
@@ -545,6 +566,7 @@ fn source_name(source: EventSource) -> &'static str {
         EventSource::Task => "task",
         EventSource::Monitor => "monitor",
         EventSource::App => "app",
+        EventSource::Pipe => "pipe",
     }
 }
 
@@ -556,6 +578,7 @@ fn source_named(name: &str) -> Option<EventSource> {
         "task" => Some(EventSource::Task),
         "monitor" => Some(EventSource::Monitor),
         "app" => Some(EventSource::App),
+        "pipe" => Some(EventSource::Pipe),
         _ => None,
     }
 }

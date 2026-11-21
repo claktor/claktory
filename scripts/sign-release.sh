@@ -44,6 +44,8 @@ SUPERVISOR="$DIR/supervisor/Claktory Agents.app"
 [[ -d "$SUPERVISOR" ]] || SUPERVISOR=""
 APPS_HOST="$DIR/claktory-apps"
 [[ -f "$APPS_HOST" ]] || APPS_HOST=""
+SPEECH="$DIR/claktory-speech"
+[[ -f "$SPEECH" ]] || SPEECH=""
 
 IDENTITY="$(developer_id_identity)"
 KEY=false
@@ -79,6 +81,11 @@ if [[ -n "$APPS_HOST" ]]; then
   sign --identifier dev.factory.claktory-apps --entitlements "$ROOT/scripts/claktory-apps.entitlements" "$APPS_HOST"
   codesign --verify --strict "$APPS_HOST"
 fi
+# The speech host: no entitlements (its Metal library is embedded; no JIT).
+if [[ -n "$SPEECH" ]]; then
+  sign --identifier dev.factory.claktory-speech "$SPEECH"
+  codesign --verify --strict "$SPEECH"
+fi
 # The supervisor's app: its identity is its bundle's (dev.factory.supervisor),
 # which a Developer Tools grant keeps across reinstalls.
 if [[ -n "$SUPERVISOR" ]]; then
@@ -91,6 +98,7 @@ HELPERS="$APP/Contents/Helpers"
 if [[ -d "$HELPERS" ]]; then
   cp "$DIR/factoryd" "$HELPERS/factoryd"
   if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$HELPERS/claktory-apps"; fi
+  if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$HELPERS/claktory-speech"; fi
   if [[ -n "$SUPERVISOR" ]]; then
     rm -rf "$HELPERS/Claktory Agents.app"
     ditto "$SUPERVISOR" "$HELPERS/Claktory Agents.app"
@@ -109,6 +117,7 @@ mkdir "$STAGE/release"
 ditto "$APP" "$STAGE/release/$(basename "$APP")"
 cp "$DIR/factoryd" "$STAGE/release/factoryd"
 if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$STAGE/release/claktory-apps"; fi
+if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$STAGE/release/claktory-speech"; fi
 if [[ -n "$SUPERVISOR" ]]; then
   ditto "$SUPERVISOR" "$STAGE/release/supervisor/$(basename "$SUPERVISOR")"
 fi

@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use factory_agent::{Event, EventSource, Tool, ToolResult};
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1::{self, ProposalState};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
@@ -20,7 +20,7 @@ use serde_json::json;
 
 use crate::config::{self, AgentConfig, Config};
 use crate::extensions::{agents, enabled, switch};
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 use crate::store::Store;
 use crate::transcript::{Transcript, now_ms};
 
@@ -88,9 +88,12 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
     }
     let person = {
         let inner = factory.lock();
-        let Some(me) = inner.config.agent(agent) else { return Err("You're no longer in this Claktory.".to_owned()) };
-        if is_admin(me) {
-            return Err("You're an admin agent: message agents directly instead.".to_owned());
+        // A chat proposes as any agent does; it's never an admin.
+        if !crate::chats::kept(factory, agent) {
+            let me = crate::extensions::caller(&inner.config, agent)?;
+            if is_admin(me) {
+                return Err("You're an admin agent: message agents directly instead.".to_owned());
+            }
         }
         let Some(rivet) = rivet(&inner.config) else {
             return Err("This Claktory has no Rivet (admin agent) to propose to, so nothing was proposed.".to_owned());
@@ -201,7 +204,12 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     let (rivet_name, person, delivery) = {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(from) = config.agent(agent) else { return Err(RequestError::UnknownAgent(agent.to_owned())) };
+        // Signed as in any message to Rivet; a chat by its title.
+        let from = match config.agent(agent) {
+            Some(from) => Some(from),
+            None if crate::chats::kept(factory, agent) => None,
+            None => return Err(RequestError::UnknownAgent(agent.to_owned())),
+        };
         let rivet = rivet(config);
         let delivery = match rivet {
             _ if !approve => None,
@@ -218,7 +226,11 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
                     message.push_str(comment);
                     message.push_str("\n\n");
                 }
-                let _ = write!(message, "{} proposes:\n\n{}", agents::signed(config, from, rivet), row.text);
+                let signed = match from {
+                    Some(from) => agents::signed(config, from, rivet),
+                    None => crate::chats::signed(factory, agent),
+                };
+                let _ = write!(message, "{signed} proposes:\n\n{}", row.text);
                 Some((rivet.id.clone(), message))
             }
         };
@@ -261,7 +273,7 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     }
     summary.push('.');
     let text = format!("{summary}\n\nYour proposal:\n{}", row.text);
-    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+    let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
 }

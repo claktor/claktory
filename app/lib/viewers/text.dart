@@ -112,6 +112,21 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
       // Selected with the mouse and copied with ⌘C or a right click's
       // Copy, like the conversation; the line numbers stay out of it.
       final text = SelectableArea(
+        // On an iPhone, Comment and Suggest join the text's own menu, after
+        // Copy: the comment's written in a sheet above the keyboard.
+        extra: commenting == null
+            ? null
+            : (region) => [
+                ContextMenuButtonItem(
+                  label: 'Comment',
+                  onPressed: () => _commentFrom(region, commenting),
+                ),
+                ContextMenuButtonItem(
+                  label: 'Suggest',
+                  onPressed: () =>
+                      _commentFrom(region, commenting, suggest: true),
+                ),
+              ],
         child: formatted
             ? _FormattedText(
                 text: _text,
@@ -133,9 +148,33 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
     return PaneScaffold(
       details: details,
       controls: controls,
+      comments: commentable ? CommentsButton(controller: comments) : null,
+      actions: [
+        if (_markdown && !_binary && problem == null)
+          PaneAction(
+            'Plain text',
+            () => setState(() => _raw = !_raw),
+            active: _raw,
+          ),
+        PaneAction('Reload', reload),
+      ],
       body: ColoredBox(color: palette.canvas, child: body),
     );
   }
+}
+
+/// Comment (or Suggest) from the iPhone's menu over a selection: the
+/// passage is the selection's, as the controller last heard it; the menu
+/// and the selection's handles go, the passage stays lit while it's
+/// written on.
+void _commentFrom(
+  SelectableRegionState region,
+  CommentsController comments, {
+  bool suggest = false,
+}) {
+  comments.comment(suggest: suggest);
+  region.hideToolbar();
+  region.clearSelection();
 }
 
 class _CutNote extends StatelessWidget {

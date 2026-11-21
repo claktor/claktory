@@ -15,18 +15,18 @@ use crate::common::{Client, create_agent, last_workspace, send_message, start, t
 
 /// A local account service, on a port of its own, with mail kept in memory
 /// and a clock a test can move on.
-struct Instance {
-    url: String,
+pub(crate) struct Instance {
+    pub(crate) url: String,
     addr: std::net::SocketAddr,
     db: std::path::PathBuf,
     mail: Arc<mail::Memory>,
     ahead: Arc<AtomicI64>,
-    secrets: ([u8; 32], [u8; 32]),
+    pub(crate) secrets: ([u8; 32], [u8; 32]),
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
 impl Instance {
-    async fn start(dir: &Path) -> Instance {
+    pub(crate) async fn start(dir: &Path) -> Instance {
         let secrets = Secrets::generate();
         let kept = (*secrets.k_share, secrets.signing_key.to_bytes());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
@@ -95,7 +95,7 @@ impl Instance {
 }
 
 /// A Claktory with signing in on, at `service`.
-async fn open(dir: &Path, service: &str) -> (std::net::SocketAddr, Arc<factoryd::Factory>) {
+pub(crate) async fn open(dir: &Path, service: &str) -> (std::net::SocketAddr, Arc<factoryd::Factory>) {
     let config = dir.join("home/config.json");
     if !config.exists() {
         std::fs::create_dir_all(dir.join("home")).expect("home");
@@ -132,7 +132,7 @@ async fn wait_for(client: &mut Client, done: impl Fn(&v1::Workspace) -> bool) ->
 }
 
 /// Signs in; the workspace after it.
-async fn sign_in(client: &mut Client, instance: &Instance, email: &str) -> v1::Workspace {
+pub(crate) async fn sign_in(client: &mut Client, instance: &Instance, email: &str) -> v1::Workspace {
     client.ok(Request::AccountSignIn(v1::AccountSignIn { email: email.into() })).await;
     let code = instance.last_code(email);
     let events = client.ok(Request::AccountVerify(v1::AccountVerify { code })).await;
@@ -361,6 +361,73 @@ async fn a_claktory_removed_at_the_service_opens_only_with_the_recovery_key_unti
 }
 
 #[tokio::test]
+async fn after_the_services_share_key_changes_the_recovery_key_opens_the_vault_once_and_it_opens_by_itself_after() {
+    let dir = temp_dir();
+    let mut instance = Instance::start(&dir).await;
+    let recovery;
+    {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        sign_in(&mut client, &instance, "matt@example.com").await;
+        let shown = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
+        let Body::RecoveryKey(key) = shown.body else { panic!("expected the recovery key") };
+        recovery = key.key;
+    }
+    // The service's share key is rotated (a leak, say): its shares change,
+    // so the vault no longer opens with the account.
+    instance.secrets.0 = *claktory_account::server::Secrets::generate().k_share;
+    instance.restart().await;
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, |workspace| !account(workspace).problem.is_empty()).await;
+    assert!(!unlocked(&workspace), "locked");
+    instance.advance(61);
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    assert_eq!(account(&workspace).problem, "Your secrets stay locked until you open them with the recovery key.");
+
+    // The recovery key opens it, and it's sealed under the new share at
+    // once: no check-in, sign-out or second sign-in needed.
+    instance.advance(61);
+    let opened = client.request(Request::UnlockVault(v1::UnlockVault { passphrase: recovery })).await;
+    assert!(matches!(opened.body, Body::VaultSession(_)), "{:?}", opened.body);
+    wait_for(&mut client, |workspace| unlocked(workspace) && account(workspace).problem.is_empty()).await;
+    drop(client);
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    until(&mut client, workspace, unlocked).await;
+}
+
+/// The service's signing key is rotated (KEY-LEAK.md): its answers no longer
+/// check against the key pinned at sign-in. The Claktory says so once, rather
+/// than spending the one share a minute on retries, and signing in again pins
+/// the new key and opens the vault, whose shares didn't change.
+#[tokio::test]
+async fn after_the_services_signing_key_changes_signing_in_again_opens_the_vault() {
+    let dir = temp_dir();
+    let mut instance = Instance::start(&dir).await;
+    {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        sign_in(&mut client, &instance, "matt@example.com").await;
+    }
+    instance.secrets.1 = claktory_account::server::Secrets::generate().signing_key.to_bytes();
+    instance.restart().await;
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, |workspace| !account(workspace).problem.is_empty()).await;
+    assert!(!unlocked(&workspace), "locked");
+    assert_eq!(account(&workspace).problem, "127.0.0.1 changed its key. Sign in again, and your secrets open by themselves.");
+    instance.advance(61);
+    sign_in(&mut client, &instance, "matt@example.com").await;
+    wait_for(&mut client, |workspace| unlocked(workspace) && account(workspace).problem.is_empty()).await;
+    // One share went to the answer that didn't check, one to signing in again.
+    assert_eq!(instance.count("SELECT count(*) FROM share_releases"), 2);
+}
+
+#[tokio::test]
 async fn while_signing_in_is_off_nothing_shows_and_nothing_is_sent() {
     let dir = temp_dir();
     std::fs::create_dir_all(dir.join("home")).expect("home");
@@ -404,12 +471,12 @@ async fn the_command_line_signs_in_with_the_emailed_code() {
     assert_eq!(status.json["account"]["state"], "signed_in");
 }
 
-/// Signing in is on by default. A new Claktory asks for it until it's
-/// signed in; one from before (its config.json was there) may skip it once,
-/// which lasts across restarts and a sign-out, and can still sign in later.
-/// The code step says where the code comes from.
+/// Signing in is on by default, and every Claktory must sign in (#195): a
+/// new one, one from before sign-in, and one that skipped the step in an
+/// earlier version are all asked, and Not now is refused. The code step
+/// says where the code comes from.
 #[tokio::test]
-async fn a_new_claktory_asks_to_sign_in_and_one_from_before_may_skip_it() {
+async fn every_claktory_is_asked_to_sign_in_and_none_may_skip_it() {
     // New: no config.json yet, so it's made now, with signing in on.
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
@@ -421,37 +488,122 @@ async fn a_new_claktory_asks_to_sign_in_and_one_from_before_may_skip_it() {
     let config = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
     assert!(!config.contains("\"account\""), "on by default, so not written: {config}");
 
-    // From before: its config.json had no account settings.
+    // One that skipped the step in an earlier version is asked again.
     let dir = temp_dir();
     let instance = Instance::start(&dir).await;
-    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::create_dir_all(dir.join("home/account")).expect("home");
     std::fs::write(dir.join("home/config.json"), format!(r#"{{"account": {{"service": "{}"}}}}"#, instance.url)).expect("config");
-    {
-        let (addr, _factory) = start(&dir).await;
-        let (mut client, workspace, _) = Client::connect(addr).await;
-        let state = account(&workspace);
-        assert_eq!((state.state(), state.skippable, state.code_from.as_str()), (AccountState::SignedOut, true, ""));
-        // Not now, with a code on its way: the code is dropped.
-        let events = client.ok(Request::AccountSignIn(v1::AccountSignIn { email: "matt@example.com".into() })).await;
-        let state = account(last_workspace(&events).expect("workspace"));
-        assert_eq!((state.state(), state.skippable), (AccountState::AwaitingCode, true));
-        assert_eq!(state.code_from, "code@auth.claktory.com", "the service says where codes come from");
-        let events = client.ok(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
-        let state = account(last_workspace(&events).expect("workspace"));
-        assert_eq!((state.state(), state.skippable, state.code_from.as_str()), (AccountState::Skipped, false, ""));
-        let code = instance.last_code("matt@example.com");
-        let late = client.request(Request::AccountVerify(v1::AccountVerify { code })).await;
-        assert_eq!(failure(&late.body).0, ErrorCode::InvalidRequest, "the code was dropped");
-    }
-    // Still skipped after a restart; signing in later works, and signing out goes back to skipped.
+    std::fs::write(dir.join("home/account/account.json"), r#"{"step": "skipped"}"#).expect("account.json");
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
-    assert_eq!(account(&workspace).state(), AccountState::Skipped);
-    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
     let state = account(&workspace);
-    assert_eq!((state.state(), state.skippable), (AccountState::SignedIn, false));
+    assert_eq!((state.state(), state.skippable, state.code_from.as_str()), (AccountState::SignedOut, false, ""));
+    let saved = std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json");
+    assert!(saved.contains("\"step\": \"asked\""), "so an earlier version asks too: {saved}");
+    let events = client.ok(Request::AccountSignIn(v1::AccountSignIn { email: "matt@example.com".into() })).await;
+    let state = account(last_workspace(&events).expect("workspace"));
+    assert_eq!((state.state(), state.skippable), (AccountState::AwaitingCode, false));
+    assert_eq!(state.code_from, "code@auth.claktory.com", "the service says where codes come from");
+    let skip = client.request(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
+    assert_eq!(failure(&skip.body), (ErrorCode::InvalidRequest, "Sign in to use this Claktory.".into()));
+    let code = instance.last_code("matt@example.com");
+    let events = client.ok(Request::AccountVerify(v1::AccountVerify { code })).await;
+    let state = account(last_workspace(&events).expect("workspace"));
+    assert_eq!((state.state(), state.skippable), (AccountState::SignedIn, false), "the code still works after a refused Not now");
     let skip = client.request(Request::SkipAccountSignIn(v1::SkipAccountSignIn {})).await;
     assert_eq!(failure(&skip.body), (ErrorCode::InvalidRequest, "This Claktory is already signed in.".into()));
     let events = client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
-    assert_eq!(account(last_workspace(&events).expect("workspace")).state(), AccountState::Skipped);
+    assert_eq!(account(last_workspace(&events).expect("workspace")).state(), AccountState::SignedOut, "signed out, it asks again");
+}
+
+/// Signed out of one account, signing in to another takes one code: the
+/// Claktory proves to the service that it's the same one, and moves.
+#[tokio::test]
+async fn switching_accounts_takes_one_code() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let first = account(&sign_in(&mut client, &instance, "matt@example.com").await);
+    assert_eq!(first.state(), AccountState::SignedIn);
+    client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+
+    let workspace = sign_in(&mut client, &instance, "ana@example.com").await;
+    let state = account(&workspace);
+    assert_eq!((state.state(), state.email.as_str(), state.problem.as_str()), (AccountState::SignedIn, "ana@example.com", ""));
+    assert_eq!(instance.count("SELECT COUNT(*) FROM claktories"), 1, "the same Claktory, moved");
+    assert_eq!(instance.count("SELECT COUNT(*) FROM accounts"), 2);
+}
+
+/// Moved to another computer (#217): at its first start there, a Claktory
+/// changes its token and backend key at the service, so the copy it moved
+/// from can't use them; its vault still opens with the same share.
+#[tokio::test]
+async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_still_opens() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let account_file = |name: &str| std::fs::read_to_string(dir.join("home/account").join(name)).expect("a file");
+    let (old_key, old_token) = {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+        assert!(unlocked(&workspace));
+        let saved: serde_json::Value = serde_json::from_str(&account_file("account.json")).expect("json");
+        (account_file("claktory.key"), saved["machine_token"].as_str().expect("a token").to_owned())
+    };
+    // As import leaves it.
+    std::fs::write(dir.join("home/move-epoch"), "1\n").expect("write");
+    instance.advance(61);
+
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    until(&mut client, workspace, unlocked).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let saved: serde_json::Value = serde_json::from_str(&account_file("account.json")).expect("json");
+        if saved["move_epoch"] == 1 {
+            assert_ne!(saved["machine_token"].as_str(), Some(old_token.as_str()), "a new token");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the credentials weren't changed: {saved}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_ne!(account_file("claktory.key"), old_key, "a new backend key");
+    assert_eq!(mode(&dir.join("home/account/claktory.key")), 0o600);
+    assert!(!dir.join("home/account/moving.json").exists());
+    assert!(instance.mail.sent().iter().any(|mail| mail.subject.contains(" moved to ")), "the account is told");
+
+    // The old pair no longer works at the service: the copy left behind is locked out.
+    let seed: [u8; 32] = factoryd_unhex(&old_key).try_into().expect("a seed");
+    let old = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let body = br#"{"version":"v0","platform":"macos-arm64"}"#.to_vec();
+    let time = jiff::Timestamp::now().as_second() + 61;
+    let signature = claktory_account::protocol::sign_request(&old, "POST", "/v1/check-in", time, &body);
+    let answer = reqwest::Client::new()
+        .post(format!("{}/v1/check-in", instance.url))
+        .header("authorization", format!("Bearer {old_token}"))
+        .header(claktory_account::protocol::TIME_HEADER, time.to_string())
+        .header(claktory_account::protocol::SIGNATURE_HEADER, signature)
+        .body(body)
+        .send()
+        .await
+        .expect("an answer");
+    assert_eq!(answer.status().as_u16(), 401);
+
+    // Started again, nothing more is changed.
+    let token = account_file("account.json");
+    drop(client);
+    drop(_factory);
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    until(&mut client, workspace, unlocked).await;
+    let saved: serde_json::Value = serde_json::from_str(&account_file("account.json")).expect("json");
+    let before: serde_json::Value = serde_json::from_str(&token).expect("json");
+    assert_eq!(saved["machine_token"], before["machine_token"]);
+}
+
+fn factoryd_unhex(text: &str) -> Vec<u8> {
+    let text = text.trim();
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex")).collect()
 }

@@ -4,6 +4,9 @@ import 'loopback_forward.dart';
 import 'tunnel/api/tunnel.dart' as rust;
 import 'tunnel/api/tunnel.dart'
     show TunnelFailure, TunnelPath, TunnelPhase, TunnelStatus;
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
+    show ExternalLibrary;
+
 import 'tunnel/frb_generated.dart';
 
 export 'tunnel/api/tunnel.dart'
@@ -34,8 +37,13 @@ abstract interface class Tunnels {
 }
 
 abstract interface class Tunnel {
-  /// Where the app connects: `ws://127.0.0.1:<port>`.
+  /// Where the app connects: `ws://127.0.0.1:<port><requestPath>`.
   int get port;
+
+  /// What the app asks for at [port]: the tunnel's own secret path. Any
+  /// program on this device can reach the port, so the tunnel forwards
+  /// only a socket asking for this. Never shown, saved or logged.
+  String get requestPath;
 
   TunnelStatus get status;
 
@@ -57,7 +65,10 @@ class RustTunnels implements Tunnels {
 
   static Future<void>? _loaded;
 
-  static Future<void> _load() => _loaded ??= RustLib.init();
+  /// Loads the app's Rust library (the tunnel's, and the account key's
+  /// too), once; from [library] when given (a test's build of it).
+  static Future<void> load({ExternalLibrary? library}) =>
+      _loaded ??= RustLib.init(externalLibrary: library);
 
   @override
   Future<Tunnel> open({
@@ -66,7 +77,7 @@ class RustTunnels implements Tunnels {
     required List<String> relays,
     List<String> addresses = const [],
   }) async {
-    await _load();
+    await load();
     final handle = await rust.openTunnel(
       deviceKey: deviceKey,
       endpointId: endpointId,
@@ -81,19 +92,24 @@ class RustTunnels implements Tunnels {
     required String deviceKey,
     required String endpointId,
   }) async {
-    await _load();
+    await load();
     final ids = rust.pairingIds(deviceKey: deviceKey, endpointId: endpointId);
     return (device: ids.device, backend: ids.backend);
   }
 }
 
 class _RustTunnel implements Tunnel {
-  _RustTunnel(this._handle) : port = _handle.port();
+  _RustTunnel(this._handle)
+    : port = _handle.port(),
+      requestPath = _handle.path();
 
   final rust.TunnelHandle _handle;
 
   @override
   final int port;
+
+  @override
+  final String requestPath;
 
   @override
   TunnelStatus get status => _handle.status();

@@ -49,6 +49,7 @@ fn options(cwd: &Path, stream: StreamFn, compact_at: u64) -> AgentOptions {
         inbox: None,
         after_compaction: None,
         secrets: None,
+        fallback_model: None,
     }
 }
 

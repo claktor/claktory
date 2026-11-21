@@ -11,7 +11,14 @@ import 'controls.dart';
 import 'identity.dart';
 import 'map_card.dart';
 import 'map_layout.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
+import 'mobile/navigation.dart';
+import 'mobile/input.dart' show InputKind;
+import 'mobile/presentation.dart' show showPanel;
 import 'pane_chrome.dart';
+import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
@@ -47,7 +54,9 @@ const mapLayerNames = {
 /// Rivet and the other admins along the top, then the workspace and each
 /// project as a board with its folders and agents, and the vault along the
 /// bottom; lines show who can message whom, who has which secret and who
-/// reads Claktory's records. Hover an agent to light up its lines and,
+/// reads Claktory's records. A project's pipes to other Claktories are
+/// portal pads at its top right, each with a line leaving the board; a click
+/// opens the pipe. Hover an agent to light up its lines and,
 /// after a moment, see its card (every extension it has, where it works,
 /// whom it messages, its secrets); click it to open its conversation. On a
 /// phone, with no pointer, a tap lights it up and shows its card, with Open
@@ -145,7 +154,14 @@ class _MapViewState extends State<MapView> {
         bottom: Space.s,
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
+            // At most about half the screen: the map stays in view above
+            // it, and its details scroll.
+            constraints: BoxConstraints(
+              maxWidth: 420,
+              maxHeight:
+                  MediaQuery.sizeOf(context).height *
+                  (largeText(context) ? 0.85 : 0.5),
+            ),
             child: MapAgentCard(
               width: null,
               details: details,
@@ -184,6 +200,169 @@ class _MapViewState extends State<MapView> {
     );
   }
 
+  /// Lights up [id] (an agent's chip shows its card) and brings it into
+  /// view: from the list of what's on the map.
+  void _pick(String id) {
+    PhoneRoutes.of(context)?.pop<void>();
+    setState(() => _pinned = id);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final chip = _layout.chips.where((chip) => chip.id == id).firstOrNull;
+      if (chip != null) _canvas.show(chip.rect.inflate(120));
+    });
+  }
+
+  /// Everything on the map as a list, to search: for VoiceOver, large
+  /// text, or finding one agent among many.
+  void _openList() => PhoneRoutes.of(context)?.push<void>(
+    PhoneRoute(
+      id: 'map:list',
+      builder: (context) => _MapList(onPick: _pick),
+    ),
+  );
+
+  /// Which kinds of line show, and what the badges mean, in a sheet.
+  void _openLines(MapLayout layout) {
+    final layers = [
+      for (final layer in MapLayer.values)
+        if (layout.wires.any((wire) => wire.layer == layer)) layer,
+    ];
+    final badges = <String, MapBadge>{};
+    for (final chip in layout.chips) {
+      for (final badge in chip.node.badges) {
+        badges.putIfAbsent(badge.key, () => badge);
+      }
+    }
+    showPanel(
+      context,
+      title: 'Lines',
+      builder: (context, close) => StatefulBuilder(
+        builder: (context, setSheet) => _LinesPanel(
+          layers: layers,
+          badges: badges.values.toList(),
+          hidden: _hidden,
+          onToggle: (layer) {
+            setState(() {
+              if (!_hidden.remove(layer)) _hidden.add(layer);
+            });
+            setSheet(() {});
+          },
+        ),
+      ),
+    );
+  }
+
+  /// The Map on a phone: Back, Search and Lines in its header, the board
+  /// filling the rest at its own type size (a pinch reads it closer), and
+  /// Fit at its foot, or in its place the card of the agent tapped.
+  Widget _phoneMap(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    void close() => AppScope.closePage(context);
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      child: ListenableBuilder(
+        listenable: backend.workspace,
+        builder: (context, _) {
+          final workspace = backend.workspace.workspace;
+          final empty = !workspace.hasMap() || workspace.map.nodes.isEmpty;
+          final layout = empty ? null : _layoutFor(workspace);
+          Widget glyph(String icon, Color color) =>
+              ExtensionGlyph(icon: icon, name: '', color: color, size: 20);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PhoneHeader(
+                leading: HeaderButton.back(onTap: close),
+                title: Text(
+                  'Map',
+                  style: PhoneType.emphasis.copyWith(color: palette.text),
+                ),
+                trailing: [
+                  if (layout != null) ...[
+                    HeaderButton(
+                      label: 'Search the map',
+                      glyph: (color) => glyph('search', color),
+                      onTap: _openList,
+                    ),
+                    HeaderButton(
+                      label: 'Lines',
+                      active: _hidden.isNotEmpty,
+                      glyph: (color) => glyph('list-filter', color),
+                      onTap: () => _openLines(layout),
+                    ),
+                  ],
+                ],
+              ),
+              Expanded(
+                child: ColoredBox(
+                  color: palette.canvas,
+                  child: layout == null
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(Space.xl),
+                            child: Text(
+                              'Update Claktory to see its map.',
+                              textAlign: TextAlign.center,
+                              style: PhoneType.body.copyWith(
+                                color: palette.textMuted,
+                              ),
+                            ),
+                          ),
+                        )
+                      : _phoneBoard(workspace, layout),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _phoneBoard(Workspace workspace, MapLayout layout) {
+    final palette = Palette.of(context);
+    final pinned = _pinned;
+    final cardChip = pinned == null || !pinned.startsWith('agent:')
+        ? null
+        : layout.chips.where((chip) => chip.id == pinned).firstOrNull;
+    return Stack(
+      children: [
+        Positioned.fill(
+          // The board is drawn to its own measure: the system's text size
+          // would burst its boxes. A pinch reads it closer, and the list
+          // (Search) reads at any size.
+          child: MediaQuery.withNoTextScaling(
+            child: ZoomCanvas(
+              controller: _canvas,
+              size: layout.size,
+              background: (transform) =>
+                  _GridPainter(transform, palette.hairline),
+              child: _Board(
+                layout: layout,
+                pads: portalPads(layout, workspace.pipes),
+                person: workspace.person,
+                hidden: _hidden,
+                focus: pinned,
+                phone: true,
+                onHover: (_) {},
+                onTap: _open,
+              ),
+            ),
+          ),
+        ),
+        if (cardChip != null)
+          _cardFor(workspace, cardChip, phone: true)
+        else
+          Positioned(
+            right: Touch.gutter,
+            bottom: Touch.gutter,
+            child: _FitButton(controller: _canvas),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -191,6 +370,7 @@ class _MapViewState extends State<MapView> {
     final inPane = InPane.of(context);
     final phone = isPhoneLayout(context);
     void close() => AppScope.closePage(context);
+    if (phone && !inPane) return _phoneMap(context);
     return CallbackShortcuts(
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
@@ -279,6 +459,7 @@ class _MapViewState extends State<MapView> {
                                       _GridPainter(transform, palette.hairline),
                                   child: _Board(
                                     layout: layout,
+                                    pads: portalPads(layout, workspace.pipes),
                                     person: workspace.person,
                                     hidden: _hidden,
                                     focus: focus,
@@ -310,14 +491,22 @@ class _MapViewState extends State<MapView> {
 class _Board extends StatelessWidget {
   const _Board({
     required this.layout,
+    this.pads = const [],
     required this.person,
     required this.hidden,
     required this.focus,
     required this.onHover,
     required this.onTap,
+    this.phone = false,
   });
 
   final MapLayout layout;
+
+  /// On a phone: pads a finger can tap, and a pipe opened closes the Map.
+  final bool phone;
+
+  /// The projects' pipes, each a portal pad on its project's box.
+  final List<PortalPad> pads;
 
   /// The person, over the admins: they can message every agent, so no
   /// line leads to them.
@@ -339,6 +528,7 @@ class _Board extends StatelessWidget {
             child: CustomPaint(
               painter: _BoardPainter(
                 layout: layout,
+                pads: pads,
                 palette: palette,
                 hidden: hidden,
                 focus: focus,
@@ -346,6 +536,22 @@ class _Board extends StatelessWidget {
             ),
           ),
         ),
+        for (final pad in pads)
+          Positioned.fromRect(
+            // A finger's height on a phone, the pad drawn in its middle.
+            rect: phone
+                ? Rect.fromCenter(
+                    center: pad.rect.center,
+                    width: pad.rect.width,
+                    height: math.max(pad.rect.height, Touch.target),
+                  )
+                : pad.rect,
+            child: AnimatedOpacity(
+              duration: Motion.fast,
+              opacity: lit == null ? 1 : 0.3,
+              child: _PortalPadView(pad: pad, phone: phone),
+            ),
+          ),
         if (layout.you case final you?)
           Positioned.fromRect(
             rect: you,
@@ -522,12 +728,14 @@ const _quiet = {'web', 'tree'};
 class _BoardPainter extends CustomPainter {
   _BoardPainter({
     required this.layout,
+    this.pads = const [],
     required this.palette,
     required this.hidden,
     required this.focus,
   }) : hiddenKey = Set.of(hidden);
 
   final MapLayout layout;
+  final List<PortalPad> pads;
   final Palette palette;
   final Set<MapLayer> hidden;
   final Set<MapLayer> hiddenKey;
@@ -550,6 +758,13 @@ class _BoardPainter extends CustomPainter {
           );
           canvas.drawRRect(shape, Paint()..color = palette.sidebar);
           canvas.drawRRect(shape, _stroke(palette.hairline, 1));
+          // Short of its pipes' pads, at its top right.
+          var padsFrom = rect.right;
+          for (final pad in pads) {
+            if (pad.boxId == box.id) {
+              padsFrom = math.min(padsFrom, pad.rect.left - Space.s);
+            }
+          }
           _text(
             canvas,
             box.label,
@@ -558,7 +773,9 @@ class _BoardPainter extends CustomPainter {
               fontWeight: FontWeight.w600,
             ),
             Offset(rect.left + _titleInset(box), rect.top + mapCell + 1),
-            rect.width - _titleInset(box) - mapCell,
+            math.min(padsFrom, rect.right - mapCell) -
+                rect.left -
+                _titleInset(box),
           );
           _text(
             canvas,
@@ -622,6 +839,21 @@ class _BoardPainter extends CustomPainter {
             rect.width - mapCell * 2,
           );
       }
+    }
+
+    // Each pipe leaves the board: a line from its pad up through the top of
+    // its project's box, ending in a ring, as somewhere else begins.
+    for (final pad in pads) {
+      final color = pad.closed ? palette.textFaint : pipeColor;
+      final paint = _stroke(
+        focus == null ? color : color.withValues(alpha: 0.3),
+        1.5,
+      );
+      final x = pad.rect.center.dx;
+      final end = Offset(x, pad.rect.top - portalReach);
+      canvas
+        ..drawLine(Offset(x, pad.rect.top), end, paint)
+        ..drawCircle(end, 2.5, paint);
     }
 
     // Lines: the dimmed first, so the lit ones run over them.
@@ -710,11 +942,194 @@ class _BoardPainter extends CustomPainter {
   @override
   bool shouldRepaint(_BoardPainter old) =>
       old.layout != layout ||
+      !_samePads(old.pads, pads) ||
       old.palette != palette ||
       old.focus != focus ||
       !old.hiddenKey.containsAll(hidden) ||
       old.hiddenKey.length != hidden.length;
 }
+
+bool _samePads(List<PortalPad> a, List<PortalPad> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].rect != b[i].rect ||
+        a[i].closed != b[i].closed ||
+        a[i].pipe.name != b[i].pipe.name) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// How far a pipe's line reaches out of its project's box, past its top.
+const portalReach = mapCell * 2;
+
+/// A pipe on the Map: a pad on its project's box, at [rect].
+class PortalPad {
+  const PortalPad({
+    required this.pipe,
+    required this.boxId,
+    required this.rect,
+    required this.label,
+  });
+
+  final Pipe pipe;
+
+  /// Its project's box ("project:…").
+  final String boxId;
+  final Rect rect;
+
+  /// The other Claktory's name; the pipe's own before it's known. Empty
+  /// when there's room only for the portal.
+  final String label;
+
+  bool get closed => pipe.state == PipeState.PIPE_STATE_CLOSED;
+}
+
+/// Each project's pipes as pads along the top right of its box, on its
+/// title's line, right to left in the order they were made. They take at
+/// most half the box; past that, they show only their portals.
+@visibleForTesting
+List<PortalPad> portalPads(MapLayout layout, List<Pipe> pipes) {
+  if (pipes.isEmpty) return const [];
+  final style = TextStyles.caption.copyWith(fontWeight: FontWeight.w500);
+  final pads = <PortalPad>[];
+  for (final box in layout.boxes) {
+    if (box.kind != MapBoxKind.project) continue;
+    final here = [
+      for (final pipe in pipes)
+        if ('project:${pipe.projectId}' == box.id) pipe,
+    ]..sort((a, b) => a.createdMs.compareTo(b.createdMs));
+    if (here.isEmpty) continue;
+    final room = box.rect.width / 2;
+    final labels = [
+      for (final pipe in here)
+        pipe.peer.claktoryName.isNotEmpty ? pipe.peer.claktoryName : pipe.name,
+    ];
+    final widths = [
+      for (final label in labels)
+        math.min(_padMaxWidth, _padBare + _textWidth(label, style)),
+    ];
+    final gaps = Space.xs * (here.length - 1);
+    final full = widths.fold(0.0, (sum, width) => sum + width) + gaps <= room;
+    var right = box.rect.right - mapCell;
+    for (var i = 0; i < here.length; i++) {
+      final width = full ? widths[i] : _padHeight;
+      final left = right - width;
+      if (left < box.rect.left + mapCell * 4) break;
+      pads.add(
+        PortalPad(
+          pipe: here[i],
+          boxId: box.id,
+          rect: Rect.fromLTWH(
+            left,
+            box.rect.top + mapCell - 1,
+            width,
+            _padHeight,
+          ),
+          label: full ? labels[i] : '',
+        ),
+      );
+      right = left - Space.xs;
+    }
+  }
+  return pads;
+}
+
+const _padHeight = 20.0;
+const _padMaxWidth = 150.0;
+
+/// A pad's width besides its label: padding, the portal and the space
+/// after it, and the border.
+const _padBare = Space.s + 12 + Space.xs + Space.s + 2;
+
+double _textWidth(String text, TextStyle style) {
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: TextDirection.ltr,
+    maxLines: 1,
+  )..layout();
+  final width = painter.width;
+  painter.dispose();
+  return width.ceilToDouble();
+}
+
+/// A pipe's pad on the Map: its portal and the other Claktory's name, in
+/// the pipe's color. A click opens it; hovering shows its name and where
+/// it stands.
+class _PortalPadView extends StatelessWidget {
+  const _PortalPadView({required this.pad, this.phone = false});
+
+  final PortalPad pad;
+
+  /// In a finger's taller box, drawn at its own height in the middle; a
+  /// tap opens the pipe in place of the Map.
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final pipe = pad.pipe;
+    final color = pad.closed ? palette.textFaint : pipeColor;
+    final status = pipeStatus(pipe);
+    return HoverCard(
+      card: (context) =>
+          Text(status.isEmpty ? pipe.name : '${pipe.name} · $status'),
+      child: Semantics(
+        button: true,
+        label: 'Pipe ${pipe.name}',
+        child: Pressable(
+          onTap: () {
+            openPipe(context, pipe);
+            // On a phone, the pipe's conversation in front.
+            if (phone) PhoneNavigation.of(context)?.value = true;
+          },
+          builder: (context, hovered) => _padHeightOn(
+            phone,
+            AnimatedContainer(
+              duration: Motion.fast,
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.symmetric(horizontal: Space.s),
+              decoration: BoxDecoration(
+                color: hovered ? palette.hover : palette.canvas,
+                borderRadius: BorderRadius.circular(_padHeight / 2),
+                border: Border.all(color: color),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  PortalGlyph(color: color, size: 12),
+                  if (pad.label.isNotEmpty) ...[
+                    const SizedBox(width: Space.xs),
+                    Flexible(
+                      child: Text(
+                        pad.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.caption.copyWith(
+                          color: palette.text,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// [pad] as it's drawn: in the middle of a phone's taller box, at its own
+/// height; elsewhere filling its box.
+Widget _padHeightOn(bool phone, Widget pad) => phone
+    ? Center(
+        child: SizedBox(height: _padHeight, child: pad),
+      )
+    : pad;
 
 /// A faint dot every two cells, like a board's grid, at every zoom.
 class _GridPainter extends CustomPainter {
@@ -1016,6 +1431,437 @@ class _ZoomControls extends StatelessWidget {
                 onTap: controller.zoomIn,
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'plus', name: '', color: color),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Fit, over a phone's board at its foot: the whole map in view again.
+/// Shows the zoom while it isn't fitted.
+class _FitButton extends StatelessWidget {
+  const _FitButton({required this.controller});
+
+  final CanvasController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => Semantics(
+        button: true,
+        label: 'Fit',
+        value: controller.fitted
+            ? null
+            : '${(controller.scale * 100).round()}%',
+        excludeSemantics: true,
+        onTap: controller.fit,
+        child: Pressable(
+          onTap: controller.fit,
+          builder: (context, pressed) => Container(
+            constraints: const BoxConstraints(
+              minHeight: Touch.target,
+              minWidth: Touch.target + Space.l,
+            ),
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: Space.l),
+            decoration: BoxDecoration(
+              color: pressed ? palette.selected : palette.sidebar,
+              borderRadius: BorderRadius.circular(Touch.target / 2),
+              border: Border.all(color: palette.hairline),
+              boxShadow: floatingShadow,
+            ),
+            child: Text(
+              controller.fitted
+                  ? 'Fit'
+                  : 'Fit · ${(controller.scale * 100).round()}%',
+              style: PhoneType.label.copyWith(
+                color: palette.text,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A phone's Lines sheet: a switch for each kind of line on the map, then
+/// what the badges on agents mean.
+class _LinesPanel extends StatelessWidget {
+  const _LinesPanel({
+    required this.layers,
+    required this.badges,
+    required this.hidden,
+    required this.onToggle,
+  });
+
+  final List<MapLayer> layers;
+  final List<MapBadge> badges;
+  final Set<MapLayer> hidden;
+  final ValueChanged<MapLayer> onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final caption = PhoneType.secondary.copyWith(color: palette.textMuted);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final layer in layers)
+            ToggleTap(
+              value: !hidden.contains(layer),
+              onChanged: (_) => onToggle(layer),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: Touch.row),
+                child: Row(
+                  children: [
+                    _Swatch(
+                      color: mapLayerColor(layer, palette),
+                      bus: layer == MapLayer.messages,
+                    ),
+                    const SizedBox(width: Space.m),
+                    Expanded(
+                      child: Text(
+                        mapLayerNames[layer]!,
+                        style: PhoneType.body.copyWith(color: palette.text),
+                      ),
+                    ),
+                    Toggle(
+                      value: !hidden.contains(layer),
+                      label: mapLayerNames[layer]!,
+                      onChanged: (_) => onToggle(layer),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (badges.isNotEmpty) ...[
+            const SizedBox(height: Space.l),
+            Text(
+              'Badges: extra reach or power',
+              style: PhoneType.caption.copyWith(
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: Space.s),
+            for (final badge in badges)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.s),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 20,
+                      child: ExtensionGlyph(
+                        icon: badge.icon,
+                        name: badge.label,
+                        color: palette.textMuted,
+                        size: 16,
+                      ),
+                    ),
+                    const SizedBox(width: Space.m),
+                    Expanded(child: Text(badge.label, style: caption)),
+                  ],
+                ),
+              ),
+          ],
+          const SizedBox(height: Space.m),
+          Text(
+            'Agents can read their whole project but change files only in '
+            'their own folder. Tap an agent to see everything it has.',
+            style: caption,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Everything on the map as a list, on a phone: a search field, then each
+/// project's agents (their name, role, lead, whom they message and their
+/// secrets), then the secrets, apps and records. A tap shows one on the
+/// map, lit up, an agent with its card.
+class _MapList extends StatefulWidget {
+  const _MapList({required this.onPick});
+
+  final ValueChanged<String> onPick;
+
+  @override
+  State<_MapList> createState() => _MapListState();
+}
+
+class _MapListState extends State<_MapList> {
+  final _query = TextEditingController();
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  bool _matches(List<String> words) {
+    final query = _query.text.trim().toLowerCase();
+    if (query.isEmpty) return true;
+    final haystack = words.join(' ').toLowerCase();
+    return query
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .every(haystack.contains);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: Listenable.merge([backend.workspace, _query]),
+      builder: (context, _) {
+        final workspace = backend.workspace.workspace;
+        final nodes = workspace.map.nodes;
+        final places = [
+          for (final node in nodes)
+            if (node.kind == MapNodeKind.MAP_NODE_KIND_WORKSPACE ||
+                node.kind == MapNodeKind.MAP_NODE_KIND_PROJECT)
+              node,
+        ];
+        String placeOf(MapNode agent) {
+          for (final place in places) {
+            final here = place.kind == MapNodeKind.MAP_NODE_KIND_WORKSPACE
+                ? agent.projectId.isEmpty
+                : place.refId == agent.projectId;
+            if (here) return place.label;
+          }
+          return '';
+        }
+
+        final agents = [
+          for (final node in nodes)
+            if (node.kind == MapNodeKind.MAP_NODE_KIND_AGENT &&
+                _matches([node.label, node.detail, placeOf(node)]))
+              node,
+        ];
+        final others = [
+          for (final node in nodes)
+            if ((node.kind == MapNodeKind.MAP_NODE_KIND_SECRET ||
+                    node.kind == MapNodeKind.MAP_NODE_KIND_APP ||
+                    node.kind == MapNodeKind.MAP_NODE_KIND_DATA) &&
+                _matches([node.label, node.detail]))
+              node,
+        ];
+        // In the sidebar's order: the workspace's agents, then each
+        // project's.
+        final order = sidebarOrder(workspace);
+        int rank(String id) => order[id] ?? order.length;
+        agents.sort((a, b) => rank(a.id).compareTo(rank(b.id)));
+        final groups = <String, List<MapNode>>{};
+        for (final agent in agents) {
+          (groups[agent.projectId] ??= []).add(agent);
+        }
+        final projects = groups.keys.toList()
+          ..sort(
+            (a, b) => a.isEmpty
+                ? -1
+                : b.isEmpty
+                ? 1
+                : rank('project:$a').compareTo(rank('project:$b')),
+          );
+        final heading = PhoneType.caption.copyWith(
+          color: palette.textMuted,
+          fontWeight: FontWeight.w500,
+        );
+        Widget title(String text) => Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Touch.gutter,
+            Space.l,
+            Touch.gutter,
+            Space.xs,
+          ),
+          child: Semantics(header: true, child: Text(text, style: heading)),
+        );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PhoneHeader(
+              leading: HeaderButton.back(
+                onTap: () => PhoneRoutes.of(context)?.pop<void>(),
+              ),
+              title: Text(
+                'On the map',
+                style: PhoneType.emphasis.copyWith(color: palette.text),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Touch.gutter,
+                Space.s,
+                Touch.gutter,
+                0,
+              ),
+              child: TextField(
+                controller: _query,
+                placeholder: 'Search',
+                kind: InputKind.text,
+                autocorrect: false,
+                textInputAction: TextInputAction.search,
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: Space.xl),
+                children: [
+                  if (agents.isEmpty && others.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(Touch.gutter),
+                      child: Text(
+                        'Nothing matches',
+                        style: PhoneType.body.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
+                    ),
+                  for (final project in projects) ...[
+                    title(placeOf(groups[project]!.first)),
+                    for (final agent in groups[project]!)
+                      _ListRow(
+                        node: agent,
+                        relations: _relations(
+                          mapAgentDetails(workspace, agent),
+                        ),
+                        onTap: () => widget.onPick(agent.id),
+                      ),
+                  ],
+                  if (others.isNotEmpty) ...[
+                    title('Secrets and records'),
+                    for (final node in others)
+                      _ListRow(
+                        node: node,
+                        relations: '',
+                        onTap: () => widget.onPick(node.id),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// An agent's ties in a line: "Reports to Mike · Messages Sam, Iris ·
+  /// 2 secrets".
+  static String _relations(MapAgentDetails details) {
+    String names(List<MapNode> nodes) => nodes.length <= 3
+        ? nodes.map((node) => node.label).join(', ')
+        : '${nodes.length} agents';
+    return [
+      if (details.lead case final lead?) 'Reports to ${lead.label}',
+      if (details.reports.isNotEmpty) 'Leads ${names(details.reports)}',
+      if (details.everyone)
+        'Messages every agent'
+      else if (details.messages.isNotEmpty)
+        'Messages ${names(details.messages)}',
+      if (details.secrets.length == 1)
+        '1 secret'
+      else if (details.secrets.length > 1)
+        '${details.secrets.length} secrets',
+    ].join(' · ');
+  }
+}
+
+/// A row of the map's list: an agent (its color, name, role and ties), or
+/// a secret, an app or Claktory's records with its glyph.
+class _ListRow extends StatelessWidget {
+  const _ListRow({
+    required this.node,
+    required this.relations,
+    required this.onTap,
+  });
+
+  final MapNode node;
+  final String relations;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final agent = node.kind == MapNodeKind.MAP_NODE_KIND_AGENT;
+    final secret = node.kind == MapNodeKind.MAP_NODE_KIND_SECRET;
+    final app = node.kind == MapNodeKind.MAP_NODE_KIND_APP;
+    final mark = agent
+        ? Container(
+            width: 4,
+            height: 32,
+            decoration: BoxDecoration(
+              color: agentColor(node.color),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          )
+        : ExtensionGlyph(
+            icon: secret
+                ? 'key-round'
+                : app
+                ? node.icon
+                : 'database',
+            name: app ? node.label : '',
+            color: mapLayerColor(
+              secret
+                  ? MapLayer.secrets
+                  : app
+                  ? MapLayer.apps
+                  : MapLayer.data,
+              palette,
+            ),
+            size: 16,
+          );
+    return Semantics(
+      container: true,
+      button: true,
+      onTap: onTap,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, pressed) => Container(
+          constraints: const BoxConstraints(minHeight: Touch.row),
+          color: pressed ? palette.hover : const Color(0x00000000),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Touch.gutter,
+            vertical: Space.s,
+          ),
+          child: Row(
+            children: [
+              SizedBox(width: 24, child: Center(child: mark)),
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      node.label,
+                      style: PhoneType.body.copyWith(color: palette.text),
+                    ),
+                    if (node.detail.isNotEmpty)
+                      Text(
+                        node.detail,
+                        style: PhoneType.secondary.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
+                    if (relations.isNotEmpty)
+                      Text(
+                        relations,
+                        style: PhoneType.caption.copyWith(
+                          color: palette.textFaint,
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ],
           ),

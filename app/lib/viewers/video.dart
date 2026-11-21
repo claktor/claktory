@@ -11,6 +11,7 @@ import '../annotations.dart';
 import '../backend.dart';
 import '../controls.dart';
 import '../identity.dart';
+import '../mobile/metrics.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
@@ -416,6 +417,14 @@ class _VideoViewerState extends State<VideoViewer>
     );
   }
 
+  /// [moment] as the bar says it: 0:12, or 0:12–0:20.
+  static String _when(Moment moment) {
+    final end = moment.end;
+    return end == null
+        ? formatTime(moment.start)
+        : '${formatTime(moment.start)}–${formatTime(end)}';
+  }
+
   /// The person dragged across the frame: the part of it the comment is on.
   void _markRegion(Rect region) {
     final comments = this.comments;
@@ -483,6 +492,26 @@ class _VideoViewerState extends State<VideoViewer>
     return PaneScaffold(
       details: details,
       controls: controls,
+      comments: comments == null ? null : CommentsButton(controller: comments),
+      actions: [PaneAction('Reload', reload)],
+      toolbar: comments == null
+          ? null
+          : ValueListenableBuilder(
+              valueListenable: comments.selection,
+              builder: (context, picked, _) => CommentModeBar(
+                marking: _marking,
+                onToggle: _toggleMarking,
+                // The moment it was paused at to begin with: Comment
+                // twice writes about what's on screen.
+                hint: picked is Moment
+                    ? 'At ${_when(picked)}. Tap the timeline for another '
+                          'moment, or drag across the frame.'
+                    : 'Tap the timeline, or drag across the frame.',
+                action: 'Comment',
+                actionPrimary: true,
+                onAction: picked is Moment ? comments.comment : null,
+              ),
+            ),
       body: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.space): _togglePlaying,
@@ -586,7 +615,8 @@ class _VideoViewerState extends State<VideoViewer>
                         },
                       ),
                     ),
-                  if (comments != null)
+                  // A phone has the bar under the video instead.
+                  if (comments != null && !isPhoneLayout(context))
                     Positioned(
                       top: Space.s,
                       right: Space.s,
@@ -699,8 +729,73 @@ class _Controls extends StatelessWidget {
   final void Function(double seconds) onSeek;
   final void Function(double seconds, {double? until}) onMark;
 
+  Widget _phone(BuildContext context) {
+    final palette = Palette.of(context);
+    final time = TypeScale.of(context).caption.copyWith(
+      color: palette.textMuted,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    // As iOS's player has them: the timeline across, the time at its ends
+    // under it, and Play between, clear of the screen's edge (Back's
+    // swipe).
+    return Unselectable(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: _edge),
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: palette.hairline)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Timeline(
+              key: timelineKey,
+              state: state,
+              comments: comments,
+              marking: marking,
+              onSeek: onSeek,
+              onMark: onMark,
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: ExcludeSemantics(
+                    child: Text(formatTime(state.position), style: time),
+                  ),
+                ),
+                GlyphButton(
+                  label: state.playing ? 'Pause' : 'Play',
+                  active: false,
+                  onTap: onPlay,
+                  glyph: (color) => ExtensionGlyph(
+                    icon: state.playing ? 'pause' : 'play',
+                    name: state.playing ? 'Pause' : 'Play',
+                    color: color,
+                  ),
+                ),
+                Expanded(
+                  child: ExcludeSemantics(
+                    child: Text(
+                      formatTime(state.duration),
+                      textAlign: TextAlign.end,
+                      style: time,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Back's swipe starts within 20pt of the screen's leading edge: the
+  /// timeline starts past it.
+  static const _edge = Touch.gutter + Space.s;
+
   @override
   Widget build(BuildContext context) {
+    if (isPhoneLayout(context)) return _phone(context);
     final palette = Palette.of(context);
     return Unselectable(
       child: Container(
@@ -789,10 +884,11 @@ class _TimelineState extends State<Timeline> {
     return (local.dx / width).clamp(0.0, 1.0) * duration;
   }
 
-  /// The comment whose mark is under [local], if any.
-  String? _hit(Offset local, Size size, List<_Placed> placed) {
+  /// The comment whose mark is under [local], if any: within a
+  /// fingertip's reach on a phone.
+  String? _hit(Offset local, Size size, List<_Placed> placed, {double by = 4}) {
     for (final mark in placed.reversed) {
-      if (mark.rect(size, widget.state.duration).inflate(4).contains(local)) {
+      if (mark.rect(size, widget.state.duration).inflate(by).contains(local)) {
         return mark.threadId;
       }
     }
@@ -811,10 +907,15 @@ class _TimelineState extends State<Timeline> {
             ? 0
             : placed.map((m) => m.lane).reduce((a, b) => a > b ? a : b) + 1;
         final height = 16 + lanes * Timeline.lane;
+        final phone = isPhoneLayout(context);
+        // A finger's target on a phone: the track in the middle of 44pt.
+        final pad = phone && height < Touch.target
+            ? (Touch.target - height) / 2
+            : 0.0;
         return LayoutBuilder(
           builder: (context, constraints) {
             final size = Size(constraints.maxWidth, height);
-            return MouseRegion(
+            final timeline = MouseRegion(
               cursor: widget.marking
                   ? SystemMouseCursors.precise
                   : SystemMouseCursors.click,
@@ -827,7 +928,12 @@ class _TimelineState extends State<Timeline> {
                     widget.onMark(at);
                     return;
                   }
-                  final hit = _hit(details.localPosition, size, placed);
+                  final hit = _hit(
+                    details.localPosition - Offset(0, pad),
+                    size,
+                    placed,
+                    by: phone ? 10 : 4,
+                  );
                   if (hit != null && comments != null) {
                     comments.focus(hit);
                   } else {
@@ -852,32 +958,71 @@ class _TimelineState extends State<Timeline> {
                   }
                 },
                 onHorizontalDragEnd: (_) => _dragFrom = null,
-                child: SizedBox(
-                  height: height,
-                  child: CustomPaint(
-                    size: size,
-                    painter: _TimelinePainter(
-                      state: widget.state,
-                      placed: placed,
-                      selection: comments?.selection.value is Moment
-                          ? comments!.selection.value! as Moment
-                          : null,
-                      focused: comments?.focused,
-                      track: palette.selected,
-                      played: palette.textMuted,
-                      head: palette.text,
-                      signal: palette.signal,
-                      colorOf: (agentId) => comments == null
-                          ? palette.textMuted
-                          : _agentColor(comments.backend, agentId),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: pad),
+                  child: SizedBox(
+                    height: height,
+                    child: CustomPaint(
+                      size: size,
+                      painter: _TimelinePainter(
+                        state: widget.state,
+                        placed: placed,
+                        selection: comments?.selection.value is Moment
+                            ? comments!.selection.value! as Moment
+                            : null,
+                        focused: comments?.focused,
+                        track: palette.selected,
+                        played: palette.textMuted,
+                        head: palette.text,
+                        signal: palette.signal,
+                        colorOf: (agentId) => comments == null
+                            ? palette.textMuted
+                            : _agentColor(comments.backend, agentId),
+                      ),
                     ),
                   ),
                 ),
               ),
             );
+            return phone ? _adjustable(comments, timeline) : timeline;
           },
         );
       },
+    );
+  }
+
+  /// On a phone, for VoiceOver: an adjustable slider, a swipe up or down
+  /// moving the time by a twentieth of the video (between 1 and 10
+  /// seconds); while marking, it moves the moment being marked.
+  Widget _adjustable(CommentsController? comments, Widget timeline) {
+    final state = widget.state;
+    final duration = state.duration;
+    final picked = comments?.selection.value;
+    final at = widget.marking && picked is Moment
+        ? picked.start
+        : state.position;
+    final step = (duration / 20).clamp(1.0, 10.0);
+    double by(double delta) => (at + delta).clamp(0.0, duration);
+    void move(double delta) {
+      if (widget.marking) {
+        widget.onMark(by(delta));
+      } else {
+        widget.onSeek(by(delta));
+      }
+    }
+
+    String said(double seconds) =>
+        '${formatTime(seconds)} of ${formatTime(duration)}';
+    return Semantics(
+      container: true,
+      slider: true,
+      label: widget.marking ? 'Moment to comment on' : 'Position',
+      value: said(at),
+      increasedValue: said(by(step)),
+      decreasedValue: said(by(-step)),
+      onIncrease: duration <= 0 ? null : () => move(step),
+      onDecrease: duration <= 0 ? null : () => move(-step),
+      child: ExcludeSemantics(child: timeline),
     );
   }
 

@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
@@ -12,15 +13,24 @@ import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
 import 'avatar.dart';
+import 'chats.dart' show ChatScope, chatTitle;
 import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
 import 'explorer.dart' show openFile;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
+import 'mobile/haptics.dart';
+import 'mobile/message_actions.dart';
+import 'mobile/metrics.dart';
+import 'mobile/platform_policy.dart';
+import 'mobile/navigation.dart';
 import 'markdown.dart';
 import 'outbox.dart';
+import 'ask_card.dart';
 import 'pairing_card.dart';
+import 'pipes.dart' show SecretApprovalCard;
+import 'refusal_card.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -28,6 +38,7 @@ import 'state.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
 import 'tool_views.dart';
+import 'voice.dart';
 import 'waiting.dart' show EntryReveal, EntryTarget;
 
 /// The selected agent's transcript.
@@ -98,8 +109,10 @@ class TranscriptView extends StatefulWidget {
 /// How long the view takes to glide to a new entry.
 const _glideDuration = Duration(milliseconds: 300);
 
-/// How faded a queued message is.
-const _queuedOpacity = 0.5;
+/// How faded a queued message is: on a phone less, so its words keep at
+/// least 3:1 (IDENTITY.md, Phone).
+double _queuedOpacity(BuildContext context) =>
+    isPhoneLayout(context) ? 0.75 : 0.5;
 
 /// How long a message that left the queue stays, waiting for its entry,
 /// before it fades out (as it does when /clear drops the queue).
@@ -160,6 +173,22 @@ class _TranscriptViewState extends State<TranscriptView>
   /// Entries the user has expanded, so they stay open when scrolled away.
   final _expanded = <int>{};
 
+  /// Whether words are selected: a hold on a message is then the
+  /// selection's, not the message's actions ([MessageSelection]).
+  final _selecting = ValueNotifier(false);
+
+  /// The message the pointer is over, for the right click's Reply.
+  final _pointed = ValueNotifier<_Pointed?>(null);
+
+  /// Quotes [message] into this conversation's message box: an agent's,
+  /// or a chat's.
+  void _reply(_Pointed message) {
+    final chatId = ChatScope.chatIdOf(context);
+    final key = chatId != null ? 'chat:$chatId' : widget.transcript.agentId;
+    if (key.isEmpty) return;
+    AppScope.scope(context).drafts.reply(key, message.text, from: message.from);
+  }
+
   /// Queued messages shown after the last entry, oldest first, including
   /// ones that just left the queue while their entry is on its way.
   final _waiting = <_Waiting>[];
@@ -191,9 +220,11 @@ class _TranscriptViewState extends State<TranscriptView>
     final index = target == null ? null : _indexFor(target);
     if (target != null && index != null) {
       widget.reveal!.used(target);
-      _split = index;
-      _controller.pinned = false;
-      _atTop();
+      if (_worthGoing(index)) {
+        _split = index;
+        _controller.pinned = false;
+        _atTop();
+      }
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) => _revealChanged());
     }
@@ -238,10 +269,11 @@ class _TranscriptViewState extends State<TranscriptView>
     final load = widget.loadFrom;
     if (index != null ||
         load == null ||
+        !reveal.reachBack ||
         !transcript.hasEarlier ||
         target.seq >= transcript[0].seq) {
       reveal.used(target);
-      if (index != null) _goTo(index);
+      if (index != null && _worthGoing(index)) _goTo(index);
       return;
     }
     _revealing = true;
@@ -272,6 +304,19 @@ class _TranscriptViewState extends State<TranscriptView>
   /// Loads tried for the entry [TranscriptView.reveal] names.
   var _revealTries = 0;
 
+  /// Whether to go to the entry at [index] that [TranscriptView.reveal]
+  /// names: when the person asked to reach it, or when it's news, nothing
+  /// of theirs after it. A card they've written past is old news, and the
+  /// conversation stays at its end.
+  bool _worthGoing(int index) {
+    if (widget.reveal?.reachBack ?? false) return true;
+    final transcript = widget.transcript;
+    for (var i = index + 1; i < transcript.length; i++) {
+      if (transcript[i].entry.hasUser()) return false;
+    }
+    return true;
+  }
+
   /// Puts the entry at [index] at the top of the view: it starts the part
   /// below the center line, which sits at offset 0. Following the end
   /// starts again once the person scrolls down to it.
@@ -281,6 +326,13 @@ class _TranscriptViewState extends State<TranscriptView>
       ..gliding = false
       ..pinned = false;
     setState(() => _split = index);
+    // The center line at the top from the next frame on, not one after:
+    // the frame between would show the old place with the new split.
+    if (_controller.hasClients) {
+      _jumping = true;
+      _controller.jumpTo(0);
+      _jumping = false;
+    }
     _atTop();
   }
 
@@ -446,8 +498,10 @@ class _TranscriptViewState extends State<TranscriptView>
         );
         added = true;
       } else {
-        // Back in the queue: it stays.
+        // Still queued, or back in the queue: it stays, as it is now (a
+        // voice message's transcription moves on).
         shown.first
+          ..message = message
           ..leaving?.cancel()
           ..leaving = null
           ..gone = false;
@@ -504,6 +558,8 @@ class _TranscriptViewState extends State<TranscriptView>
 
   @override
   void dispose() {
+    _selecting.dispose();
+    _pointed.dispose();
     widget.follow.removeListener(_followAgain);
     widget.transcript.removeListener(_entriesChanged);
     widget.queued?.removeListener(_queueChanged);
@@ -618,6 +674,9 @@ class _TranscriptViewState extends State<TranscriptView>
     if (t >= 1) {
       _controller.gliding = false;
       _glide.stop();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _anchorAtEnd();
+      });
     }
   }
 
@@ -626,8 +685,12 @@ class _TranscriptViewState extends State<TranscriptView>
     return sliver is RenderSliver ? sliver.geometry?.scrollExtent : null;
   }
 
+  /// The view is being put at a place of its own choosing: not the person
+  /// scrolling, so following stays as it was set.
+  var _jumping = false;
+
   void _scrolled() {
-    if (!_controller.hasClients) return;
+    if (!_controller.hasClients || _jumping) return;
     final position = _controller.position;
     if (_controller.gliding) {
       // The glide's own step; anything else is the user taking over.
@@ -635,8 +698,64 @@ class _TranscriptViewState extends State<TranscriptView>
       _controller.gliding = false;
       _glide.stop();
     }
-    _controller.pinned = position.pixels >= position.maxScrollExtent - 8;
+    _controller.pinned = _atEnd();
     _maybeLoadEarlier();
+    // The end may come into the list only once laid out at this place.
+    if (!_settling) {
+      _settling = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _settling = false;
+        if (!mounted || !_controller.hasClients || _controller.gliding) return;
+        _controller.pinned = _atEnd();
+        _anchorAtEnd();
+      });
+    }
+  }
+
+  /// A check of [_atEnd] is due after the next layout.
+  var _settling = false;
+
+  /// Whether the view is at the true bottom: within a few pixels of the
+  /// end, and the list below the center line laid out to its last item.
+  /// Before that, its end is only an estimate (after going far back to a
+  /// card, say), and following it would leap when the estimate's put right.
+  bool _atEnd() {
+    final position = _controller.position;
+    if (position.pixels < position.maxScrollExtent - 8) return false;
+    final padding = _liveKey.currentContext?.findRenderObject();
+    final list = padding is RenderSliverPadding ? padding.child : null;
+    if (list is! RenderSliverMultiBoxAdaptor) return true;
+    final count =
+        widget.transcript.length -
+        math.min(_split, widget.transcript.length) +
+        _waiting.length;
+    if (count == 0) return true;
+    final last = list.lastChild;
+    return last != null && list.indexOf(last) == count - 1;
+  }
+
+  /// How many items may be below the center line before following the end
+  /// moves the line down to it.
+  static const _anchorAfter = 30;
+
+  /// Following the end with many entries below the center line (after
+  /// going back to a card and down again, or a long session), moves the
+  /// line to the newest entry: all else is laid out upward from it, so
+  /// what changes above can't move the bottom, and the end is exact. Left
+  /// for later while the person is typing in the conversation (in a card).
+  void _anchorAtEnd() {
+    final length = widget.transcript.length;
+    if (!_controller.pinned ||
+        _controller.gliding ||
+        length - _split <= _anchorAfter) {
+      return;
+    }
+    final focus = FocusManager.instance.primaryFocus?.context;
+    if (focus != null &&
+        focus.findAncestorStateOfType<_TranscriptViewState>() == this) {
+      return;
+    }
+    setState(() => _split = length - 1);
   }
 
   void _followAgain() {
@@ -661,17 +780,21 @@ class _TranscriptViewState extends State<TranscriptView>
     if (index >= transcript.length) {
       return _queuedItem(_waiting[index - transcript.length]);
     }
-    final model = transcript[index];
+    return _entryItem(index, transcript[index]);
+  }
+
+  Widget _entryItem(int index, EntryModel model) {
+    final transcript = widget.transcript;
     final fromQueue = _fromQueue.contains(model.seq);
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: contentMaxWidth),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: Space.xl),
+          padding: EdgeInsets.symmetric(horizontal: Metrics.of(context).gutter),
           child: Arrival(
             // A delivered message brightens where its queued bubble was.
-            from: fromQueue ? _queuedOpacity : 0,
+            from: fromQueue ? _queuedOpacity(context) : 0,
             rise: !fromQueue,
             // Only an entry built as it arrives eases in; one built later,
             // as the user scrolls to it, is just there.
@@ -700,7 +823,26 @@ class _TranscriptViewState extends State<TranscriptView>
     final palette = Palette.of(context);
     final message = waiting.message;
     final files = waiting.outgoing?.files ?? const <OutgoingFile>[];
+    // A voice message: on its way, or being transcribed (or failed). Once
+    // its words are there, it waits as they are, with ▶.
+    final heard =
+        message.hasTranscription() &&
+        message.transcription.state ==
+            TranscriptionState.TRANSCRIPTION_STATE_DONE;
+    final voice =
+        waiting.outgoing?.voice ??
+        (message.hasTranscription() && !heard
+            ? Duration(milliseconds: message.transcription.durationMs.toInt())
+            : null);
+    final voiceFailed =
+        waiting.outgoing == null &&
+        message.transcription.state ==
+            TranscriptionState.TRANSCRIPTION_STATE_FAILED;
     final (Widget bubble, CrossAxisAlignment side) = switch (message.source) {
+      'person' when voice != null => (
+        _UserText('', waitingVoice: voice),
+        CrossAxisAlignment.end,
+      ),
       'person' when files.isNotEmpty => (
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -728,7 +870,11 @@ class _TranscriptViewState extends State<TranscriptView>
         CrossAxisAlignment.end,
       ),
       'person' => (
-        _UserText(message.text, files: message.attachments),
+        _UserText(
+          message.text,
+          files: message.attachments,
+          voice: heard ? message.transcription : null,
+        ),
         CrossAxisAlignment.end,
       ),
       'agent' => (
@@ -748,7 +894,8 @@ class _TranscriptViewState extends State<TranscriptView>
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.center,
-          style: TextStyles.caption.copyWith(color: palette.textFaint),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textFaint),
         ),
         CrossAxisAlignment.center,
       ),
@@ -756,13 +903,52 @@ class _TranscriptViewState extends State<TranscriptView>
     final outgoing = waiting.outgoing;
     final failure = outgoing?.failure;
     final sending = outgoing != null || waiting.justSent;
+    // Under the bubble: where it was sent from, and Queued or Sending…
+    // (or how a voice message's transcription goes).
+    final Widget? status = failure == null && !voiceFailed
+        ? Padding(
+            padding: EdgeInsets.only(
+              top: 2,
+              left: Space.m,
+              // Under the bubble, clear of the avatar.
+              right: message.source == 'person'
+                  ? Space.m + userAvatarSize + Space.xs
+                  : Space.m,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (message.source == 'person' && message.hasSentFrom()) ...[
+                  DeviceMark(message.sentFrom),
+                  const SizedBox(width: Space.xs),
+                ],
+                // A voice message says how its
+                // transcription goes instead.
+                if (voice != null && !sending)
+                  const TranscribingLine()
+                else
+                  Text(
+                    sending ? 'Sending…' : 'Queued',
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
+                  ),
+              ],
+            ),
+          )
+        : null;
+    final statusClear = isPhoneLayout(context);
     return Align(
       key: ObjectKey(waiting),
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: contentMaxWidth),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Space.xl, Space.l, Space.xl, 0),
+          padding: EdgeInsets.fromLTRB(
+            Metrics.of(context).gutter,
+            Space.l,
+            Metrics.of(context).gutter,
+            0,
+          ),
           child: AnimatedOpacity(
             opacity: waiting.gone ? 0 : 1,
             duration: Motion.fast,
@@ -775,41 +961,26 @@ class _TranscriptViewState extends State<TranscriptView>
                 crossAxisAlignment: side,
                 children: [
                   Opacity(
-                    opacity: _queuedOpacity,
+                    opacity: _queuedOpacity(context),
                     child: Column(
                       crossAxisAlignment: side,
-                      children: [
-                        bubble,
-                        if (failure == null)
-                          Padding(
-                            padding: EdgeInsets.only(
-                              top: 2,
-                              left: Space.m,
-                              // Under the bubble, clear of the avatar.
-                              right: message.source == 'person'
-                                  ? Space.m + userAvatarSize + Space.xs
-                                  : Space.m,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (message.source == 'person' &&
-                                    message.hasSentFrom()) ...[
-                                  DeviceMark(message.sentFrom),
-                                  const SizedBox(width: Space.xs),
-                                ],
-                                Text(
-                                  sending ? 'Sending…' : 'Queued',
-                                  style: TextStyles.caption.copyWith(
-                                    color: palette.textFaint,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
+                      children: [bubble, if (!statusClear) ?status],
                     ),
                   ),
+                  // On a phone, what it waits for is read at full strength.
+                  if (statusClear) ?status,
+                  if (voiceFailed)
+                    Padding(
+                      padding: const EdgeInsets.only(
+                        top: 2,
+                        left: Space.m,
+                        right: Space.m + userAvatarSize + Space.xs,
+                      ),
+                      child: VoiceFailed(
+                        agentId: widget.agentId,
+                        message: message,
+                      ),
+                    ),
                   if (outgoing != null && failure != null)
                     _NotSent(
                       why: failure,
@@ -863,40 +1034,333 @@ class _TranscriptViewState extends State<TranscriptView>
         return ToolViewScope(
           transcript: widget.transcript,
           agentId: widget.transcript.agentId,
-          child: SelectableArea(
-            child: CustomScrollView(
-              controller: _controller,
-              center: _liveKey,
-              slivers: [
-                SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) => index == split
-                        ? _EarlierRow(
-                            failed: _earlierFailed,
-                            onRetry: () {
-                              setState(() => _earlierFailed = null);
-                              _maybeLoadEarlier();
-                            },
-                          )
-                        : _item(split - 1 - index),
-                    childCount: split + (hasEarlier ? 1 : 0),
-                  ),
-                ),
-                SliverPadding(
-                  key: _liveKey,
-                  padding: const EdgeInsets.only(bottom: Space.xl),
-                  sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (context, index) => _item(split + index),
-                      childCount: length - split + _waiting.length,
-                    ),
-                  ),
-                ),
+          child: _WithLatest(
+            away: _controller.away,
+            transcript: widget.transcript,
+            onTap: _followAgain,
+            child: SelectableArea(
+              onSelectionChanged: (content) => _selecting.value =
+                  content != null && content.plainText.isNotEmpty,
+              // Reply, for the message the right click is on.
+              menuItems: () => [
+                if (_pointed.value case final pointed?)
+                  MenuItem('Reply', () => _reply(pointed)),
               ],
+              child: MessageSelection(
+                selecting: _selecting,
+                child: _ReplyScope(
+                  pointed: _pointed,
+                  reply: _reply,
+                  child: CustomScrollView(
+                    controller: _controller,
+                    center: _liveKey,
+                    // On a phone, scrolling the conversation tucks the
+                    // keyboard away, as Messages does.
+                    keyboardDismissBehavior: isPhoneLayout(context)
+                        ? ScrollViewKeyboardDismissBehavior.onDrag
+                        : ScrollViewKeyboardDismissBehavior.manual,
+                    slivers: [
+                      SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) => index == split
+                              ? _EarlierRow(
+                                  failed: _earlierFailed,
+                                  onRetry: () {
+                                    setState(() => _earlierFailed = null);
+                                    _maybeLoadEarlier();
+                                  },
+                                )
+                              : _item(split - 1 - index),
+                          childCount: split + (hasEarlier ? 1 : 0),
+                        ),
+                      ),
+                      SliverPadding(
+                        key: _liveKey,
+                        padding: const EdgeInsets.only(bottom: Space.xl),
+                        sliver: SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (context, index) => _item(split + index),
+                            childCount: length - split + _waiting.length,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// While the conversation is scrolled up away from its end: a button to go
+/// back down and follow it again, saying how many replies came in
+/// meanwhile. On a phone a pill at its foot (research mobile.md §4); on a
+/// Mac a small round button at its bottom right, "3 new" beside its arrow
+/// when replies came in.
+class _WithLatest extends StatefulWidget {
+  const _WithLatest({
+    required this.away,
+    required this.transcript,
+    required this.onTap,
+    required this.child,
+  });
+
+  final ValueListenable<bool> away;
+  final TranscriptStore transcript;
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  State<_WithLatest> createState() => _WithLatestState();
+}
+
+class _WithLatestState extends State<_WithLatest> {
+  /// The transcript's length when the view left its end.
+  int? _from;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.away.addListener(_changed);
+    widget.transcript.addListener(_changed);
+    if (widget.away.value) _from = widget.transcript.length;
+  }
+
+  @override
+  void didUpdateWidget(_WithLatest old) {
+    super.didUpdateWidget(old);
+    if (old.away != widget.away) {
+      old.away.removeListener(_changed);
+      widget.away.addListener(_changed);
+    }
+    if (old.transcript != widget.transcript) {
+      old.transcript.removeListener(_changed);
+      widget.transcript.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.away.removeListener(_changed);
+    widget.transcript.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (!mounted) return;
+    // Following can change while the list lays out: show it after.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => _changed());
+      return;
+    }
+    final away = widget.away.value;
+    if (away == (_from != null) && !away) return;
+    setState(() {
+      if (!away) {
+        _from = null;
+      } else {
+        _from ??= widget.transcript.length;
+      }
+    });
+  }
+
+  /// Replies and messages from agents since the view left the end.
+  int get _new {
+    final from = _from;
+    if (from == null) return 0;
+    var count = 0;
+    for (var i = from; i < widget.transcript.length; i++) {
+      final entry = widget.transcript[i].entry;
+      if ((entry.hasAssistant() && entry.assistant.text.isNotEmpty) ||
+          (entry.hasEvent() &&
+              entry.event.source == EventSource.EVENT_SOURCE_AGENT)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /// What it says to VoiceOver.
+  static String _label(int count) => count == 0
+      ? 'Go to the latest message'
+      : '$count new ${count == 1 ? 'message' : 'messages'}, go to the latest';
+
+  /// A Mac's: at the bottom right, over the conversation's end.
+  Widget _mac(BuildContext context, bool shown, int count) {
+    final palette = Palette.of(context);
+    return Stack(
+      children: [
+        Positioned.fill(child: widget.child),
+        Positioned(
+          right: Space.l,
+          bottom: Space.m,
+          child: IgnorePointer(
+            ignoring: !shown,
+            child: AnimatedOpacity(
+              opacity: shown ? 1 : 0,
+              duration: Motion.fast,
+              child: ExcludeSemantics(
+                excluding: !shown,
+                child: Semantics(
+                  container: true,
+                  button: true,
+                  label: _label(count),
+                  onTap: widget.onTap,
+                  excludeSemantics: true,
+                  child: Pressable(
+                    key: const ValueKey('latest'),
+                    onTap: widget.onTap,
+                    builder: (context, hovered) => AnimatedContainer(
+                      duration: Motion.fast,
+                      curve: Curves.easeOut,
+                      // A pointer's 28 on a Mac; a finger's on a wide iPad
+                      // or Android window.
+                      height: Metrics.of(context).target,
+                      constraints: BoxConstraints(
+                        minWidth: Metrics.of(context).target,
+                      ),
+                      padding: EdgeInsets.only(
+                        left: count == 0 ? 0 : Space.s + 2,
+                        right: count == 0 ? 0 : Space.s,
+                      ),
+                      decoration: BoxDecoration(
+                        color: hovered ? palette.selected : palette.sidebar,
+                        borderRadius: BorderRadius.circular(Radii.floating),
+                        border: Border.all(color: palette.hairline),
+                        boxShadow: floatingShadow,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (count > 0) ...[
+                            Text(
+                              '$count new',
+                              style: TextStyles.label.copyWith(
+                                color: palette.text,
+                                fontWeight: FontWeight.w500,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: Space.xs),
+                          ],
+                          ExtensionGlyph(
+                            icon: 'arrow-down',
+                            name: 'Latest',
+                            color: hovered ? palette.text : palette.textMuted,
+                            size: 14,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _from != null;
+    final count = _new;
+    if (!isPhoneLayout(context)) return _mac(context, shown, count);
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Stack(
+      children: [
+        Positioned.fill(child: widget.child),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: Space.s,
+          child: Center(
+            child: IgnorePointer(
+              ignoring: !shown,
+              child: AnimatedOpacity(
+                opacity: shown ? 1 : 0,
+                duration: Motion.fast,
+                child: ExcludeSemantics(
+                  excluding: !shown,
+                  child: Semantics(
+                    container: true,
+                    button: true,
+                    label: _label(count),
+                    onTap: widget.onTap,
+                    excludeSemantics: true,
+                    child: Pressable(
+                      onTap: () {
+                        unawaited(Haptics.selection());
+                        widget.onTap();
+                      },
+                      // A floating control: its words grow only so far,
+                      // so it never covers the conversation it leads to.
+                      builder: (context, pressed) =>
+                          MediaQuery.withClampedTextScaling(
+                            maxScaleFactor: 1.5,
+                            child: Container(
+                              constraints: BoxConstraints(
+                                minHeight: PhonePlatformPolicy.of(context)
+                                    .touchTarget,
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: Space.l,
+                              ),
+                              decoration: BoxDecoration(
+                                color: pressed
+                                    ? palette.selected
+                                    : palette.sidebar,
+                                borderRadius: BorderRadius.circular(
+                                  PhonePlatformPolicy.of(context).touchTarget /
+                                      2,
+                                ),
+                                border: Border.all(color: palette.hairline),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Color(0x40000000),
+                                    blurRadius: 12,
+                                    offset: Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ExtensionGlyph(
+                                    icon: 'arrow-down',
+                                    name: 'Latest',
+                                    color: palette.text,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: Space.xs),
+                                  Text(
+                                    count == 0 ? 'Latest' : '$count new',
+                                    style: type.label.copyWith(
+                                      color: palette.text,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -924,9 +1388,8 @@ class _EarlierRow extends StatelessWidget {
                   const SizedBox(width: Space.s),
                   Text(
                     'Loading earlier messages…',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
                   ),
                 ],
               )
@@ -938,7 +1401,8 @@ class _EarlierRow extends StatelessWidget {
                       "Couldn't load earlier messages. $failed",
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyles.caption.copyWith(color: palette.danger),
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.danger),
                     ),
                   ),
                   const SizedBox(width: Space.s),
@@ -946,7 +1410,7 @@ class _EarlierRow extends StatelessWidget {
                     onTap: onRetry,
                     builder: (context, hovered) => Text(
                       'Retry',
-                      style: TextStyles.caption.copyWith(
+                      style: TypeScale.of(context).caption.copyWith(
                         color: hovered ? palette.text : palette.textMuted,
                         fontWeight: FontWeight.w500,
                       ),
@@ -966,7 +1430,18 @@ class _FollowController extends ScrollController {
   /// The extent of the content below the center line, read during layout.
   final double? Function() liveExtent;
 
-  var pinned = true;
+  /// Following the end; when not, a phone offers Latest to go back to it.
+  bool get pinned => !away.value;
+  set pinned(bool value) => away.value = !value;
+
+  /// Scrolled up away from the end: [pinned]'s opposite, to listen to.
+  final away = ValueNotifier(false);
+
+  @override
+  void dispose() {
+    away.dispose();
+    super.dispose();
+  }
 
   /// The view is gliding to a new entry, so layout leaves it be.
   var gliding = false;
@@ -1085,6 +1560,13 @@ class _EntryViewState extends State<EntryView> {
     return _built ??= _build();
   }
 
+  /// On a phone, the hold's Reply: quotes the message into the box.
+  VoidCallback? _replyTo(String text, String? from) {
+    final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
+    if (scope == null) return null;
+    return () => scope.reply((text: text, from: from));
+  }
+
   Widget _build() {
     final entry = widget.model.entry;
     final seq = widget.model.seq;
@@ -1094,11 +1576,12 @@ class _EntryViewState extends State<EntryView> {
           entry.user.text,
           sentFrom: entry.user.hasSentFrom() ? entry.user.sentFrom : null,
           files: entry.user.attachments,
+          voice: entry.user.hasVoice() ? entry.user.voice : null,
         ),
         Space.l,
       ),
       Entry_Kind.proposal => (
-        _ProposalCard(key: ValueKey(entry.proposal.id), entry.proposal),
+        ProposalCard(key: ValueKey(entry.proposal.id), entry.proposal),
         Space.l,
       ),
       Entry_Kind.event =>
@@ -1116,7 +1599,7 @@ class _EntryViewState extends State<EntryView> {
       Entry_Kind.assistant => (
         entry.assistant.text.isEmpty
             ? const SizedBox.shrink()
-            : Markdown(entry.assistant.text),
+            : _OwnReply(entry.assistant.text),
         Space.l,
       ),
       Entry_Kind.thinking => (
@@ -1157,6 +1640,8 @@ class _EntryViewState extends State<EntryView> {
         SecretRequestCard(
           key: ValueKey(entry.secretRequest.id),
           entry.secretRequest,
+          // An admin agent's conversation shows the secret it collects.
+          shownIn: AppScope.of(context).transcript.agentId,
         ),
         Space.l,
       ),
@@ -1174,11 +1659,48 @@ class _EntryViewState extends State<EntryView> {
         ),
         Space.l,
       ),
+      Entry_Kind.secretApproval => (
+        SecretApprovalCard(key: ValueKey(seq), entry.secretApproval, seq: seq),
+        Space.l,
+      ),
+      // Priya's ask card (#208) replaces this.
+      Entry_Kind.askPerson => (
+        AskPersonCard(
+          key: ValueKey(seq),
+          entry.askPerson,
+          agentId: AppScope.of(context).transcript.agentId,
+          seq: seq,
+        ),
+        Space.l,
+      ),
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
+    // A message's words, for its Copy and Select text on a phone and its
+    // Reply; and who sent it, when it's another agent.
+    final words = switch (entry.whichKind()) {
+      Entry_Kind.user => entry.user.text,
+      Entry_Kind.assistant => entry.assistant.text,
+      Entry_Kind.event
+          when entry.event.source == EventSource.EVENT_SOURCE_AGENT =>
+        splitAlsoSentTo(entry.event.text).$1,
+      _ => null,
+    };
+    final from = entry.whichKind() == Entry_Kind.event
+        ? entry.event.from
+        : null;
     return Padding(
       padding: EdgeInsets.only(top: gap),
-      child: child,
+      child: words == null
+          ? child
+          : _Repliable(
+              text: words,
+              from: from,
+              child: MessageActions(
+                text: words,
+                onReply: _replyTo(words, from),
+                child: child,
+              ),
+            ),
     );
   }
 }
@@ -1224,9 +1746,23 @@ const userAvatarSize = 22.0;
 /// The person's message: a bubble on the right in the agent's color, their
 /// avatar at its side, and a mark under it for the device it was sent from.
 class _UserText extends StatelessWidget {
-  const _UserText(this.text, {this.sentFrom, this.files = const []});
+  const _UserText(
+    this.text, {
+    this.sentFrom,
+    this.files = const [],
+    this.voice,
+    this.waitingVoice,
+  });
 
   final String text;
+
+  /// Said rather than typed: [text] is what was heard, files[0] the
+  /// recording, played from ▶ under it.
+  final Transcription? voice;
+
+  /// A voice message not transcribed yet, this long: its length shows
+  /// instead of words.
+  final Duration? waitingVoice;
 
   /// Where it was sent from; null when the backend doesn't know (sent
   /// before it kept that), and then nothing shows.
@@ -1238,14 +1774,37 @@ class _UserText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = AgentTints.of(context)?.own ?? Palette.of(context).signal;
+    final words = Text(
+      text,
+      style: TypeScale.of(context).body
+          .copyWith(color: const Color(0xFFFFFFFF)),
+    );
+    final voice = this.voice;
+    final waiting = waitingVoice;
     final bubble = Bubble(
       color: color,
       outgoing: true,
-      child: Text(
-        text,
-        style: TextStyles.body.copyWith(color: const Color(0xFFFFFFFF)),
-      ),
+      child: waiting != null
+          ? VoiceWaiting(duration: waiting)
+          : voice != null && this.files.isNotEmpty
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                words,
+                const SizedBox(height: Space.xs),
+                VoicePlay(
+                  path: this.files.first.path,
+                  duration: Duration(milliseconds: voice.durationMs.toInt()),
+                ),
+              ],
+            )
+          : words,
     );
+    // A voice message's recording plays from its bubble.
+    final files = voice != null || waiting != null
+        ? const <Attachment>[]
+        : this.files;
     final from = sentFrom;
     // The person's avatar beside it, at its foot, as an agent's character
     // heads its messages.
@@ -1435,7 +1994,7 @@ class _NotSent extends StatelessWidget {
       onTap: onTap,
       builder: (context, hovered) => Text(
         label,
-        style: TextStyles.caption.copyWith(
+        style: TypeScale.of(context).caption.copyWith(
           color: hovered ? palette.text : palette.textMuted,
           fontWeight: FontWeight.w500,
         ),
@@ -1452,7 +2011,8 @@ class _NotSent extends StatelessWidget {
             card: (context) => Text(why),
             child: Text(
               'Not sent',
-              style: TextStyles.caption.copyWith(color: palette.danger),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.danger),
             ),
           ),
           const SizedBox(width: Space.s),
@@ -1522,16 +2082,24 @@ class DeviceMark extends StatelessWidget {
 /// Rivet's color with the proposal, a comment box (Enter approves), Dismiss
 /// and Approve. Decided, it says how and when, with the person's comment.
 /// The backend sends the entry back decided; the card keeps nothing.
-class _ProposalCard extends StatefulWidget {
-  const _ProposalCard(this.proposal, {super.key});
+class ProposalCard extends StatefulWidget {
+  const ProposalCard(this.proposal, {super.key, this.agentId, this.chatId});
 
   final Proposal proposal;
 
+  /// The agent that proposed it; the selected agent when null (its
+  /// conversation is the one showing).
+  final String? agentId;
+
+  /// The chat that proposed it instead; when null, the chat whose
+  /// conversation it's in ([ChatScope]), if any.
+  final String? chatId;
+
   @override
-  State<_ProposalCard> createState() => _ProposalCardState();
+  State<ProposalCard> createState() => _ProposalCardState();
 }
 
-class _ProposalCardState extends State<_ProposalCard> {
+class _ProposalCardState extends State<ProposalCard> {
   final _comment = TextEditingController();
   var _deciding = false;
 
@@ -1552,11 +2120,15 @@ class _ProposalCardState extends State<_ProposalCard> {
       _error = null;
     });
     try {
+      final chatId = widget.chatId ?? ChatScope.chatIdOf(context) ?? '';
       await scope.decideProposal(
-        scope.workspace.workspace.selectedAgentId,
+        chatId.isEmpty
+            ? (widget.agentId ?? scope.workspace.workspace.selectedAgentId)
+            : '',
         widget.proposal.id,
         approve: approve,
         comment: approve ? _comment.text.trim() : '',
+        chatId: chatId,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -1605,10 +2177,8 @@ class _ProposalCardState extends State<_ProposalCard> {
               Flexible(
                 child: Text(
                   'Proposal to $name',
-                  style: TextStyles.caption.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: color, fontWeight: FontWeight.w600),
                 ),
               ),
             ],
@@ -1628,7 +2198,7 @@ class _ProposalCardState extends State<_ProposalCard> {
                 Expanded(
                   child: Text(
                     _error ?? 'Enter approves; $name gets it as your message.',
-                    style: TextStyles.caption.copyWith(
+                    style: TypeScale.of(context).caption.copyWith(
                       color: _error == null
                           ? palette.textFaint
                           : palette.danger,
@@ -1678,7 +2248,7 @@ class _ProposalCardState extends State<_ProposalCard> {
                           ),
                       ],
                     ),
-                    style: TextStyles.caption,
+                    style: TypeScale.of(context).caption,
                   ),
                 ),
               ],
@@ -1687,7 +2257,8 @@ class _ProposalCardState extends State<_ProposalCard> {
               const SizedBox(height: Space.xs),
               Text(
                 proposal.comment,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textMuted),
               ),
             ],
           ],
@@ -1746,7 +2317,7 @@ class _AgentMessageState extends State<_AgentMessage> {
           child: NameThenRole(
             name: widget.event.from,
             role: tints?.agents[_sender]?.role ?? '',
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: nameColor,
               fontWeight: FontWeight.w600,
               decoration: known && _hovered ? TextDecoration.underline : null,
@@ -1804,10 +2375,86 @@ class _AgentMessageState extends State<_AgentMessage> {
             padding: const EdgeInsets.only(left: Space.m, top: 2),
             child: Text(
               'Also sent to $also',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ),
       ],
+    );
+  }
+}
+
+/// A message in the conversation, its words and who sent it when it's
+/// another agent (null for the agent's own and the person's).
+typedef _Pointed = ({String text, String? from});
+
+/// Where a message tells the conversation that the pointer is over it, and
+/// how to reply to one ([_Repliable]).
+class _ReplyScope extends InheritedWidget {
+  const _ReplyScope({
+    required this.pointed,
+    required this.reply,
+    required super.child,
+  });
+
+  final ValueNotifier<_Pointed?> pointed;
+  final void Function(_Pointed message) reply;
+
+  @override
+  bool updateShouldNotify(_ReplyScope old) =>
+      old.pointed != pointed || old.reply != reply;
+}
+
+/// A message that can be replied to: on a Mac it says when the pointer is
+/// over it, so the right click's menu offers Reply for it.
+class _Repliable extends StatelessWidget {
+  const _Repliable({
+    required this.text,
+    required this.from,
+    required this.child,
+  });
+
+  final String text;
+  final String? from;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
+    if (scope == null) return child;
+    final me = (text: text, from: from);
+    return MouseRegion(
+      opaque: false,
+      hitTestBehavior: HitTestBehavior.translucent,
+      onEnter: (_) => scope.pointed.value = me,
+      onHover: (_) => scope.pointed.value = me,
+      onExit: (_) {
+        if (scope.pointed.value == me) scope.pointed.value = null;
+      },
+      child: child,
+    );
+  }
+}
+
+/// The agent's own reply in its conversation: a bubble on the left like
+/// another agent's message, but washed with the agent's own color rather
+/// than filled with it, edged in it, its words in `text`, and with no name
+/// over it: it's whose conversation this is. Others' messages, filled with
+/// their color under their name, stand apart from it at a glance.
+class _OwnReply extends StatelessWidget {
+  const _OwnReply(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final own = AgentTints.of(context)?.own ?? Palette.of(context).textFaint;
+    return Bubble(
+      color: own.withValues(alpha: 0.14),
+      edge: own.withValues(alpha: 0.5),
+      outgoing: false,
+      wide: true,
+      child: Markdown(text),
     );
   }
 }
@@ -1855,7 +2502,7 @@ class _EventLine extends StatelessWidget {
                 maxLines: open ? null : 1,
                 overflow: open ? null : TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
-                style: TextStyles.caption.copyWith(color: color),
+                style: TypeScale.of(context).caption.copyWith(color: color),
               ),
             ),
             if (more) ...[
@@ -1876,11 +2523,13 @@ class _EventLine extends StatelessWidget {
         child: task
             ? Text(
                 event.text,
-                style: TextStyles.code.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).code
+                    .copyWith(color: palette.textMuted),
               )
             : Text(
                 event.text,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textMuted),
               ),
       ),
     );
@@ -1942,11 +2591,20 @@ class Bubble extends StatelessWidget {
     required this.color,
     required this.outgoing,
     required this.child,
+    this.edge,
+    this.wide = false,
   });
 
   final Color color;
   final bool outgoing;
   final Widget child;
+
+  /// A 1px line around it, tail and all; none when null.
+  final Color? edge;
+
+  /// Room for an agent's own reply, its code and tables: most of the
+  /// column rather than a message's share of it.
+  final bool wide;
 
   @override
   Widget build(BuildContext context) {
@@ -1961,11 +2619,20 @@ class Bubble extends StatelessWidget {
           ),
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth: constraints.maxWidth * 0.78,
+              // A phone's narrow column keeps more of its width for words.
+              maxWidth:
+                  constraints.maxWidth *
+                  (wide
+                      ? (isPhoneLayout(context) ? 0.94 : 0.9)
+                      : (isPhoneLayout(context) ? 0.86 : 0.78)),
               minHeight: 34,
             ),
             child: CustomPaint(
-              painter: _BubblePainter(color: color, outgoing: outgoing),
+              painter: _BubblePainter(
+                color: color,
+                outgoing: outgoing,
+                edge: edge,
+              ),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(
                   Space.m,
@@ -1984,7 +2651,13 @@ class Bubble extends StatelessWidget {
 }
 
 class _BubblePainter extends CustomPainter {
-  const _BubblePainter({required this.color, required this.outgoing});
+  const _BubblePainter({
+    required this.color,
+    required this.outgoing,
+    this.edge,
+  });
+
+  final Color? edge;
 
   /// How far the tail reaches past the bubble.
   static const tail = 5.0;
@@ -2015,11 +2688,20 @@ class _BubblePainter extends CustomPainter {
       shape = shape.transform(mirror.storage);
     }
     canvas.drawPath(shape, Paint()..color = color);
+    if (edge case final edge?) {
+      canvas.drawPath(
+        shape,
+        Paint()
+          ..color = edge
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
   }
 
   @override
   bool shouldRepaint(_BubblePainter old) =>
-      old.color != color || old.outgoing != outgoing;
+      old.color != color || old.outgoing != outgoing || old.edge != edge;
 }
 
 /// A one-line header that expands to show more below it.
@@ -2058,9 +2740,16 @@ class _DisclosureState extends State<_Disclosure> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Pressable(
-          onTap: _toggle,
-          builder: (context, hovered) => widget.header(context, _open, hovered),
+        Semantics(
+          // On a phone, one thing to open or close, saying which it is.
+          container: true,
+          button: true,
+          expanded: _open,
+          child: Pressable(
+            onTap: _toggle,
+            builder: (context, hovered) =>
+                widget.header(context, _open, hovered),
+          ),
         ),
         if (widget.under?.call(context) case final under?)
           Padding(
@@ -2079,6 +2768,25 @@ class _DisclosureState extends State<_Disclosure> {
       ],
     );
   }
+}
+
+/// A disclosure's header line: 24pt on a Mac; on a phone a finger's
+/// height at least, and taller as the text grows.
+class _HeaderLine extends StatelessWidget {
+  const _HeaderLine({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => isPhoneLayout(context)
+      ? ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Touch.target),
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: child,
+          ),
+        )
+      : SizedBox(height: 24, child: child);
 }
 
 class _ThinkingView extends StatelessWidget {
@@ -2101,8 +2809,7 @@ class _ThinkingView extends StatelessWidget {
     return _Disclosure(
       expanded: expanded,
       onToggle: onToggle,
-      header: (context, open, hovered) => SizedBox(
-        height: 24,
+      header: (context, open, hovered) => _HeaderLine(
         child: Row(
           children: [
             SizedBox(
@@ -2116,15 +2823,17 @@ class _ThinkingView extends StatelessWidget {
             ),
             Text(
               live ? 'Thinking…' : 'Thought',
-              style: TextStyles.body.copyWith(
+              style: TypeScale.of(context).body.copyWith(
                 color: hovered || live ? palette.textMuted : palette.textFaint,
               ),
             ),
           ],
         ),
       ),
-      body: (context) =>
-          Text(text, style: TextStyles.body.copyWith(color: palette.textMuted)),
+      body: (context) => Text(
+        text,
+        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+      ),
     );
   }
 }
@@ -2217,29 +2926,57 @@ class _ToolCallView extends StatelessWidget {
     final failed = info.failed;
     final running = info.running;
     final view = toolViewFor(info);
+    // On a phone how long it ran and whether it failed go under the line,
+    // which needs the width; only the chevron stays at its end.
+    final phone = isPhoneLayout(context);
+    final timed = call.started > 0 && (call.ended > 0 || running);
+    Widget? meta() => !phone || (!timed && !failed)
+        ? null
+        : Wrap(
+            spacing: Space.s,
+            children: [
+              if (timed)
+                Ticking(
+                  active: call.ended == 0,
+                  builder: (context, now) => Text(
+                    toolClock(call, now),
+                    style: TypeScale.of(context).caption.copyWith(
+                      color: palette.textFaint,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              if (failed)
+                Text(
+                  'Failed',
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.danger),
+                ),
+            ],
+          );
     // After the line: how long it ran, whether it failed, and the chevron
     // that opens its input and output.
     List<Widget> ending(bool open, bool hovered) => [
       // How long it has run (ticking) and when bash will stop it, or how
       // long it took.
-      if (call.started > 0 && (call.ended > 0 || running)) ...[
+      if (timed && !phone) ...[
         const SizedBox(width: Space.s),
         Ticking(
           active: call.ended == 0,
           builder: (context, now) => Text(
             toolClock(call, now),
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: palette.textFaint,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
         ),
       ],
-      if (failed) ...[
+      if (failed && !phone) ...[
         const SizedBox(width: Space.s),
         Text(
           'Failed',
-          style: TextStyles.caption.copyWith(color: palette.danger),
+          style: TypeScale.of(context).caption.copyWith(color: palette.danger),
         ),
       ],
       const SizedBox(width: Space.s),
@@ -2252,8 +2989,7 @@ class _ToolCallView extends StatelessWidget {
       return _Disclosure(
         expanded: expanded,
         onToggle: onToggle,
-        header: (context, open, hovered) => SizedBox(
-          height: 24,
+        header: (context, open, hovered) => _HeaderLine(
           child: Row(
             children: [
               SizedBox(
@@ -2274,7 +3010,15 @@ class _ToolCallView extends StatelessWidget {
                         ),
                 ),
               ),
-              Expanded(child: view.line(context, info)),
+              Expanded(
+                child: switch (meta()) {
+                  final meta? => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [view.line(context, info), meta],
+                  ),
+                  null => view.line(context, info),
+                },
+              ),
               ...ending(open, hovered),
             ],
           ),
@@ -2293,7 +3037,8 @@ class _ToolCallView extends StatelessWidget {
                   call.output.trim(),
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.caption.copyWith(color: palette.danger),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.danger),
                 ),
             ],
           );
@@ -2302,11 +3047,70 @@ class _ToolCallView extends StatelessWidget {
       );
     }
     final summary = toolSummary(call.name, call.input);
+    if (phone) {
+      // Its name over what it does, and how long it ran under that: on one
+      // line they'd leave each other no room.
+      return _Disclosure(
+        expanded: expanded,
+        onToggle: onToggle,
+        header: (context, open, hovered) => _HeaderLine(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: Space.xs),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: Space.l + 2,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: running
+                        ? const LiveDot()
+                        : Dot(
+                            color: failed ? palette.danger : palette.textFaint,
+                          ),
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        call.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TypeScale.of(context).label.copyWith(
+                          color: failed ? palette.danger : palette.text,
+                        ),
+                      ),
+                      if (summary.text.isNotEmpty)
+                        Text(
+                          [
+                            summary.text,
+                            if (summary.more.isNotEmpty) summary.more,
+                          ].join(' '),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              (summary.code
+                                      ? TypeScale.of(context).code
+                                      : TypeScale.of(context).secondary)
+                                  .copyWith(color: palette.textMuted),
+                        ),
+                      ?meta(),
+                    ],
+                  ),
+                ),
+                ...ending(open, hovered),
+              ],
+            ),
+          ),
+        ),
+        body: (context) => _ToolCallBody(call: call, running: running),
+      );
+    }
     return _Disclosure(
       expanded: expanded,
       onToggle: onToggle,
-      header: (context, open, hovered) => SizedBox(
-        height: 24,
+      header: (context, open, hovered) => _HeaderLine(
         child: Row(
           children: [
             SizedBox(
@@ -2320,9 +3124,8 @@ class _ToolCallView extends StatelessWidget {
             ),
             Text(
               call.name,
-              style: TextStyles.label.copyWith(
-                color: failed ? palette.danger : palette.text,
-              ),
+              style: TypeScale.of(context).label
+                  .copyWith(color: failed ? palette.danger : palette.text),
             ),
             const SizedBox(width: Space.s),
             // What it does: the command, the path, whom it messages.
@@ -2331,17 +3134,21 @@ class _ToolCallView extends StatelessWidget {
                 summary.text,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: (summary.code ? TextStyles.code : TextStyles.body)
-                    .copyWith(
-                      color: hovered ? palette.text : palette.textMuted,
-                    ),
+                style:
+                    (summary.code
+                            ? TypeScale.of(context).code
+                            : TypeScale.of(context).body)
+                        .copyWith(
+                          color: hovered ? palette.text : palette.textMuted,
+                        ),
               ),
             ),
             if (summary.more.isNotEmpty) ...[
               const SizedBox(width: Space.s),
               Text(
                 summary.more,
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             ],
             ...ending(open, hovered),
@@ -2397,14 +3204,14 @@ class _ToolCallBody extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(color: palette.textFaint),
+        style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
       ),
     );
     final Widget output;
     if (call.output.isEmpty) {
       output = Text(
         running ? 'Running…' : 'No output',
-        style: TextStyles.caption.copyWith(color: palette.textFaint),
+        style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
       );
     } else if (call.name == 'edit_file' && !failed) {
       output = DiffView(call.output);
@@ -2474,15 +3281,17 @@ class DiffView extends StatelessWidget {
         borderRadius: BorderRadius.circular(Radii.panel),
         border: Border.all(color: palette.hairline),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.m,
-          vertical: Space.s + 2,
-        ),
-        child: Text.rich(
-          TextSpan(style: TextStyles.code, children: spans),
-          softWrap: false,
+      child: NoDrawerGesture(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.m,
+            vertical: Space.s + 2,
+          ),
+          child: Text.rich(
+            TextSpan(style: TypeScale.of(context).code, children: spans),
+            softWrap: false,
+          ),
         ),
       ),
     );
@@ -2509,8 +3318,7 @@ class _CompactionView extends StatelessWidget {
       onToggle: onToggle,
       header: (context, open, hovered) {
         final color = hovered ? palette.textMuted : palette.textFaint;
-        return SizedBox(
-          height: 24,
+        return _HeaderLine(
           child: Row(
             children: [
               Expanded(child: Container(height: 1, color: palette.hairline)),
@@ -2519,7 +3327,7 @@ class _CompactionView extends StatelessWidget {
                 compaction.idle
                     ? 'Earlier messages summarized while idle'
                     : 'Earlier messages summarized',
-                style: TextStyles.caption.copyWith(color: color),
+                style: TypeScale.of(context).caption.copyWith(color: color),
               ),
               const SizedBox(width: Space.xs + 2),
               Chevron(color: color, down: open),
@@ -2538,7 +3346,8 @@ class _CompactionView extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: Space.s),
               child: Text(
                 'Summarized at ${formatTokens(compaction.tokensBefore)} tokens.',
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             ),
           Markdown(compaction.summary, color: palette.textMuted),
@@ -2556,9 +3365,35 @@ class _NoticeView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // A step the model declined on safety grounds: its own card, not a
+    // failure.
+    if (notice.refusalCategory.isNotEmpty) {
+      final store = AppScope.of(context).workspace;
+      return RefusalCard(
+        notice,
+        agent: ChatScope.chatIdOf(context) == null
+            ? store.agent(store.workspace.selectedAgentId)
+            : null,
+      );
+    }
     final error = notice.level == NoticeLevel.NOTICE_LEVEL_ERROR;
     if (error) {
       final store = AppScope.of(context).workspace;
+      // In a chat, the chat's error, not the selected agent's.
+      final chatId = ChatScope.chatIdOf(context);
+      if (chatId != null) {
+        final chat = store.workspace.chats
+            .where((chat) => chat.id == chatId)
+            .firstOrNull;
+        final title = chat == null ? 'New chat' : chatTitle(chat);
+        if (notice.hasRefused()) {
+          return RefusedLine(notice.refused, agent: 'this chat');
+        }
+        return ErrorLine(
+          notice.text,
+          about: 'In the chat "$title" (chat $chatId):',
+        );
+      }
       final id = store.workspace.selectedAgentId;
       final name = store.agent(id)?.name ?? id;
       if (notice.hasRefused()) return RefusedLine(notice.refused, agent: name);
@@ -2569,7 +3404,7 @@ class _NoticeView extends StatelessWidget {
     }
     return Text(
       notice.text,
-      style: TextStyles.caption.copyWith(color: palette.textMuted),
+      style: TypeScale.of(context).caption.copyWith(color: palette.textMuted),
     );
   }
 }
@@ -2662,7 +3497,7 @@ class _RefusedLineState extends State<RefusedLine> {
       ),
       _ => ("$name refused ${widget.agent}'s sign-in.", 'Open Providers…', ''),
     };
-    final caption = TextStyles.caption;
+    final caption = TypeScale.of(context).caption;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

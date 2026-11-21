@@ -221,12 +221,12 @@ pub(crate) fn install(setup: &Setup, repair: bool) -> Report {
 fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
     let damaged = |detail: String| Report::new(Outcome::Damaged, "This copy of Claktory is damaged. Download Claktory again.", detail);
     let backend = setup.helpers.join("factoryd");
-    let host = setup.helpers.join(crate::update::APPS_HOST);
+    let helpers: Vec<std::path::PathBuf> = crate::update::HELPERS.iter().map(|name| setup.helpers.join(name)).collect();
     let app = setup.helpers.join(SUPERVISOR_APP);
     if !backend.is_file() || !app.join(SUPERVISOR_PROGRAM).is_file() {
         return Err(damaged(format!("{} has no factoryd or {SUPERVISOR_APP}", setup.helpers.display())));
     }
-    for (piece, deep) in [(&backend, false), (&host, false), (&app, true)] {
+    for (piece, deep) in std::iter::once((&backend, false)).chain(helpers.iter().map(|helper| (helper, false))).chain([(&app, true)]) {
         if piece.exists() {
             verify(&setup.codesign, piece, deep).map_err(damaged)?;
         }
@@ -246,10 +246,12 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
         let bytes = std::fs::read(&backend).map_err(copying)?;
         crate::update::write_executable(&setup.home.backend(), &bytes).map_err(copying)?;
     }
-    let installed_host = bin.join(crate::update::APPS_HOST);
-    if host.is_file() && !installed_host.exists() {
-        let bytes = std::fs::read(&host).map_err(copying)?;
-        crate::update::write_executable(&installed_host, &bytes).map_err(copying)?;
+    for (name, bundled) in crate::update::HELPERS.iter().zip(&helpers) {
+        let installed = bin.join(name);
+        if bundled.is_file() && !installed.exists() {
+            let bytes = std::fs::read(bundled).map_err(copying)?;
+            crate::update::write_executable(&installed, &bytes).map_err(copying)?;
+        }
     }
     let supervisor = launch_agent::supervisors(&setup.home)[0].clone();
     if !supervisor.is_file() {
@@ -566,7 +568,9 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         assert!(!taken_by_another(port), "this user's own listener");
         drop(listener);
-        assert!(!taken_by_another(port), "nothing there");
+        // Another test's listener can land on the freed port for a moment
+        // between the check's connect and its lsof: ask again, not once.
+        assert!((0..5).any(|_| !taken_by_another(port)), "nothing there");
     }
 
     #[test]

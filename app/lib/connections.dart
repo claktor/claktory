@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:io';
 
@@ -5,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'device_account.dart';
 import 'tunnel_client.dart' show newDeviceKey;
 
 /// A Factory on another machine, as its pairing code describes it. Since
@@ -14,6 +16,10 @@ import 'tunnel_client.dart' show newDeviceKey;
 /// `&color=`. Before it:
 /// `factory://<host>:<port>?t=<token>&fp=<SHA-256>&name=<machine>`, with
 /// its certificate's SHA-256.
+///
+/// One found through the person's account has no token: this device shows
+/// a Claktory its account instead (Hello.assertion). Its code is made here,
+/// `factory://?account=<claktory id>&e=…&name=…`, and kept like any other.
 @immutable
 class RemoteFactory {
   const RemoteFactory({
@@ -27,7 +33,24 @@ class RemoteFactory {
     this.endpointId = '',
     this.relays = const [],
     this.addresses = const [],
+    this.accountId = '',
   });
+
+  /// One of the person's Claktories, found through their account.
+  factory RemoteFactory.fromAccount(AccountClaktory claktory) {
+    final code = Uri(
+      scheme: 'factory',
+      host: '',
+      queryParameters: {
+        'account': claktory.id,
+        'e': claktory.endpointId,
+        if (claktory.relays.isNotEmpty) 'r': claktory.relays,
+        'name': claktory.name,
+        if (claktory.color.isNotEmpty) 'color': claktory.color,
+      },
+    ).toString();
+    return parsePairingCode(code, fromAccount: true)!;
+  }
 
   /// The pairing code, as pasted: what's kept on the device.
   final String code;
@@ -59,6 +82,13 @@ class RemoteFactory {
   /// Direct UDP addresses it listens on (`ip:port`), tried as well as the
   /// relays: this Mac's own code has only these.
   final List<String> addresses;
+
+  /// The Claktory's id with the person's account (`claktory_id`) when it
+  /// was found there, connected to without a code; empty for a code's.
+  final String accountId;
+
+  /// Found through the account: it lets this device in on its account.
+  bool get fromAccount => accountId.isNotEmpty;
 
   /// Whether the app reaches it through the private tunnel.
   bool get tunnelled => endpointId.isNotEmpty;
@@ -107,8 +137,10 @@ final _socketAddress = RegExp(
   r'^(\d{1,3}(\.\d{1,3}){3}|\[[0-9a-fA-F:.]+\]):\d{1,5}$',
 );
 
-/// The Factory a pairing code points at; null if [text] isn't one.
-RemoteFactory? parsePairingCode(String text) {
+/// The Factory a pairing code points at; null if [text] isn't one. A
+/// code this app made for a Claktory found through the account is one
+/// only when [fromAccount] (as kept on this device), never as pasted.
+RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
   final code = text.trim();
   final Uri uri;
   try {
@@ -127,6 +159,24 @@ RemoteFactory? parsePairingCode(String text) {
     for (final address in uri.queryParametersAll['a'] ?? const <String>[])
       if (_socketAddress.hasMatch(address)) address,
   ];
+  final accountId = fromAccount ? uri.queryParameters['account'] ?? '' : '';
+  if (accountId.isNotEmpty) {
+    if (uri.scheme != 'factory' || !_endpointId.hasMatch(endpointId)) {
+      return null;
+    }
+    return RemoteFactory(
+      code: code,
+      host: '',
+      port: 0,
+      token: '',
+      fingerprint: '',
+      name: uri.queryParameters['name'] ?? '',
+      color: uri.queryParameters['color'] ?? '',
+      endpointId: endpointId,
+      relays: relays,
+      accountId: accountId,
+    );
+  }
   final direct =
       uri.host.isNotEmpty &&
       uri.hasPort &&
@@ -168,28 +218,69 @@ class Connections extends ChangeNotifier {
     this._current,
     List<RemoteFactory>? saved,
     Map<String, String>? keys,
+    DeviceAccount? account,
   ]) : _saved = saved ?? [],
-       _keys = keys ?? {};
+       _keys = keys ?? {},
+       account = account ?? DeviceAccount() {
+    this.account.onKept = _changed;
+  }
 
-  /// Reads what this device keeps. Anything unreadable is left out.
+  /// Reads what this device keeps; a code that isn't one is left out.
+  /// When the store itself can't be read, the Connections are empty and
+  /// [readFailure] says why: nothing is written over the store until
+  /// it's read after all or the person starts over ([startOver]).
   static Future<Connections> load(ConnectionStorage storage) async {
-    var kept = const StoredConnections(current: '', saved: []);
+    final StoredConnections kept;
     try {
       kept = await storage.read();
+    } on ConnectionStorageFailure catch (failure) {
+      developer.log('could not read connections: $failure', name: 'factory');
+      return Connections(storage).._readFailure = failure;
     } catch (error) {
       developer.log('could not read connections: $error', name: 'factory');
+      return Connections(storage)
+        .._readFailure = ConnectionStorageFailure('', '$error');
     }
-    final saved = [for (final code in kept.saved) ?parsePairingCode(code)];
-    final current = parsePairingCode(kept.current);
+    RemoteFactory? parse(String code) =>
+        parsePairingCode(code, fromAccount: true);
+    final saved = [for (final code in kept.saved) ?parse(code)];
+    final current = parse(kept.current);
     if (current != null && !saved.contains(current)) saved.add(current);
     bool known(String code) => saved.any((target) => target.code == code);
     return Connections(storage, current, saved, {
       for (final MapEntry(:key, :value) in kept.keys.entries)
         if (known(key)) key: value,
-    });
+    }, DeviceAccount.kept(kept.account));
   }
 
   final ConnectionStorage _storage;
+
+  /// Why what this device keeps couldn't be read; null when it was. While
+  /// it's set nothing is written, so a store that may still hold the
+  /// device's pairings and account is never replaced by what's in memory.
+  ConnectionStorageFailure? get readFailure => _readFailure;
+  ConnectionStorageFailure? _readFailure;
+
+  /// Why the last change couldn't be kept; null once one is. What shows is
+  /// right until the app starts again, which reads the last kept.
+  final writeFailure = ValueNotifier<ConnectionStorageFailure?>(null);
+
+  /// Forgets what this device kept, when it couldn't be read and the
+  /// person chooses to start over: the store is empty, then written to
+  /// again. Throws [ConnectionStorageFailure] when it can't.
+  Future<void> startOver() async {
+    await _storage.reset();
+    _readFailure = null;
+    _current = null;
+    _saved.clear();
+    _keys.clear();
+    _changed();
+  }
+
+  /// Writes what's in memory now, as after a change: again after a failed
+  /// write.
+  void keep() => _changed();
+
   RemoteFactory? _current;
   final List<RemoteFactory> _saved;
 
@@ -197,6 +288,10 @@ class Connections extends ChangeNotifier {
   /// tunnel, by pairing code: made here, never sent anywhere. One per
   /// pairing, so two Factories can't tell it's the same device.
   final Map<String, String> _keys;
+
+  /// This device signed in to the person's Claktory account, to find
+  /// their Claktories and show them it's theirs. Kept with the rest.
+  final DeviceAccount account;
 
   /// This device's key for [target], made and kept the first time.
   String deviceKey(RemoteFactory target, {String Function()? make}) {
@@ -245,21 +340,70 @@ class Connections extends ChangeNotifier {
 
   void _changed() {
     notifyListeners();
-    _storage
-        .write(
-          StoredConnections(
-            current: _current?.code ?? '',
-            saved: [for (final target in _saved) target.code],
-            keys: Map.of(_keys),
-          ),
-        )
-        .catchError(
-          (Object error) => developer.log(
-            'could not keep connections: $error',
-            name: 'factory',
-          ),
-        );
+    if (_readFailure != null) {
+      developer.log(
+        "not keeping connections: what's kept couldn't be read",
+        name: 'factory',
+      );
+      return;
+    }
+    unawaited(_write());
   }
+
+  /// Writes what's in memory; the calls reach the store in order.
+  Future<void> _write() async {
+    try {
+      await _storage.write(
+        StoredConnections(
+          current: _current?.code ?? '',
+          saved: [for (final target in _saved) target.code],
+          keys: Map.of(_keys),
+          account: account.toKept(),
+        ),
+      );
+      writeFailure.value = null;
+    } on ConnectionStorageFailure catch (failure) {
+      developer.log('could not keep connections: $failure', name: 'factory');
+      writeFailure.value = failure;
+    } catch (error) {
+      developer.log('could not keep connections: $error', name: 'factory');
+      writeFailure.value = ConnectionStorageFailure('', '$error');
+    }
+  }
+
+  @override
+  void dispose() {
+    writeFailure.dispose();
+    super.dispose();
+  }
+}
+
+/// What went wrong reading, writing or clearing what this device keeps, as
+/// the native store says it (`factory/device`'s error codes, the same on
+/// every platform).
+@immutable
+class ConnectionStorageFailure implements Exception {
+  const ConnectionStorageFailure(this.code, this.message);
+
+  /// `credentials_unavailable` (for now: the device locked, the store
+  /// busy), `credentials_unreadable` (there, but it can't be made sense
+  /// of), `credentials_key_missing` or `credentials_key_invalidated` (the
+  /// key that protects it is gone), `credentials_newer_version` (a newer
+  /// app wrote it), `credentials_read_failed` (a write refused after a
+  /// failed read), `credentials_write_failed`, `credentials_reset_failed`;
+  /// empty for anything else.
+  final String code;
+
+  /// What the device said.
+  final String message;
+
+  /// It may well work in a moment (the device unlocked), so it's tried
+  /// again by itself.
+  bool get transient => code == 'credentials_unavailable';
+
+  @override
+  String toString() =>
+      'ConnectionStorageFailure(${code.isEmpty ? 'unknown' : code}: $message)';
 }
 
 /// What [ConnectionStorage] keeps: pairing codes, and this device's iroh
@@ -270,6 +414,7 @@ class StoredConnections {
     required this.current,
     required this.saved,
     this.keys = const {},
+    this.account = const {},
   });
 
   /// The code of the Factory showing; empty for this Mac's.
@@ -278,12 +423,21 @@ class StoredConnections {
 
   /// This device's key by pairing code.
   final Map<String, String> keys;
+
+  /// This device's account key, and the account it's signed in to
+  /// ([DeviceAccount.toKept]).
+  final Map<String, String> account;
 }
 
 /// Where [Connections] are kept, and how a pairing code becomes a QR code.
+/// Each throws [ConnectionStorageFailure] when it fails.
 abstract interface class ConnectionStorage {
   Future<StoredConnections> read();
   Future<void> write(StoredConnections connections);
+
+  /// Clears what's kept, the person having chosen to start over after it
+  /// couldn't be read: reads then find nothing, and writes work again.
+  Future<void> reset();
 
   /// [text] as a QR code: its modules row by row, dark ones true; null if
   /// it can't be made here.
@@ -306,9 +460,25 @@ class QrModules {
 class DeviceConnectionStorage implements ConnectionStorage {
   static const _channel = MethodChannel('factory/device');
 
+  /// [call], its PlatformException as the store's failure.
+  static Future<T> _store<T>(Future<T> Function() call) async {
+    try {
+      return await call();
+    } on PlatformException catch (error) {
+      throw ConnectionStorageFailure(
+        error.code,
+        error.message ?? error.details?.toString() ?? '',
+      );
+    } on MissingPluginException catch (error) {
+      throw ConnectionStorageFailure('', error.message ?? 'no store here');
+    }
+  }
+
   @override
   Future<StoredConnections> read() async {
-    final kept = await _channel.invokeMapMethod<String, Object?>('connections');
+    final kept = await _store(
+      () => _channel.invokeMapMethod<String, Object?>('connections'),
+    );
     return StoredConnections(
       current: kept?['current'] as String? ?? '',
       saved: [
@@ -320,16 +490,27 @@ class DeviceConnectionStorage implements ConnectionStorage {
             in (kept?['keys'] as Map<Object?, Object?>? ?? const {}).entries)
           if (key is String && value is String) key: value,
       },
+      account: {
+        for (final MapEntry(:key, :value)
+            in (kept?['account'] as Map<Object?, Object?>? ?? const {}).entries)
+          if (key is String && value is String) key: value,
+      },
     );
   }
 
   @override
-  Future<void> write(StoredConnections connections) =>
-      _channel.invokeMethod<void>('setConnections', {
-        'current': connections.current,
-        'saved': connections.saved,
-        'keys': connections.keys,
-      });
+  Future<void> write(StoredConnections connections) => _store(
+    () => _channel.invokeMethod<void>('setConnections', {
+      'current': connections.current,
+      'saved': connections.saved,
+      'keys': connections.keys,
+      'account': connections.account,
+    }),
+  );
+
+  @override
+  Future<void> reset() =>
+      _store(() => _channel.invokeMethod<void>('resetConnections'));
 
   @override
   Future<QrModules?> qrCode(String text) async {
@@ -349,14 +530,35 @@ class DeviceConnectionStorage implements ConnectionStorage {
 }
 
 /// Connections kept in memory, for tests: [kept] is what a restart reads.
+/// [readFails], [writeFails] and [resetFails] make each fail so.
 class MemoryConnectionStorage implements ConnectionStorage {
   StoredConnections kept = const StoredConnections(current: '', saved: []);
+  ConnectionStorageFailure? readFails;
+  ConnectionStorageFailure? writeFails;
+  ConnectionStorageFailure? resetFails;
+  var writes = 0;
+  var resets = 0;
 
   @override
-  Future<StoredConnections> read() async => kept;
+  Future<StoredConnections> read() async {
+    if (readFails case final failure?) throw failure;
+    return kept;
+  }
 
   @override
-  Future<void> write(StoredConnections connections) async => kept = connections;
+  Future<void> write(StoredConnections connections) async {
+    if (writeFails case final failure?) throw failure;
+    writes++;
+    kept = connections;
+  }
+
+  @override
+  Future<void> reset() async {
+    if (resetFails case final failure?) throw failure;
+    resets++;
+    readFails = null;
+    kept = const StoredConnections(current: '', saved: []);
+  }
 
   @override
   Future<QrModules?> qrCode(String text) async => null;

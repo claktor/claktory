@@ -54,7 +54,12 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   /// dialled first, so a backend from before it fails here (Unsupported).
   Future<ForwardHandle> forwardPort({required int port});
 
-  /// Where the app connects: ws://127.0.0.1:<port>.
+  /// The path the app asks for at [port]: `/<secret>`, the tunnel's own.
+  /// Nothing else there is forwarded, so no other program on this device
+  /// passes for it. Never shown, saved or logged.
+  String path();
+
+  /// Where the app connects: ws://127.0.0.1:<port><path>.
   int port();
 
   /// After the app was suspended or the network changed: the connection

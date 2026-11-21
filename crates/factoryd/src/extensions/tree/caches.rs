@@ -36,9 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use factory_agent::{Event, EventSource};
-
-use crate::factory::{Factory, Queued};
+use crate::factory::{Factory, Queued, host_event};
 use crate::transcript::now_ms;
 
 /// Cache folders by name, each with the files beside it that make it one.
@@ -345,7 +343,7 @@ fn workers(factory: &Factory, place: &Place) -> Vec<String> {
     config
         .agents
         .iter()
-        .filter(|agent| crate::runner::places(&factory.home, config, agent).folder.starts_with(&place.path))
+        .filter(|agent| crate::runner::places(&factory.home, config, agent, &[]).folder.starts_with(&place.path))
         .map(|agent| agent.id.clone())
         .collect()
 }
@@ -419,7 +417,7 @@ pub(crate) fn take_note(factory: &Factory, agent: &str) -> Option<Queued> {
     let texts = factory.build_caches.notes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(agent)?;
     let summary =
         if texts.len() == 1 { "A build cache was cleared".to_owned() } else { format!("{} build caches were cleared", texts.len()) };
-    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+    let event = host_event(summary);
     let mut note = Queued::event(texts.join("\n"), event);
     match factory.store.add_message(agent, &note) {
         Ok(id) => note.id = id,

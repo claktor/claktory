@@ -448,7 +448,10 @@ void main() {
     final agent = tester.getCenter(find.text('Builder').first);
 
     Future<void> dragTo(Offset target) async {
-      final gesture = await tester.startGesture(agent);
+      final gesture = await tester.startGesture(
+        agent,
+        kind: PointerDeviceKind.mouse,
+      );
       await tester.pump(const Duration(milliseconds: 50));
       for (var i = 1; i <= 10; i++) {
         await gesture.moveTo(Offset.lerp(agent, target, i / 10)!);

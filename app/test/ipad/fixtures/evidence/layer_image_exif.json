@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "ink_layer_id": "layer-whiteboard",
+  "revision": 1,
+  "parent_revision": null,
+  "source": {
+    "absolute_path": "/Users/me/photos/whiteboard.heic",
+    "sha256": "745a23c14bbeb5af0ff63c531e150562d9753aed2aa060e6fc055c1c16df1b3b",
+    "mime": "image/heic",
+    "size": 2210331
+  },
+  "coordinate_space": {
+    "kind": "image",
+    "oriented_width": 3024,
+    "oriented_height": 4032,
+    "stored_width": 4032,
+    "stored_height": 3024,
+    "exif_orientation": 6,
+    "units": "px"
+  },
+  "drawing": {
+    "format": "pencilkit",
+    "content_version": 1,
+    "blob_id": "blob-whiteboard-r1-drawing",
+    "sha256": "7267aae0a421ff09269c1c10ddda70b481e3377950ad5762d5821bd68e80f7d7",
+    "bytes": 4410,
+    "space": "oriented_image",
+    "drawing_to_document": [
+      1,
+      0,
+      0,
+      1,
+      0,
+      0
+    ]
+  },
+  "ink_preview": {
+    "png_blob_id": "blob-whiteboard-r1-preview",
+    "sha256": "6e51add338bddeb7e822d51dbffe6c0616ddf7c4d1f6764e0ac2255fbf3ab3d8",
+    "pixel_width": 1536,
+    "pixel_height": 2048,
+    "bytes": 61200
+  },
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

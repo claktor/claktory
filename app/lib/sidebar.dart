@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
@@ -8,15 +9,36 @@ import 'agent_name.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
+import 'chats.dart'
+    show
+        ChatGlyph,
+        ChatHistory,
+        chatTitle,
+        chatWaiting,
+        chatsNewestFirst,
+        deleteChat,
+        openChat,
+        renameChat,
+        selectedChat,
+        startNewChat;
 import 'connection.dart';
-import 'explorer.dart' show filesShown, openFiles;
+import 'explorer.dart' show filesShown, openFiles, projectById;
 import 'controls.dart';
 import 'forms.dart';
 import 'highlights.dart';
+import 'inbox.dart' show needsYouCount, needsYouLabel;
 import 'identity.dart';
 import 'loopback_forward.dart' show ForwardingsLine;
 import 'markdown.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/haptics.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
+import 'mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
+import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'mobile/platform_policy.dart';
 import 'phone.dart' show PhoneProjects;
+import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart' show isAdminAgent;
@@ -39,10 +61,14 @@ class Sidebar extends StatelessWidget {
     final scope = AppScope.scope(context);
     final backend = scope.backend;
     final palette = Palette.of(context);
+    // On a phone it's the drawer's tree, which draws its own edge.
+    final phone = isPhoneLayout(context);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: palette.sidebar,
-        border: Border(right: BorderSide(color: palette.hairline)),
+        border: phone
+            ? null
+            : Border(right: BorderSide(color: palette.hairline)),
       ),
       child: SizedBox(
         width: width,
@@ -57,7 +83,11 @@ class Sidebar extends StatelessWidget {
           builder: (context, _) {
             final workspace = backend.workspace.workspace;
             final page = scope.page.value;
-            final selected = page == AppPage.agent
+            // An agent's row isn't selected while a pipe shows instead.
+            final selected =
+                page == AppPage.agent &&
+                    selectedPipe(workspace) == null &&
+                    selectedChat(workspace) == null
                 ? workspace.selectedAgentId
                 : '';
             Project? focused;
@@ -74,11 +104,14 @@ class Sidebar extends StatelessWidget {
                     rivet.projectId != focused.id
                 ? rivet
                 : null;
+            // On a phone: what waits for the person first, and the
+            // footer's places as rows at the end of the list.
+            final needsYou = phone ? _NeedsYou.of(workspace) : const <Object>[];
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // The traffic lights' row.
-                const TitleSpace(),
+                if (!phone) const TitleSpace(),
                 Expanded(
                   child: FocusTraversalGroup(
                     child: ListView(
@@ -88,102 +121,127 @@ class Sidebar extends StatelessWidget {
                         Space.s,
                         Space.m,
                       ),
-                      children: focused != null
-                          ? [
-                              if (pinned != null) ...[
-                                _Place(
-                                  projectId: pinned.projectId,
-                                  header: null,
-                                  agents: [pinned],
-                                  selectedAgentId: selected,
+                      children: [
+                        if (needsYou.isNotEmpty) _NeedsYou(waiting: needsYou),
+                        // On a Mac, everything that waits for the person in
+                        // one place: there only while something does.
+                        if (!phone)
+                          if (needsYouCount(workspace) case final count
+                              when count > 0) ...[
+                            _NeedsYouRow(count: count),
+                            const SizedBox(height: Space.s),
+                          ],
+                        ...(focused != null
+                            ? [
+                                if (pinned != null) ...[
+                                  _Place(
+                                    projectId: pinned.projectId,
+                                    header: null,
+                                    agents: [pinned],
+                                    selectedAgentId: selected,
+                                  ),
+                                  const SizedBox(height: Space.s),
+                                ],
+                                // What's out of sight elsewhere glows here.
+                                Glow(
+                                  store: backend.highlights,
+                                  matches: (key) => _elsewhere(
+                                    key,
+                                    workspace,
+                                    focused!.id,
+                                    shown: pinned?.id,
+                                  ),
+                                  child: _QuietRow(
+                                    label: '‹ All projects',
+                                    waiting: waitingIn([
+                                      for (final agent in workspace.agents)
+                                        if (agent.projectId != focused.id &&
+                                            agent.id != pinned?.id &&
+                                            archivedProjectOf(
+                                                  workspace,
+                                                  agent,
+                                                ) ==
+                                                null)
+                                          agent,
+                                    ]),
+                                    onTap: () {
+                                      AppScope.scope(context).history.clear();
+                                      fireAndLog(backend.focusProject(''));
+                                    },
+                                  ),
                                 ),
                                 const SizedBox(height: Space.s),
-                              ],
-                              // What's out of sight elsewhere glows here.
-                              Glow(
-                                store: backend.highlights,
-                                matches: (key) => _elsewhere(
-                                  key,
-                                  workspace,
-                                  focused!.id,
-                                  shown: pinned?.id,
-                                ),
-                                child: _QuietRow(
-                                  label: '‹ All projects',
-                                  waiting: waitingIn([
-                                    for (final agent in workspace.agents)
-                                      if (agent.projectId != focused.id &&
-                                          agent.id != pinned?.id &&
-                                          archivedProjectOf(workspace, agent) ==
-                                              null)
-                                        agent,
-                                  ]),
-                                  onTap: () {
-                                    AppScope.scope(context).history.clear();
-                                    fireAndLog(backend.focusProject(''));
-                                  },
-                                ),
-                              ),
-                              const SizedBox(height: Space.s),
-                              _Place(
-                                projectId: focused.id,
-                                header: _ProjectHeading(project: focused),
-                                folders: focused.folders,
-                                agents: backend.workspace.agentsIn(focused.id),
-                                selectedAgentId: selected,
-                              ),
-                            ]
-                          : [
-                              // Rivet and any other workspace agents, on
-                              // their own at the top.
-                              if (backend.workspace
-                                  .agentsIn('')
-                                  .isNotEmpty) ...[
                                 _Place(
-                                  projectId: '',
-                                  header: null,
-                                  agents: backend.workspace.agentsIn(''),
+                                  projectId: focused.id,
+                                  header: _ProjectHeading(project: focused),
+                                  folders: focused.folders,
+                                  agents: backend.workspace.agentsIn(
+                                    focused.id,
+                                  ),
                                   selectedAgentId: selected,
                                 ),
-                                const SizedBox(height: Space.l),
-                              ],
-                              _Caption(
-                                'Projects',
-                                trailing: _AskRivet(
-                                  starter: 'Set up a new project for ',
-                                  fallback: (context, close) =>
-                                      CreateProjectForm(close: close),
-                                ),
-                              ),
-                              for (final project in workspace.projects)
-                                if (!project.archived)
+                              ]
+                            : [
+                                // Rivet and any other workspace agents, on
+                                // their own at the top.
+                                if (backend.workspace
+                                    .agentsIn('')
+                                    .isNotEmpty) ...[
                                   _Place(
-                                    projectId: project.id,
-                                    header: _ProjectRow(project: project),
-                                    folders: project.folders,
-                                    agents: backend.workspace.agentsIn(
-                                      project.id,
-                                    ),
+                                    projectId: '',
+                                    header: null,
+                                    agents: backend.workspace.agentsIn(''),
                                     selectedAgentId: selected,
-                                    indent: Space.l,
                                   ),
-                              // Out of the way, and back with a click.
-                              if (workspace.projects.any((p) => p.archived))
-                                _Archived(
-                                  projects: [
-                                    for (final project in workspace.projects)
-                                      if (project.archived) project,
-                                  ],
+                                  const SizedBox(height: Space.l),
+                                ],
+                                _Caption(
+                                  'Projects',
+                                  trailing: _AskRivet(
+                                    starter: 'Set up a new project for ',
+                                    fallback: (context, close) =>
+                                        CreateProjectForm(close: close),
+                                  ),
                                 ),
-                            ],
+                                for (final project in workspace.projects)
+                                  if (!project.archived)
+                                    _Place(
+                                      projectId: project.id,
+                                      header: _ProjectRow(project: project),
+                                      folders: project.folders,
+                                      agents: backend.workspace.agentsIn(
+                                        project.id,
+                                      ),
+                                      selectedAgentId: selected,
+                                      indent: Space.l,
+                                    ),
+                                // Out of the way, and back with a click.
+                                if (workspace.projects.any((p) => p.archived))
+                                  _Archived(
+                                    projects: [
+                                      for (final project in workspace.projects)
+                                        if (project.archived) project,
+                                    ],
+                                  ),
+                              ]),
+                        // The person's own chats, under every project.
+                        _Chats(
+                          chats: chatsNewestFirst(workspace),
+                          selectedId: page == AppPage.agent
+                              ? workspace.selectedChatId
+                              : '',
+                        ),
+                        if (phone) _PhoneFooter(workspace: workspace),
+                      ],
                     ),
                   ),
                 ),
-                _Footer(
-                  workspace: workspace,
-                  connected: backend.connected.value,
-                  page: page,
-                ),
+                if (!phone)
+                  _Footer(
+                    workspace: workspace,
+                    connected: backend.connected.value,
+                    page: page,
+                  ),
               ],
             );
           },
@@ -191,6 +249,43 @@ class Sidebar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Opens [agent]'s conversation: at what waits for the person if it's
+/// news, or with [reach] (its needs-you mark), however far back. On a
+/// phone the drawer closes on it, and the phone taps.
+void _selectAgent(BuildContext context, Agent agent, {bool reach = false}) {
+  final backend = AppScope.of(context);
+  AppScope.closePage(context);
+  fireAndLog(() async {
+    await backend.selectAgent(agent.id);
+    // Its conversation is here now: it opens at what waits for the
+    // person, if anything does.
+    final now = backend.workspace.agent(agent.id);
+    if (now == null) return;
+    if (reach) {
+      backend.reveal.reach(now);
+    } else {
+      backend.reveal.oldestWaiting(now);
+    }
+  }());
+  _toConversation(context);
+}
+
+/// Opens [pipe] in place of the conversation, as [_selectAgent] does an
+/// agent's.
+void _selectPipe(BuildContext context, Pipe pipe) {
+  openPipe(context, pipe);
+  _toConversation(context);
+}
+
+/// On a phone, what was chosen comes to the front: the drawer closes and
+/// pages pushed go.
+void _toConversation(BuildContext context) {
+  final front = PhoneNavigation.of(context);
+  if (front == null) return;
+  unawaited(Haptics.selection());
+  front.value = true;
 }
 
 /// Whether [key] is something outside the focused project [projectId]:
@@ -216,9 +311,12 @@ bool _elsewhere(
 
 /// A section label. Labels name groups; rows are things you can act on.
 class _Caption extends StatelessWidget {
-  const _Caption(this.text, {this.trailing});
+  const _Caption(this.text, {this.trailing, this.header = false});
 
   final String text;
+
+  /// It heads a section, for VoiceOver.
+  final bool header;
 
   /// A small button at its end, such as [_AskRivet].
   final Widget? trailing;
@@ -226,11 +324,14 @@ class _Caption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final label = Text(
-      text,
-      style: TextStyles.caption.copyWith(
-        color: palette.textFaint,
-        fontWeight: FontWeight.w500,
+    final Widget label = Semantics(
+      // A heading is an element of its own, not read into the row under it.
+      container: header,
+      header: header,
+      child: Text(
+        text,
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
     final trailing = this.trailing;
@@ -269,19 +370,46 @@ class _AskRivet extends StatelessWidget {
   static const _tip = 'Ask Rivet to set it up';
 
   void _ask(BuildContext context) {
-    if (!askRivet(context, starter)) showModal(context, fallback);
+    if (askRivet(context, starter)) {
+      // On a phone, Rivet's conversation comes to the front, the words
+      // waiting in its message box.
+      _toConversation(context);
+    } else {
+      showModal(context, fallback);
+    }
   }
+
+  @override
+  Widget build(BuildContext context) =>
+      _QuietPlus(tip: _tip, onTap: () => _ask(context));
+}
+
+/// A caption's quiet "+" on a Mac: a 20px square, its [tip] on hover. On a
+/// phone, a [HeaderButton] at the row's end instead.
+class _QuietPlus extends StatelessWidget {
+  const _QuietPlus({required this.tip, required this.onTap});
+
+  final String tip;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    if (isPhoneLayout(context)) {
+      return HeaderButton(
+        label: tip,
+        inRow: true,
+        onTap: onTap,
+        glyph: (color) => ExtensionGlyph(icon: 'plus', name: '+', color: color),
+      );
+    }
     return HoverCard(
-      card: (context) => const Text(_tip),
+      card: (context) => Text(tip),
       child: Semantics(
         button: true,
-        label: _tip,
+        label: tip,
         child: Pressable(
-          onTap: () => _ask(context),
+          onTap: onTap,
           builder: (context, hovered) => AnimatedContainer(
             duration: Motion.fast,
             curve: Curves.easeOut,
@@ -346,6 +474,13 @@ class _Place extends StatelessWidget {
     // then each folder's. Each is its own tree: an agent whose parent is in
     // another folder stands at its folder's top level.
     final folderIds = {for (final folder in folders) folder.id};
+    final workspace = backend.workspace.workspace;
+    final pipes = projectId.isEmpty
+        ? const <Pipe>[]
+        : pipesIn(workspace, projectId);
+    final selectedPipeId = AppScope.scope(context).page.value == AppPage.agent
+        ? workspace.selectedPipeId
+        : '';
     final roots = _tree([
       for (final agent in agents)
         if (!folderIds.contains(agent.folderId)) agent,
@@ -355,18 +490,9 @@ class _Place extends StatelessWidget {
     final gutter = agents.any(
       (agent) => agents.any((other) => other.parentId == agent.id),
     );
-    void select(Agent agent) {
-      AppScope.closePage(context);
-      fireAndLog(() async {
-        await backend.selectAgent(agent.id);
-        // Its conversation is here now: it opens at what waits for the
-        // person, if anything does.
-        final now = backend.workspace.agent(agent.id);
-        if (now != null) backend.reveal.oldestWaiting(now);
-      }());
-      // On a phone, its conversation is pushed over the list.
-      PhoneNavigation.of(context)?.value = true;
-    }
+
+    void select(Agent agent, {bool reach = false}) =>
+        _selectAgent(context, agent, reach: reach);
 
     Widget branch(_Node node, List<_Node> siblings) {
       final children = node.children;
@@ -382,6 +508,7 @@ class _Place extends StatelessWidget {
                 : '',
             selected: node.agent.id == selectedAgentId,
             onTap: () => select(node.agent),
+            onReach: () => select(node.agent, reach: true),
             gutter: gutter,
             children: children,
             siblings: [for (final sibling in siblings) sibling.agent.id],
@@ -457,6 +584,13 @@ class _Place extends StatelessWidget {
                           if (agent.folderId == folder.id) agent,
                       ]),
                       branch: branch,
+                    ),
+                  // Its pipes to other Claktories, after its agents.
+                  for (final pipe in pipes)
+                    _PipeRow(
+                      pipe: pipe,
+                      selected: pipe.id == selectedPipeId,
+                      onTap: () => _selectPipe(context, pipe),
                     ),
                 ],
               ),
@@ -572,7 +706,7 @@ class _FolderGroupState extends State<_FolderGroup> {
                       folder.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyles.caption.copyWith(
+                      style: TypeScale.of(context).caption.copyWith(
                         color: unseen || waiting > 0 ? palette.text : color,
                         fontWeight: unseen || waiting > 0
                             ? FontWeight.w600
@@ -585,9 +719,8 @@ class _FolderGroupState extends State<_FolderGroup> {
                       padding: const EdgeInsets.only(left: Space.s),
                       child: Text(
                         '${hidden.length}',
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                        ),
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.textFaint),
                       ),
                     ),
                   if (waiting > 0)
@@ -730,6 +863,7 @@ class _RowState extends State<_Row> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = touchFirst(context);
     return FocusableActionDetector(
       mouseCursor: SystemMouseCursors.click,
       onShowHoverHighlight: (value) => setState(() => _hovered = value),
@@ -750,7 +884,20 @@ class _RowState extends State<_Row> {
         child: AnimatedContainer(
           duration: Motion.fast,
           curve: Curves.easeOut,
-          height: widget.height,
+          // On a phone, a finger's size at least, growing with the text.
+          height: phone ? null : widget.height,
+          constraints: phone
+              ? BoxConstraints(
+                  minHeight: PhonePlatformPolicy.least(
+                    context,
+                    DenseList.of(context)
+                        ? (widget.height > 28
+                              ? Touch.denseRow
+                              : Touch.denseLine)
+                        : (widget.height > 28 ? Touch.row : Touch.target),
+                  ),
+                )
+              : null,
           padding: const EdgeInsets.symmetric(horizontal: Space.s),
           decoration: BoxDecoration(
             color: widget.selected
@@ -767,6 +914,10 @@ class _RowState extends State<_Row> {
               ? widget.builder(context, _hovered)
               : Stack(
                   clipBehavior: Clip.none,
+                  // A phone's row grows: its content stays in the middle.
+                  alignment: phone
+                      ? AlignmentDirectional.centerStart
+                      : AlignmentDirectional.topStart,
                   children: [
                     // Out to the row's edges, through its padding.
                     Positioned(
@@ -790,12 +941,62 @@ void _openProjectSettings(BuildContext context, Project project) => showModal(
   (context, close) => ProjectSettingsForm(project: project, close: close),
 );
 
-/// A project's right click: its settings; on a phone, a touch and hold
-/// offers its Files too.
+/// A project's right click: its settings. With a finger, its More button
+/// or a touch and hold: its actions (Files, Add an agent, Project
+/// settings), in a sheet on a phone, in a popover by the project on an
+/// iPad.
 void _projectMenu(BuildContext context, Project project) {
-  final phone = PhoneProjects.of(context);
-  if (phone != null) return phone.menu(project);
-  _openProjectSettings(context, project);
+  if (!touchFirst(context)) return _openProjectSettings(context, project);
+  unawaited(_projectActions(context, project));
+}
+
+Future<void> _projectActions(BuildContext context, Project project) async {
+  final files = PhoneProjects.of(context)?.files;
+  final chosen = await showActions<String>(
+    context,
+    title: project.name,
+    actions: [
+      if (files != null)
+        SheetAction(
+          'Files',
+          'files',
+          glyph: (color) => FolderGlyph(color: color),
+        ),
+      SheetAction(
+        'Add an agent',
+        'agent',
+        glyph: (color) => ExtensionGlyph(icon: 'plus', name: '', color: color),
+      ),
+      SheetAction(
+        'Project settings',
+        'settings',
+        glyph: (color) => CogGlyph(color: color),
+      ),
+    ],
+  );
+  if (!context.mounted) return;
+  switch (chosen) {
+    case 'files':
+      files?.call(project);
+    case 'agent':
+      _askForAgent(project)._ask(context);
+    case 'settings':
+      _openProjectSettings(context, project);
+  }
+}
+
+/// A project's More on a phone, at its row's end: its actions.
+class _ProjectMore extends StatelessWidget {
+  const _ProjectMore({required this.project});
+
+  final Project project;
+
+  @override
+  Widget build(BuildContext context) => HeaderButton.more(
+    inRow: true,
+    label: '${project.name} options',
+    onTap: () => _projectMenu(context, project),
+  );
 }
 
 /// The button on a project's row that opens its Files in a pane beside the
@@ -882,19 +1083,23 @@ class _ProjectRow extends StatelessWidget {
               project.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyles.body.copyWith(
-                color: hovered ? palette.text : palette.textMuted,
-              ),
+              style: TypeScale.of(context).body
+                  .copyWith(color: hovered ? palette.text : palette.textMuted),
             ),
           ),
-          if (hovered || filesShown(context, project.id)) ...[
-            _FilesButton(
-              project: project,
-              shown: filesShown(context, project.id),
-            ),
-            const SizedBox(width: Space.xs),
+          // A phone has no hover: its actions are behind More.
+          if (isPhoneLayout(context))
+            _ProjectMore(project: project)
+          else ...[
+            if (hovered || filesShown(context, project.id)) ...[
+              _FilesButton(
+                project: project,
+                shown: filesShown(context, project.id),
+              ),
+              const SizedBox(width: Space.xs),
+            ],
+            if (hovered) _askForAgent(project),
           ],
-          if (hovered) _askForAgent(project),
         ],
       ),
     );
@@ -909,7 +1114,7 @@ Widget _glowFor(BuildContext context, Project project, Widget row) => Glow(
 );
 
 /// The "+" that asks Rivet for a new agent in [project].
-Widget _askForAgent(Project project) => _AskRivet(
+_AskRivet _askForAgent(Project project) => _AskRivet(
   starter: 'Add an agent to ${project.name} that ',
   fallback: (context, close) =>
       CreateAgentForm(projectId: project.id, close: close),
@@ -948,20 +1153,24 @@ class _ProjectHeading extends StatelessWidget {
               project.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyles.label.copyWith(color: palette.text),
+              style: TypeScale.of(context).label.copyWith(color: palette.text),
             ),
           ),
-          if (hovered || filesShown(context, project.id)) ...[
-            _FilesButton(
-              project: project,
-              shown: filesShown(context, project.id),
-            ),
-            const SizedBox(width: Space.xs),
-          ],
-          if (hovered) ...[
-            _askForAgent(project),
-            const SizedBox(width: Space.xs),
-            MoreGlyph(color: palette.textMuted),
+          if (isPhoneLayout(context))
+            _ProjectMore(project: project)
+          else ...[
+            if (hovered || filesShown(context, project.id)) ...[
+              _FilesButton(
+                project: project,
+                shown: filesShown(context, project.id),
+              ),
+              const SizedBox(width: Space.xs),
+            ],
+            if (hovered) ...[
+              _askForAgent(project),
+              const SizedBox(width: Space.xs),
+              MoreGlyph(color: palette.textMuted),
+            ],
           ],
         ],
       ),
@@ -984,6 +1193,7 @@ class _AgentRow extends StatefulWidget {
     required this.folderId,
     required this.selected,
     required this.onTap,
+    required this.onReach,
     required this.gutter,
     required this.children,
     required this.siblings,
@@ -998,6 +1208,10 @@ class _AgentRow extends StatefulWidget {
   final String folderId;
   final bool selected;
   final VoidCallback onTap;
+
+  /// Its needs-you mark was clicked: opens its conversation at the oldest
+  /// card waiting, however far back.
+  final VoidCallback onReach;
 
   /// Keep room for the disclosure even without one.
   final bool gutter;
@@ -1191,7 +1405,8 @@ class _AgentRowState extends State<_AgentRow> {
         children: [
           if (widget.gutter)
             SizedBox(
-              width: Space.m + 2,
+              // On a phone, wide enough for a fingertip, the row's height.
+              width: touchFirst(context) ? _phoneAvatar(context) : Space.m + 2,
               child: widget.children.isEmpty
                   ? null
                   : Semantics(
@@ -1225,13 +1440,17 @@ class _AgentRowState extends State<_AgentRow> {
           // (the wave and the unseen mark speak for those).
           Padding(
             padding: const EdgeInsets.only(right: Space.s - 2),
-            child: AgentCharacter(agent: agent, size: 24, live: true),
+            child: AgentCharacter(
+              agent: agent,
+              size: touchFirst(context) ? _phoneAvatar(context) : 24,
+              live: true,
+            ),
           ),
           Expanded(
-            child: NameOverRole(
+            child: _NameOverRole(
               name: agent.name,
               role: wait.isEmpty ? agent.role : wait,
-              style: TextStyles.body.copyWith(
+              style: TypeScale.of(context).body.copyWith(
                 color: widget.selected || hovered || stands
                     ? palette.text
                     : palette.textMuted,
@@ -1249,10 +1468,18 @@ class _AgentRowState extends State<_AgentRow> {
           if (agent.queuedMessages > 0)
             Text(
               '${agent.queuedMessages}',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           if (waiting > 0)
-            _needsYou(waitingLabel(agent.name, waiting), waiting)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onReach,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: _needsYou(waitingLabel(agent.name, waiting), waiting),
+              ),
+            )
           // A status mark, not the agent's identity: it stays a dot.
           else if (unseen)
             Padding(
@@ -1264,6 +1491,59 @@ class _AgentRowState extends State<_AgentRow> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// An agent's character, or a pipe's portal, on a phone: 32pt, 28 in the
+/// drawer ([DenseList]).
+double _phoneAvatar(BuildContext context) => DenseList.of(context) ? 28 : 32;
+
+/// A row's name over its role (or how it's doing): [NameOverRole] on a
+/// Mac; on a phone the phone's type, the role at 13pt rather than 11.
+class _NameOverRole extends StatelessWidget {
+  const _NameOverRole({
+    required this.name,
+    required this.role,
+    required this.style,
+    required this.roleColor,
+  });
+
+  final String name;
+  final String role;
+  final TextStyle style;
+  final Color roleColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!touchFirst(context)) {
+      return NameOverRole(
+        name: name,
+        role: role,
+        style: style,
+        roleColor: roleColor,
+      );
+    }
+    final text = Text(
+      name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: role.isEmpty ? style : style.copyWith(height: 1.25),
+    );
+    if (role.isEmpty) return text;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        text,
+        Text(
+          role,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TypeScale.of(context).caption
+              .copyWith(height: 1.25, color: roleColor),
+        ),
+      ],
     );
   }
 }
@@ -1296,24 +1576,158 @@ class _DragFeedback extends StatelessWidget {
         ),
         child: Text(
           name,
-          style: TextStyles.body.copyWith(
-            color: palette.text,
-            decoration: TextDecoration.none,
-          ),
+          style: TypeScale.of(context).body
+              .copyWith(color: palette.text, decoration: TextDecoration.none),
         ),
       ),
     );
   }
 }
 
+/// A pipe to another Claktory, under its project's agents: a portal in the
+/// pipe's color where an agent's character would be, its name over where it
+/// stands, and like an agent's row, a needs-you count for what waits for
+/// the person (held messages, its approval, a loop's Continue) or a dot for
+/// something new. A click opens it.
+class _PipeRow extends StatelessWidget {
+  const _PipeRow({
+    required this.pipe,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Pipe pipe;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final waiting = pipeWaiting(pipe);
+    final unseen = pipe.unseen;
+    final stands = unseen || waiting > 0;
+    final closed = pipe.state == PipeState.PIPE_STATE_CLOSED;
+    return Semantics(
+      label: 'Pipe',
+      child: _Row(
+        key: ValueKey('pipe-row/${pipe.id}'),
+        height: 40,
+        selected: selected,
+        onTap: onTap,
+        builder: (context, hovered) => Row(
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(right: Space.s - 2),
+              child: SizedBox.square(
+                dimension: touchFirst(context) ? _phoneAvatar(context) : 24,
+                child: Center(
+                  child: PortalGlyph(
+                    color: closed ? palette.textFaint : pipeColor,
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: _NameOverRole(
+                name: pipe.name,
+                role: pipeStatus(pipe),
+                style: TypeScale.of(context).body.copyWith(
+                  color: selected || hovered || stands
+                      ? palette.text
+                      : palette.textMuted,
+                  fontWeight: stands
+                      ? FontWeight.w600
+                      : selected
+                      ? FontWeight.w500
+                      : FontWeight.w400,
+                ),
+                roleColor: selected || hovered
+                    ? palette.textMuted
+                    : palette.textFaint,
+              ),
+            ),
+            if (waiting > 0)
+              _needsYou(waitingLabel(pipe.name, waiting), waiting)
+            else if (unseen)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
+                child: Semantics(
+                  label: '${pipe.name} has something new',
+                  child: const Dot(color: pipeColor, size: 7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// On a Mac, "Needs you" at the top of the sidebar while anything,
+/// anywhere, waits for the person's answer: the inbox glyph, the words, and
+/// the count in the needs-you pill. A click shows the Needs you page beside
+/// the conversation, or closes it.
+class _NeedsYouRow extends StatelessWidget {
+  const _NeedsYouRow({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return _Row(
+      key: const ValueKey('needs-you'),
+      selected: AppScope.pageShown(context, AppPage.inbox),
+      onTap: () => AppScope.togglePage(context, AppPage.inbox),
+      builder: (context, hovered) => Row(
+        children: [
+          SizedBox(
+            width: Space.l + 2,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ExtensionGlyph(
+                icon: 'inbox',
+                name: 'Needs you',
+                color: palette.text,
+                size: 14,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              'Needs you',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyles.body.copyWith(
+                color: palette.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          _needsYou(needsYouLabel(count), count),
+        ],
+      ),
+    );
+  }
+}
+
 class _QuietRow extends StatelessWidget {
-  const _QuietRow({required this.label, required this.onTap, this.waiting = 0});
+  const _QuietRow({
+    required this.label,
+    required this.onTap,
+    this.waiting = 0,
+    this.waitingLabel =
+        'Something in another project is waiting for your answer',
+  });
 
   final String label;
   final VoidCallback onTap;
 
   /// What waits for the person out of sight behind it: marked at its end.
   final int waiting;
+
+  /// What the mark says to VoiceOver.
+  final String waitingLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -1325,19 +1739,277 @@ class _QuietRow extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: TextStyles.body.copyWith(
+              style: TypeScale.of(context).body.copyWith(
                 color: hovered ? palette.textMuted : palette.textFaint,
               ),
             ),
           ),
-          if (waiting > 0)
-            _needsYou(
-              'Something in another project is waiting for your answer',
-              waiting,
+          if (waiting > 0) _needsYou(waitingLabel, waiting),
+        ],
+      ),
+    );
+  }
+}
+
+/// How many chats the sidebar lists, the newest; "Show all" opens the rest.
+const chatsListed = 20;
+
+/// The person's chats (#213): conversations of their own beside the agents,
+/// for a question that isn't any agent's job. Under "Chats" (its "+" starts
+/// a new one), the [chatsListed] newest, each a row with a speech bubble
+/// and its title, no character and no color, since a chat is a session,
+/// not someone; then "Show all" when there are more. With none yet, one
+/// quiet "New chat" row.
+class _Chats extends StatelessWidget {
+  const _Chats({required this.chats, required this.selectedId});
+
+  /// Newest first.
+  final List<Chat> chats;
+  final String selectedId;
+
+  void _new(BuildContext context) {
+    startNewChat(context);
+    _toConversation(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final listed = chats.take(chatsListed).toList();
+    final rest = chats.skip(chatsListed).toList();
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _Caption(
+            'Chats',
+            header: true,
+            trailing: _QuietPlus(tip: 'New chat', onTap: () => _new(context)),
+          ),
+          if (chats.isEmpty)
+            _Row(
+              onTap: () => _new(context),
+              builder: (context, hovered) => Row(
+                children: [
+                  _ChatMark(
+                    color: hovered ? palette.textMuted : palette.textFaint,
+                  ),
+                  Expanded(
+                    child: Text(
+                      'New chat',
+                      style: TypeScale.of(context).body.copyWith(
+                        color: hovered ? palette.textMuted : palette.textFaint,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          for (final chat in listed)
+            _ChatRow(
+              key: ValueKey('chat-row/${chat.id}'),
+              chat: chat,
+              selected: chat.id == selectedId,
+            ),
+          if (rest.isNotEmpty)
+            _QuietRow(
+              // One word for it in the drawer, as Needs you's See all.
+              label: isPhoneLayout(context) ? 'See all' : 'Show all',
+              waiting: rest.fold<int>(
+                0,
+                (sum, chat) => sum + chatWaiting(chat),
+              ),
+              waitingLabel: 'A chat not shown here is waiting for your answer',
+              onTap: () => _showAll(context),
             ),
         ],
       ),
     );
+  }
+
+  /// Every chat: on a phone a page of its own over the conversation, on a
+  /// Mac a dialog.
+  void _showAll(BuildContext context) {
+    final routes = PhoneRoutes.of(context);
+    if (routes != null) {
+      routes.closeDrawer();
+      unawaited(
+        routes.push<void>(
+          PhoneRoute(id: 'chats', builder: (context) => const _ChatsPage()),
+        ),
+      );
+      return;
+    }
+    showModal(
+      context,
+      (context, close) => SizedBox(
+        width: 440,
+        height: 520,
+        child: ChatHistory(
+          onOpen: (chat) {
+            close();
+            openChat(context, chat);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// On a phone, every chat as a page (Back, "Chats", New chat): a tap opens
+/// one as the conversation.
+class _ChatsPage extends StatelessWidget {
+  const _ChatsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    void back() => PhoneRoutes.of(context)?.pop<void>();
+    return ColoredBox(
+      color: palette.sidebar,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          PhoneHeader(
+            leading: HeaderButton.back(onTap: back),
+            title: Text(
+              'Chats',
+              style: PhoneType.emphasis.copyWith(color: palette.text),
+            ),
+            trailing: [
+              HeaderButton(
+                label: 'New chat',
+                onTap: () {
+                  startNewChat(context);
+                  _toConversation(context);
+                },
+                glyph: (color) =>
+                    ExtensionGlyph(icon: 'plus', name: '+', color: color),
+              ),
+            ],
+          ),
+          Expanded(
+            child: ChatHistory(
+              onOpen: (chat) {
+                openChat(context, chat);
+                _toConversation(context);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A chat's mark where an agent's character would be: a speech bubble,
+/// in the row's quiet color.
+class _ChatMark extends StatelessWidget {
+  const _ChatMark({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final phone = touchFirst(context);
+    return Padding(
+      padding: const EdgeInsets.only(right: Space.s - 2),
+      child: SizedBox.square(
+        dimension: phone ? _phoneAvatar(context) : 24,
+        child: Center(child: ChatGlyph(color: color)),
+      ),
+    );
+  }
+}
+
+/// One chat: its bubble and title (bold while something new or waiting
+/// is in it), a faint wave across it while it replies, then the
+/// needs-you count of a proposal waiting, or a dot for a reply not yet
+/// read. A tap opens it; a right click, or a touch and hold, offers Rename
+/// and Delete.
+class _ChatRow extends StatelessWidget {
+  const _ChatRow({super.key, required this.chat, required this.selected});
+
+  final Chat chat;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final title = chatTitle(chat);
+    final waiting = chatWaiting(chat);
+    final stands = chat.unseen || waiting > 0;
+    return Semantics(
+      label: 'Chat',
+      child: _Row(
+        selected: selected,
+        onTap: () {
+          openChat(context, chat);
+          _toConversation(context);
+        },
+        onSecondaryTap: () => _chatMenu(context, chat),
+        // While it replies; in no one's color, as a chat is no one.
+        underlay: chat.status == AgentStatus.AGENT_STATUS_WORKING
+            ? WorkingWave(color: palette.textFaint, radius: Radii.control - 1)
+            : null,
+        builder: (context, hovered) => Row(
+          children: [
+            _ChatMark(
+              color: selected || hovered
+                  ? palette.textMuted
+                  : palette.textFaint,
+            ),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TypeScale.of(context).body.copyWith(
+                  color: selected || hovered || stands
+                      ? palette.text
+                      : palette.textMuted,
+                  fontWeight: stands
+                      ? FontWeight.w600
+                      : selected
+                      ? FontWeight.w500
+                      : FontWeight.w400,
+                ),
+              ),
+            ),
+            if (waiting > 0)
+              _needsYou(waitingLabel(title, waiting), waiting)
+            else if (chat.unseen)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
+                child: Semantics(
+                  label: '$title has something new',
+                  child: Dot(color: palette.textMuted, size: 7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A chat's right click or touch and hold: Rename or Delete.
+Future<void> _chatMenu(BuildContext context, Chat chat) async {
+  final chosen = await showActions<String>(
+    context,
+    title: chatTitle(chat),
+    actions: [
+      const SheetAction('Rename', 'rename'),
+      const SheetAction('Delete', 'delete', destructive: true),
+    ],
+  );
+  if (!context.mounted) return;
+  switch (chosen) {
+    case 'rename':
+      renameChat(context, chat);
+    case 'delete':
+      deleteChat(context, chat);
   }
 }
 
@@ -1378,7 +2050,7 @@ class _ArchivedState extends State<_Archived> {
                 Expanded(
                   child: Text(
                     'Archived (${widget.projects.length})',
-                    style: TextStyles.body.copyWith(
+                    style: TypeScale.of(context).body.copyWith(
                       color: hovered ? palette.textMuted : palette.textFaint,
                     ),
                   ),
@@ -1410,7 +2082,7 @@ class _ArchivedState extends State<_Archived> {
                         project.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyles.body.copyWith(
+                        style: TypeScale.of(context).body.copyWith(
                           color: hovered
                               ? palette.textMuted
                               : palette.textFaint,
@@ -1447,7 +2119,7 @@ class _Unarchive extends StatelessWidget {
           child: ExcludeSemantics(
             child: Text(
               'Unarchive',
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: hovered ? palette.text : palette.textMuted,
                 fontWeight: FontWeight.w500,
               ),
@@ -1457,6 +2129,434 @@ class _Unarchive extends StatelessWidget {
       ),
     );
   }
+}
+
+/// On a phone, what waits for the person's answer, first in the drawer:
+/// "Needs you" and a row for each agent or pipe with something waiting,
+/// which opens it at the oldest card waiting.
+class _NeedsYou extends StatelessWidget {
+  const _NeedsYou({required this.waiting});
+
+  /// The agents, pipes and chats waiting ([_NeedsYou.of]).
+  final List<Object> waiting;
+
+  /// The agents, pipes and chats with something waiting for the person,
+  /// in the sidebar's order; archived projects' wait.
+  static List<Object> of(Workspace workspace) => [
+    for (final agent in workspace.agents)
+      if (waitingIn([agent]) > 0 && archivedProjectOf(workspace, agent) == null)
+        agent,
+    for (final pipe in workspace.pipes)
+      if (pipeWaiting(pipe) > 0) pipe,
+    for (final chat in chatsNewestFirst(workspace))
+      if (chatWaiting(chat) > 0) chat,
+  ];
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: Space.l),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Every card waiting, on one page, to answer there: See all at the
+        // heading's end, or under it at the largest text sizes.
+        if (largeText(context)) ...[
+          const _Caption('Needs you', header: true),
+          const Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: _SeeAll(),
+          ),
+        ] else
+          const _Caption('Needs you', header: true, trailing: _SeeAll()),
+        for (final item in waiting)
+          if (item is Chat)
+            _ChatRow(
+              key: ValueKey('needs-you/chat/${item.id}'),
+              chat: item,
+              selected: false,
+            )
+          else
+            _FlatRow(item: item, reach: true),
+      ],
+    ),
+  );
+}
+
+/// On a phone, "See all" at the end of the drawer's Needs you: the Needs
+/// you page, every card waiting, to answer there without opening each
+/// conversation. A finger's size; the words in `signal`, as iOS tints a
+/// section's See All.
+class _SeeAll extends StatelessWidget {
+  const _SeeAll();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    void open() => AppScope.openPage(context, AppPage.inbox);
+    // An element of its own for VoiceOver, with its own tap: not merged
+    // into the section around it.
+    return Semantics(
+      container: true,
+      button: true,
+      label: 'See everything that needs you',
+      onTap: open,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: open,
+        builder: (context, pressed) => ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: PhonePlatformPolicy.least(
+              context,
+              DenseList.of(context) ? Touch.denseLine : Touch.target,
+            ),
+            minWidth: PhonePlatformPolicy.least(context, Touch.target),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Space.s),
+            child: Center(
+              widthFactor: 1,
+              child: Text(
+                'See all',
+                style: TypeScale.of(context).secondary.copyWith(
+                  color: pressed
+                      ? palette.signal.withValues(alpha: 0.6)
+                      : palette.signal,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// On a phone, the drawer's tree narrowed to [query]: the agents and
+/// pipes whose names (or roles, or projects' names) have it in them, each
+/// with its project, here on the phone.
+class SidebarSearch extends StatelessWidget {
+  const SidebarSearch({super.key, required this.query});
+
+  final String query;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final workspace = backend.workspace.workspace;
+        final wanted = query.toLowerCase();
+        bool has(String text) => text.toLowerCase().contains(wanted);
+        String projectName(String id) =>
+            id.isEmpty ? '' : projectById(workspace, id)?.name ?? '';
+        final found = <Object>[
+          for (final agent in workspace.agents)
+            if (archivedProjectOf(workspace, agent) == null &&
+                (has(agent.name) ||
+                    has(agent.role) ||
+                    has(projectName(agent.projectId))))
+              agent,
+          for (final pipe in workspace.pipes)
+            if (has(pipe.name) || has(projectName(pipe.projectId))) pipe,
+          for (final chat in chatsNewestFirst(workspace))
+            if (has(chatTitle(chat))) chat,
+        ];
+        if (found.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.all(Space.l),
+            child: Text(
+              'Nothing matches “$query”.',
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
+            ),
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.m),
+          children: [
+            for (final item in found)
+              if (item is Chat)
+                _ChatRow(
+                  key: ValueKey('chat-row/${item.id}'),
+                  chat: item,
+                  selected: false,
+                )
+              else
+                _FlatRow(item: item, project: true),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// An agent or a pipe on a row of its own, outside the tree (Needs you, a
+/// search): its character or portal, its name over its role or status
+/// (and with [project], its project's name), and what waits. A tap opens
+/// it; with [reach], at the oldest card waiting.
+class _FlatRow extends StatelessWidget {
+  const _FlatRow({
+    required this.item,
+    this.reach = false,
+    this.project = false,
+  });
+
+  /// An [Agent] or a [Pipe].
+  final Object item;
+  final bool reach;
+  final bool project;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final workspace = AppScope.of(context).workspace.workspace;
+    final item = this.item;
+    final String name;
+    final String line;
+    final String projectId;
+    final int waiting;
+    final Widget glyph;
+    final VoidCallback onTap;
+    if (item is Pipe) {
+      name = item.name;
+      line = pipeStatus(item);
+      projectId = item.projectId;
+      waiting = pipeWaiting(item);
+      glyph = PortalGlyph(
+        color: item.state == PipeState.PIPE_STATE_CLOSED
+            ? palette.textFaint
+            : pipeColor,
+      );
+      onTap = () => _selectPipe(context, item);
+    } else {
+      final agent = item as Agent;
+      name = agent.name;
+      final wait = usageWaitLine(agent);
+      line = wait.isEmpty ? agent.role : wait;
+      projectId = agent.projectId;
+      waiting = waitingIn([agent]);
+      glyph = AgentCharacter(
+        agent: agent,
+        size: _phoneAvatar(context),
+        live: true,
+      );
+      onTap = () => _selectAgent(context, agent, reach: reach);
+    }
+    final where = project && projectId.isNotEmpty
+        ? (projectById(workspace, projectId)?.name ?? '')
+        : '';
+    final under = [line, where].where((part) => part.isNotEmpty).join(' · ');
+    return _Row(
+      key: ValueKey(item is Pipe ? 'pipe/${item.id}' : (item as Agent).id),
+      height: 40,
+      onTap: onTap,
+      builder: (context, hovered) => Row(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: Space.s - 2),
+            child: SizedBox.square(
+              dimension: _phoneAvatar(context),
+              child: Center(child: glyph),
+            ),
+          ),
+          Expanded(
+            child: _NameOverRole(
+              name: name,
+              role: under,
+              style: TypeScale.of(context).body.copyWith(
+                color: palette.text,
+                fontWeight: waiting > 0 ? FontWeight.w600 : FontWeight.w400,
+              ),
+              roleColor: palette.textMuted,
+            ),
+          ),
+          if (waiting > 0) _needsYou(waitingLabel(name, waiting), waiting),
+        ],
+      ),
+    );
+  }
+}
+
+/// On a phone, the footer's places at the end of the drawer's list, one
+/// labelled row each (Map, Usage, Marketplace, Settings, What's new), then
+/// what's going on with sign-in and the settings file, and the versions.
+class _PhoneFooter extends StatelessWidget {
+  const _PhoneFooter({required this.workspace});
+
+  final Workspace workspace;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
+    final type = TypeScale.of(context);
+    Widget place(
+      AppPage page,
+      String label,
+      Widget Function(Color color) glyph, {
+      String? glow,
+    }) {
+      final row = _Row(
+        onTap: () => AppScope.openPage(context, page),
+        builder: (context, hovered) => Row(
+          children: [
+            SizedBox(
+              width: 32,
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: glyph(palette.textMuted),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                label,
+                style: type.body.copyWith(color: palette.text),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (glow == null) return row;
+      return Glow(
+        store: scope.backend.highlights,
+        matches: (key) => key == glow,
+        child: row,
+      );
+    }
+
+    final status = _footerStatus(context, workspace);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(height: 1, color: palette.hairline),
+          const SizedBox(height: Space.s),
+          place(
+            AppPage.map,
+            'Map',
+            (color) => ExtensionGlyph(icon: 'network', name: '', color: color),
+          ),
+          place(
+            AppPage.usage,
+            'Usage',
+            (color) =>
+                ExtensionGlyph(icon: 'chart-column', name: '', color: color),
+          ),
+          place(
+            AppPage.marketplace,
+            'Marketplace',
+            (color) => BagGlyph(color: color),
+            glow: 'marketplace:',
+          ),
+          place(
+            AppPage.settings,
+            'Settings',
+            (color) => CogGlyph(color: color),
+            glow: 'settings:',
+          ),
+          place(
+            AppPage.changelog,
+            "What's new",
+            (color) =>
+                ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
+          ),
+          // How much of each provider's limits is used, a touch and hold
+          // for its resets.
+          if (workspace.providers.any((p) => p.signedInWith.isNotEmpty))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Space.xs,
+                Space.s,
+                Space.xs,
+                0,
+              ),
+              child: ProviderUsageCircles(providers: workspace.providers),
+            ),
+          ForwardingsLine(
+            forwards: scope.backend.forwards,
+            except: workspace.hasLogin() ? workspace.login.url : '',
+            padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, 0),
+          ),
+          for (final line in status)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, 0),
+              child: line,
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, 0),
+            child: Text(
+              _versions(workspace.version, scope.appBuild.version),
+              style: type.caption.copyWith(color: palette.textFaint),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The footer's lines about sign-in and the settings file, when there's
+/// something to say: "Signing in to …", "Settings file has an error".
+List<Widget> _footerStatus(BuildContext context, Workspace workspace) {
+  final palette = Palette.of(context);
+  final configError = workspace.configError;
+  void openSettings() => AppScope.openProviders(context);
+  final status = <Widget>[];
+  if (workspace.hasLogin() && !AppScope.pageShown(context, AppPage.settings)) {
+    final login = workspace.login;
+    var provider = login.providerId;
+    for (final candidate in workspace.providers) {
+      if (candidate.id == login.providerId) provider = candidate.name;
+    }
+    final failed = login.error.isNotEmpty;
+    status.add(
+      Pressable(
+        onTap: openSettings,
+        builder: (context, hovered) => Row(
+          children: [
+            if (!failed) ...[const LiveDot(), const SizedBox(width: Space.s)],
+            Flexible(
+              child: Text(
+                failed
+                    ? "Couldn't sign in to $provider"
+                    : 'Signing in to $provider…',
+                style: TypeScale.of(context).caption.copyWith(
+                  color: failed
+                      ? palette.danger
+                      : hovered
+                      ? palette.text
+                      : palette.textMuted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  if (configError.isNotEmpty) {
+    status.add(
+      Pressable(
+        onTap: () => showModal(
+          context,
+          (context, close) => _ConfigError(message: configError, close: close),
+        ),
+        builder: (context, hovered) => Text(
+          'Settings file has an error',
+          style: TypeScale.of(context).caption.copyWith(
+            color: palette.danger,
+            decoration: hovered ? TextDecoration.underline : null,
+            decorationColor: palette.danger,
+          ),
+        ),
+      ),
+    );
+  }
+  return status;
 }
 
 /// Settings and the Marketplace, the version, and sign-in, connection and
@@ -1475,63 +2575,9 @@ class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final configError = workspace.configError;
     final scope = AppScope.scope(context);
     final appVersion = scope.appBuild.version;
-    void openSettings() => AppScope.openProviders(context);
-    final status = <Widget>[];
-    if (workspace.hasLogin() &&
-        !AppScope.pageShown(context, AppPage.settings)) {
-      final login = workspace.login;
-      var provider = login.providerId;
-      for (final candidate in workspace.providers) {
-        if (candidate.id == login.providerId) provider = candidate.name;
-      }
-      final failed = login.error.isNotEmpty;
-      status.add(
-        Pressable(
-          onTap: openSettings,
-          builder: (context, hovered) => Row(
-            children: [
-              if (!failed) ...[const LiveDot(), const SizedBox(width: Space.s)],
-              Flexible(
-                child: Text(
-                  failed
-                      ? "Couldn't sign in to $provider"
-                      : 'Signing in to $provider…',
-                  style: TextStyles.caption.copyWith(
-                    color: failed
-                        ? palette.danger
-                        : hovered
-                        ? palette.text
-                        : palette.textMuted,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-    if (configError.isNotEmpty) {
-      status.add(
-        Pressable(
-          onTap: () => showModal(
-            context,
-            (context, close) =>
-                _ConfigError(message: configError, close: close),
-          ),
-          builder: (context, hovered) => Text(
-            'Settings file has an error',
-            style: TextStyles.caption.copyWith(
-              color: palette.danger,
-              decoration: hovered ? TextDecoration.underline : null,
-              decorationColor: palette.danger,
-            ),
-          ),
-        ),
-      );
-    }
+    final status = _footerStatus(context, workspace);
     return Container(
       padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.m),
       decoration: BoxDecoration(
@@ -1563,8 +2609,8 @@ class _Footer extends StatelessWidget {
               ),
               child: ProviderUsageCircles(providers: workspace.providers),
             ),
-          Row(
-            children: [
+          _FooterButtons(
+            pages: [
               Glow(
                 store: scope.backend.highlights,
                 matches: (key) => key == 'settings:',
@@ -1575,7 +2621,6 @@ class _Footer extends StatelessWidget {
                   glyph: (color) => CogGlyph(color: color),
                 ),
               ),
-              const SizedBox(width: Space.xs),
               Glow(
                 store: scope.backend.highlights,
                 matches: (key) => key == 'marketplace:',
@@ -1587,7 +2632,6 @@ class _Footer extends StatelessWidget {
                   glyph: (color) => BagGlyph(color: color),
                 ),
               ),
-              const SizedBox(width: Space.xs),
               GlyphButton(
                 label: "What's new",
                 active: AppScope.pageShown(context, AppPage.changelog),
@@ -1595,7 +2639,6 @@ class _Footer extends StatelessWidget {
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
               ),
-              const SizedBox(width: Space.xs),
               GlyphButton(
                 label: 'Map',
                 active: AppScope.pageShown(context, AppPage.map),
@@ -1603,7 +2646,6 @@ class _Footer extends StatelessWidget {
                 glyph: (color) =>
                     ExtensionGlyph(icon: 'network', name: 'Map', color: color),
               ),
-              const SizedBox(width: Space.xs),
               GlyphButton(
                 label: 'Usage',
                 active: AppScope.pageShown(context, AppPage.usage),
@@ -1614,17 +2656,16 @@ class _Footer extends StatelessWidget {
                   color: color,
                 ),
               ),
-              const Spacer(),
-              // The person, at the end: their profile is at the top of
-              // Settings.
-              GlyphButton(
-                label: 'Profile',
-                active: false,
-                onTap: () => AppScope.openPage(context, AppPage.settings),
-                glyph: (_) =>
-                    const ExcludeSemantics(child: PersonAvatar(size: 20)),
-              ),
             ],
+            // The person, at the end: their profile is at the top of
+            // Settings.
+            profile: GlyphButton(
+              label: 'Profile',
+              active: false,
+              onTap: () => AppScope.openPage(context, AppPage.settings),
+              glyph: (_) =>
+                  const ExcludeSemantics(child: PersonAvatar(size: 20)),
+            ),
           ),
           // How it's connected, always in sight: which Claktory this is,
           // and whether what shows is live.
@@ -1646,6 +2687,40 @@ class _Footer extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The footer's buttons: the pages, then the person at the end. On a Mac a
+/// line of 28px buttons; with a finger's targets (an iPad's sidebar,
+/// [touchFirst]) the pages wrap onto more lines in the room beside the
+/// person rather than run past the sidebar's edge.
+class _FooterButtons extends StatelessWidget {
+  const _FooterButtons({required this.pages, required this.profile});
+
+  final List<Widget> pages;
+  final Widget profile;
+
+  @override
+  Widget build(BuildContext context) {
+    if (touchFirst(context)) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: Wrap(children: pages)),
+          profile,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        for (final (i, page) in pages.indexed) ...[
+          if (i > 0) const SizedBox(width: Space.xs),
+          page,
+        ],
+        const Spacer(),
+        profile,
+      ],
     );
   }
 }
@@ -1746,7 +2821,9 @@ String _versions(String backend, String app) {
 
 /// A [Draggable] that starts only once the pointer has moved a few pixels,
 /// like a native drag. Flutter's starts after one pixel for a mouse, so a
-/// click with a slight jiggle became a drag (and no click).
+/// click with a slight jiggle became a drag (and no click). A finger (or
+/// pen) starts one only by holding still a moment, as on iPhone: a finger
+/// that moves first scrolls the list.
 class _SidebarDraggable<T extends Object> extends Draggable<T> {
   const _SidebarDraggable({
     required super.child,
@@ -1772,7 +2849,16 @@ class _SlopDragRecognizer extends MultiDragGestureRecognizer {
 
   @override
   MultiDragPointerState createNewPointerState(PointerDownEvent event) =>
-      _SlopPointerState(event.position, event.kind, gestureSettings);
+      switch (event.kind) {
+        PointerDeviceKind.touch ||
+        PointerDeviceKind.stylus ||
+        PointerDeviceKind.invertedStylus => _HoldPointerState(
+          event.position,
+          event.kind,
+          gestureSettings,
+        ),
+        _ => _SlopPointerState(event.position, event.kind, gestureSettings),
+      };
 
   @override
   String get debugDescription => 'sidebar drag';
@@ -1792,4 +2878,63 @@ class _SlopPointerState extends MultiDragPointerState {
   @override
   void accepted(GestureMultiDragStartCallback starter) =>
       starter(initialPosition);
+}
+
+/// How long a finger holds still before it picks a row up.
+const sidebarHoldToDrag = kLongPressTimeout;
+
+/// A finger: it picks the row up once it has held still for
+/// [sidebarHoldToDrag]; moving first lets the list scroll instead.
+class _HoldPointerState extends MultiDragPointerState {
+  _HoldPointerState(super.initialPosition, super.kind, super.gestureSettings) {
+    _timer = Timer(sidebarHoldToDrag, _held);
+  }
+
+  Timer? _timer;
+  GestureMultiDragStartCallback? _starter;
+
+  void _held() {
+    _timer = null;
+    final starter = _starter;
+    if (starter != null) {
+      _starter = null;
+      _pickUp(starter);
+    } else {
+      resolve(GestureDisposition.accepted);
+    }
+  }
+
+  /// The row comes up under the finger, with a tick.
+  void _pickUp(GestureMultiDragStartCallback starter) {
+    HapticFeedback.selectionClick();
+    starter(initialPosition);
+  }
+
+  @override
+  void checkForResolutionAfterMove() {
+    if (_timer == null) return;
+    if (pendingDelta!.distance > computeHitSlop(kind, gestureSettings)) {
+      // Moved before holding: a scroll, not a drag.
+      _timer?.cancel();
+      _timer = null;
+      resolve(GestureDisposition.rejected);
+    }
+  }
+
+  @override
+  void accepted(GestureMultiDragStartCallback starter) {
+    if (_timer == null) {
+      _pickUp(starter);
+    } else {
+      // Won the arena before the hold ended: start once it does.
+      _starter = starter;
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _timer = null;
+    super.dispose();
+  }
 }

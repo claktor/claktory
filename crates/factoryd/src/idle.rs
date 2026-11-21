@@ -117,7 +117,7 @@ fn check(factory: &Arc<Factory>) {
     let mut started = false;
     for agent in &config.agents {
         let Some(runtime) = inner.agents.get_mut(&agent.id) else { continue };
-        if runtime.running || !runtime.queue.is_empty() || runtime.compact.is_some() {
+        if runtime.running || runtime.has_ready() || runtime.compact.is_some() {
             continue;
         }
         let Some(transcript) = runtime.transcript.as_ref() else { continue };

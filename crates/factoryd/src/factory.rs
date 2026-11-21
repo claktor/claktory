@@ -119,6 +119,9 @@ pub enum RequestError {
     /// A release's app can't be sent to an app on another machine, and why.
     #[error("can't send the app of {version}: {why}")]
     NoApp { version: String, why: String },
+    /// A question from an agent that can't be answered so, and why.
+    #[error("{0}")]
+    Ask(String),
     #[error("no proposal \"{0}\" from this agent")]
     UnknownProposal(String),
     /// A proposal to Rivet that can't be decided so, and why.
@@ -166,6 +169,14 @@ pub enum RequestError {
     /// A usage reset that can't be used now, and why (`crate::usage`).
     #[error("{0}")]
     Reset(String),
+    #[error("no pipe \"{0}\"")]
+    NoPipe(String),
+    /// A pipe that can't be made or changed so, and why (`crate::pipes`).
+    #[error("{0}")]
+    Pipe(String),
+    /// An avatar pair that can't be picked, and why.
+    #[error("{0}")]
+    Avatar(String),
 }
 
 impl RequestError {
@@ -185,7 +196,8 @@ impl RequestError {
             | RequestError::UnknownProposal(_)
             | RequestError::UnknownThread(_)
             | RequestError::UnknownComment(_)
-            | RequestError::NoReset(_) => v1::ErrorCode::NotFound,
+            | RequestError::NoReset(_)
+            | RequestError::NoPipe(_) => v1::ErrorCode::NotFound,
             RequestError::Empty(_)
             | RequestError::RelativePath(_)
             | RequestError::ConfigBroken
@@ -203,6 +215,7 @@ impl RequestError {
             | RequestError::Monitor(_)
             | RequestError::Remote(_)
             | RequestError::Proposal(_)
+            | RequestError::Ask(_)
             | RequestError::BuildCache(_)
             | RequestError::Apps(_)
             | RequestError::Layout(_)
@@ -211,7 +224,9 @@ impl RequestError {
             | RequestError::Connect(_)
             | RequestError::Comments(_)
             | RequestError::Usage(_)
-            | RequestError::Reset(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Reset(_)
+            | RequestError::Pipe(_)
+            | RequestError::Avatar(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
@@ -254,6 +269,9 @@ pub struct AgentChange<'a> {
     pub role: Option<&'a str>,
     /// The agent it reports to, by id; empty for none.
     pub lead: Option<&'a str>,
+    /// The model a refused step is retried on; empty for the Claktory-wide
+    /// default.
+    pub fallback_model: Option<&'a str>,
 }
 
 /// What a client starts from: the state now, and the events that follow it.
@@ -266,6 +284,8 @@ pub struct Snapshot {
     pub explorers: Vec<v1::Explorer>,
     pub view: Option<v1::ExtensionView>,
     pub queued: Option<v1::QueuedMessages>,
+    /// The chat shown, if one: its conversation and queue.
+    pub chat: Option<(v1::ChatTranscript, v1::ChatQueuedMessages)>,
 }
 
 pub struct Factory {
@@ -331,6 +351,16 @@ pub struct Factory {
     pub(crate) account: crate::account::State,
     /// A new Claktory's first run (`crate::onboarding`).
     pub(crate) onboarding: crate::onboarding::State,
+    /// The speech model voice messages need (`crate::speech`).
+    pub(crate) speech: crate::speech::model::Model,
+    /// Moving this Claktory to another computer (`crate::move_run`).
+    pub(crate) moving: crate::move_run::Moving,
+    /// Pipes to other Claktories (`crate::pipes`).
+    pub(crate) pipes: crate::pipes::Pipes,
+    /// Transcribes voice messages (`crate::speech::voice`).
+    pub(crate) voices: crate::speech::voice::Voices,
+    /// The person's chats (`crate::chats`).
+    pub(crate) chats: crate::chats::Chats,
     /// Notified when a project is unarchived: its agents read what waited.
     unarchived: tokio::sync::Notify,
 }
@@ -378,11 +408,34 @@ pub(crate) struct Queued {
     pub(crate) client_id: String,
     /// The person's: the files they attached.
     pub(crate) attachments: Vec<factory_agent::Attachment>,
+    /// The person's voice message (`crate::speech::voice`): its
+    /// transcription; `text` is empty until it's done.
+    pub(crate) voice: Option<crate::speech::voice::Voice>,
+}
+
+/// A lasting event from Claktory, with no sender id.
+pub(crate) fn host_event(summary: String) -> factory_agent::Event {
+    factory_agent::Event {
+        source: factory_agent::EventSource::Host,
+        from: "Claktory".to_owned(),
+        id: String::new(),
+        summary,
+        transient: false,
+    }
 }
 
 impl Queued {
     pub(crate) fn from_person(text: impl Into<String>, sent_from: Option<factory_agent::SentFrom>) -> Queued {
-        Queued { id: 0, text: text.into(), event: None, created: now_ms(), sent_from, client_id: String::new(), attachments: Vec::new() }
+        Queued {
+            id: 0,
+            text: text.into(),
+            event: None,
+            created: now_ms(),
+            sent_from,
+            client_id: String::new(),
+            attachments: Vec::new(),
+            voice: None,
+        }
     }
 
     pub(crate) fn event(text: String, event: factory_agent::Event) -> Queued {
@@ -462,6 +515,21 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    /// Something queued can go to the agent now (a voice message being
+    /// transcribed, and the person's after it, can't: `crate::speech::voice`).
+    pub(crate) fn has_ready(&self) -> bool {
+        crate::speech::voice::deliverable(&self.queue).contains(&true)
+    }
+
+    /// Takes what's queued that can go to the agent now, oldest first; the
+    /// rest stays.
+    pub(crate) fn take_ready(&mut self) -> Vec<Queued> {
+        let ready = crate::speech::voice::deliverable(&self.queue);
+        let (taken, kept) = std::mem::take(&mut self.queue).into_iter().zip(ready).partition::<Vec<_>, _>(|(_, ready)| *ready);
+        self.queue = kept.into_iter().map(|(queued, _)| queued).collect();
+        taken.into_iter().map(|(queued, _)| queued).collect()
+    }
+
     /// Messages wait for a busy agent: a bash command it's running moves to
     /// the background (as at its timeout) so the agent reads them sooner: at
     /// once for the person's, once the command has run a minute for another
@@ -469,8 +537,15 @@ impl Runtime {
     /// a message comes and when a command starts.
     pub(crate) fn make_way(&self) {
         let (Some(detach), Some("bash")) = (&self.detach, self.doing.as_deref()) else { return };
-        let person = self.queue.iter().any(|queued| queued.event.is_none());
-        let agent = self.queue.iter().any(|queued| queued.event.as_ref().is_some_and(|event| event.source == EventSource::Agent));
+        let ready: Vec<&Queued> = self
+            .queue
+            .iter()
+            .zip(crate::speech::voice::deliverable(&self.queue))
+            .filter(|(_, ready)| *ready)
+            .map(|(queued, _)| queued)
+            .collect();
+        let person = ready.iter().any(|queued| queued.event.is_none());
+        let agent = ready.iter().any(|queued| queued.event.as_ref().is_some_and(|event| event.source == EventSource::Agent));
         let wait = if person {
             Duration::ZERO
         } else if agent {
@@ -493,6 +568,11 @@ impl Runtime {
 }
 
 impl Factory {
+    /// Where this Factory keeps its files.
+    pub fn home(&self) -> &Home {
+        &self.home
+    }
+
     pub async fn open(home: Home, models: Arc<dyn Models>) -> Result<Arc<Factory>, OpenError> {
         tokio::fs::create_dir_all(home.workspace()).await?;
         // Only this user may open the home, and the loopback port wants the
@@ -531,6 +611,7 @@ impl Factory {
         };
         let store = crate::store::Store::open(&home.db_path())?;
         crate::runs::import_files(&home, &store).await?;
+        let chats = crate::chats::Chats::load(&store);
         let mut state: State = store.state()?;
         if state.selected_agent.as_deref().is_some_and(|id| config.agent(id).is_none()) {
             state.selected_agent = None;
@@ -569,7 +650,8 @@ impl Factory {
         let key_color = crate::remote::key_color(&home);
         let key_seed = crate::remote::key_seed(&home);
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
-        let account = crate::account::State::new(&home, created, inner.config.account.enabled);
+        let account = crate::account::State::new(&home, inner.config.account.enabled);
+        let home_for_speech = home.clone();
         let onboarding = crate::onboarding::State::load(&store, created, &inner.models)?;
         let factory = Arc::new(Factory {
             home,
@@ -603,12 +685,18 @@ impl Factory {
             apps: crate::apps::Apps::default(),
             account,
             onboarding,
+            speech: crate::speech::model::Model::new(&home_for_speech),
+            moving: crate::move_run::Moving::new(&home_for_speech),
+            pipes: crate::pipes::Pipes::default(),
+            voices: crate::speech::voice::Voices::new(),
+            chats,
             unarchived: tokio::sync::Notify::new(),
             key_color,
             key_seed,
         });
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
+        crate::pipes::start(&factory);
         factory.watch_trial();
         factory.refresh_explorer().await;
         {
@@ -634,6 +722,8 @@ impl Factory {
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::apps::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::speech::model::check(Arc::downgrade(&factory)));
+        tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -648,6 +738,15 @@ impl Factory {
         tokio::spawn(resume_unarchived(Arc::downgrade(&factory)));
         tokio::spawn(load_waiting(Arc::downgrade(&factory)));
         Ok(factory)
+    }
+
+    /// Where speech recognition comes from: the `claktory-speech` program
+    /// (None: not installed) and the model it downloads. Tests and mirrors
+    /// change it; the rest uses Claktory's own.
+    pub fn set_speech_source(self: &Arc<Self>, program: Option<PathBuf>, artifact: crate::speech::Artifact) {
+        self.speech.set_source(program, artifact);
+        self.broadcast_workspace(&self.lock());
+        tokio::spawn(crate::speech::model::check(Arc::downgrade(self)));
     }
 
     /// How long an idle agent with outstanding checklist items waits before
@@ -687,9 +786,15 @@ impl Factory {
                 tracing::error!(agent = %id, %error, "could not load transcript");
                 problem = Some(error);
             }
+            let chat = self.chats.selected();
+            if let Some(id) = &chat
+                && let Err(error) = self.ensure_loaded(id).await
+            {
+                tracing::error!(chat = %id, %error, "could not load a chat's conversation");
+            }
             let inner = self.lock();
             // Selection may have moved while loading; retry until the snapshot is complete.
-            if inner.state.selected_agent != selected {
+            if inner.state.selected_agent != selected || self.chats.selected() != chat {
                 continue;
             }
             let receiver = self.events.subscribe();
@@ -705,6 +810,7 @@ impl Factory {
                 view: inner.view.clone(),
                 // A client starts out with nothing queued.
                 queued: self.queued_of(&inner).filter(|queued| !queued.messages.is_empty()),
+                chat: crate::chats::shown(self, &inner),
             };
         }
     }
@@ -838,6 +944,7 @@ impl Factory {
                     extensions: Default::default(),
                     avatar: Default::default(),
                     lead: None,
+                    fallback_model: String::new(),
                 };
                 let lead = lead.trim();
                 if !lead.is_empty()
@@ -872,10 +979,12 @@ impl Factory {
     }
 
     async fn delete_agent_data(&self, id: &str) -> Result<(), RequestError> {
+        crate::vault::requests::forget_admin(self, id);
         crate::extensions::checklist::forget(&self.store, id)?;
         crate::extensions::memory::forget(&self.store, id)?;
         crate::extensions::monitors::forget(self, id)?;
         crate::proposals::forget(&self.store, id)?;
+        crate::extensions::ask::forget(&self.store, id)?;
         crate::extensions::devices::forget(self, id).await?;
         crate::extensions::viewer::forget(self, id)?;
         self.forget_presence(id)?;
@@ -891,11 +1000,27 @@ impl Factory {
         crate::remote::Identity { name: config.claktory_name(), color: config.claktory_color(self.key_color).to_owned() }
     }
 
-    /// New colours for the person's avatar, never the ones it had.
-    pub(crate) async fn shuffle_avatar(&self) -> Result<(), RequestError> {
+    /// New colours for the person's avatar: the pair they chose, or a
+    /// shuffled one, never the one it had (a plain shuffle also forgets a
+    /// chosen pair, so shuffling keeps working after a choice).
+    pub(crate) async fn shuffle_avatar(&self, request: v1::ShuffleAvatar) -> Result<(), RequestError> {
         let key_seed = self.key_seed.clone();
+        if let Some(chosen) = request.choice {
+            let count = crate::person::PAIRS.len();
+            if chosen < 0 || chosen as usize >= count {
+                return Err(RequestError::Avatar(format!("choice must be 0 to {}", count - 1)));
+            }
+            return self
+                .edit_config(|config| {
+                    config.user.avatar.choice = Some(u32::try_from(chosen).expect("checked above"));
+                    Ok(())
+                })
+                .await;
+        }
         self.edit_config(|config| {
-            config.user.avatar.seed = crate::person::shuffled(crate::person::seed(config, &key_seed));
+            let shown = crate::person::choice(config, &key_seed);
+            config.user.avatar.choice = None;
+            config.user.avatar.seed = crate::person::shuffled(shown);
             Ok(())
         })
         .await
@@ -920,6 +1045,7 @@ impl Factory {
             cache_ttl,
             name,
             color,
+            default_fallback_model,
         } = request;
         let (model, effort) = (model.as_deref(), effort.as_deref());
         let models = self.lock().models.clone();
@@ -937,6 +1063,9 @@ impl Factory {
             }
             if let Some(compact_at) = compact_at {
                 config.compact_at_tokens = compact_at;
+            }
+            if let Some(fallback) = &default_fallback_model {
+                config.default_fallback_model = fallback.trim().to_owned();
             }
             let resources = &mut config.resources;
             for (value, setting) in [
@@ -1044,8 +1173,21 @@ impl Factory {
             {
                 return Err(RequestError::UnknownProject(project.to_owned()));
             }
-            let AgentChange { name, prompt, model, effort, project, color, extension, placeholder, folder, avatar_shape, role, lead } =
-                change;
+            let AgentChange {
+                name,
+                prompt,
+                model,
+                effort,
+                project,
+                color,
+                extension,
+                placeholder,
+                folder,
+                avatar_shape,
+                role,
+                lead,
+                fallback_model,
+            } = change;
             if let Some(extension) = extension {
                 crate::extensions::apply_change(config, id, extension)?;
             }
@@ -1100,6 +1242,9 @@ impl Factory {
             if let Some(effort) = effort {
                 agent.effort = effort.to_owned();
             }
+            if let Some(fallback) = fallback_model {
+                agent.fallback_model = fallback.trim().to_owned();
+            }
             Ok(())
         })
         .await?;
@@ -1119,6 +1264,9 @@ impl Factory {
         self.ensure_loaded(id).await?;
         let mut inner = self.lock();
         inner.state.selected_agent = Some(id.to_owned());
+        // An agent's conversation in place of a pipe's or a chat's.
+        self.pipes.deselect();
+        crate::chats::leave(self, &mut inner);
         // Opening the agent is seeing what it did.
         inner.state.unseen.remove(id);
         let view = self.current_view(&inner);
@@ -1173,7 +1321,7 @@ impl Factory {
     /// Gives an agent an event, waking it if it's idle. Gone agents miss it.
     pub(crate) fn deliver_event(self: &Arc<Self>, id: &str, text: String, event: factory_agent::Event) {
         let mut inner = self.lock();
-        if inner.config.agent(id).is_none() {
+        if inner.config.agent(id).is_none() && !crate::chats::kept(self, id) {
             tracing::info!(agent = %id, from = %event.from, "event for an agent that's gone");
             return;
         }
@@ -1185,7 +1333,7 @@ impl Factory {
 
     /// Records a message for an existing agent and queues it: a working
     /// agent reads it after its current step, an idle one starts on it.
-    fn enqueue(self: &Arc<Self>, inner: &mut Inner, id: &str, mut queued: Queued) -> Result<(), rusqlite::Error> {
+    pub(crate) fn enqueue(self: &Arc<Self>, inner: &mut Inner, id: &str, mut queued: Queued) -> Result<(), rusqlite::Error> {
         // No secret's value reaches an agent, or factory.db, in a message:
         // another agent's, a task's output, a monitor's, or one pasted by the person.
         let redactor = self.redaction.current();
@@ -1196,26 +1344,37 @@ impl Factory {
             }
         }
         queued.id = self.store.add_message(id, &queued)?;
-        let runtime = inner.agents.entry(id.to_owned()).or_default();
-        runtime.queue.push(queued);
-        runtime.stopped = false;
-        // New work wins over compacting while idle: the conversation stays
-        // as it was, and the run goes on with the message.
-        if runtime.idle
-            && let Some(abort) = &runtime.abort
+        inner.agents.entry(id.to_owned()).or_default().queue.push(queued);
+        self.wake(inner, id);
+        Ok(())
+    }
+
+    /// Gives the agent what's queued for it that can go now: a working
+    /// agent reads it after its current step, an idle one starts on it. (A
+    /// voice message being transcribed waits, and the person's after it.)
+    pub(crate) fn wake(self: &Arc<Self>, inner: &mut Inner, id: &str) {
+        let archived = inner.config.agent(id).is_some_and(|agent| inner.config.archived(agent));
+        if let Some(runtime) = inner.agents.get_mut(id)
+            && runtime.has_ready()
         {
-            abort.abort();
-        }
-        if inner.config.agent(id).is_some_and(|agent| inner.config.archived(agent)) {
-            // Its project is archived: it waits for it to come back.
-        } else if !runtime.running {
-            runtime.running = true;
-            tokio::spawn(self.clone().run(id.to_owned()));
-        } else {
-            runtime.make_way();
+            runtime.stopped = false;
+            // New work wins over compacting while idle: the conversation stays
+            // as it was, and the run goes on with the message.
+            if runtime.idle
+                && let Some(abort) = &runtime.abort
+            {
+                abort.abort();
+            }
+            if archived {
+                // Its project is archived: it waits for it to come back.
+            } else if !runtime.running {
+                runtime.running = true;
+                tokio::spawn(self.clone().run(id.to_owned()));
+            } else {
+                runtime.make_way();
+            }
         }
         self.broadcast_workspace(inner);
-        Ok(())
     }
 
     pub fn stop_agent(&self, id: &str) -> Result<(), RequestError> {
@@ -1240,9 +1399,16 @@ impl Factory {
         if self.lock().agents.get(id).is_some_and(|runtime| runtime.transcript.is_some()) {
             return Ok(());
         }
-        let mut transcript = Transcript::load(self.home.agent_dir(id)).await?;
+        let folder = if crate::chats::is_chat(id) { crate::chats::dir(&self.home, id) } else { self.home.agent_dir(id) };
+        let mut transcript = Transcript::load(folder, id.to_owned()).await?;
         if let Err(error) = crate::proposals::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read proposals; decided ones show as pending");
+        }
+        if let Err(error) = crate::pipes::agents::restore(self, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read pipe secret approvals; decided ones show as waiting");
+        }
+        if let Err(error) = crate::extensions::ask::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read its questions; answered ones show as waiting");
         }
         if let Err(error) = crate::extensions::devices::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read the devices it adds; they show as waiting");
@@ -1254,6 +1420,16 @@ impl Factory {
                 }
             }
             Err(error) => tracing::error!(agent = %id, %error, "could not read secret requests; decided ones show as pending"),
+        }
+        // The add-secret cards this agent opened for others' requests
+        // (secrets_collect) show as those requests are now.
+        match self.vault.requests_with_admin(id) {
+            Ok(requests) => {
+                for request in requests.into_iter().filter(|request| request.agent_id != id) {
+                    transcript.set_secret_request(request);
+                }
+            }
+            Err(error) => tracing::error!(agent = %id, %error, "could not read the requests it collects; decided ones show as open"),
         }
         match self.vault.proposals_of(id) {
             Ok(proposals) => {
@@ -1279,13 +1455,22 @@ impl Factory {
     }
 
     /// Whether something of the agent's waits for the person: a request for
-    /// a secret, or a proposal to connect a service or to Rivet.
+    /// a secret, a proposal to connect a service or to Rivet, a question.
     fn has_waiting(&self, id: &str) -> bool {
         let requests = self.vault.requests_of(id).unwrap_or_default();
         let connects = self.vault.proposals_of(id).unwrap_or_default();
-        requests.iter().any(|request| request.state() == v1::SecretRequestState::Pending)
+        let collecting = self.vault.requests_with_admin(id).unwrap_or_default();
+        // An approved request with an admin agent waits on it, not the
+        // person (`crate::transcript`'s waits agrees).
+        requests.iter().any(|request| {
+            request.state() == v1::SecretRequestState::Pending
+                || (request.state() == v1::SecretRequestState::Approved && request.admin_agent_id.is_empty())
+        }) || collecting
+            .iter()
+            .any(|request| request.agent_id != id && request.collecting && request.state() == v1::SecretRequestState::Approved)
             || connects.iter().any(|proposal| proposal.state() == v1::ConnectProposalState::Pending)
             || crate::proposals::pending_of(&self.store, id)
+            || crate::extensions::ask::pending_of(&self.store, id)
             || crate::extensions::devices::waiting_of(&self.store, id)
     }
 
@@ -1426,7 +1611,7 @@ impl Factory {
         self.capacity_changed();
         let mut removed = Vec::new();
         for id in inner.agents.keys() {
-            if config.agent(id).is_none() {
+            if config.agent(id).is_none() && !crate::chats::is_chat(id) {
                 removed.push(id.clone());
             }
         }
@@ -1710,35 +1895,23 @@ impl Factory {
             }
             *sent = queued;
         }
+        drop(sent);
+        crate::chats::broadcast_queue(self, inner);
     }
 
     /// What waits for the selected agent, for clients.
     fn queued_of(&self, inner: &Inner) -> Option<v1::QueuedMessages> {
         let id = inner.state.selected_agent.as_deref()?;
         let queue = inner.agents.get(id).map_or(&[][..], |runtime| &runtime.queue[..]);
-        let messages = queue
-            .iter()
-            .map(|queued| {
-                let event = queued.event.as_ref();
-                v1::QueuedMessage {
-                    id: queued.id,
-                    source: crate::store::source_of(event).to_owned(),
-                    sender: event.map(|event| event.from.clone()).unwrap_or_default(),
-                    sender_id: event.map(|event| event.id.clone()).unwrap_or_default(),
-                    text: queued.text.clone(),
-                    created: queued.created,
-                    summary: event.map(|event| event.summary.clone()).unwrap_or_default(),
-                    sent_from: queued.sent_from.as_ref().map(crate::transcript::sent_from),
-                    client_id: queued.client_id.clone(),
-                    attachments: queued.attachments.iter().map(crate::transcript::attachment).collect(),
-                }
-            })
-            .collect();
+        let messages = queue.iter().map(queued_message).collect();
         Some(v1::QueuedMessages { agent_id: id.to_owned(), messages })
     }
 
     /// Sends a transcript change to clients if the agent is the selected one.
     pub(crate) fn send_change(&self, inner: &Inner, agent_id: &str, change: Change) {
+        if crate::chats::is_chat(agent_id) {
+            return crate::chats::send_change(self, agent_id, change);
+        }
         if inner.state.selected_agent.as_deref() != Some(agent_id) {
             return;
         }
@@ -1833,6 +2006,8 @@ impl Factory {
                 lead_id: inner.config.lead(agent).map(|lead| lead.id.clone()).unwrap_or_default(),
                 usage_wait: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map(|wait| wait.text.clone()).unwrap_or_default(),
                 usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
+                tainted_by_pipes: self.pipes.tainted(&agent.id),
+                fallback_model: agent.fallback_model.clone(),
             });
         }
         let config = &inner.config;
@@ -1842,10 +2017,18 @@ impl Factory {
             vault.flows = self.broker.flows();
         }
         let apps = crate::apps::infos(self, config, &vault);
+        let (pipes, selected_pipe_id) = crate::pipes::view(self, inner);
+        let (chats, selected_chat_id) = crate::chats::view(self, inner);
         v1::Workspace {
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
             apps,
             apps_available: self.apps.available(),
+            pipes,
+            speech_model: Some(self.speech.view()),
+            chats,
+            selected_chat_id,
+            r#move: self.moving.view(),
+            selected_pipe_id,
             person: Some(crate::person::person(config, &self.key_seed, self.account.signed_in_as(&config.account))),
             projects,
             agents,
@@ -1916,6 +2099,7 @@ impl Factory {
                 name: config.claktory_name(),
                 color: config.claktory_color(self.key_color).to_owned(),
                 onboarding: Some(self.onboarding.view()),
+                default_fallback_model: config.default_fallback_model.clone(),
             }),
         }
     }
@@ -1972,6 +2156,24 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
     v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false }
 }
 
+/// A queued message as clients see it.
+pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
+    let event = queued.event.as_ref();
+    v1::QueuedMessage {
+        id: queued.id,
+        source: crate::store::source_of(event).to_owned(),
+        sender: event.map(|event| event.from.clone()).unwrap_or_default(),
+        sender_id: event.map(|event| event.id.clone()).unwrap_or_default(),
+        text: queued.text.clone(),
+        created: queued.created,
+        summary: event.map(|event| event.summary.clone()).unwrap_or_default(),
+        sent_from: queued.sent_from.as_ref().map(crate::transcript::sent_from),
+        client_id: queued.client_id.clone(),
+        attachments: queued.attachments.iter().map(crate::transcript::attachment).collect(),
+        transcription: queued.voice.as_ref().map(crate::speech::voice::Voice::view),
+    }
+}
+
 /// The agent's transcript as a snapshot sends it: its latest entries.
 pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
     let transcript = inner.agents.get(id)?.transcript.as_ref()?;
@@ -1984,7 +2186,9 @@ pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
 /// agent's `waiting_seqs`) without opening them.
 async fn load_waiting(factory: Weak<Factory>) {
     let Some(factory) = factory.upgrade() else { return };
-    let ids: Vec<String> = factory.lock().config.agents.iter().map(|agent| agent.id.clone()).collect();
+    let mut ids: Vec<String> = factory.lock().config.agents.iter().map(|agent| agent.id.clone()).collect();
+    // Chats' proposals to Rivet too.
+    ids.extend(factory.chats.ids());
     for id in ids {
         if !factory.has_waiting(&id) {
             continue;
@@ -2009,7 +2213,7 @@ async fn resume_unarchived(factory: Weak<Factory>) {
             .agents
             .iter()
             .filter(|agent| !inner.config.archived(agent))
-            .filter(|agent| inner.agents.get(&agent.id).is_some_and(|runtime| !runtime.running && !runtime.queue.is_empty()))
+            .filter(|agent| inner.agents.get(&agent.id).is_some_and(|runtime| !runtime.running && runtime.has_ready()))
             .map(|agent| agent.id.clone())
             .collect();
         for id in ready {

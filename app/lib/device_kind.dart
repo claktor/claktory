@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'android/device_identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// What kind of device this app runs on, told to the backend in every
@@ -56,6 +57,9 @@ Future<DeviceKind> deviceKindOf(
     case TargetPlatform.windows:
       return DeviceKind.DEVICE_KIND_DESKTOP;
     case TargetPlatform.android:
+      return AndroidDeviceIdentity.forDisplayShortestSide(
+        shortestSide ?? androidDisplayShortestSide(),
+      ).kind;
     case TargetPlatform.fuchsia:
       return DeviceKind.DEVICE_KIND_UNSPECIFIED;
   }
@@ -78,6 +82,10 @@ Future<String> thisDeviceNameForHello() =>
 
 Future<String>? _name;
 
+/// This device's own name, worked out afresh: what it signs in to the
+/// person's account as.
+Future<String> thisDeviceName() => deviceNameOf(defaultTargetPlatform);
+
 @visibleForTesting
 Future<String> deviceNameOf(
   TargetPlatform platform, {
@@ -97,6 +105,9 @@ Future<String> deviceNameOf(
     case TargetPlatform.windows:
       return Platform.localHostname;
     case TargetPlatform.android:
+      return AndroidDeviceIdentity.forDisplayShortestSide(
+        shortestSide ?? androidDisplayShortestSide(),
+      ).name;
     case TargetPlatform.fuchsia:
       return '';
   }

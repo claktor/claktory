@@ -801,7 +801,7 @@ async fn what_waits_for_the_person_shows_with_the_agent() {
         let cancel = format!(r#"{{"id":"{}","reason":"Not needed."}}"#, asked[1].id);
         call(&mut client, &mut view, "builder", "secrets_request_cancel", &cancel).await;
         view.follow(&mut client, |view| waiting_seqs(view, "builder") == [first, third]).await;
-        let decided = v1::DecideProposal { agent_id: "builder".into(), proposal_id: proposal, approve: false, comment: String::new() };
+        let decided = v1::DecideProposal { agent_id: "builder".into(), proposal_id: proposal, approve: false, ..Default::default() };
         apply_request(&mut client, &mut view, Request::DecideProposal(decided)).await;
         view.follow(&mut client, |view| waiting_seqs(view, "builder") == [first]).await;
         // The app opens on another agent after the restart.
@@ -816,4 +816,197 @@ async fn what_waits_for_the_person_shows_with_the_agent() {
     // Expired: nothing waits.
     factory.expire_secret_requests_after(12 * 3_600_000);
     view.follow(&mut client, |view| waiting_seqs(view, "builder").is_empty()).await;
+}
+
+/// A request entry for `id` in the selected agent's conversation, as shown
+/// now.
+fn shown_request(view: &View, id: &str) -> v1::SecretRequest {
+    view.entries
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::SecretRequest(request)) if request.id == id => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the request's entry")
+}
+
+/// #223: the person approves the need, and the admin agent (Rivet) does
+/// the vault work: it answers the request with a matching secret, renamed
+/// to the variables asked for, or collects a new one with an add-secret
+/// card in its own conversation.
+#[tokio::test]
+async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let rivet = v1::UpdateAgent {
+        agent_id: "rivet".into(),
+        model: Some(crate::common::MODEL.into()),
+        effort: Some("off".into()),
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, Request::UpdateAgent(rivet)).await;
+    // The vault's token sets CF_TOKEN, not the name Builder asks for.
+    add(&mut client, "Cloudflare", "CF_TOKEN", TOKEN).await;
+
+    // The request knows which admin agent an approval passes it to.
+    let need = r#"{"name":"Cloudflare token","description":"A Cloudflare token that can edit claktory.com's DNS.","variables":[{"name":"CLOUDFLARE_API_TOKEN"}],"reason":"To deploy."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", need).await;
+    let asked = waiting(&view).pop().expect("the request");
+    assert_eq!(asked.admin_agent_id, "rivet");
+
+    // Approving the need gives nothing by itself: it passes to Rivet, and
+    // leaves Needs you, since it now waits on Rivet, not the person.
+    let approve = v1::DecideSecretRequest { approve_only: true, ..decide("builder", &asked.id, true, Vec::new(), "Go ahead.") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(approve)).await;
+    let shown = shown_request(&view, &asked.id);
+    assert_eq!(shown.state(), v1::SecretRequestState::Approved);
+    assert!(shown.approved_ms > 0 && shown.admin_agent_id == "rivet" && shown.comment == "Go ahead.");
+    assert!(waiting_seqs(&view, "builder").is_empty(), "approved waits on Rivet, not in Needs you");
+    assert!(vault(&view.workspace).secrets[0].grants.is_empty(), "nothing given yet");
+    let twice = client
+        .request(Request::DecideSecretRequest(v1::DecideSecretRequest {
+            approve_only: true,
+            ..decide("builder", &asked.id, true, Vec::new(), "")
+        }))
+        .await;
+    assert!(failure(&twice.body).1.contains("approved already"), "{:?}", twice.body);
+
+    // Rivet hears what was approved, and answers it with the existing
+    // secret: the one variable-name mismatch pairs by itself, the grant
+    // goes to Builder, and Builder is told what it got.
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    view.follow(&mut client, |view| {
+        events(view).iter().any(|line| line.contains("The person approved Builder's request for Cloudflare token")) && idle(view, "rivet")
+    })
+    .await;
+    let give = format!(r#"{{"secret":"Cloudflare","request":"{}"}}"#, asked.id);
+    let given = call(&mut client, &mut view, "rivet", "secrets_grant", &give).await;
+    assert!(given.starts_with("Gave Cloudflare to builder"), "{given}");
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    view.follow(&mut client, |view| {
+        events(view).iter().any(|line| line.contains("approved your request and Rivet gave you Cloudflare")) && idle(view, "builder")
+    })
+    .await;
+    let decided = shown_request(&view, &asked.id);
+    assert_eq!((decided.state(), decided.given_secret_name.as_str()), (v1::SecretRequestState::Granted, "Cloudflare"));
+    assert!(waiting_seqs(&view, "builder").is_empty(), "nothing waits any more");
+    // Builder uses it under the name it asked for.
+    let output =
+        call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo $CLOUDFLARE_API_TOKEN","secrets":["Cloudflare"]}"#).await;
+    assert!(output.starts_with("[secret Cloudflare/"), "{output}");
+
+    // A second need has no match in the vault: Rivet asks the person to
+    // add one, with a card in its own conversation.
+    let mail = r#"{"name":"Mail key","description":"A Resend key that can send sign-up mail.","variables":[{"name":"RESEND_API_KEY"}],"reason":"Sign-up mail."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", mail).await;
+    let second = waiting(&view).pop().expect("the request");
+    let approve = v1::DecideSecretRequest { approve_only: true, ..decide("builder", &second.id, true, Vec::new(), "") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(approve)).await;
+    let opened = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{}"}}"#, second.id)).await;
+    assert!(opened.starts_with("Asked the person to add Mail key"), "{opened}");
+    let card = shown_request(&view, &second.id);
+    assert!(card.collecting && card.state() == v1::SecretRequestState::Approved, "the card in Rivet's conversation");
+    // While collecting, the person's wait is Rivet's card, counted once.
+    assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the collect card is in Needs you");
+    assert!(waiting_seqs(&view, "builder").is_empty(), "the asker's card isn't");
+
+    // The person saves the card: the secret is made and goes to Builder,
+    // the card shows it granted, and Rivet hears how it ended.
+    let save = v1::DecideSecretRequest {
+        name: "Resend".into(),
+        ..decide("builder", &second.id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], "")
+    };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(save)).await;
+    let card = shown_request(&view, &second.id);
+    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's card follows");
+    assert!(waiting_seqs(&view, "rivet").is_empty(), "nothing waits with Rivet any more");
+    view.follow(&mut client, |view| {
+        events(view).iter().any(|line| line.contains("gave Builder Resend for its request themselves")) && idle(view, "rivet")
+    })
+    .await;
+    let resend = vault(&view.workspace).secrets.into_iter().find(|secret| secret.name == "Resend").expect("made");
+    assert_eq!(resend.grants[0].agent_id.as_str(), "builder");
+
+    // After a restart, both conversations show the requests as they ended.
+    drop(client);
+    drop(_factory);
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let card = shown_request(&view, &second.id);
+    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's card after a restart");
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    assert_eq!(shown_request(&view, &asked.id).state(), v1::SecretRequestState::Granted);
+}
+
+/// #223's fallbacks: approval needs an admin agent with Secrets, and falls
+/// back to the direct card without one; an approved request can be
+/// withdrawn but not changed, and never expires.
+#[tokio::test]
+async fn approval_needs_an_admin_and_approved_requests_neither_expire_nor_change() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+
+    // Approved, the asker can still withdraw it (Rivet's card would close).
+    let need = r#"{"name":"Stripe","description":"Payments.","variables":[{"name":"STRIPE_KEY"}],"reason":"Payments."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", need).await;
+    let stripe = waiting(&view).pop().expect("the request");
+    assert_eq!(stripe.admin_agent_id, "rivet");
+    let approve = v1::DecideSecretRequest { approve_only: true, ..decide("builder", &stripe.id, true, Vec::new(), "") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(approve)).await;
+    let out = call(&mut client, &mut view, "builder", "secrets_request_cancel", &format!(r#"{{"id":"{}"}}"#, stripe.id)).await;
+    assert!(out.starts_with("Withdrew"), "{out}");
+    assert_eq!(shown_request(&view, &stripe.id).state(), v1::SecretRequestState::Withdrawn);
+
+    // Approved, it can't be changed any more, and it doesn't expire.
+    let keys = r#"{"name":"Keys","description":"Keys.","variables":[{"name":"SOME_KEY"}],"reason":"Keys."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", keys).await;
+    let keys = waiting(&view).pop().expect("the request");
+    let approve = v1::DecideSecretRequest { approve_only: true, ..decide("builder", &keys.id, true, Vec::new(), "") };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(approve)).await;
+    let changed =
+        call(&mut client, &mut view, "builder", "secrets_request_update", &format!(r#"{{"id":"{}","reason":"More."}}"#, keys.id)).await;
+    assert!(changed.contains("already approved"), "{changed}");
+    factory.expire_secret_requests_after(13 * 3_600_000);
+    assert_eq!(shown_request(&view, &keys.id).state(), v1::SecretRequestState::Approved, "approved requests don't expire");
+
+    // The admin gone between the request and the approval: approving the
+    // need is refused, and the direct card still works.
+    let gone = r#"{"name":"Gone","description":"Gone.","variables":[{"name":"GONE_KEY"}],"reason":"Gone."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", gone).await;
+    let gone = waiting(&view).pop().expect("the request");
+    assert_eq!(gone.admin_agent_id, "rivet");
+    apply_request(&mut client, &mut view, Request::DeleteAgent(v1::DeleteAgent { agent_id: "rivet".into() })).await;
+    // Deleting the admin hands its requests back: the approved one loses
+    // its admin and is the person's (and Needs you's) again.
+    let keys = shown_request(&view, &keys.id);
+    assert!(keys.state() == v1::SecretRequestState::Approved && keys.admin_agent_id.is_empty(), "handed back");
+    let builder_waits = waiting_seqs(&view, "builder");
+    assert!(builder_waits.contains(&seq_of(&view, &keys.id)), "it counts again: {builder_waits:?}");
+    let refused = client
+        .request(Request::DecideSecretRequest(v1::DecideSecretRequest {
+            approve_only: true,
+            ..decide("builder", &gone.id, true, Vec::new(), "")
+        }))
+        .await;
+    assert!(failure(&refused.body).1.contains("No admin agent"), "{:?}", refused.body);
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &gone.id, false, Vec::new(), ""))).await;
+    assert_eq!(shown_request(&view, &gone.id).state(), v1::SecretRequestState::Dismissed);
+
+    // With no admin agent at all, a new request carries none: the app
+    // shows the direct card from the start.
+    let last = r#"{"name":"Last","description":"Last.","variables":[{"name":"LAST_KEY"}],"reason":"Last."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", last).await;
+    let last = waiting(&view).pop().expect("the request");
+    assert_eq!(last.admin_agent_id, "", "no admin agent to pass it to");
 }

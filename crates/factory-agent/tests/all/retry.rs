@@ -54,6 +54,7 @@ fn options(stream: StreamFn) -> AgentOptions {
         inbox: None,
         after_compaction: None,
         secrets: None,
+        fallback_model: None,
     }
 }
 

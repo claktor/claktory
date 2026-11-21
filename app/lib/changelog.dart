@@ -4,6 +4,8 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'extensions.dart' show dayLabel;
 import 'identity.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -49,31 +51,41 @@ class ChangelogView extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (!inPane)
-              WindowDrag(
-                child: Container(
-                  height: titleBarHeight,
-                  padding: const EdgeInsets.only(
-                    left: Space.xl,
-                    right: Space.m,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: palette.hairline)),
-                  ),
-                  child: Row(
-                    children: [
-                      Text(
+              isPhoneLayout(context)
+                  ? PhoneHeader(
+                      leading: HeaderButton.back(onTap: close),
+                      title: Text(
                         "What's new",
-                        style: TextStyles.label.copyWith(
-                          color: palette.text,
-                          fontWeight: FontWeight.w600,
+                        style: PhoneType.emphasis.copyWith(color: palette.text),
+                      ),
+                    )
+                  : WindowDrag(
+                      child: Container(
+                        height: titleBarHeight,
+                        padding: const EdgeInsets.only(
+                          left: Space.xl,
+                          right: Space.m,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: palette.hairline),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              "What's new",
+                              style: TypeScale.of(context).label.copyWith(
+                                color: palette.text,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            Button(label: 'Done', onPressed: close),
+                          ],
                         ),
                       ),
-                      const Spacer(),
-                      Button(label: 'Done', onPressed: close),
-                    ],
-                  ),
-                ),
-              ),
+                    ),
             Expanded(
               child: SelectableArea(
                 child: ListenableBuilder(
@@ -91,16 +103,23 @@ class ChangelogView extends StatelessWidget {
                         constraints: const BoxConstraints(maxWidth: 640),
                         child: versions.isEmpty
                             ? Padding(
-                                padding: const EdgeInsets.all(Space.xl),
+                                padding: EdgeInsets.all(
+                                  isPhoneLayout(context)
+                                      ? Touch.gutter
+                                      : Space.xl,
+                                ),
                                 child: Text(
                                   'No release notes yet.',
-                                  style: TextStyles.body.copyWith(
-                                    color: palette.textFaint,
-                                  ),
+                                  style: TypeScale.of(context).body
+                                      .copyWith(color: palette.textFaint),
                                 ),
                               )
                             : ListView.builder(
-                                padding: const EdgeInsets.all(Space.xl),
+                                padding: EdgeInsets.all(
+                                  isPhoneLayout(context)
+                                      ? Touch.gutter
+                                      : Space.xl,
+                                ),
                                 itemCount: versions.length,
                                 itemBuilder: (context, index) {
                                   final version = versions[index];
@@ -202,7 +221,7 @@ class _Version extends StatelessWidget {
                     children: [
                       Text(
                         version.unreleased ? 'Unreleased' : version.version,
-                        style: TextStyles.label.copyWith(
+                        style: TypeScale.of(context).label.copyWith(
                           color: palette.text,
                           fontWeight: FontWeight.w600,
                           fontFeatures: const [FontFeature.tabularFigures()],
@@ -211,14 +230,13 @@ class _Version extends StatelessWidget {
                       if (released.isNotEmpty)
                         Text(
                           released,
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
                         ),
                       if (tag != null)
                         Text(
                           tag,
-                          style: TextStyles.caption.copyWith(
+                          style: TypeScale.of(context).caption.copyWith(
                             color: tagColor,
                             fontWeight: FontWeight.w500,
                           ),
@@ -269,14 +287,15 @@ class _Item extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 kind,
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             ),
           ),
           Expanded(
             child: Text(
               item.text.isEmpty ? item.raw : item.text,
-              style: TextStyles.body.copyWith(color: palette.text),
+              style: TypeScale.of(context).body.copyWith(color: palette.text),
             ),
           ),
         ],

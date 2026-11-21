@@ -78,10 +78,13 @@ impl Factory {
         changed.as_mut().enable();
         {
             let mut inner = self.lock();
-            let noun = inner.config.agent(id).map(|agent| {
-                let provider = agent.model.split_once('/').map_or(agent.model.as_str(), |(provider, _)| provider);
+            // A chat waits as an agent does, as "The chat".
+            let model_and_name =
+                inner.config.agent(id).map(|agent| (agent.model.clone(), agent.name.clone())).or_else(|| self.chats.model_and_name(id));
+            let noun = model_and_name.map(|(model, agent)| {
+                let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider);
                 let name = inner.providers.iter().find(|known| known.id == provider).map_or(provider, |known| known.name.as_str());
-                (factory_agent::accounts::account_noun(provider, name), agent.name.clone())
+                (factory_agent::accounts::account_noun(provider, name), agent)
             });
             let Some((noun, name)) = noun else { return false };
             let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) else { return false };

@@ -6,6 +6,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -266,49 +267,91 @@ void main() {
     expect(harness.backend.sent, isEmpty);
   });
 
-  testWidgets('a Claktory from before sign-in offers Not now, once', (
+  testWidgets('signing in is required: no Not now, nor what the email is '
+      'used for, only a link to it; the app behind is out of reach', (
     tester,
   ) async {
-    final snapshot = withAccount(signedOut)..account.skippable = true;
-    final harness = Harness(snapshot);
-    await harness.show(tester, size: const Size(1200, 900));
-    await pumpFrames(tester);
+    final opened = <Uri>[];
+    openAccountPage = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => openAccountPage = (url) async => true);
+    final harness = await showAccount(tester, signedOut);
     expect(find.text('Sign in to Claktory'), findsOneWidget);
-    await tester.tap(find.text('Not now'));
+    expect(find.text('Not now'), findsNothing);
+    expect(find.textContaining('Claktory shares your email'), findsNothing);
+    await tester.tap(find.text('How Claktory uses your email'));
     await tester.pump();
-    expect(harness.last.hasSkipAccountSignIn(), isTrue);
-    final skipped = harness.backend.workspace.workspace.deepCopy()
-      ..account.state = ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED
-      ..account.skippable = false;
-    await harness.apply(tester, skipped);
-    await pumpFrames(tester);
-    expect(find.text('Sign in to Claktory'), findsNothing);
-
-    // Settings → Account can still sign in, and Not now goes back.
-    await openSettings(tester, harness);
-    await reveal(tester, find.text('Not signed in'));
-    await tester.tap(find.text('Sign in…'));
-    await pumpFrames(tester);
-    expect(find.text('Sign in to Claktory'), findsOneWidget);
-    final sent = harness.backend.sent.length;
-    await tester.tap(find.text('Not now'));
-    await pumpFrames(tester);
-    expect(find.text('Sign in to Claktory'), findsNothing);
-    expect(harness.backend.sent, hasLength(sent), reason: 'skipped already');
+    expect(opened, [Uri.parse('https://claktory.com/privacy')]);
+    // The agent's conversation behind the step can't be clicked.
+    await tester.tap(find.text('Builder').first, warnIfMissed: false);
+    await tester.pump();
+    expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
   });
 
-  testWidgets('a new Claktory has no Not now', (tester) async {
-    await showAccount(tester, signedOut);
+  testWidgets('on a phone, the app behind the sign-in is inert', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = await showAccount(
+      tester,
+      signedOut,
+      size: const Size(393, 852),
+    );
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    expect(find.text('Not now'), findsNothing);
+    final semantics = tester.ensureSemantics();
+    await tester.pump();
+    expect(find.semantics.byLabel(RegExp('Builder')), findsNothing);
+    expect(find.semantics.byLabel('Sign in to Claktory'), findsOneWidget);
+    semantics.dispose();
+    await tester.tap(find.text('Builder').first, warnIfMissed: false);
+    await tester.pump();
+    expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
+  });
+
+  testWidgets('Delete account… opens the deletion step on the account site', (
+    tester,
+  ) async {
+    final opened = <Uri>[];
+    openAccountPage = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => openAccountPage = (url) async => true);
+    final harness = await showAccount(tester, signedIn);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Delete account…'));
+    expect(
+      find.text(
+        'Deletes your email and everything linked to it at claktory.com, '
+        'after asking.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Delete account…'));
+    await tester.pump();
+    expect(opened, [Uri.parse('https://account.claktory.com/account/delete')]);
+  });
+
+  testWidgets('a Claktory an older version let skip is asked again', (
+    tester,
+  ) async {
+    await showAccount(
+      tester,
+      ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED,
+    );
     expect(find.text('Sign in to Claktory'), findsOneWidget);
     expect(find.text('Not now'), findsNothing);
   });
 
-  testWidgets('the code step names the sender, and can skip while waiting', (
+  testWidgets('the code step names the sender, with no way around it', (
     tester,
   ) async {
     final snapshot = withAccount(awaiting)
-      ..account.codeFrom = 'code@auth.claktory.com'
-      ..account.skippable = true;
+      ..account.codeFrom = 'code@auth.claktory.com';
     final harness = Harness(snapshot);
     await harness.show(tester, size: const Size(1200, 900));
     await pumpFrames(tester);
@@ -319,9 +362,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    await tester.tap(find.text('Not now'));
-    await tester.pump();
-    expect(harness.last.hasSkipAccountSignIn(), isTrue);
+    expect(find.text('Not now'), findsNothing);
   });
 
   testWidgets("when claktory.com can't be reached, Claktory starts without "
@@ -471,6 +512,9 @@ void main() {
       size: const Size(375, 667),
     );
     await openSettings(tester, harness);
+    // A phone lists the sections: Account opens as a page of its own.
+    harness.backend.settingsSection.value = 'account';
+    await pumpFrames(tester);
     final more = find.text('Show exactly what was sent');
     await reveal(tester, more);
     await tester.ensureVisible(more);

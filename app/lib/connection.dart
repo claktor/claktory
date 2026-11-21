@@ -7,6 +7,8 @@ import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show Touch;
+import 'mobile/platform_policy.dart';
 import 'tunnel/api/tunnel.dart';
 import 'tunnel_client.dart' show idleTunnel, tunnelAdvice;
 
@@ -165,6 +167,13 @@ class ConnectionLine extends StatelessWidget {
       builder: (context, _) {
         final palette = Palette.of(context);
         final connection = Connection(backend, machine: machine);
+        // Under a finger on Android (the sidebar's foot of a wide window),
+        // a whole touch target, 48dp; a Mac and an iPad keep the line as it
+        // is. A phone's drawer shows the connection as a word instead.
+        final policy = PhonePlatformPolicy.of(context);
+        final least = policy.touch && policy.touchTarget > Touch.target
+            ? policy.touchTarget
+            : 0.0;
         return HoverCard(
           holdToShow: true,
           card: (context) => Text(
@@ -172,6 +181,7 @@ class ConnectionLine extends StatelessWidget {
             style: TextStyles.caption.copyWith(color: palette.textMuted),
           ),
           child: Semantics(
+            container: true,
             button: true,
             label: connection.line,
             child: Pressable(
@@ -188,35 +198,38 @@ class ConnectionLine extends StatelessWidget {
                         close: close,
                       ),
                     ),
-              builder: (context, hovered) => ExcludeSemantics(
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 10,
-                      child: Center(
-                        child: ConnectionDot(link: connection.link),
-                      ),
-                    ),
-                    const SizedBox(width: Space.s - 2),
-                    Flexible(
-                      child: Text(
-                        connection.line,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyles.caption.copyWith(
-                          color: connection.problem
-                              ? palette.danger
-                              : hovered
-                              ? palette.textMuted
-                              : palette.textFaint,
-                          decoration: connection.problem && hovered
-                              ? TextDecoration.underline
-                              : null,
-                          decorationColor: palette.danger,
+              builder: (context, hovered) => ConstrainedBox(
+                constraints: BoxConstraints(minWidth: least, minHeight: least),
+                child: ExcludeSemantics(
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 10,
+                        child: Center(
+                          child: ConnectionDot(link: connection.link),
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: Space.s - 2),
+                      Flexible(
+                        child: Text(
+                          connection.line,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyles.caption.copyWith(
+                            color: connection.problem
+                                ? palette.danger
+                                : hovered
+                                ? palette.textMuted
+                                : palette.textFaint,
+                            decoration: connection.problem && hovered
+                                ? TextDecoration.underline
+                                : null,
+                            decorationColor: palette.danger,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

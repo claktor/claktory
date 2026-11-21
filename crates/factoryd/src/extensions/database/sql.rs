@@ -67,9 +67,14 @@ pub(crate) fn path(home: &Home, target: &Target) -> PathBuf {
 }
 
 /// Factory's tables no agent reads, even an admin: each agent's memory is
-/// its own (the person's decision).
+/// its own (the person's decision); pipes, whose messages are another
+/// Claktory's untrusted text that agents read only fenced, through a pipe
+/// granted to them (`crate::pipes`); and comments on files, which hold the
+/// person's unsent drafts: a comment reaches an agent only when the person
+/// sends it, and agents read sent ones with the Comments tools
+/// (`crate::annotations`).
 fn private(table: &str) -> bool {
-    table.starts_with("memory_")
+    table.starts_with("memory_") || table == "pipes" || table.starts_with("pipe_") || table == "threads" || table.starts_with("thread_")
 }
 
 /// What `target`'s statements may do. Writes to factory.db are already
@@ -126,7 +131,9 @@ fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
         return format!("It ran longer than {}s and was stopped; narrow it (WHERE, LIMIT, an index).", TIME_LIMIT.as_secs());
     }
     if *target == Target::Factory && (text.contains("prohibited") || text.contains("not authorized")) {
-        return format!("{text}. Agents' memory (the memory_ tables) isn't readable, even by admin agents.");
+        return format!(
+            "{text}. Agents' memory (the memory_ tables), pipes (pipes, pipe_) and comments on files (threads, thread_) aren't readable, even by admin agents; comments sent to you are in comments_list."
+        );
     }
     if text.contains("not authorized") {
         return format!("{text}: ATTACH and load_extension aren't allowed.");
@@ -374,14 +381,28 @@ mod tests {
         let factory = Connection::open(home.db_path()).expect("open");
         factory
             .execute_batch(
-                "PRAGMA journal_mode = wal; CREATE TABLE messages (agent TEXT, text TEXT); INSERT INTO messages VALUES ('rivet', 'hi'); CREATE TABLE memory_notes (agent TEXT, body TEXT); INSERT INTO memory_notes VALUES ('scout', 'secret');",
+                "PRAGMA journal_mode = wal; CREATE TABLE messages (agent TEXT, text TEXT); INSERT INTO messages VALUES ('rivet', 'hi'); CREATE TABLE memory_notes (agent TEXT, body TEXT); INSERT INTO memory_notes VALUES ('scout', 'secret'); CREATE TABLE threads (id INTEGER, agent TEXT); CREATE TABLE thread_comments (thread INTEGER, body TEXT, draft INTEGER); INSERT INTO thread_comments VALUES (1, 'not sent yet', 1); CREATE TABLE thread_files (path TEXT, text TEXT);",
             )
             .expect("schema");
         let target = Target::Factory;
         let mut db = open(&home, &target, false).expect("open").expect("there");
         assert_eq!(query(&db, &target, "SELECT * FROM messages", None).as_deref(), Ok("agent | text\nrivet | hi"));
         let memory = query(&db, &target, "SELECT body FROM memory_notes", None).unwrap_err();
-        assert!(memory.contains("memory_ tables) isn't readable"), "{memory}");
+        assert!(
+            memory.contains("(the memory_ tables), pipes (pipes, pipe_) and comments on files (threads, thread_) aren't readable"),
+            "{memory}"
+        );
+        // Comments on files hold the person's drafts: no table of them is read, joined or listed.
+        for sql in [
+            "SELECT body FROM thread_comments WHERE draft = 1",
+            "SELECT * FROM threads",
+            "SELECT text FROM thread_files",
+            "SELECT m.text FROM messages m JOIN thread_comments c ON 1",
+            "SELECT (SELECT body FROM thread_comments) AS b",
+        ] {
+            let refused = query(&db, &target, sql, None).unwrap_err();
+            assert!(refused.contains("comments on files (threads, thread_) aren't readable"), "{sql}: {refused}");
+        }
         assert!(exec(&mut db, &target, "INSERT INTO messages VALUES ('x', 'y')", None).is_err());
         assert_eq!(schema(&db, &target, None).as_deref(), Ok("messages (1 rows): agent TEXT, text TEXT"));
         // Factory goes on writing meanwhile.

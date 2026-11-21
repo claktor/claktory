@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::when::{self, FireOn, MINUTE, Repeat, SECOND, When};
 use super::{Monitor, Query, Status, fired_since, query, save, waiting};
-use crate::factory::Factory;
+use crate::factory::{Factory, host_event};
 use crate::transcript::now_ms;
 
 /// Fires an agent's monitors may make in `BUDGET_WINDOW` before the one
@@ -165,7 +165,7 @@ async fn tick_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
                     // Paused while its project is archived.
                     on: crate::extensions::enabled(config, super::ID) && !inner.config.archived(config),
                     running: inner.agents.get(&config.id).is_some_and(|runtime| runtime.running),
-                    folder: crate::runner::places(&factory.home, &inner.config, config).folder,
+                    folder: crate::runner::places(&factory.home, &inner.config, config, &[]).folder,
                 },
                 None => Agent { on: false, running: false, folder: PathBuf::new() },
             };
@@ -307,7 +307,7 @@ fn fire_text(factory: &Factory, monitor: &Monitor, trigger: &Trigger, last: bool
 /// One Factory note to the agent about its monitor, such as why it stopped.
 fn notice(factory: &Arc<Factory>, monitor: &Monitor, what: &str, text: String) {
     let summary = format!("m{} {} {what}", monitor.id, monitor.name);
-    let event = Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary, transient: false };
+    let event = host_event(summary);
     factory.deliver_event(&monitor.agent, text, event);
 }
 

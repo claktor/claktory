@@ -1,5 +1,6 @@
 import 'package:factory_app/explorer.dart';
 import 'package:factory_app/layout.dart' show chatOnly, leaves, open;
+import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/panes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
@@ -447,6 +448,11 @@ void main() {
     );
     await harness.show(tester, size: const Size(390, 844));
     await pumpFrames(tester);
+    // A touch and hold on the project, in the drawer.
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
+    await pumpFrames(tester);
     await tester.longPress(find.text('Site'));
     await pumpFrames(tester);
     expect(find.text('Project settings'), findsOneWidget);
@@ -482,8 +488,6 @@ void main() {
   ) async {
     final harness = Harness(snapshot(layout: withFilesOf('p1')));
     await harness.show(tester, size: const Size(390, 844));
-    await pumpFrames(tester);
-    await tester.tap(find.text('Builder'));
     await pumpFrames(tester);
     await tester.tap(find.bySemanticsLabel('Extensions'));
     await pumpFrames(tester);

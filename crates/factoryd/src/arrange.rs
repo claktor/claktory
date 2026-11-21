@@ -205,6 +205,7 @@ mod tests {
             folder: String::new(),
             extensions: Default::default(),
             avatar: Default::default(),
+            fallback_model: String::new(),
         }
     }
 

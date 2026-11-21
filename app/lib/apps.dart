@@ -8,6 +8,7 @@ import 'characters/character.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -60,7 +61,8 @@ class AppsSettings extends StatelessWidget {
             if (apps.isEmpty)
               Text(
                 'No apps yet.',
-                style: TextStyles.body.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
               )
             else
               for (final app in apps) AppRow(key: ValueKey(app.id), app: app),
@@ -77,7 +79,8 @@ class AppsSettings extends StatelessWidget {
               'Each app runs walled off from everything else: it reaches '
               'only the sites you approve and keeps its secrets to itself. '
               'An agent can use an app only once you give it one.',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ],
         );
@@ -165,7 +168,8 @@ class _AppInstallFormState extends State<AppInstallForm> {
           if (_error == null)
             Text(
               'Reading the file…',
-              style: TextStyles.body.copyWith(color: palette.textMuted),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textMuted),
             ),
           const SizedBox(height: Space.l),
         ],
@@ -176,7 +180,8 @@ class _AppInstallFormState extends State<AppInstallForm> {
       );
     }
     final update = permissions.installedVersion.isNotEmpty;
-    final caption = TextStyles.caption.copyWith(color: palette.textFaint);
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint);
     return FormFrame(
       title: update
           ? 'Update ${permissions.name} to ${permissions.version}?'
@@ -189,7 +194,8 @@ class _AppInstallFormState extends State<AppInstallForm> {
             if (permissions.publisher.isNotEmpty) 'By ${permissions.publisher}',
             tierLine(permissions.tier, permissions.publisherKey),
           ].join(' · '),
-          style: TextStyles.caption.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textMuted),
         ),
         if (_unreviewed(permissions.tier)) ...[
           const SizedBox(height: Space.s),
@@ -209,7 +215,8 @@ class _AppInstallFormState extends State<AppInstallForm> {
           child: permissions.hosts.isEmpty
               ? Text(
                   'No sites on the internet.',
-                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
                 )
               : _Lines(permissions.hosts, mono: true),
         ),
@@ -396,20 +403,20 @@ class _AppRowState extends State<AppRow> {
                                 children: [
                                   Text(
                                     app.name,
-                                    style: TextStyles.label.copyWith(
-                                      color: palette.text,
-                                    ),
+                                    style: TypeScale.of(context).label
+                                        .copyWith(color: palette.text),
                                   ),
                                   Text(
                                     [
                                       appStateLine(app.state),
                                       _grantsLine(backend, app),
                                     ].join(' · '),
-                                    style: TextStyles.caption.copyWith(
-                                      color: troubled
-                                          ? palette.danger
-                                          : palette.textFaint,
-                                    ),
+                                    style: TypeScale.of(context).caption
+                                        .copyWith(
+                                          color: troubled
+                                              ? palette.danger
+                                              : palette.textFaint,
+                                        ),
                                   ),
                                 ],
                               ),
@@ -446,7 +453,7 @@ class _AppRowState extends State<AppRow> {
                 if (app.stateDetail.isNotEmpty)
                   Text(
                     app.stateDetail,
-                    style: TextStyles.caption.copyWith(
+                    style: TypeScale.of(context).caption.copyWith(
                       color: troubled ? palette.danger : palette.textMuted,
                     ),
                   ),
@@ -462,7 +469,8 @@ class _AppRowState extends State<AppRow> {
                 if (_error != null)
                   Text(
                     _error!,
-                    style: TextStyles.caption.copyWith(color: palette.danger),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.danger),
                   ),
                 const SizedBox(height: Space.s),
               ],
@@ -475,7 +483,8 @@ class _AppRowState extends State<AppRow> {
 
   Widget _details(BuildContext context, Palette palette, Backend backend) {
     final workspace = backend.workspace.workspace;
-    final caption = TextStyles.caption.copyWith(color: palette.textFaint);
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -485,16 +494,17 @@ class _AppRowState extends State<AppRow> {
         ],
         if (app.setup.isNotEmpty) ...[
           const SizedBox(height: Space.m),
-          Text('Setup', style: _heading(palette)),
+          Text('Setup', style: _heading(context, palette)),
           for (final item in app.setup) _SetupLine(app: app, item: item),
         ],
         const SizedBox(height: Space.m),
-        Text('Agents', style: _heading(palette)),
+        Text('Agents', style: _heading(context, palette)),
         const SizedBox(height: Space.xs),
         if (app.grants.isEmpty)
           Text(
             'No agent can use it yet.',
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
           )
         else
           for (final grant in app.grants)
@@ -514,7 +524,7 @@ class _AppRowState extends State<AppRow> {
         ],
         if (app.hosts.isNotEmpty) ...[
           const SizedBox(height: Space.m),
-          Text('It can reach', style: _heading(palette)),
+          Text('It can reach', style: _heading(context, palette)),
           _Lines(app.hosts, mono: true),
         ],
         const SizedBox(height: Space.m),
@@ -544,10 +554,9 @@ class _AppRowState extends State<AppRow> {
   }
 }
 
-TextStyle _heading(Palette palette) => TextStyles.caption.copyWith(
-  color: palette.textFaint,
-  fontWeight: FontWeight.w500,
-);
+TextStyle _heading(BuildContext context, Palette palette) =>
+    TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500);
 
 /// "Given to June and Mike", "Given to no agent".
 String _grantsLine(Backend backend, AppInfo app) {
@@ -599,11 +608,12 @@ class _SetupLine extends StatelessWidget {
               children: [
                 Text(
                   item.label,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
                 Text(
                   item.done ? 'Saved' : 'Not set yet',
-                  style: TextStyles.caption.copyWith(
+                  style: TypeScale.of(context).caption.copyWith(
                     color: item.done ? palette.textFaint : palette.signal,
                   ),
                 ),
@@ -624,7 +634,8 @@ class _SetupLine extends StatelessWidget {
           else
             Text(
               'Needs a newer Claktory',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
         ],
       ),
@@ -676,20 +687,21 @@ class _GrantLine extends StatelessWidget {
               children: [
                 Text(
                   agent?.name ?? grant.agentId,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
                 if (scopes.isNotEmpty)
                   Text(
                     scopes.join(' · '),
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
                   ),
                 Text(
                   events.isEmpty
                       ? 'Hears none of its events'
                       : 'Hears: ${labelInSentence(events.join(' · '))}',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ],
             ),
@@ -822,7 +834,8 @@ class _AppAccessFormState extends State<AppAccessForm> {
             child: choices.isEmpty
                 ? Text(
                     'Every agent has it already.',
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.textMuted),
                   )
                 : Select<String>(
                     value: _agentId ?? '',
@@ -957,14 +970,14 @@ class _SwitchLine extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  style: TextStyles.body.copyWith(
+                  style: TypeScale.of(context).body.copyWith(
                     color: onChanged == null ? palette.textMuted : palette.text,
                   ),
                 ),
                 if (note != null && note.isNotEmpty)
                   Text(
                     note,
-                    style: TextStyles.caption.copyWith(
+                    style: TypeScale.of(context).caption.copyWith(
                       color: palette.textFaint,
                       fontFamily: mono ? TextStyles.mono : null,
                     ),
@@ -1143,12 +1156,12 @@ class _ScopeLine extends StatelessWidget {
         children: [
           Text(
             scope.label,
-            style: TextStyles.body.copyWith(color: palette.text),
+            style: TypeScale.of(context).body.copyWith(color: palette.text),
           ),
           if (scope.tools.isNotEmpty)
             Text(
               scope.tools.join(', '),
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: palette.textFaint,
                 fontFamily: TextStyles.mono,
               ),
@@ -1175,7 +1188,7 @@ class _Lines extends StatelessWidget {
         for (final line in lines)
           Text(
             line,
-            style: TextStyles.body.copyWith(
+            style: TypeScale.of(context).body.copyWith(
               color: palette.text,
               fontFamily: mono ? TextStyles.mono : null,
             ),
@@ -1201,7 +1214,10 @@ class _Warning extends StatelessWidget {
         border: Border.all(color: palette.signal.withValues(alpha: 0.4)),
         borderRadius: BorderRadius.circular(Radii.panel),
       ),
-      child: Text(text, style: TextStyles.body.copyWith(color: palette.text)),
+      child: Text(
+        text,
+        style: TypeScale.of(context).body.copyWith(color: palette.text),
+      ),
     );
   }
 }

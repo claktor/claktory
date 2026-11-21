@@ -97,14 +97,15 @@ PREVIOUS=""
 if [[ -f "$RELEASES/latest" ]]; then
   PREVIOUS="$RELEASES/$(cat "$RELEASES/latest")"
 fi
-# The backend is factoryd and the apps host beside it (claktory-apps, which
-# factoryd runs from its own folder): they're built, reused and shipped together.
-if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]]; then
+# The backend is factoryd and the hosts beside it (claktory-apps and
+# claktory-speech, which factoryd runs from its own folder): they're built,
+# reused and shipped together.
+if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/claktory-speech" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]]; then
   BACKEND="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
 else
-  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p factoryd -p claktory-apps
+  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech
   BACKEND="$ROOT/target/release"
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
@@ -116,7 +117,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-0.0.0}"
 partial="$RELEASES/$FACTORY_VERSION.partial"
 rm -rf "$partial"
 mkdir -p "$partial"
-cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$partial/"
+cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$BACKEND/claktory-speech" "$partial/"
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the

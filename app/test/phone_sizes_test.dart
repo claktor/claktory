@@ -6,6 +6,7 @@ import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/sidebar.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -157,9 +158,21 @@ void main() {
 
       testWidgets('the list, a conversation with the keyboard up, its ⋯ '
           'sheet and a pushed viewer fit', (tester) async {
-        final harness = await show(tester, _workspace());
-        expect(find.text(_long), findsWidgets);
-        await tester.tap(find.text(_long).first);
+        final harness = await show(
+          tester,
+          _workspace()..selectedAgentId = 'rivet',
+        );
+        // The drawer, with the long name and role in it.
+        await tester.tap(find.bySemanticsLabel(RegExp(r'^(Menu|Back)$')));
+        await pumpFrames(tester);
+        final row = find.descendant(
+          of: find.byType(Sidebar),
+          matching: find.text(_long),
+        );
+        expect(row, findsOneWidget);
+        await tester.tap(row);
+        await pumpFrames(tester);
+        await harness.apply(tester, _workspace()..selectedAgentId = 'long');
         await pumpFrames(tester);
         expect(find.byType(AgentView), findsOneWidget);
 
@@ -200,7 +213,10 @@ void main() {
           ),
           findsOneWidget,
         );
-        await tester.tap(find.text('Plain'));
+        // The viewer's own actions are in its More.
+        await tester.tap(find.bySemanticsLabel('More').last);
+        await pumpFrames(tester);
+        await tester.tap(find.text('Plain text'));
         await pumpFrames(tester);
         await tester.tap(find.bySemanticsLabel('Back').last);
         await pumpFrames(tester);

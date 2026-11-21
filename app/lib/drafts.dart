@@ -53,6 +53,19 @@ class Drafts extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Starts a reply to a message in the box keyed [key] (an agent's id, or
+  /// a chat's `chat:<id>`): the message quoted ([replyQuote]) above what the
+  /// draft has, and the box takes the focus with the cursor at the end, to
+  /// write the reply under it.
+  void reply(String key, String message, {String? from}) {
+    final quote = replyQuote(message, from: from);
+    if (quote.isEmpty) return;
+    final draft = of(key).trim();
+    _focusFor = key;
+    set(key, draft.isEmpty ? '$quote\n\n' : '$quote\n\n$draft');
+    notifyListeners();
+  }
+
   /// The agent whose message box should take the focus, once.
   String? _focusFor;
 
@@ -64,14 +77,17 @@ class Drafts extends ChangeNotifier {
     return true;
   }
 
-  /// Drops the drafts of agents that no longer exist, each time the backend
-  /// sends the workspace.
+  /// Drops the drafts of agents and chats that no longer exist, each time
+  /// the backend sends the workspace. A chat's draft is keyed `chat:<id>`.
   void watch(WorkspaceStore workspace) {
     void prune() {
       if (!workspace.received) return;
-      final agents = {for (final agent in workspace.workspace.agents) agent.id};
+      final kept = {
+        for (final agent in workspace.workspace.agents) agent.id,
+        for (final chat in workspace.workspace.chats) 'chat:${chat.id}',
+      };
       final before = _drafts.length;
-      _drafts.removeWhere((agentId, _) => !agents.contains(agentId));
+      _drafts.removeWhere((key, _) => !kept.contains(key));
       if (_drafts.length != before) _save();
     }
 
@@ -87,6 +103,29 @@ class Drafts extends ChangeNotifier {
     );
   }
 }
+
+/// [message] as a reply quotes it: Markdown's quote, `> ` before each
+/// line, after a line naming who wrote it when that's not the agent or the
+/// person whose conversation it is ([from]). A long message is quoted up to
+/// [replyQuoteLength] characters, cut between words, with `…`: enough to
+/// say which one, as the agent has the rest.
+String replyQuote(String message, {String? from}) {
+  var text = message.trim();
+  if (text.isEmpty) return '';
+  if (text.length > replyQuoteLength) {
+    final cut = text.lastIndexOf(RegExp(r'\s'), replyQuoteLength);
+    text =
+        '${text.substring(0, cut > replyQuoteLength ~/ 2 ? cut : replyQuoteLength).trimRight()}…';
+  }
+  return [
+    if (from != null && from.isNotEmpty) '> $from wrote:',
+    for (final line in text.split('\n'))
+      line.trimRight().isEmpty ? '>' : '> ${line.trimRight()}',
+  ].join('\n');
+}
+
+/// How much of a message [replyQuote] quotes.
+const replyQuoteLength = 500;
 
 /// Where [Drafts] are kept.
 abstract interface class DraftStorage {

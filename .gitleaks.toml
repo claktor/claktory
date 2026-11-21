@@ -24,9 +24,9 @@ regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
 keywords = ["/users/", "/home/"]
 
 [[rules.allowlists]]
-description = "Placeholder home folders in tests and docs"
+description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex)"
 regexTarget = "match"
-regexes = ['''^/(?:Users|home)/(?:me|x|you|user|runner|linuxbrew|Shared)$''']
+regexes = ['''^/(?:Users|home)/(?:me|mex|x|you|user|runner|linuxbrew|Shared)$''']
 
 [[rules.allowlists]]
 description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"
@@ -51,11 +51,24 @@ regexTarget = "secret"
 regexes = ['''^eyJhbGciOiJub25lIn0\.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0\.sig$''']
 
 [[allowlists]]
-description = "The secrets tests' made-up values (vault and bash's secrets): a fake Stripe-shaped key, a fake Resend key and AWS's documented sample secret key, cut short; they only check that values are hidden in output and sealed on disk"
+description = "The secrets tests' made-up values (vault, bash's secrets and the pipes test's outbox file): a fake Stripe-shaped key, a fake Resend key and AWS's documented sample secret key, cut short, with a dash variant for a file's content; they only check that values are hidden in output, sealed on disk and refused through a pipe"
 regexTarget = "secret"
-regexes = ['''^(?:sk_live_4f9a8b7c6d5e4f3a2b1c|re_123456789abcdef|wJalrXUtnFEMI/K7MDENG)$''']
+regexes = ['''^(?:sk_live_4f9a8b7c6d5e4f3a2b1c|re_123456789abcdef|wJalrXUtnFEMI[/-]K7MDENG)$''']
 
 [[allowlists]]
 description = "Made-up tokens in tests: the hex digits in order, alone (the pairing tests' example both the backend and the app work the four-digit approval number out from, #132) or after a short prefix (the vault tests' fake keys, asc- and hz-)"
 regexTarget = "secret"
 regexes = ['''^(?:[a-z]{2,3}-)?0123456789abcdef$''']
+
+[[allowlists]]
+description = "Development-history commits (move docs, re-pathing code and app tests, #217 cycle) that carried this machine's user name and home paths before the v0.1.14 cut fixed the files to placeholder homes. The public repository receives one squashed tree per release, never this history; these commits' trees were never published. Exact commits only, nothing after the fix may use this."
+commits = [
+  "2328b697fb0c386b1575dd118f6034df1bb095a8",
+  "0a25d1cbcaac2f2a541e35cb5352948a53f44b8a",
+  "329ff9b097d1982351dcb81ae43f11490931c3ce",
+  "edf589a42a22e181f2891445f3889504b66600c7",
+  "ed65977625b7639ec63805d9f6bc2abc0b2387d2",
+  "b0de673ad11f298bf55cc822dfb2e6fdd1e05555",
+  "94266178fd45504f72941283f6891f43c6f821a8",
+  "6345f3678176965a600332e446880180c2954558",
+]

@@ -85,6 +85,15 @@ Each prints one JSON line with --json; exit 0 done, 2 the next step is the perso
                                            --number: allow it only if it shows these digits
   provider key PROVIDER --stdin [--label LABEL]   an API key, read from stdin
   login [PROVIDER]                         sign in in a browser; with --json, paste the code or address on stdin
+  export [--final] [--out FILE] [--skip FOLDER]   this Claktory in one encrypted file, to move it to another computer;
+                                           --final stops it here for good, keeping everything (see docs/MOVE.md)
+  export --restore | export --delete-moved after --final: brings this copy back, or deletes it once the moved one works
+  move CODE [--skip FOLDER]                 moves this Claktory to the computer that shows CODE (factoryd receive there)
+  import BUNDLE [--map FROM=TO]… [--passphrase-stdin]
+                                           make this Claktory from one moved from another computer; run again
+                                           to finish one that stopped, or import --abandon to undo it
+  receive [--committed]                    show a code to move another computer's Claktory here over the network:
+                                           paste it into Claktory there (Move to another computer…); run again to carry on
   supervise                                runs the backend and keeps it running";
 
 /// How to use `command`, or every command: USAGE's lines for it.
@@ -214,13 +223,19 @@ impl Flags {
                 word => flags.words.push(word.to_owned()),
             }
         }
+        // main's own, with options of its own.
+        if flags.words.first().is_some_and(|word| word == "import" || word == "receive") {
+            return None;
+        }
         if flags.help || flags.bad.is_some() {
             return Some(flags);
         }
         let command = flags.words.first().map(String::as_str)?;
         let ours = match command {
             "status" | "account" | "settings" | "provider" | "help" => true,
-            "pair" | "allow" | "deny" | "unpair" | "devices" => flags.json || flags.no_wait,
+            "pair" | "deny" | "unpair" | "devices" => flags.json || flags.no_wait,
+            // With the number the device shows, only the backend can check it.
+            "allow" => flags.json || flags.no_wait || flags.number.is_some(),
             "login" => flags.json,
             _ => false,
         };
@@ -933,9 +948,23 @@ mod tests {
         let help = Flags::parse(&args("pair --help")).expect("ours");
         assert!(help.help && help.words == ["pair"]);
         assert!(Flags::parse(&args("allow -x")).is_some_and(|flags| flags.bad.is_some()));
+        // --number, after the device or before it, and never in its name (Arjun's finding).
+        for line in ["allow new-device-11 --number 1934", "allow --number 1934 new-device-11", "--dev allow new-device-11 --number 1934"] {
+            let flags = Flags::parse(&args(line)).expect(line);
+            assert_eq!(
+                (flags.words, flags.number.as_deref()),
+                (vec!["allow".to_owned(), "new-device-11".to_owned()], Some("1934")),
+                "{line}"
+            );
+        }
         assert!(Flags::parse(&args("pair Phone --host 10.0.0.2")).is_none(), "as before");
         assert!(Flags::parse(&args("-h")).is_some_and(|flags| flags.help));
         assert!(Flags::parse(&args("--dev")).is_none(), "serves");
+        assert!(
+            Flags::parse(&args("import --abandon")).is_none()
+                && Flags::parse(&args("import b --map /a=/b --passphrase-stdin")).is_none()
+                && Flags::parse(&args("receive --committed")).is_none()
+        );
     }
 
     #[test]

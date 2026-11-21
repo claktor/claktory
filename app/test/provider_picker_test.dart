@@ -45,6 +45,9 @@ Future<Harness> showProviders(
   await harness.show(tester, size: const Size(1200, 1100));
   harness.page.value = AppPage.settings;
   await settle(tester);
+  // Providers is below General, wherever General ends.
+  await tester.ensureVisible(pickerField);
+  await settle(tester);
   return harness;
 }
 

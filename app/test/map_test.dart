@@ -21,7 +21,8 @@ void main() {
     final harness = Harness(workspace ?? claktoryWorkspace());
     await harness.show(tester, size: size);
     harness.page.value = AppPage.map;
-    await settle(tester);
+    // On a phone it's a page pushed over the conversation: let it slide in.
+    await pumpFrames(tester);
     return harness;
   }
 
@@ -383,14 +384,15 @@ void main() {
     expect(find.text('Update Claktory to see its map.'), findsOneWidget);
   });
 
-  testWidgets('on a phone it fills the screen, and Done goes back', (
+  testWidgets('on a phone it fills the screen, and Back goes back', (
     tester,
   ) async {
     final harness = await showMap(tester, size: const Size(393, 852));
     expect(find.byType(MapView), findsOneWidget);
     expect(chip('Mike'), findsOneWidget);
-    await tester.tap(find.text('Done'));
-    await settle(tester);
+    await tester.tap(find.bySemanticsLabel('Back'));
+    await pumpFrames(tester);
     expect(harness.page.value, AppPage.agent);
+    expect(find.byType(MapView), findsNothing);
   });
 }

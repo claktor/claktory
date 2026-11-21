@@ -7,9 +7,16 @@ import 'backend.dart';
 import 'controls.dart';
 import 'folder_browser.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart';
+import 'mobile/presentation.dart' show confirmDiscard, guardSheet;
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/platform_policy.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
+import 'pipes.dart'
+    show ConnectPipeForm, PortalGlyph, openPipe, pipeStatus, pipesIn;
 import 'settings_view.dart';
 import 'state.dart';
 
@@ -27,7 +34,12 @@ class FormFrame extends StatelessWidget {
     this.body,
     this.secondary,
     this.cancelLabel = 'Cancel',
+    this.dirty = false,
   });
+
+  /// It has changes that closing it would drop: on a phone, Cancel or
+  /// dragging the sheet away asks first ([confirmDiscard]).
+  final bool dirty;
 
   final String title;
 
@@ -58,55 +70,290 @@ class FormFrame extends StatelessWidget {
         const SingleActivator(LogicalKeyboardKey.enter, control: true): submit,
       },
       child: FocusTraversalGroup(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: phone && fields.isNotEmpty
+            ? Builder(
+                builder: (context) {
+                  guardSheet(
+                    context,
+                    dirty ? () => confirmDiscard(context) : null,
+                  );
+                  return _phoneForm(context, palette);
+                },
+              )
+            : phone
+            ? _phoneDialog(context, palette)
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    title,
+                    style: TypeScale.of(context).emphasis
+                        .copyWith(color: palette.text),
+                  ),
+                  if (body != null) ...[
+                    const SizedBox(height: Space.s),
+                    Text(
+                      body!,
+                      style: TypeScale.of(context).body
+                          .copyWith(color: palette.textMuted),
+                    ),
+                  ],
+                  const SizedBox(height: Space.xl),
+                  // A long form scrolls between its title and its buttons.
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: fields,
+                      ),
+                    ),
+                  ),
+                  if (error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: Space.m),
+                      child: Text(
+                        error!,
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.danger),
+                      ),
+                    ),
+                  Row(
+                    children: [
+                      if (!phone) ?secondary,
+                      const Spacer(),
+                      Button(label: cancelLabel, onPressed: onCancel),
+                      const SizedBox(width: Space.s),
+                      Button(
+                        label: submitLabel,
+                        onPressed: onSubmit,
+                        primary: true,
+                      ),
+                    ],
+                  ),
+                  // A phone is too narrow for three buttons in a row: the less
+                  // common action goes on a line of its own, under them.
+                  if (phone && secondary != null) ...[
+                    const SizedBox(height: Space.m),
+                    Align(alignment: Alignment.centerLeft, child: secondary),
+                  ],
+                ],
+              ),
+      ),
+    );
+  }
+
+  /// A dialog with nothing to fill in, on a phone (Reconnect, Remove this
+  /// device?): its words scroll over its buttons at the foot; at the
+  /// largest text sizes the buttons are one over the other, the action
+  /// first, each the sheet's width, and scroll with the words.
+  Widget _phoneDialog(BuildContext context, Palette palette) {
+    final type = TypeScale.of(context);
+    final body = this.body;
+    final error = this.error;
+    final secondary = this.secondary;
+    final large = largeText(context);
+    final submit = Button(
+      label: submitLabel,
+      onPressed: onSubmit,
+      primary: true,
+    );
+    final cancel = Button(label: cancelLabel, onPressed: onCancel);
+    final words = [
+      Text(title, style: type.emphasis.copyWith(color: palette.text)),
+      if (body != null) ...[
+        const SizedBox(height: Space.s),
+        Text(body, style: type.body.copyWith(color: palette.textMuted)),
+      ],
+      if (error != null) ...[
+        const SizedBox(height: Space.m),
+        Text(error, style: type.secondary.copyWith(color: palette.danger)),
+      ],
+    ];
+    final buttons = [
+      const SizedBox(height: Space.xl),
+      if (large) ...[
+        submit,
+        const SizedBox(height: Space.s),
+        cancel,
+      ] else
+        Row(
           children: [
-            Text(
-              title,
-              style: TextStyles.emphasis.copyWith(color: palette.text),
+            const Spacer(),
+            cancel,
+            const SizedBox(width: Space.s),
+            submit,
+          ],
+        ),
+      // A phone is too narrow for three buttons in a row: the less
+      // common action goes on a line of its own, under them.
+      if (secondary != null) ...[
+        const SizedBox(height: Space.m),
+        Align(alignment: AlignmentDirectional.centerStart, child: secondary),
+      ],
+    ];
+    // At the largest text sizes even the buttons may not fit: all of it
+    // scrolls together then.
+    if (large) {
+      return SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [...words, ...buttons],
+        ),
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: words,
             ),
-            if (body != null) ...[
-              const SizedBox(height: Space.s),
-              Text(
-                body!,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
-              ),
+          ),
+        ),
+        ...buttons,
+      ],
+    );
+  }
+
+  /// A form on a phone, as iOS lays one out in a sheet: Cancel at the
+  /// start of its top row, the title in the middle and the action at the
+  /// end, then the fields, scrolling under them. Why it was refused shows
+  /// under the title, where the eye is after tapping the action.
+  Widget _phoneForm(BuildContext context, Palette palette) {
+    final type = TypeScale.of(context);
+    final body = this.body;
+    final error = this.error;
+    final secondary = this.secondary;
+    final heading = Semantics(
+      header: true,
+      child: Text(
+        title,
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: type.emphasis.copyWith(color: palette.text),
+      ),
+    );
+    final cancel = _BarButton(
+      label: cancelLabel,
+      onTap: !dirty
+          ? onCancel
+          : () async {
+              if (await confirmDiscard(context)) onCancel();
+            },
+    );
+    final action = _BarButton(
+      label: submitLabel,
+      onTap: onSubmit,
+      primary: true,
+    );
+    // At the largest text sizes the title goes under Cancel and the action.
+    final stacked = largeText(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Like iOS's bar, its buttons grow with the text only so far.
+        MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 1.5,
+          child: Row(
+            children: [
+              Flexible(child: cancel),
+              stacked ? const Spacer() : Expanded(flex: 2, child: heading),
+              Flexible(child: action),
             ],
-            const SizedBox(height: Space.xl),
-            // A long form scrolls between its title and its buttons.
-            Flexible(
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: fields,
-                ),
-              ),
-            ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: Space.m),
-                child: Text(
-                  error!,
-                  style: TextStyles.caption.copyWith(color: palette.danger),
-                ),
-              ),
-            Row(
+          ),
+        ),
+        if (stacked) heading,
+        const SizedBox(height: Space.s),
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (!phone) ?secondary,
-                const Spacer(),
-                Button(label: cancelLabel, onPressed: onCancel),
-                const SizedBox(width: Space.s),
-                Button(label: submitLabel, onPressed: onSubmit, primary: true),
+                if (body != null) ...[
+                  Text(
+                    body,
+                    style: type.body.copyWith(color: palette.textMuted),
+                  ),
+                  const SizedBox(height: Space.s),
+                ],
+                if (error != null) ...[
+                  Text(
+                    error,
+                    style: type.secondary.copyWith(color: palette.danger),
+                  ),
+                  const SizedBox(height: Space.s),
+                ],
+                const SizedBox(height: Space.s),
+                ...fields,
+                if (secondary != null)
+                  Align(alignment: Alignment.centerLeft, child: secondary),
               ],
             ),
-            // A phone is too narrow for three buttons in a row: the less
-            // common action goes on a line of its own, under them.
-            if (phone && secondary != null) ...[
-              const SizedBox(height: Space.m),
-              Align(alignment: Alignment.centerLeft, child: secondary),
-            ],
-          ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A form's Cancel or its action in a phone's form sheet: words in
+/// `signal`, the action's in weight 600, in a 44pt target; faint while it
+/// can't be done.
+class _BarButton extends StatelessWidget {
+  const _BarButton({
+    required this.label,
+    required this.onTap,
+    this.primary = false,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final enabled = onTap != null;
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: enabled,
+      label: label,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, pressed) => ConstrainedBox(
+          // A finger's size: iOS's 44pt, Android's 48dp.
+          constraints: BoxConstraints(
+            minHeight: PhonePlatformPolicy.least(context, Touch.target),
+            minWidth: PhonePlatformPolicy.least(context, Touch.target),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Space.s),
+            child: Center(
+              widthFactor: 1,
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: PhoneType.label.copyWith(
+                  color: !enabled
+                      ? palette.textFaint
+                      : pressed
+                      ? palette.signal.withValues(alpha: 0.6)
+                      : palette.signal,
+                  fontWeight: primary ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -194,6 +441,7 @@ class _CreateProjectFormState extends State<CreateProjectForm>
             child: TextField(
               controller: _name,
               autofocus: true,
+              kind: InputKind.text,
               onSubmitted: (_) => _submit(),
             ),
           ),
@@ -255,6 +503,9 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
 
   /// Adding a folder with the form, as Rivet can't run.
   var _addingFolder = false;
+
+  /// Connecting a pipe to another Claktory, in this modal's place.
+  var _connectingPipe = false;
   final _newName = TextEditingController();
   final _newPath = TextEditingController();
 
@@ -362,6 +613,9 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
         fields: const [],
       );
     }
+    if (_connectingPipe) {
+      return ConnectPipeForm(project: project, close: widget.close);
+    }
     if (_addingFolder) {
       return ListenableBuilder(
         listenable: Listenable.merge([_newName, _newPath]),
@@ -379,6 +633,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
               child: TextField(
                 controller: _newName,
                 autofocus: true,
+                kind: InputKind.text,
                 placeholder: 'Research',
                 onSubmitted: (_) => _createFolder(),
               ),
@@ -408,6 +663,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
         return FormFrame(
           title: 'Project settings',
           error: error,
+          dirty: _changed,
           submitLabel: 'Save',
           onSubmit: !_changed || !_valid || submitting ? null : _submit,
           onCancel: widget.close,
@@ -423,7 +679,9 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
               label: 'Name',
               child: TextField(
                 controller: _name,
-                autofocus: true,
+                // Not over a phone's settings: the keyboard would hide them.
+                autofocus: !isPhoneLayout(context),
+                kind: InputKind.text,
                 onSubmitted: (_) => _submit(),
               ),
             ),
@@ -456,10 +714,75 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
                 ],
               ),
             ),
+            _pipesField(backend),
             _archiveField(backend),
           ],
         );
       },
+    );
+  }
+
+  /// The project's pipes to other Claktories, each opening at a click, and
+  /// Connect a pipe… to make a new one or use another's invite.
+  Widget _pipesField(Backend backend) {
+    final palette = Palette.of(context);
+    final pipes = pipesIn(backend.workspace.workspace, widget.project.id);
+    return Field(
+      label: 'Pipes',
+      note:
+          "A pipe connects this project to someone else's Claktory, so your "
+          "agents and theirs can talk. They see only the pipe.",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final pipe in pipes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: Pressable(
+                onTap: () {
+                  openPipe(context, pipe);
+                  widget.close();
+                },
+                builder: (context, hovered) => Row(
+                  children: [
+                    const PortalGlyph(),
+                    const SizedBox(width: Space.s),
+                    Flexible(
+                      child: Text(
+                        pipe.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TypeScale.of(context).body.copyWith(
+                          color: hovered ? palette.link : palette.text,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: Space.s),
+                    Expanded(
+                      child: Text(
+                        pipeStatus(pipe),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.textFaint),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Button(
+              label: 'Connect a pipe…',
+              onPressed: () => setState(() {
+                _connectingPipe = true;
+                error = null;
+              }),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -527,6 +850,7 @@ class _FolderRow extends StatelessWidget {
               child: TextField(
                 controller: edit.name,
                 placeholder: 'Name',
+                kind: InputKind.text,
                 onSubmitted: (_) => onSubmit(),
               ),
             ),
@@ -587,6 +911,10 @@ class _PathField extends StatelessWidget {
           child: TextField(
             controller: controller,
             placeholder: placeholder,
+            // A path: as typed, no capitals or corrections.
+            kind: InputKind.text,
+            textCapitalization: TextCapitalization.none,
+            autocorrect: false,
             onSubmitted: (_) => onSubmit(),
           ),
         ),
@@ -617,7 +945,8 @@ class _PathField extends StatelessWidget {
         const SizedBox(height: Space.xs),
         Text(
           'A path on $machine, where this Claktory runs.',
-          style: TextStyles.caption.copyWith(color: palette.textFaint),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textFaint),
         ),
       ],
     );
@@ -696,6 +1025,17 @@ String _defaultModelLabel(Workspace workspace) {
   return 'Default (no model available)';
 }
 
+/// "Default (GPT-5.5)": what an agent with no fallback model
+/// of its own uses, or "(none)" when Settings → Defaults has none.
+String _followDefaultLabel(Workspace workspace) {
+  final id = workspace.settings.defaultFallbackModel;
+  if (id.isEmpty) return 'Default (none)';
+  for (final model in workspace.models) {
+    if (model.id == id) return 'Default (${modelLabel(model)})';
+  }
+  return 'Default (no model available)';
+}
+
 String _defaultEffortLabel(Workspace workspace) {
   final effort = workspace.settings.defaultEffort;
   return effort.isEmpty ? 'Default' : 'Default (${effortLabel(effort)})';
@@ -731,6 +1071,7 @@ class _AgentFields extends StatelessWidget {
     this.outsideLabel = 'Workspace',
     this.defaultPrompt = '',
     this.lead,
+    this.fallback,
     required this.close,
   });
 
@@ -773,6 +1114,10 @@ class _AgentFields extends StatelessWidget {
   /// The Lead field, under where it works; only an existing agent has it.
   final Widget? lead;
 
+  /// The Fallback model field, under the model; only an existing agent
+  /// has it.
+  final Widget? fallback;
+
   /// Closes the form, for leaving it to sign in.
   final VoidCallback close;
 
@@ -794,7 +1139,10 @@ class _AgentFields extends StatelessWidget {
           label: 'Name',
           child: TextField(
             controller: name,
-            autofocus: true,
+            // A phone brings the keyboard up only for a new agent's name,
+            // not over its settings.
+            autofocus: !isPhoneLayout(context) || name.text.isEmpty,
+            kind: InputKind.text,
             onSubmitted: (_) => onSubmit(),
           ),
         ),
@@ -804,6 +1152,7 @@ class _AgentFields extends StatelessWidget {
           child: TextField(
             controller: role,
             placeholder: 'Such as Coordinator or Writer',
+            kind: InputKind.text,
             onSubmitted: (_) => onSubmit(),
           ),
         ),
@@ -819,6 +1168,7 @@ class _AgentFields extends StatelessWidget {
               TextField(
                 controller: prompt,
                 placeholder: 'What this agent does and how',
+                kind: InputKind.multiline,
                 minLines: 4,
                 maxLines: 10,
               ),
@@ -861,29 +1211,49 @@ class _AgentFields extends StatelessWidget {
         if (workspace.models.isEmpty)
           Field(
             label: 'Model',
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'No model available',
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
-                  ),
-                ),
-                Button(
+            child: Builder(
+              builder: (context) {
+                final words = Text(
+                  'No model available',
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
+                );
+                final signIn = Button(
                   label: 'Sign in…',
                   onPressed: () {
                     close();
                     AppScope.openProviders(context);
                   },
-                ),
-              ],
+                );
+                // On a phone, Sign in goes under the words.
+                if (isPhoneLayout(context)) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      words,
+                      const SizedBox(height: Space.s),
+                      signIn,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: words),
+                    signIn,
+                  ],
+                );
+              },
             ),
           )
         else
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          Flex(
+            // On a phone, the effort goes under the model.
+            direction: isPhoneLayout(context) ? Axis.vertical : Axis.horizontal,
+            crossAxisAlignment: isPhoneLayout(context)
+                ? CrossAxisAlignment.stretch
+                : CrossAxisAlignment.start,
             children: [
-              Expanded(
+              _Share(
                 flex: 3,
                 child: Field(
                   label: 'Model',
@@ -900,8 +1270,8 @@ class _AgentFields extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: Space.m),
-              Expanded(
+              if (!isPhoneLayout(context)) const SizedBox(width: Space.m),
+              _Share(
                 flex: 2,
                 child: Field(
                   label: 'Reasoning effort',
@@ -921,9 +1291,23 @@ class _AgentFields extends StatelessWidget {
               ),
             ],
           ),
+        if (workspace.models.isNotEmpty) ?fallback,
       ],
     );
   }
+}
+
+/// Its [flex] share of a Mac's row; on a phone, where the row is a column,
+/// its own height.
+class _Share extends StatelessWidget {
+  const _Share({required this.flex, required this.child});
+
+  final int flex;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      isPhoneLayout(context) ? child : Expanded(flex: flex, child: child);
 }
 
 /// The agent colors as swatches; the chosen one is ringed.
@@ -936,9 +1320,17 @@ class ColorPicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // A finger's target on a phone.
+    final phone = isPhoneLayout(context);
+    // At least the platform's floor where it's used with a finger
+    // (Android's 48); a Mac's and an iPad's stay as they were.
+    final size = PhonePlatformPolicy.least(
+      context,
+      phone ? Touch.target : 26.0,
+    );
     return Wrap(
-      spacing: Space.s,
-      runSpacing: Space.s,
+      spacing: phone ? Space.xs : Space.s,
+      runSpacing: phone ? Space.xs : Space.s,
       children: [
         for (final MapEntry(key: name, value: color) in agentColors.entries)
           Semantics(
@@ -950,9 +1342,9 @@ class ColorPicker extends StatelessWidget {
               onTap: () => onChanged(name),
               builder: (context, hovered) => AnimatedContainer(
                 duration: Motion.fast,
-                width: 26,
-                height: 26,
-                padding: const EdgeInsets.all(3),
+                width: size,
+                height: size,
+                padding: EdgeInsets.all(phone ? 5 : 3),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
@@ -1118,7 +1510,8 @@ class _DefaultPrompt extends StatelessWidget {
                       ? "Claktory's default. Each update brings the newest "
                             'version until you change it.'
                       : 'Changed from the default.',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ),
               if (!isDefault) ...[
@@ -1171,6 +1564,10 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   late var _effort = widget.agent.effort;
   late var _color = widget.agent.color;
 
+  /// The model a step its model declines is tried again on; empty to
+  /// follow the default.
+  late var _fallback = widget.agent.fallbackModel;
+
   /// The agent it reports to, as chosen here; empty for none.
   late var _lead = widget.agent.leadId;
 
@@ -1210,6 +1607,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     }
     if (_model != agent.model) update.model = _model;
     if (_effort != agent.effort) update.effort = _effort;
+    if (_fallback != agent.fallbackModel) update.fallbackModel = _fallback;
     if (_color != agent.color) update.color = _color;
     final lead = _leadIn(AppScope.of(context).workspace.workspace);
     if (lead != agent.leadId) update.leadId = lead;
@@ -1224,6 +1622,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
         update.hasProjectId() ||
         update.hasModel() ||
         update.hasEffort() ||
+        update.hasFallbackModel() ||
         update.hasColor() ||
         update.hasAvatarShape() ||
         update.hasPlaceholder() ||
@@ -1351,6 +1750,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
         return FormFrame(
           title: 'Agent settings',
           error: error,
+          dirty: _changed,
           submitLabel: 'Save',
           onSubmit: canSave ? _submit : null,
           onCancel: widget.close,
@@ -1453,6 +1853,21 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                   onChanged: (id) => setState(() => _lead = id),
                 ),
               ),
+              fallback: Field(
+                label: 'Fallback model',
+                note:
+                    'If its model declines a step for safety reasons, '
+                    'Claktory tries it again on this one.',
+                child: Select(
+                  value: _fallback,
+                  options: fallbackModelOptions(
+                    workspace,
+                    _fallback,
+                    emptyLabel: _followDefaultLabel(workspace),
+                  ),
+                  onChanged: (id) => setState(() => _fallback = id),
+                ),
+              ),
               close: widget.close,
             ),
             Field(
@@ -1462,6 +1877,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                   'lines to rotate them.',
               child: TextField(
                 controller: _placeholder,
+                kind: InputKind.multiline,
                 minLines: 1,
                 maxLines: 8,
                 // The default, shown while it's left empty.
@@ -1637,9 +2053,8 @@ class _ExtensionSettings extends StatelessWidget {
                   // A kind from a newer backend: say so rather than guess.
                   _ => Text(
                     '${option.label}: needs a newer Claktory',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
                   ),
                 },
               ),
@@ -1685,14 +2100,17 @@ class _SwitchRow extends StatelessWidget {
             children: [
               Text(
                 label,
-                style: (strong ? TextStyles.label : TextStyles.body).copyWith(
-                  color: palette.text,
-                ),
+                style:
+                    (strong
+                            ? TypeScale.of(context).label
+                            : TypeScale.of(context).body)
+                        .copyWith(color: palette.text),
               ),
               if (description.isNotEmpty)
                 Text(
                   description,
-                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textMuted),
                 ),
             ],
           ),
@@ -1765,12 +2183,13 @@ class _AgentListOptionState extends State<_AgentListOption> {
       children: [
         Text(
           widget.option.label,
-          style: TextStyles.body.copyWith(color: palette.text),
+          style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
         if (widget.option.description.isNotEmpty)
           Text(
             widget.option.description,
-            style: TextStyles.caption.copyWith(color: palette.textMuted),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
           ),
         const SizedBox(height: Space.xs + 2),
         TapRegion(
@@ -1814,9 +2233,8 @@ class _AgentListOptionState extends State<_AgentListOption> {
                                     widget.option.includesProject
                                         ? 'No one outside its project'
                                         : 'No one',
-                                    style: TextStyles.body.copyWith(
-                                      color: palette.textFaint,
-                                    ),
+                                    style: TypeScale.of(context).body
+                                        .copyWith(color: palette.textFaint),
                                   )
                                 : Wrap(
                                     spacing: Space.xs,
@@ -1874,7 +2292,7 @@ class _AgentListOptionState extends State<_AgentListOption> {
           ),
           child: Text(
             own ? '$name · in its project' : name,
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: palette.textFaint,
               fontWeight: FontWeight.w500,
             ),
@@ -1910,7 +2328,7 @@ class _AgentListOptionState extends State<_AgentListOption> {
                     child: NameThenRole(
                       name: agent.name,
                       role: agent.role,
-                      style: TextStyles.body.copyWith(
+                      style: TypeScale.of(context).body.copyWith(
                         color: fixed ? palette.textMuted : palette.text,
                       ),
                       roleColor: palette.textFaint,
@@ -1946,7 +2364,8 @@ class _AgentListOptionState extends State<_AgentListOption> {
                     padding: const EdgeInsets.all(Space.s),
                     child: Text(
                       'No other agents.',
-                      style: TextStyles.body.copyWith(color: palette.textFaint),
+                      style: TypeScale.of(context).body
+                          .copyWith(color: palette.textFaint),
                     ),
                   )
                 : ListView(shrinkWrap: true, children: rows),
@@ -1980,7 +2399,7 @@ class _AgentChip extends StatelessWidget {
           const SizedBox(width: Space.xs + 2),
           Text(
             agent.name,
-            style: TextStyles.caption.copyWith(color: palette.text),
+            style: TypeScale.of(context).caption.copyWith(color: palette.text),
           ),
         ],
       ),
@@ -2093,7 +2512,7 @@ class _AvatarPicker extends StatelessWidget {
               ),
               child: Text(
                 'Automatic',
-                style: TextStyles.caption.copyWith(
+                style: TypeScale.of(context).caption.copyWith(
                   color: value.isEmpty || hovered
                       ? palette.text
                       : palette.textMuted,
@@ -2169,7 +2588,7 @@ class _CharacterPreviewState extends State<CharacterPreview> {
           ),
           child: Text(
             label,
-            style: TextStyles.caption.copyWith(
+            style: TypeScale.of(context).caption.copyWith(
               color: selected || hovered ? palette.text : palette.textMuted,
             ),
           ),

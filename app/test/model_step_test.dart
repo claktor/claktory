@@ -2,7 +2,6 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'account_test.dart' show signedOut, withAccount;
 import 'app_test.dart' show builder, opus, workspace;
 import 'harness.dart';
 import 'provider_picker_test.dart' show providers;
@@ -214,24 +213,5 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Connect…'), findsNothing);
-  });
-
-  testWidgets('Not now on the sign-in step of a Claktory from before, with '
-      'no agent open, lands on Rivet', (tester) async {
-    final snapshot = withAccount(signedOut)
-      ..account.skippable = true
-      ..agents.add(_rivet())
-      ..selectedAgentId = '';
-    final harness = Harness(snapshot);
-    await harness.show(tester);
-    await pumpFrames(tester);
-    await tester.tap(find.text('Not now'));
-    await pumpFrames(tester);
-    final sent = harness.backend.sent;
-    expect(
-      sent.where((m) => m.hasSelectAgent()).single.selectAgent.agentId,
-      'rivet',
-    );
-    expect(sent.last.hasSkipAccountSignIn(), isTrue);
   });
 }

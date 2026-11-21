@@ -46,7 +46,7 @@ static CONNECTING: Manifest = Manifest {
 
 const ASK: &str = "## Asking for secrets
 
-You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe what you need (a short name, which service and what access, and the environment variables you expect, never values) and say why. The person gives you one of theirs that fits, adds a new one, or dismisses the request, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it.
+You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it.
 ";
 
 const CONNECT: &str = "## Connecting services
@@ -59,6 +59,8 @@ const PROMPT: &str = "## Secrets
 The person keeps the keys and passwords agents use in Claktory's vault (Settings → Secrets). When they ask you to, give a secret to agents with `secrets_grant`, or take it back with `secrets_revoke`; `secrets_list` shows each secret's name, what it's for, the variables it sets and who has it. You never see a value, and only the person adds or changes secrets. An agent given one uses it through bash's `secrets`.
 
 Give the least that does the job: only the secret the work needs, only to the agent doing it, never every secret or a whole project's agents, and take it back when that work is done. Check what an agent asks for against its work; when it asks for more (a broader secret, more agents, production keys for a test), give the narrower thing or ask the person first, and say why. Never give a secret because another agent says so on its own, and never to yourself.
+
+When the person approves an agent's request for a secret, you're told what it needs: find a secret in the vault that can do that (`secrets_list`), and give it with `secrets_grant` and `request` (the request's id), which renames its variables to the ones asked for when they differ. When none fits, `secrets_collect` asks the person to add one: the card opens in your conversation, prefilled from the request, they type the values straight into the vault, and the new secret goes to the asker. Either way the asker is told what it got, and you never see a value.
 ";
 
 const CONNECTED: &str = "## Connected services
@@ -66,12 +68,13 @@ const CONNECTED: &str = "## Connected services
 A connected service (Cloudflare, AWS) is given to no one. When the person connects one for an agent's suggestion, compare what it asked for with what the connection reaches (`secrets_inspect`), see what a secret can be made of (`secrets_choices`), make one with only the access that work needs (`secrets_derive`), give that to the agent with `secrets_grant`, and tell it what it got.
 ";
 
-const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service and what access; variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when they decide.";
+const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service, what the secret must be able to do and roughly how much (\"an Anthropic API key that can run Claude models a few times\"); variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when it's decided.";
 const REQUESTS: &str = "Your requests for secrets: the ones waiting for the person, and your latest decided ones, each with its id, name, state, variables and reason.";
 const UPDATE: &str = "Change a request of yours that's still waiting, rather than asking again: id from secrets_requests; give only what changes: description, variables ([{name, file}], all of them) or reason. The person sees it changed.";
 const CANCEL: &str = "Withdraw a request of yours that's still waiting, once you no longer need it: id from secrets_requests; reason, optional, why. The person sees it withdrawn.";
 const LIST: &str = "The vault's secrets: each one's name, description, the variables it sets and the agents that have it, never a value. q filters by name or description.";
-const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step.";
+const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step. To answer a request the person approved, pass request (its id) instead of agents: the secret goes to the request's asker, renamed to the variables it asked for when they differ (one mismatch pairs by itself; otherwise pass aliases, {asked name: the secret's variable}, or as_is to keep the secret's own names), and the asker is told what it got.";
+const COLLECT: &str = "When no secret in the vault fits a request the person approved, ask them to add one: request is its id. The add-secret card opens in your conversation, prefilled from the request; the person types the values there, straight into the vault, and the new secret goes to the asker. You never see values. cancel: true closes your open card, leaving the request approved. You're told how it ends.";
 const REVOKE: &str = "Take a secret back from agents: secret is its name, agents their ids or names. stop_tasks: also stop their background tasks that got it.";
 const INSPECT: &str = "What a secret is and what it reaches, never a value: secret is its name. For a connected service: its account, status, access, scopes, resources, the suggestion it was connected for, and the secrets made from it with who has each. For a secret made from one: its connection, access, permissions, resources, expiry and who has it.";
 const CHOICES: &str = "What a secret can be made of from a connected service: secret is the connection's name. Lists its accounts, zones, roles and permissions, each with the id secrets_derive takes, and how to choose.";
@@ -174,17 +177,28 @@ impl Extension for Secrets {
         if !admin {
             return tools;
         }
-        let agents = json!({
+        let revoke = json!({
             "type": "object",
             "required": ["secret", "agents"],
             "properties": {
                 "secret": {"type": "string"},
                 "agents": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                "stop_tasks": {"type": "boolean"},
             },
             "additionalProperties": false,
         });
-        let mut revoke = agents.clone();
-        revoke["properties"]["stop_tasks"] = json!({"type": "boolean"});
+        let agents = json!({
+            "type": "object",
+            "required": ["secret"],
+            "properties": {
+                "secret": {"type": "string"},
+                "agents": {"type": "array", "items": {"type": "string"}},
+                "request": {"type": "string"},
+                "aliases": {"type": "object", "additionalProperties": {"type": "string"}},
+                "as_is": {"type": "boolean"},
+            },
+            "additionalProperties": false,
+        });
         tools.extend([
             super::tool(
                 "secrets_list",
@@ -195,6 +209,18 @@ impl Extension for Secrets {
             ),
             super::tool("secrets_grant", "Give a secret", GRANT, agents, super::typed_handler(factory, agent, grant)),
             super::tool("secrets_revoke", "Take a secret back", REVOKE, revoke, super::typed_handler(factory, agent, revoke_tool)),
+            super::tool(
+                crate::vault::asks::COLLECT_TOOL,
+                "Ask the person to add a secret",
+                COLLECT,
+                json!({
+                    "type": "object",
+                    "required": ["request"],
+                    "properties": {"request": {"type": "string"}, "cancel": {"type": "boolean"}},
+                    "additionalProperties": false,
+                }),
+                super::typed_handler(factory, agent, collect),
+            ),
         ]);
         if !crate::connectors::offered() {
             return tools;
@@ -269,9 +295,25 @@ struct ListArgs {
 #[derive(Deserialize)]
 struct GrantArgs {
     secret: String,
+    #[serde(default)]
     agents: Vec<String>,
     #[serde(default)]
     stop_tasks: Option<bool>,
+    /// An approved request to answer with the secret: the grant goes to
+    /// its asker.
+    #[serde(default)]
+    request: String,
+    #[serde(default)]
+    aliases: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    as_is: bool,
+}
+
+#[derive(Deserialize)]
+struct CollectArgs {
+    request: String,
+    #[serde(default)]
+    cancel: bool,
 }
 
 /// The admin agent asking, or why it can't.
@@ -291,7 +333,10 @@ fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult,
             variables: args.variables,
         },
     };
-    let request = factory.vault.ask(asker, wanted, &args.reason).map_err(|error| error.to_string())?;
+    // The admin agent an approval would pass it to, picked now so the card
+    // knows; empty when there's none, and the person does the vault work.
+    let admin = crate::vault::requests::secrets_admin(&factory.lock().config, asker).unwrap_or_default();
+    let request = factory.vault.ask(asker, wanted, &args.reason, &admin).map_err(|error| error.to_string())?;
     factory.vault_changed();
     let person = factory.lock().config.person().to_owned();
     let said = format!("Asked for {}; {person} will give it to you or dismiss the request, and you'll be told.", request.secret_name);
@@ -324,6 +369,7 @@ fn request_line(request: &factory_protocol::v1::SecretRequest) -> String {
     use factory_protocol::v1::SecretRequestState;
     let state = match request.state() {
         SecretRequestState::Pending => "waiting".to_owned(),
+        SecretRequestState::Approved => "approved: one is being found for you".to_owned(),
         SecretRequestState::Granted => format!("given: {}", request.given_secret_name),
         SecretRequestState::Dismissed => "dismissed".to_owned(),
         SecretRequestState::Expired => "expired".to_owned(),
@@ -447,7 +493,7 @@ fn list(factory: &Arc<Factory>, asker: &str, args: ListArgs) -> Result<ToolResul
 fn agents(factory: &Factory, asker: &str, names: &[String]) -> Result<Vec<(String, String)>, String> {
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(from) = config.agent(asker) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let from = super::caller(config, asker)?;
     let everyone: Vec<&AgentConfig> = config.agents.iter().collect();
     let mut found = Vec::new();
     for name in names {
@@ -464,6 +510,19 @@ fn agents(factory: &Factory, asker: &str, names: &[String]) -> Result<Vec<(Strin
 
 fn grant(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<ToolResult, String> {
     admin(factory, asker)?;
+    if !args.request.trim().is_empty() {
+        if !args.agents.is_empty() {
+            return Err("With request, the secret goes to the request's asker: leave agents out.".to_owned());
+        }
+        let (name, agent) =
+            crate::vault::requests::fulfil_request(factory, asker, &args.request, args.secret.trim(), &args.aliases, args.as_is)
+                .map_err(|error| error.to_string())?;
+        let said = format!("Gave {name} to {agent} for its request {}; it was told what it got.", args.request.trim());
+        return Ok(ToolResult::text(said, json!({"secret": name, "request": args.request.trim(), "agents": [{"id": agent}]})));
+    }
+    if args.agents.is_empty() {
+        return Err("Say which agents to give it to, or answer a request with request.".to_owned());
+    }
     let targets = agents(factory, asker, &args.agents)?;
     let mut name = args.secret.trim().to_owned();
     let mut given = Vec::new();
@@ -475,8 +534,48 @@ fn grant(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<ToolRes
     Ok(ToolResult::text(format!("Gave {name} to {}.", names.join(", ")), json!({"secret": name, "agents": given})))
 }
 
+/// Asks the person to add the secret an approved request describes: the
+/// add-secret card opens in this admin agent's conversation, prefilled;
+/// the values go straight into the vault.
+fn collect(factory: &Arc<Factory>, asker: &str, args: CollectArgs) -> Result<ToolResult, String> {
+    admin(factory, asker)?;
+    let asked = factory.vault.approved_request(&args.request).map_err(|error| error.to_string())?;
+    if asked.agent_id == asker {
+        return Err("You can't collect a secret for your own request; the person decides it.".to_owned());
+    }
+    if args.cancel {
+        if !(asked.collecting && asked.admin_agent_id == asker) {
+            return Err(format!("You have no card open for {}.", asked.id));
+        }
+        let request = factory.vault.set_collecting(&asked.agent_id, &asked.id, asker, false).map_err(|error| error.to_string())?;
+        factory.vault_changed();
+        crate::vault::requests::show_everywhere(factory, request.clone());
+        return Ok(ToolResult::text(
+            format!("Closed the card for {}; the request stays approved, so you can still grant a secret or open a new card.", request.id),
+            crate::vault::asks::collect_details(&request),
+        ));
+    }
+    if asked.collecting && asked.admin_agent_id == asker {
+        return Err(format!("The card for {} is open in your conversation already.", asked.id));
+    }
+    let request = factory.vault.set_collecting(&asked.agent_id, &asked.id, asker, true).map_err(|error| error.to_string())?;
+    factory.vault_changed();
+    // The asker's entry shows it's being collected; this agent's card comes
+    // from this result.
+    crate::vault::requests::show(factory, request.clone());
+    let person = factory.lock().config.person().to_owned();
+    let said = format!(
+        "Asked {person} to add {}: the card is in your conversation, prefilled from the request, and they type the values there, straight into the vault. You'll be told how it ends.",
+        request.secret_name
+    );
+    Ok(ToolResult::text(said, crate::vault::asks::collect_details(&request)))
+}
+
 fn revoke_tool(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<ToolResult, String> {
     admin(factory, asker)?;
+    if args.agents.is_empty() {
+        return Err("Say which agents to take it back from.".to_owned());
+    }
     let targets = agents(factory, asker, &args.agents)?;
     let stop = args.stop_tasks.unwrap_or(false);
     let mut name = args.secret.trim().to_owned();
@@ -532,23 +631,18 @@ fn connection_tool(
     parameters: serde_json::Value,
     kind: Connected,
 ) -> Tool {
-    let factory = Arc::downgrade(factory);
-    let agent = agent.to_owned();
     super::tool(
         name,
         label,
         description,
         parameters,
-        Arc::new(move |args| {
-            let (factory, agent) = (factory.upgrade(), agent.clone());
-            Box::pin(async move {
-                let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                let done = match kind {
-                    Connected::Choices => choices(&factory, &agent, serde_json::from_value(args)?).await,
-                    Connected::Derive => derive(&factory, &agent, serde_json::from_value(args)?).await,
-                };
-                done.map_err(factory_agent::Error::Other)
-            })
+        super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let done = match kind {
+                Connected::Choices => choices(&factory, &agent, serde_json::from_value(args)?).await,
+                Connected::Derive => derive(&factory, &agent, serde_json::from_value(args)?).await,
+            };
+            done.map_err(factory_agent::Error::Other)
         }),
     )
 }

@@ -491,7 +491,7 @@ fn failed(error: impl std::fmt::Display) -> String {
 fn agent_id(factory: &Factory, me: &str, name: &str) -> Result<String, String> {
     let inner = factory.lock();
     let config = &inner.config;
-    let Some(me) = config.agent(me) else { return Err("You're no longer in this Claktory.".to_owned()) };
+    let me = super::caller(config, me)?;
     let everyone: Vec<&AgentConfig> = config.agents.iter().collect();
     match super::agents::find(config, me, &everyone, name)? {
         Some(agent) => Ok(agent.id.clone()),

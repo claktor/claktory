@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "channel": "factory/device/keyboard",
+  "kind": "event_channel",
+  "event": {
+    "hardware_keyboard": true
+  }
+}

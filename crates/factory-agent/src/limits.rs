@@ -456,6 +456,7 @@ pub fn anthropic_reset(base_url: String, auth: RequestAuth, reset: UsageReset) -
         let Some(organization) = profile["organization"]["uuid"].as_str().filter(|uuid| !uuid.is_empty()) else {
             return Ok(refused("Anthropic didn't say which organization this account is in. Nothing was used.", CLAUDE_RESETS));
         };
+        let read_auth = auth.clone();
         let token = auth.api_key.ok_or_else(|| Error::Other("Anthropic reset: not signed in".into()))?;
         let url = format!("{}/api/organizations/{organization}/reset_rate_limits", base_url.trim_end_matches('/'));
         let body = serde_json::json!({
@@ -471,12 +472,46 @@ pub fn anthropic_reset(base_url: String, auth: RequestAuth, reset: UsageReset) -
             .header("x-app", "cli")
             .json(&body);
         let posted = post_reset(request).await;
-        Ok(anthropic_reset_answer(&reset, posted))
+        // The count people see comes from a fresh usage read: the claim's
+        // own resets_left counts only the grant it used, and another grant
+        // of the same kind may hold more (#230).
+        let fresh_left = match &posted {
+            Posted::Answer(claim, _) => fresh_resets_left(&base_url, read_auth, &reset, claim).await,
+            _ => None,
+        };
+        Ok(anthropic_reset_answer(&reset, posted, fresh_left))
     })
 }
 
-/// What Anthropic's answer to a claim means for the person.
-fn anthropic_reset_answer(reset: &UsageReset, posted: Posted) -> ResetAnswer {
+/// How many resets of `reset`'s kind the account still has, read afresh
+/// after a claim: Anthropic's count across every grant of the kind, with
+/// the used grant itself never above what the claim answered for it (the
+/// usage read can lag the claim by a moment). None when the read fails,
+/// and the answer falls back to the claim's own count.
+async fn fresh_resets_left(base_url: &str, auth: RequestAuth, reset: &UsageReset, claim: &Value) -> Option<u64> {
+    let usage = match anthropic_get("Anthropic usage", "usage?cedar_ember=1&skip_spend=1", base_url, auth).await {
+        Ok(usage) => usage,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the usage after a Claude reset");
+            return None;
+        }
+    };
+    let claimed = claim["resets_left"].as_u64();
+    let mut left = 0;
+    for fresh in parse_anthropic_resets(&usage) {
+        if fresh.label != reset.label {
+            continue;
+        }
+        let count = u64::from(fresh.left);
+        left += if fresh.id == reset.id { count.min(claimed.unwrap_or(count)) } else { count };
+    }
+    Some(left)
+}
+
+/// What Anthropic's answer to a claim means for the person. `fresh_left`
+/// is the account's count of this kind from a usage read after the claim
+/// (see `fresh_resets_left`); without it, the claim's grant-scoped count.
+fn anthropic_reset_answer(reset: &UsageReset, posted: Posted, fresh_left: Option<u64>) -> ResetAnswer {
     let kind = ResetKind::by_label(&reset.label);
     let (claim, again) = match posted {
         Posted::Answer(claim, again) => (claim, again),
@@ -501,7 +536,7 @@ fn anthropic_reset_answer(reset: &UsageReset, posted: Posted) -> ResetAnswer {
             return refused(UNCONFIRMED, CLAUDE_RESETS);
         }
     };
-    let left = claim["resets_left"].as_u64();
+    let left = fresh_left.or(claim["resets_left"].as_u64());
     let left_line = |left: u64| resets_left(left, kind.noun());
     match claim["result"].as_str().unwrap_or("unavailable") {
         "reset" => {

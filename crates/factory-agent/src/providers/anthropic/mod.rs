@@ -95,6 +95,13 @@ fn fallback_models(model: &Model) -> Vec<Value> {
     model.compat.as_ref().and_then(|compat| compat.get("allowedFallbackModels")).and_then(Value::as_array).cloned().unwrap_or_default()
 }
 
+/// Whether the model supports Anthropic's server-side fallback at all
+/// (`serverSideFallback`): with no named list, `fallbacks: "default"` asks
+/// for Anthropic's own per-category recommendation.
+fn server_side_fallback(model: &Model) -> bool {
+    compat_flag(model, "serverSideFallback", false) || !fallback_models(model).is_empty()
+}
+
 fn to_claude_code_name(name: &str) -> String {
     CLAUDE_CODE_TOOLS.iter().find(|tool| tool.eq_ignore_ascii_case(name)).map_or_else(|| name.to_owned(), |tool| (*tool).to_owned())
 }
@@ -425,6 +432,10 @@ fn build_params(model: &Model, context: &LlmContext, oauth: bool, max_tokens: u6
     let fallbacks = fallback_models(model);
     if !fallbacks.is_empty() {
         params.insert("fallbacks".into(), Value::Array(fallbacks.iter().map(|fallback| json!({"model": fallback["model"]})).collect()));
+    } else if server_side_fallback(model) {
+        // Anthropic's per-category recommendation; a category with none, or
+        // a rate-limited fallback model, returns the refusal as it is.
+        params.insert("fallbacks".into(), json!("default"));
     }
     Ok(Value::Object(params))
 }
@@ -438,7 +449,7 @@ fn request_headers(model: &Model, context: &LlmContext, options: &StreamOptions,
     if !compat_flag(model, "forceAdaptiveThinking", false) {
         betas.push(INTERLEAVED_THINKING_BETA);
     }
-    if !fallback_models(model).is_empty() {
+    if server_side_fallback(model) {
         betas.push(SERVER_SIDE_FALLBACK_BETA);
     }
     if compat_flag(model, "claudeCodeRequest", false) {
@@ -506,6 +517,9 @@ fn map_stop_reason(reason: &str, details: &Value) -> Result<(StopReason, Option<
         "end_turn" | "pause_turn" | "stop_sequence" => (StopReason::Stop, None),
         "max_tokens" => (StopReason::Length, None),
         "tool_use" => (StopReason::ToolUse, None),
+        // A refusal stays StopReason::Error on the wire and on disk (an
+        // older backend reads the conversation fine after a rollback); its
+        // details ride in `extra` (`crate::refusal`), set by the caller.
         "refusal" => {
             let explanation =
                 details["explanation"].as_str().filter(|text| !text.is_empty()).unwrap_or("The model refused to complete the request");
@@ -555,6 +569,23 @@ impl Parser {
         self.stream_index.iter().position(|candidate| *candidate == Some(index))
     }
 
+    /// Prices the message as `served`, another model than was asked for
+    /// (the server's fallback answered, or an alias resolved): the named
+    /// fallback entry's cost, or the catalog's for that model.
+    fn reprice_as(&mut self, served: &str) {
+        let named = self
+            .fallbacks
+            .iter()
+            .find(|fallback| fallback["model"] == served)
+            .and_then(|fallback| serde_json::from_value::<ModelCost>(fallback["cost"].clone()).ok());
+        let from_catalog =
+            || crate::providers::catalog::models("anthropic").into_iter().find(|model| model.id == served).map(|model| model.cost);
+        if let Some(cost) = named.or_else(from_catalog) {
+            self.cost = cost;
+            self.reprice();
+        }
+    }
+
     fn reprice(&mut self) {
         let usage = &mut self.output.usage;
         usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
@@ -570,14 +601,7 @@ impl Parser {
                 if let Some(served) = message["model"].as_str() {
                     self.output.model = served.to_owned();
                     if served != model.id {
-                        let fallback = self
-                            .fallbacks
-                            .iter()
-                            .find(|fallback| fallback["provider"] == model.provider.as_str() && fallback["model"] == served);
-                        if let Some(cost) = fallback.and_then(|fallback| serde_json::from_value::<ModelCost>(fallback["cost"].clone()).ok())
-                        {
-                            self.cost = cost;
-                        }
+                        self.reprice_as(served);
                     }
                 }
                 let usage = &message["usage"];
@@ -610,6 +634,20 @@ impl Parser {
                             arguments: if block["input"].is_null() { json!({}) } else { block["input"].clone() },
                             thought_signature: None,
                         }
+                    }
+                    // The server's own fallback: this model declined and the
+                    // next one answers from here. Mark the handoff (the
+                    // transcript names who answered) and bill the server.
+                    Some("fallback") => {
+                        let from = block["from"]["model"].as_str().unwrap_or_default();
+                        let to = block["to"]["model"].as_str().unwrap_or_default();
+                        let category = block["trigger"]["category"].as_str().unwrap_or_default();
+                        crate::refusal::mark_fallback_served(&mut self.output, from, to, category);
+                        if !to.is_empty() {
+                            self.output.model = to.to_owned();
+                            self.reprice_as(to);
+                        }
+                        return Ok(());
                     }
                     _ => return Ok(()),
                 };
@@ -679,6 +717,9 @@ impl Parser {
             "message_delta" => {
                 if let Some(reason) = event["delta"]["stop_reason"].as_str().filter(|reason| !reason.is_empty()) {
                     set_stop_reason(&mut self.output, Some(reason), map_stop_reason(reason, &event["delta"]["stop_details"]), false)?;
+                    if reason == "refusal" {
+                        crate::refusal::mark(&mut self.output, &event["delta"]["stop_details"]);
+                    }
                 }
                 let usage = &event["usage"];
                 let usage_out = &mut self.output.usage;

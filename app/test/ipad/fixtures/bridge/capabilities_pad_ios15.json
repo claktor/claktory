@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "idiom": "pad",
+  "ios_app_on_mac": false,
+  "os_version": "15.8",
+  "hardware_keyboard": true,
+  "pencil": {
+    "hover": false,
+    "squeeze": false,
+    "double_tap": true
+  },
+  "pdf_page_overlay": {
+    "available": false,
+    "min_os": "16.0"
+  },
+  "stroke_recognizer": {
+    "available": false,
+    "min_os": "27.0"
+  }
+}

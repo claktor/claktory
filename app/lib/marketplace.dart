@@ -3,6 +3,8 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart';
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -61,46 +63,78 @@ class _MarketplaceViewState extends State<MarketplaceView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            WindowDrag(
-              child: Container(
-                height: titleBarHeight,
-                padding: const EdgeInsets.only(left: Space.xl, right: Space.m),
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: palette.hairline)),
+            if (isPhoneLayout(context) && !inPane)
+              // A phone's header, its tabs under the title.
+              PhoneHeader(
+                leading: HeaderButton.back(onTap: close),
+                // One long word: smaller at the largest text sizes rather
+                // than broken over two lines.
+                title: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    'Marketplace',
+                    style: PhoneType.emphasis.copyWith(color: palette.text),
+                  ),
                 ),
-                child: Row(
-                  children: [
-                    // A phone has room for the tabs alone.
-                    if (!isPhoneLayout(context) && !inPane) ...[
-                      Text(
-                        'Marketplace',
-                        style: TextStyles.label.copyWith(
-                          color: palette.text,
-                          fontWeight: FontWeight.w600,
+                bottom: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: Space.s),
+                  child: Row(
+                    children: [
+                      for (final kind in _Kind.values)
+                        _Tab(
+                          title: kind.title,
+                          selected: kind == _kind,
+                          onTap: () => setState(() => _kind = kind),
                         ),
-                      ),
-                      const SizedBox(width: Space.xl),
                     ],
-                    Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            for (final kind in _Kind.values)
-                              _Tab(
-                                title: kind.title,
-                                selected: kind == _kind,
-                                onTap: () => setState(() => _kind = kind),
-                              ),
-                          ],
+                  ),
+                ),
+              )
+            else
+              WindowDrag(
+                child: Container(
+                  height: titleBarHeight,
+                  padding: const EdgeInsets.only(
+                    left: Space.xl,
+                    right: Space.m,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(color: palette.hairline)),
+                  ),
+                  child: Row(
+                    children: [
+                      // A phone has room for the tabs alone.
+                      if (!isPhoneLayout(context) && !inPane) ...[
+                        Text(
+                          'Marketplace',
+                          style: TypeScale.of(context).label.copyWith(
+                            color: palette.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: Space.xl),
+                      ],
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              for (final kind in _Kind.values)
+                                _Tab(
+                                  title: kind.title,
+                                  selected: kind == _kind,
+                                  onTap: () => setState(() => _kind = kind),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    if (!inPane) Button(label: 'Done', onPressed: close),
-                  ],
+                      if (!inPane) Button(label: 'Done', onPressed: close),
+                    ],
+                  ),
                 ),
               ),
-            ),
             Expanded(
               child: Align(
                 alignment: Alignment.topCenter,
@@ -108,20 +142,20 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                   constraints: const BoxConstraints(maxWidth: 640),
                   child: SelectableArea(
                     child: ListView(
-                      padding: const EdgeInsets.all(Space.xl),
+                      padding: EdgeInsets.all(
+                        isPhoneLayout(context) ? Touch.gutter : Space.xl,
+                      ),
                       children: [
                         Text(
                           _kind.title,
-                          style: TextStyles.emphasis.copyWith(
-                            color: palette.text,
-                          ),
+                          style: TypeScale.of(context).emphasis
+                              .copyWith(color: palette.text),
                         ),
                         const SizedBox(height: Space.s),
                         Text(
                           _kind.about,
-                          style: TextStyles.body.copyWith(
-                            color: palette.textMuted,
-                          ),
+                          style: TypeScale.of(context).body
+                              .copyWith(color: palette.textMuted),
                         ),
                         const SizedBox(height: Space.xl),
                         ListenableBuilder(
@@ -136,9 +170,8 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                             if (offered.isEmpty) {
                               return Text(
                                 _kind.empty,
-                                style: TextStyles.body.copyWith(
-                                  color: palette.textFaint,
-                                ),
+                                style: TypeScale.of(context).body
+                                    .copyWith(color: palette.textFaint),
                               );
                             }
                             return Column(
@@ -198,7 +231,7 @@ class _ExtensionCard extends StatelessWidget {
               children: [
                 Text(
                   extension.name,
-                  style: TextStyles.label.copyWith(
+                  style: TypeScale.of(context).label.copyWith(
                     color: palette.text,
                     fontWeight: FontWeight.w600,
                   ),
@@ -206,7 +239,8 @@ class _ExtensionCard extends StatelessWidget {
                 const SizedBox(height: Space.xs),
                 Text(
                   extension.description,
-                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
                 ),
                 const SizedBox(height: Space.s),
                 Text(
@@ -215,7 +249,8 @@ class _ExtensionCard extends StatelessWidget {
                       : extension.adminDefault
                       ? 'On for Rivet. Turn it on for others in their settings.'
                       : "Turn it on in an agent's settings.",
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ],
             ),
@@ -244,7 +279,11 @@ class _Tab extends StatelessWidget {
     return Pressable(
       onTap: onTap,
       builder: (context, hovered) => Container(
-        height: 44,
+        // On a phone, taller as the text grows.
+        height: isPhoneLayout(context) ? null : 44,
+        constraints: isPhoneLayout(context)
+            ? const BoxConstraints(minHeight: Touch.target)
+            : null,
         padding: const EdgeInsets.symmetric(horizontal: Space.s),
         alignment: Alignment.center,
         decoration: BoxDecoration(
@@ -257,7 +296,7 @@ class _Tab extends StatelessWidget {
         ),
         child: Text(
           title,
-          style: TextStyles.body.copyWith(
+          style: TypeScale.of(context).body.copyWith(
             color: selected || hovered ? palette.text : palette.textMuted,
           ),
         ),

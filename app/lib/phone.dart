@@ -1,376 +1,765 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_view.dart';
 import 'backend.dart';
 import 'changelog.dart';
+import 'chats.dart' show ChatView, selectedChat;
+import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'controls.dart';
 import 'explorer.dart';
-import 'forms.dart' show ProjectSettingsForm;
 import 'extensions.dart';
 import 'identity.dart';
+import 'ipad/columns.dart' show compactRoutes;
+import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'layout.dart';
 import 'map.dart';
 import 'marketplace.dart';
+import 'mobile/back.dart' show PageTarget;
+import 'mobile/drawer.dart';
+import 'mobile/extension_list.dart';
+import 'mobile/header.dart';
+import 'mobile/metrics.dart' show PhoneType, TypeScale, withoutInsets;
+import 'mobile/navigation.dart';
+import 'mobile/platform_policy.dart';
+import 'mobile/presentation.dart'
+    show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
-import 'panes.dart' show pageOfKind, paneGlyph, paneTitle;
+import 'panes.dart' show paneGlyph, paneTitle;
+import 'pipes.dart' show PipeView, selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'rail.dart' show ClaktoriesBackRow;
 import 'scanner.dart';
 import 'screens.dart' show ScreenOpener;
 import 'scope.dart';
 import 'settings_view.dart';
-import 'sidebar.dart';
+import 'shell.dart' show NoAgentView;
 import 'pane_chrome.dart';
 import 'viewers/registry.dart';
+import 'inbox.dart' show InboxView;
 import 'usage_view.dart';
+import 'your_claktories.dart';
 
-/// The app at a phone's size (docs/IDENTITY.md, "Phone"): the sidebar is
-/// the first screen, an agent's conversation is pushed over it with a back
-/// button, its panels open as sheets, and the message box rides above the
-/// keyboard. A phone with nothing paired opens to pairing.
-class PhoneShell extends StatefulWidget {
+/// The app at a phone's size (docs/IDENTITY.md, "Phone"): the selected
+/// conversation (an agent's, or a pipe's) fills the screen; the drawer
+/// ([PhoneDrawerHost]) holds the Claktories and this one's projects,
+/// agents and pipes; Settings, Files, a viewer and the other pages are
+/// pushed over the conversation with iOS's Back; panels open as sheets;
+/// and the message box rides above the keyboard. A phone with nothing
+/// paired opens to pairing.
+class PhoneShell extends StatelessWidget {
   const PhoneShell({super.key});
 
   @override
-  State<PhoneShell> createState() => _PhoneShellState();
+  Widget build(BuildContext context) {
+    // Over a Claktory's window the drawer is the list of Claktories'
+    // (rail.dart), so it stays as Claktories switch; else its own.
+    if (PhoneDrawerHost.of(context) != null) return const _PhoneScreens();
+    return const PhoneDrawerHost(child: _PhoneScreens());
+  }
 }
 
-class _PhoneShellState extends State<PhoneShell> {
-  /// Whether the selected agent's conversation is pushed over the list.
-  final _conversation = ValueNotifier(false);
+/// A page pushed over the conversation: [id] tells it apart; [alive] says
+/// whether what it shows is still there (a pane closed on another device
+/// takes its page with it).
+class _Entry {
+  _Entry({
+    required this.id,
+    required this.builder,
+    this.overKeyboard = false,
+    this.fullscreenDialog = false,
+    this.alive,
+    this.done,
+  }) : serial = ++_pushed;
 
-  /// Whether the sheet listing the agent's extensions is up.
-  var _listing = false;
+  /// How many pages have been pushed: [serial] tells this push apart from
+  /// another of the same [id] (Back's [PageTarget]).
+  static var _pushed = 0;
 
-  /// The pane of the viewer pushed over the conversation, if one is.
-  String? _viewer;
+  final String id;
+  final int serial;
+  final WidgetBuilder builder;
+  final bool overKeyboard;
+  final bool fullscreenDialog;
+  final bool Function()? alive;
+  final Completer<Object?>? done;
+}
 
-  /// The project whose menu is up (a touch and hold on it), if one's is.
-  String? _menu;
+class _PhoneScreens extends StatefulWidget {
+  const _PhoneScreens();
 
-  /// The project whose Files are pushed over the list, and the file pushed
-  /// over them, if any.
-  String? _files;
-  String? _file;
+  @override
+  State<_PhoneScreens> createState() => _PhoneScreensState();
+}
+
+class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
+  final _navigator = GlobalKey<NavigatorState>();
+
+  /// What's pushed over the conversation, bottom first.
+  final _stack = <_Entry>[];
+
+  PhoneDrawerHostState? _host;
+  var _attached = false;
 
   /// Where an agent's show_screen says it opened a conversation
-  /// (screens.dart): it's pushed over the list.
+  /// (screens.dart): it comes to the front.
   Listenable? _opened;
+  ValueNotifier<AppPage>? _page;
 
-  void _push() => _conversation.value = true;
+  /// The drawer opened by itself once, for a Claktory with nothing chosen.
+  var _offered = false;
+
+  /// Whose extension's panel shows, so dismissing it closes that one even
+  /// as it goes down.
+  String? _panelAgent;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final host = PhoneDrawerHost.of(context);
+    if (host != _host) {
+      if (_attached) _host?.detach(this);
+      _attached = false;
+      _host = host;
+    }
     final opened = ScreenOpener.conversations(context);
-    if (opened == _opened) return;
-    _opened?.removeListener(_push);
-    _opened = opened?..addListener(_push);
+    if (opened != _opened) {
+      _opened?.removeListener(_toFront);
+      _opened = opened?..addListener(_toFront);
+    }
+    final page = AppScope.scope(context).page;
+    if (page != _page) {
+      _page?.removeListener(_pageChanged);
+      _page = page..addListener(_pageChanged);
+      _syncPage();
+    }
   }
 
   @override
   void dispose() {
-    _opened?.removeListener(_push);
-    _conversation.dispose();
+    if (_attached) _host?.detach(this);
+    _opened?.removeListener(_toFront);
+    _page?.removeListener(_pageChanged);
+    for (final entry in _stack) {
+      entry.done?.complete();
+    }
     super.dispose();
   }
 
-  /// Pushes [projectId]'s Files over the list, or takes them away (null):
-  /// the backend sends their tree meanwhile.
-  void _showFiles(String? projectId) {
-    setState(() {
-      _menu = null;
-      _files = projectId;
-      _file = null;
-    });
-    fireAndLog(AppScope.of(context).watchFiles(projectId ?? ''));
+  /// After the frame when told during a build; else now.
+  void _soon(VoidCallback action) {
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) action();
+      });
+    } else {
+      action();
+    }
   }
+
+  void _changed() => _host?.pagesChanged();
+
+  void _toFront() {
+    _host?.closeDrawer();
+    popAll();
+  }
+
+  void _pageChanged() {
+    setState(_syncPage);
+    if (_page?.value != AppPage.agent) _host?.closeDrawer();
+    _changed();
+  }
+
+  /// Settings, the Map and the other pages: the one showing is a page over
+  /// the conversation (one at a time, as on a Mac).
+  void _syncPage() {
+    final page = _page?.value ?? AppPage.agent;
+    final id = page == AppPage.agent ? null : 'page:${page.name}';
+    // Another page closes this one, and what it pushed (Settings' sections,
+    // 'route:settings:…') with it.
+    final gone = [
+      for (final entry in _stack)
+        if (entry.id.startsWith('page:') && entry.id != id ||
+            entry.id.startsWith('route:') &&
+                AppPage.values.any(
+                  (other) =>
+                      other != AppPage.agent &&
+                      'page:${other.name}' != id &&
+                      entry.id.startsWith('route:${other.name}:'),
+                ))
+          entry,
+    ];
+    _stack.removeWhere(gone.contains);
+    for (final entry in gone) {
+      _gone(entry);
+    }
+    if (id == null || _stack.any((entry) => entry.id == id)) return;
+    _stack.add(
+      _Entry(
+        id: id,
+        overKeyboard: page == AppPage.settings,
+        builder: (context) => switch (page) {
+          AppPage.settings => const SettingsView(),
+          AppPage.marketplace => const MarketplaceView(),
+          AppPage.changelog => const ChangelogView(),
+          AppPage.map => const MapView(),
+          AppPage.usage => const UsageView(),
+          AppPage.inbox => const InboxView(),
+          AppPage.agent => const SizedBox.shrink(),
+        },
+      ),
+    );
+  }
+
+  /// [entry] went, by Back, a swipe or from here: what it showed closes.
+  void _gone(_Entry entry, [Object? result]) {
+    if (entry.id.startsWith('viewer:')) _viewerGone(entry.id);
+    _soon(() {
+      final page = _page;
+      if (entry.id.startsWith('page:') &&
+          page != null &&
+          'page:${page.value.name}' == entry.id) {
+        page.value = AppPage.agent;
+      }
+      if (entry.id.startsWith('files:')) {
+        fireAndLog(AppScope.of(context).watchFiles(''));
+      }
+      if (entry.done case final done? when !done.isCompleted) {
+        done.complete(result);
+      }
+      _changed();
+    });
+  }
+
+  @override
+  Future<T?> push<T>(PhoneRoute<T> route) async {
+    final done = Completer<Object?>();
+    final id = 'route:${route.id}';
+    // The same page again, or one beside it ('settings:devices' over
+    // 'settings:providers'), takes its place rather than stacking.
+    final colon = route.id.lastIndexOf(':');
+    final siblings = colon < 0
+        ? null
+        : 'route:${route.id.substring(0, colon + 1)}';
+    final before = _stack
+        .where(
+          (entry) =>
+              entry.id == id ||
+              siblings != null && entry.id.startsWith(siblings),
+        )
+        .toList();
+    setState(() {
+      _stack.removeWhere(before.contains);
+      _stack.add(
+        _Entry(
+          id: id,
+          builder: route.builder,
+          overKeyboard: true,
+          fullscreenDialog: route.fullscreenDialog,
+          done: done,
+        ),
+      );
+    });
+    for (final entry in before) {
+      _gone(entry);
+    }
+    _changed();
+    return await done.future as T?;
+  }
+
+  @override
+  void pop<T>([T? result]) {
+    if (_stack.isEmpty) return;
+    final top = _stack.removeLast();
+    setState(() {});
+    _gone(top, result);
+  }
+
+  @override
+  bool get canPop => _stack.isNotEmpty;
+
+  @override
+  PageTarget? get topPage {
+    if (_stack.isEmpty) return null;
+    final top = _stack.last;
+    return PageTarget(
+      id: top.id,
+      serial: top.serial,
+      fullscreenDialog: top.fullscreenDialog,
+    );
+  }
+
+  @override
+  void popAll() {
+    if (_stack.isEmpty) return;
+    final all = [..._stack];
+    setState(_stack.clear);
+    for (final entry in all.reversed) {
+      _gone(entry);
+    }
+  }
+
+  @override
+  void showFiles(String projectId) {
+    final backend = AppScope.of(context);
+    final gone = [
+      for (final entry in _stack)
+        if (entry.id.startsWith('files:') || entry.id.startsWith('file:'))
+          entry,
+    ];
+    setState(() {
+      _stack.removeWhere(gone.contains);
+      _stack.add(
+        _Entry(
+          id: 'files:$projectId',
+          alive: () =>
+              projectById(backend.workspace.workspace, projectId) != null,
+          builder: (context) => ListenableBuilder(
+            listenable: backend.workspace,
+            builder: (context, _) {
+              final project = projectById(
+                backend.workspace.workspace,
+                projectId,
+              );
+              if (project == null) return const SizedBox.shrink();
+              return _FilesScreen(
+                project: project,
+                onBack: pop,
+                onOpen: (path) => _showFile(projectId, path),
+              );
+            },
+          ),
+        ),
+      );
+    });
+    fireAndLog(backend.watchFiles(projectId));
+    _changed();
+  }
+
+  /// A file of a project's Files, over them.
+  void _showFile(String projectId, String path) {
+    final files = 'files:$projectId';
+    setState(() {
+      _stack.removeWhere((entry) => entry.id.startsWith('file:'));
+      _stack.add(
+        _Entry(
+          id: 'file:$path',
+          alive: () => _stack.any((entry) => entry.id == files),
+          builder: (context) {
+            final leaf = viewerLeaf(path).leaf;
+            return _ViewerScreen(
+              leaf: leaf,
+              glyph: viewerIcon(leaf, Palette.of(context).textMuted),
+              onBack: pop,
+            );
+          },
+        ),
+      );
+    });
+    _changed();
+  }
+
+  /// One of [agentId]'s viewers (a pane beside its conversation on a Mac),
+  /// over its conversation. Back pops it on this phone only; its × removes
+  /// the pane from the agent's layout, everywhere.
+  void _showViewer(String agentId, String paneId) {
+    _workbenchFocus?.focus(agentId, paneId);
+    final backend = AppScope.of(context);
+    Agent? agent() {
+      final agent = backend.workspace.selectedAgent;
+      return agent?.id == agentId ? agent : null;
+    }
+
+    setState(() {
+      _stack.removeWhere((entry) => entry.id.startsWith('viewer:'));
+      _stack.add(
+        _Entry(
+          id: 'viewer:$agentId/$paneId',
+          alive: () {
+            final shown = agent();
+            return shown != null && find(layoutOf(shown), paneId) != null;
+          },
+          builder: (context) => ListenableBuilder(
+            listenable: backend.workspace,
+            builder: (context, _) {
+              final shown = agent();
+              final viewer = shown == null
+                  ? null
+                  : find(layoutOf(shown), paneId);
+              if (shown == null || viewer == null) {
+                return const SizedBox.shrink();
+              }
+              return _ViewerScreen(
+                leaf: viewer.leaf,
+                glyph: paneGlyph(
+                  shown,
+                  viewer.leaf,
+                  Palette.of(context).textMuted,
+                ),
+                onBack: pop,
+                onClose: () {
+                  final closed = close(layoutOf(shown), viewer.id);
+                  if (closed == null) return;
+                  fireAndLog(
+                    backend.setLayout(
+                      shown.id,
+                      isChatOnly(closed) ? null : closed,
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      );
+    });
+    _changed();
+  }
+
+  /// On an iPad, what the person reads in this window (the workbench's
+  /// focus), kept across the window narrowing to these routes and widening
+  /// again; null elsewhere, where these routes are all there is.
+  WorkbenchFocus? get _workbenchFocus => deviceIdiom(context) == Idiom.pad
+      ? context.getInheritedWidgetOfExactType<WorkbenchScope>()?.notifier
+      : null;
+
+  /// The agent whose focus these routes took up last ([_takeUpFocus]).
+  String? _focusTaken;
+
+  /// A window narrowed with a viewer in front keeps it in front: the
+  /// workbench's focused leaf, pushed over [agent]'s conversation, once.
+  void _takeUpFocus(Agent agent) {
+    final focus = _workbenchFocus;
+    if (focus == null || _focusTaken == agent.id) return;
+    _focusTaken = agent.id;
+    final routes = compactRoutes(
+      layoutOf(agent),
+      focus.focusedIn(agent.id, layoutOf(agent)),
+    );
+    if (routes.length < 2) return;
+    _soon(() => _showViewer(agent.id, routes.last));
+  }
+
+  /// [id]'s viewer went (Back, a swipe): the conversation is in front.
+  void _viewerGone(String id) {
+    final focus = _workbenchFocus;
+    final slash = id.indexOf('/');
+    if (focus == null || slash < 0) return;
+    final agentId = id.substring('viewer:'.length, slash);
+    final agent = AppScope.of(context).workspace.selectedAgent;
+    if (agent == null || agent.id != agentId) return;
+    final root = layoutOf(agent);
+    focus.focus(agentId, compactRoutes(root, null).first);
+  }
+
+  /// The agent's extensions and the viewers beside its conversation, in a
+  /// sheet: one opens its panel, or pushes the viewer.
+  void _listExtensions(Agent agent) => unawaited(
+    presentSheet<void>(
+      context,
+      padded: false,
+      builder: (context, close) => PhoneExtensionList(
+        agent: agent,
+        chosen: close,
+        viewed: (id) {
+          close();
+          _showViewer(agent.id, id);
+        },
+      ),
+    ),
+  );
 
   void _back(Agent agent) {
     final history = AppScope.scope(context).history;
     final back = history.back;
-    // Back to the agent it came from by a message, else to the list.
-    if (back != null && back != agent.id) {
-      history.goBack(agent.id);
-    } else {
-      _conversation.value = false;
+    // Back to the agent it came from by a message.
+    if (back != null && back != agent.id) history.goBack(agent.id);
+  }
+
+  /// Drops pages whose content is gone (a project deleted, a pane closed
+  /// elsewhere, another agent chosen); the navigator pops them.
+  void _prune() {
+    final dead = [
+      for (final entry in _stack)
+        if (entry.alive != null && !entry.alive!()) entry,
+    ];
+    if (dead.isEmpty) return;
+    _stack.removeWhere(dead.contains);
+    for (final entry in dead) {
+      _gone(entry);
     }
+  }
+
+  void _attach() {
+    if (_attached) return;
+    _attached = true;
+    _host?.attach(this);
+  }
+
+  void _detach() {
+    if (!_attached) return;
+    _attached = false;
+    _host?.detach(this);
   }
 
   @override
   Widget build(BuildContext context) {
     final scope = AppScope.scope(context);
     final backend = scope.backend;
-    final safe = MediaQuery.paddingOf(context);
-    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
-    return PhoneNavigation(
-      conversation: _conversation,
-      child: PhoneProjects(
-        menu: (project) => setState(() => _menu = project.id),
-        files: (project) => _showFiles(project.id),
-        child: ListenableBuilder(
-          listenable: Listenable.merge([
-            backend.workspace,
-            scope.page,
-            scope.connections,
-            _conversation,
-            backend.pairing,
-          ]),
-          builder: (context, _) {
-            // Under the status bar, and above the home indicator or the
-            // keyboard, whichever is higher.
-            // On its side, the notch and the rounded corners are at the
-            // left and right.
-            Widget screen(Widget child, {bool overKeyboard = false}) => Padding(
-              padding: EdgeInsets.only(
-                left: safe.left,
-                right: safe.right,
-                top: safe.top,
-                bottom: overKeyboard
-                    ? math.max(safe.bottom, keyboard)
-                    : safe.bottom,
-              ),
-              child: MediaQuery.removePadding(
-                context: context,
-                removeTop: true,
-                removeBottom: true,
-                removeLeft: true,
-                removeRight: true,
-                child: child,
-              ),
-            );
-            if (scope.connections.current == null && !backend.localBackend) {
-              return screen(const PairScreen(), overKeyboard: true);
-            }
-            // A code used, waiting to be allowed: the number to compare.
-            final waiting = scope.connections.current;
-            if (backend.pairing.value != null && waiting != null) {
-              return screen(
-                PairingWaitView(
-                  onCancel: () => scope.connections.forget(waiting),
-                ),
-              );
-            }
-            switch (scope.page.value) {
-              case AppPage.settings:
-                return screen(const SettingsView(), overKeyboard: true);
-              case AppPage.marketplace:
-                return screen(const MarketplaceView());
-              case AppPage.changelog:
-                return screen(const ChangelogView());
-              case AppPage.map:
-                return screen(const MapView());
-              case AppPage.usage:
-                return screen(const UsageView());
-              case AppPage.agent:
-            }
-            final workspace = backend.workspace.workspace;
-            final agent = _conversation.value
-                ? backend.workspace.selectedAgent
-                : null;
-            final panel = openPanelOf(workspace, agent);
-            final viewer = agent == null || _viewer == null
-                ? null
-                : find(layoutOf(agent), _viewer!);
-            final menu = _menu == null ? null : projectById(workspace, _menu!);
-            final files = _files == null
-                ? null
-                : projectById(workspace, _files!);
-            final file = files == null || _file == null
-                ? null
-                : viewerLeaf(_file!).leaf;
-            Widget pushed(Widget? child, String key) => AnimatedSwitcher(
-              duration: Motion.base,
-              switchInCurve: Curves.easeOut,
-              switchOutCurve: Curves.easeIn,
-              transitionBuilder: (child, animation) => SlideTransition(
-                position: Tween(
-                  begin: const Offset(1, 0),
-                  end: Offset.zero,
-                ).animate(animation),
-                child: child,
-              ),
-              child: child == null
-                  ? SizedBox.shrink(key: ValueKey('no $key'))
-                  : ColoredBox(
-                      key: ValueKey(key),
-                      color: Palette.of(context).canvas,
-                      child: screen(child),
-                    ),
-            );
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                screen(
-                  const Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      ClaktoriesBackRow(),
-                      Expanded(child: Sidebar(width: double.infinity)),
-                    ],
-                  ),
-                ),
-                AnimatedSwitcher(
-                  duration: Motion.base,
-                  switchInCurve: Curves.easeOut,
-                  switchOutCurve: Curves.easeIn,
-                  transitionBuilder: (child, animation) => SlideTransition(
-                    position: Tween(
-                      begin: const Offset(1, 0),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                  child: agent == null
-                      ? const SizedBox.shrink(key: ValueKey('list'))
-                      : ColoredBox(
-                          key: const ValueKey('conversation'),
-                          color: Palette.of(context).canvas,
-                          child: screen(
-                            AnimatedContainer(
-                              duration: Motion.base,
-                              color: conversationTint(agent),
-                              child: AgentView(
-                                key: ValueKey(agent.id),
-                                agent: agent,
-                                onBack: () => _back(agent),
-                                onMore: () => setState(() => _listing = true),
-                              ),
-                            ),
-                            overKeyboard: true,
-                          ),
-                        ),
-                ),
-                AnimatedSwitcher(
-                  duration: Motion.base,
-                  switchInCurve: Curves.easeOut,
-                  switchOutCurve: Curves.easeIn,
-                  transitionBuilder: (child, animation) => SlideTransition(
-                    position: Tween(
-                      begin: const Offset(1, 0),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                  child: agent == null || viewer == null
-                      ? const SizedBox.shrink(key: ValueKey('no viewer'))
-                      : ColoredBox(
-                          key: ValueKey('viewer ${viewer.id}'),
-                          color: Palette.of(context).canvas,
-                          child: screen(
-                            _ViewerScreen(
-                              leaf: viewer.leaf,
-                              glyph: paneGlyph(
-                                agent,
-                                viewer.leaf,
-                                Palette.of(context).textMuted,
-                              ),
-                              onBack: () => setState(() => _viewer = null),
-                              onClose: () {
-                                setState(() => _viewer = null);
-                                final closed = close(
-                                  layoutOf(agent),
-                                  viewer.id,
-                                );
-                                if (closed != null) {
-                                  fireAndLog(
-                                    backend.setLayout(
-                                      agent.id,
-                                      isChatOnly(closed) ? null : closed,
-                                    ),
-                                  );
-                                }
-                              },
-                            ),
-                          ),
-                        ),
-                ),
-                pushed(
-                  files == null
-                      ? null
-                      : _FilesScreen(
-                          project: files,
-                          onBack: () => _showFiles(null),
-                          onOpen: (path) => setState(() => _file = path),
-                        ),
-                  'files ${files?.id}',
-                ),
-                pushed(
-                  file == null
-                      ? null
-                      : _ViewerScreen(
-                          leaf: file,
-                          glyph: viewerIcon(
-                            file,
-                            Palette.of(context).textMuted,
-                          ),
-                          onBack: () => setState(() => _file = null),
-                        ),
-                  'file ${file?.path}',
-                ),
-                if (menu != null)
-                  _Sheet(
-                    onClose: () => setState(() => _menu = null),
-                    child: _ProjectMenu(
-                      project: menu,
-                      files: () => _showFiles(menu.id),
-                      settings: () {
-                        setState(() => _menu = null);
-                        showModal(
-                          context,
-                          (context, close) =>
-                              ProjectSettingsForm(project: menu, close: close),
-                        );
-                      },
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        backend.workspace,
+        scope.connections,
+        backend.pairing,
+        backend.connected,
+        backend.signInRequired,
+      ]),
+      builder: (context, _) {
+        if (scope.connections.current == null && !backend.localBackend) {
+          _soon(_detach);
+          return const _Screen(overKeyboard: true, child: PairScreen());
+        }
+        final waiting = scope.connections.current;
+        // Let in only once this phone's signed in to the account.
+        if (backend.signInRequired.value != null && waiting != null) {
+          _soon(_detach);
+          return _Screen(
+            overKeyboard: true,
+            child: SignInRequiredView(
+              onCancel: waiting.fromAccount
+                  ? () => scope.connections.forget(waiting)
+                  : null,
+            ),
+          );
+        }
+        // A code used, waiting to be allowed: the number to compare.
+        if (backend.pairing.value != null && waiting != null) {
+          _soon(_detach);
+          return _Screen(
+            child: PairingWaitView(
+              onCancel: () => scope.connections.forget(waiting),
+            ),
+          );
+        }
+        _soon(_attach);
+        _prune();
+        final workspace = backend.workspace.workspace;
+        final pipe = selectedPipe(workspace);
+        final chat = selectedChat(workspace);
+        final agent = pipe == null && chat == null
+            ? backend.workspace.selectedAgent
+            : null;
+        // Nothing chosen yet: the drawer offers what there is, once.
+        if (pipe == null &&
+            chat == null &&
+            agent == null &&
+            !_offered &&
+            backend.connected.value &&
+            workspace.agents.isNotEmpty) {
+          _offered = true;
+          _soon(() => _host?.openDrawer());
+        }
+        if (agent != null) _takeUpFocus(agent);
+        final panel = _stack.isEmpty ? openPanelOf(workspace, agent) : null;
+        if (agent != null && panel != null) _panelAgent = agent.id;
+        final policy = PhonePlatformPolicy.of(context);
+        final screens = Stack(
+          fit: StackFit.expand,
+          children: [
+            SheetOverlay(
+              overlay: Overlay.of(context),
+              child: Navigator(
+                key: _navigator,
+                pages: [
+                  policy.page<void>(
+                    key: const ValueKey('conversation'),
+                    child: _Root(
+                      onMenu: () => _host?.openDrawer(),
+                      onBack: _back,
+                      onMore: _listExtensions,
                     ),
                   ),
-                if (agent != null && _listing)
-                  _Sheet(
-                    onClose: () => setState(() => _listing = false),
-                    child: _ExtensionList(
-                      agent: agent,
-                      chosen: () => setState(() => _listing = false),
-                      viewed: (id) => setState(() {
-                        _listing = false;
-                        _viewer = id;
-                      }),
+                  for (final entry in _stack)
+                    policy.page<void>(
+                      key: ValueKey(entry.id),
+                      fullscreenDialog: entry.fullscreenDialog,
+                      child: _Screen(
+                        overKeyboard: entry.overKeyboard,
+                        child: Builder(builder: entry.builder),
+                      ),
                     ),
-                  ),
-                if (agent != null && panel != null)
-                  _Sheet(
-                    tall: true,
-                    onClose: () => fireAndLog(backend.openPanel(agent.id, '')),
-                    child: ExtensionPanel(
+                ],
+                onDidRemovePage: (page) {
+                  final key = page.key;
+                  if (key is! ValueKey<String>) return;
+                  final index = _stack.indexWhere(
+                    (entry) => entry.id == key.value,
+                  );
+                  // Already gone from here: it was taken away, not popped.
+                  if (index < 0) return;
+                  final entry = _stack.removeAt(index);
+                  _soon(() => setState(() {}));
+                  _gone(entry);
+                },
+              ),
+            ),
+            // The open extension's panel, in a sheet: dragged down, the
+            // dimmed screen tapped or Esc closes it on the backend.
+            PhoneSheetHost(
+              onDismiss: () {
+                final shown = _panelAgent;
+                if (shown != null) {
+                  fireAndLog(backend.openPanel(shown, ''));
+                }
+              },
+              child: agent != null && panel != null
+                  ? ExtensionPanel(
                       key: ValueKey('${panel.id}/${agent.id}'),
                       extension: panel,
                       agent: agent,
                       width: double.infinity,
-                    ),
+                    )
+                  : null,
+            ),
+          ],
+        );
+        // What the account needs from the person (a device to allow, this
+        // one to confirm) along the top, over whatever page is in front.
+        return DeviceBanners(child: screens);
+      },
+    );
+  }
+}
+
+/// The conversation in front: the selected pipe's, or agent's, or what to
+/// do while there's none. Its leading button opens the drawer; an agent
+/// reached by a message has Back to the one it came from instead.
+class _Root extends StatelessWidget {
+  const _Root({
+    required this.onMenu,
+    required this.onBack,
+    required this.onMore,
+  });
+
+  final VoidCallback onMenu;
+  final void Function(Agent agent) onBack;
+  final void Function(Agent agent) onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = AppScope.scope(context);
+    final backend = scope.backend;
+    final palette = Palette.of(context);
+    return ListenableBuilder(
+      listenable: Listenable.merge([backend.workspace, scope.history]),
+      builder: (context, _) {
+        final workspace = backend.workspace.workspace;
+        // One of the person's chats, as the conversation.
+        final chat = selectedChat(workspace);
+        if (chat != null) {
+          return _Screen(
+            overKeyboard: true,
+            child: ChatView(
+              key: ValueKey('chat/${chat.id}'),
+              chat: chat,
+              onMenu: onMenu,
+            ),
+          );
+        }
+        final pipe = selectedPipe(workspace);
+        if (pipe != null) {
+          return _Screen(
+            overKeyboard: true,
+            child: PipeView(
+              key: ValueKey('pipe/${pipe.id}'),
+              pipe: pipe,
+              onMenu: onMenu,
+            ),
+          );
+        }
+        final agent = backend.workspace.selectedAgent;
+        if (agent == null) {
+          return _Screen(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                PhoneHeader(
+                  leading: HeaderButton.menu(onTap: onMenu),
+                  title: Text(
+                    claktoryName(backend),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: PhoneType.emphasis.copyWith(color: palette.text),
                   ),
+                ),
+                const Expanded(child: NoAgentView()),
               ],
-            );
-          },
+            ),
+          );
+        }
+        final back = scope.history.back;
+        return _Screen(
+          overKeyboard: true,
+          child: AnimatedContainer(
+            duration: Motion.base,
+            color: conversationTint(agent),
+            child: AgentView(
+              key: ValueKey(agent.id),
+              agent: agent,
+              // Back to the agent a message came from, else the drawer.
+              onBack: back != null && back != agent.id
+                  ? () => onBack(agent)
+                  : null,
+              onMenu: onMenu,
+              onMore: () => onMore(agent),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// A screen of the phone's own: under the status bar, above the home
+/// indicator (or with [overKeyboard], the keyboard, whichever is higher),
+/// and beside the notch on its side. It owns those insets: what's inside
+/// reads none (mobile/navigation.dart).
+class _Screen extends StatelessWidget {
+  const _Screen({required this.child, this.overKeyboard = false});
+
+  final Widget child;
+  final bool overKeyboard;
+
+  @override
+  Widget build(BuildContext context) {
+    final safe = MediaQuery.paddingOf(context);
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    final inner = withoutInsets(context, keyboard: overKeyboard, child: child);
+    return ColoredBox(
+      color: Palette.of(context).canvas,
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: safe.left,
+          right: safe.right,
+          top: safe.top,
+          bottom: overKeyboard ? math.max(safe.bottom, keyboard) : safe.bottom,
         ),
+        child: inner,
       ),
     );
   }
 }
 
-/// What a project's row does on a phone: a touch and hold opens its menu
-/// ([menu]), which offers its Files as a page of their own ([files]).
+/// What a project's row does on a phone: its Files open as a page of their
+/// own ([files]). The drawer gives it.
 class PhoneProjects extends InheritedWidget {
-  const PhoneProjects({
-    super.key,
-    required this.menu,
-    required this.files,
-    required super.child,
-  });
+  const PhoneProjects({super.key, required this.files, required super.child});
 
-  final void Function(Project project) menu;
   final void Function(Project project) files;
 
   /// Null outside a phone's layout.
@@ -379,96 +768,6 @@ class PhoneProjects extends InheritedWidget {
 
   @override
   bool updateShouldNotify(PhoneProjects old) => false;
-}
-
-/// A project's menu on a phone: its Files and its settings, one 44pt row
-/// each.
-class _ProjectMenu extends StatelessWidget {
-  const _ProjectMenu({
-    required this.project,
-    required this.files,
-    required this.settings,
-  });
-
-  final Project project;
-  final VoidCallback files;
-  final VoidCallback settings;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(Space.s),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(Space.s),
-            child: Text(
-              project.name,
-              style: TextStyles.caption.copyWith(
-                color: palette.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          _SheetRow(
-            glyph: FolderGlyph(color: palette.textMuted),
-            name: 'Files',
-            onTap: files,
-          ),
-          _SheetRow(
-            glyph: CogGlyph(color: palette.textMuted),
-            name: 'Project settings',
-            onTap: settings,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A 44pt row of a sheet (a finger's size): a glyph and a name.
-class _SheetRow extends StatelessWidget {
-  const _SheetRow({
-    required this.glyph,
-    required this.name,
-    required this.onTap,
-  });
-
-  final Widget glyph;
-  final String name;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return Pressable(
-      onTap: onTap,
-      builder: (context, hovered) => Container(
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: Space.s),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Row(
-          children: [
-            SizedBox(width: 16, child: Center(child: glyph)),
-            const SizedBox(width: Space.m),
-            Expanded(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyles.body.copyWith(color: palette.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 /// A project's Files as a page pushed over the list: a bar with a back
@@ -546,179 +845,6 @@ class _FilesScreen extends StatelessWidget {
   }
 }
 
-/// A sheet from the bottom of the screen over a dimmed view: a floating
-/// layer (docs/IDENTITY.md), its top corners rounded. A tap on the dimmed
-/// part closes it.
-class _Sheet extends StatelessWidget {
-  const _Sheet({required this.onClose, required this.child, this.tall = false});
-
-  final VoidCallback onClose;
-  final Widget child;
-
-  /// Nearly the whole screen, for a panel; else as tall as its content.
-  final bool tall;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final size = MediaQuery.sizeOf(context);
-    final safe = MediaQuery.paddingOf(context);
-    // A panel leaves the agent's header in view above it, dimmed, to tap
-    // closed.
-    final room = size.height - safe.top - titleBarHeight;
-    final sheet = Container(
-      constraints: BoxConstraints(maxHeight: room),
-      height: tall ? room : null,
-      padding: EdgeInsets.only(bottom: tall ? 0 : safe.bottom),
-      decoration: BoxDecoration(
-        color: palette.sidebar,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(Radii.floating),
-        ),
-        border: Border.all(color: palette.hairline),
-        boxShadow: floatingShadow,
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: MediaQuery.removePadding(
-        context: context,
-        removeTop: true,
-        child: child,
-      ),
-    );
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: Motion.base,
-      curve: Curves.easeOut,
-      builder: (context, shown, child) => Stack(
-        fit: StackFit.expand,
-        children: [
-          GestureDetector(
-            onTap: onClose,
-            child: ColoredBox(
-              color: const Color(0xFF000000).withValues(alpha: 0.3 * shown),
-            ),
-          ),
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: FractionalTranslation(
-              translation: Offset(0, 1 - shown),
-              child: child,
-            ),
-          ),
-        ],
-      ),
-      child: sheet,
-    );
-  }
-}
-
-/// The agent's extensions, one 44pt row each (a finger's size): choosing
-/// one opens its panel.
-class _ExtensionList extends StatelessWidget {
-  const _ExtensionList({
-    required this.agent,
-    required this.chosen,
-    required this.viewed,
-  });
-
-  final Agent agent;
-  final VoidCallback chosen;
-
-  /// A viewer beside the conversation was chosen: its pane.
-  final ValueChanged<String> viewed;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final backend = AppScope.of(context);
-    final extensions = enabledExtensions(backend.workspace.workspace, agent);
-    final viewers = [
-      for (final pane in leaves(layoutOf(agent)))
-        // Settings and other pages a Mac shows beside the conversation are
-        // the phone's own screens here, and so are a project's Files.
-        if (pane.leaf.kind != chatKind &&
-            pane.leaf.kind != filesKind &&
-            pageOfKind(pane.leaf.kind) == null)
-          pane,
-    ];
-    Widget row({
-      required Widget glyph,
-      required String name,
-      required VoidCallback onTap,
-    }) => Pressable(
-      onTap: onTap,
-      builder: (context, hovered) => Container(
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: Space.s),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Row(
-          children: [
-            SizedBox(width: 16, child: Center(child: glyph)),
-            const SizedBox(width: Space.m),
-            Expanded(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyles.body.copyWith(color: palette.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-    Widget heading(String text) => Padding(
-      padding: const EdgeInsets.all(Space.s),
-      child: Text(
-        text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textMuted,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-    );
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(Space.s),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (viewers.isNotEmpty) ...[
-            heading('Files'),
-            for (final pane in viewers)
-              row(
-                glyph: paneGlyph(agent, pane.leaf, palette.textMuted),
-                name: paneTitle(pane.leaf),
-                onTap: () => viewed(pane.id),
-              ),
-            const SizedBox(height: Space.s),
-          ],
-          heading(
-            extensions.isEmpty
-                ? '${agent.name} has no extensions turned on.'
-                : "${agent.name}'s extensions",
-          ),
-          for (final extension in extensions)
-            row(
-              glyph: ExtensionGlyph(
-                icon: extension.icon,
-                name: extension.name,
-                color: palette.textMuted,
-              ),
-              name: extension.name,
-              onTap: () {
-                chosen();
-                fireAndLog(backend.openPanel(agent.id, extension.id));
-              },
-            ),
-        ],
-      ),
-    );
-  }
-}
-
 /// A viewer pushed over the conversation, or over a project's Files: a bar
 /// with a back button, its title, its controls and, for a pane of the
 /// agent's layout, its × ([onClose]); then the viewer.
@@ -737,42 +863,12 @@ class _ViewerScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    Widget bar(String details, List<Widget> controls) => Container(
-      height: titleBarHeight,
-      padding: const EdgeInsets.symmetric(horizontal: Space.xs),
-      decoration: BoxDecoration(
-        color: palette.sidebar,
-        border: Border(bottom: BorderSide(color: palette.hairline)),
-      ),
-      child: Row(
-        children: [
-          _BackButton(onBack: onBack),
-          const SizedBox(width: Space.xs),
-          glyph,
-          const SizedBox(width: Space.s),
-          Expanded(
-            child: Text(
-              paneTitle(leaf),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyles.label.copyWith(color: palette.text),
-            ),
-          ),
-          ...controls,
-          if (onClose != null)
-            GlyphButton(
-              label: 'Close',
-              active: false,
-              onTap: onClose!,
-              glyph: (color) =>
-                  ExtensionGlyph(icon: 'x', name: 'Close', color: color),
-            ),
-        ],
-      ),
-    );
     return PaneChrome(
-      header: bar,
+      phone: PhonePane(
+        title: paneTitle(leaf),
+        onBack: onBack,
+        onRemove: onClose, // null for a project's file: nothing to remove
+      ),
       child: Builder(builder: (context) => viewerBody(context, leaf)),
     );
   }
@@ -812,6 +908,11 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
 
   /// The person chose to paste the code instead.
   var _pasting = false;
+
+  /// Connecting through the account (sign in, pick one of "Your
+  /// Claktories") rather than with a code: at first when this phone is
+  /// signed in already.
+  bool? _withAccount;
 
   /// Why the last code scanned can't be used.
   String? _scanError;
@@ -872,8 +973,24 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final access = _access;
+    final withAccount = _withAccount ??= AppScope.scope(context)
+        .connections
+        .account
+        .signedIn;
     final Widget body;
-    if (_pasting || access == CameraAccess.unavailable) {
+    if (withAccount) {
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          YourClaktories(onConnect: _connect),
+          const SizedBox(height: Space.m),
+          _Link(
+            'Use a code instead',
+            onTap: () => setState(() => _withAccount = false),
+          ),
+        ],
+      );
+    } else if (_pasting || access == CameraAccess.unavailable) {
       body = _pasteForm(context, noCamera: access == CameraAccess.unavailable);
     } else if (access == CameraAccess.granted) {
       body = _scanner(context);
@@ -900,16 +1017,25 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
             children: [
               Text(
                 'Connect to your Claktory',
-                style: TextStyles.title.copyWith(color: palette.text),
+                style: TypeScale.of(context).title
+                    .copyWith(color: palette.text),
               ),
-              const SizedBox(height: Space.s),
-              Text(
-                'On your Mac, open Claktory and go to Settings → Devices → '
-                'Add a device. Then scan the code.',
-                style: TextStyles.body.copyWith(color: palette.textMuted),
-              ),
+              if (!withAccount) ...[
+                const SizedBox(height: Space.s),
+                Text(
+                  'On your Mac, open Claktory and go to Settings → Devices → '
+                  'Add a device. Then scan the code.',
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
+                ),
+              ],
               const SizedBox(height: Space.xl),
               body,
+              if (!withAccount)
+                _Link(
+                  'Sign in with your email instead',
+                  onTap: () => setState(() => _withAccount = true),
+                ),
             ],
           ),
         ),
@@ -948,7 +1074,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
           const SizedBox(height: Space.s),
           Text(
             error,
-            style: TextStyles.caption.copyWith(color: palette.danger),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.danger),
           ),
         ],
         const SizedBox(height: Space.m),
@@ -970,7 +1097,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
               ? "The camera isn't available on this iPhone. Paste the code "
                     'instead.'
               : 'To scan, allow camera access in Settings → Claktory.',
-          style: TextStyles.body.copyWith(color: palette.text),
+          style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
         const SizedBox(height: Space.l),
         if (!restricted)
@@ -1025,27 +1152,46 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
             TextField(
               controller: _code,
               placeholder: 'Paste code',
+              // A code, not words: nothing to correct or capitalize.
+              autocorrect: false,
+              textCapitalization: TextCapitalization.none,
               onSubmitted: (_) => connect(),
             ),
             if (error != null) ...[
               const SizedBox(height: Space.s),
               Text(
                 error,
-                style: TextStyles.caption.copyWith(color: palette.danger),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.danger),
               ),
             ],
             const SizedBox(height: Space.l),
-            Row(
-              children: [
-                Button(label: 'Paste', onPressed: _paste),
-                const Spacer(),
-                Button(
-                  label: 'Connect',
-                  primary: true,
-                  onPressed: target != null ? connect : null,
-                ),
-              ],
-            ),
+            // At the largest text, one above the other, Connect first.
+            if (largeText(context))
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Button(
+                    label: 'Connect',
+                    primary: true,
+                    onPressed: target != null ? connect : null,
+                  ),
+                  const SizedBox(height: Space.s),
+                  Button(label: 'Paste', onPressed: _paste),
+                ],
+              )
+            else
+              Row(
+                children: [
+                  Button(label: 'Paste', onPressed: _paste),
+                  const Spacer(),
+                  Button(
+                    label: 'Connect',
+                    primary: true,
+                    onPressed: target != null ? connect : null,
+                  ),
+                ],
+              ),
             if (!noCamera &&
                 _access != CameraAccess.denied &&
                 _access != CameraAccess.restricted) ...[
@@ -1108,7 +1254,7 @@ class _Link extends StatelessWidget {
             widthFactor: 1,
             child: Text(
               label,
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: hovered ? palette.text : palette.textMuted,
                 fontWeight: FontWeight.w500,
                 decoration: TextDecoration.underline,

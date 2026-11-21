@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "ink_layer_id": "layer-derivation-excerpt-1",
+  "revision": 1,
+  "parent_revision": null,
+  "source": {
+    "absolute_path": "/Users/me/notes/derivation.md",
+    "sha256": "4d967f33427815e06ce250dc49ab7cf4545ac738e5f98cc6aa1efcbe94b1c427",
+    "mime": "text/markdown",
+    "size": 9120
+  },
+  "coordinate_space": {
+    "kind": "excerpt_rendition",
+    "width": 640,
+    "height": 178,
+    "units": "pt",
+    "text": "Then by the chain rule, ∂L/∂W = δ · xᵀ, which is why the gradient vanishes when δ → 0.",
+    "rendition": {
+      "font": "Geist",
+      "font_size": 17,
+      "line_height": 1.5,
+      "padding": 24
+    }
+  },
+  "drawing": {
+    "format": "pencilkit",
+    "content_version": 1,
+    "blob_id": "blob-derivation-x1-r1-drawing",
+    "sha256": "ad66f625d0ba5d88072859e4609b93465c69368cabe54436bc2acb66943138c6",
+    "bytes": 2280,
+    "space": "excerpt_rendition",
+    "drawing_to_document": [
+      1,
+      0,
+      0,
+      1,
+      0,
+      0
+    ]
+  },
+  "ink_preview": {
+    "png_blob_id": "blob-derivation-x1-r1-preview",
+    "sha256": "4652be9bf9b176329aa9c9899b171e80451026debbc2cd73d2fb69fa2cd8db27",
+    "pixel_width": 1280,
+    "pixel_height": 356,
+    "bytes": 21880
+  },
+  "supplied_by": {
+    "device_kind": "tablet",
+    "os_version": "27.2"
+  }
+}

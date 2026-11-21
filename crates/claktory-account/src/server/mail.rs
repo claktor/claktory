@@ -110,6 +110,27 @@ pub fn unlock_mail(domain: &str, to: &str, name: &str, when: i64, ip: &str, acco
     Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
 }
 
+/// To the account: one of its Claktories moved to another computer.
+pub fn moved_mail(domain: &str, to: &str, from: &str, name: &str, when: i64, ip: &str, account_page: &str) -> Mail {
+    let when = format_time(when);
+    let from = if from.is_empty() { "Your Claktory".to_owned() } else { from.to_owned() };
+    let text = format!(
+        "{from} moved to {name}.\n\n\
+         When: {when}\nFrom: {ip}\n\n\
+         The copy on the old computer can no longer sign in to your account or unlock its secrets. If you moved it, there's nothing to do.\n\n\
+         If you didn't, remove it from your account at {account_page}, then change the keys kept in its secrets at each service they're for.\n"
+    );
+    let subject = format!("{from} moved to {name}");
+    let (from, name, ip, account_page) = (escape(&from), escape(name), escape(ip), escape(account_page));
+    let html = page(&format!(
+        "<p>{from} moved to {name}.</p>\
+         <p>When: {when}<br>From: {ip}</p>\
+         <p>The copy on the old computer can no longer sign in to your account or unlock its secrets. If you moved it, there's nothing to do.</p>\
+         <p>If you didn't, remove it from your account at {account_page}, then change the keys kept in its secrets at each service they're for.</p>"
+    ));
+    Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
+}
+
 /// To whoever runs the service: the mail provider refused to send. It may
 /// not arrive (the provider refuses this one too), so the log says it as
 /// well.

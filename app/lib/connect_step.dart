@@ -6,6 +6,7 @@ import 'identity.dart';
 import 'name_step.dart' show StepCard;
 import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
+import 'your_claktories.dart' show YourClaktories;
 
 /// Whether the window asks to connect to a Claktory: this Mac has none of
 /// its own (it uses one on another computer) and shows none yet. A phone
@@ -30,6 +31,11 @@ class ConnectStep extends StatefulWidget {
 class _ConnectStepState extends State<ConnectStep> {
   final _code = TextEditingController();
 
+  /// Connecting through the account (sign in, pick one of "Your
+  /// Claktories") rather than with a code: at first when this Mac is
+  /// signed in already.
+  bool? _withAccount;
+
   @override
   void dispose() {
     _code.dispose();
@@ -43,6 +49,34 @@ class _ConnectStepState extends State<ConnectStep> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final claktories = ClaktoriesScope.of(context);
+    final withAccount = _withAccount ??= AppScope.scope(context)
+        .connections
+        .account
+        .signedIn;
+    if (withAccount) {
+      return StepCard(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Connect to your Claktory',
+              style: TextStyles.emphasis.copyWith(color: palette.text),
+            ),
+            const SizedBox(height: Space.xl),
+            YourClaktories(onConnect: _connect),
+            const SizedBox(height: Space.l),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Button(
+                label: 'Use a code instead',
+                onPressed: () => setState(() => _withAccount = false),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return StepCard(
       child: ListenableBuilder(
         listenable: _code,
@@ -95,6 +129,10 @@ class _ConnectStepState extends State<ConnectStep> {
                 spacing: Space.s,
                 runSpacing: Space.s,
                 children: [
+                  Button(
+                    label: 'Sign in with your email instead',
+                    onPressed: () => setState(() => _withAccount = true),
+                  ),
                   if (claktories != null && claktories.canChooseLocal)
                     Button(
                       label: 'Set up Claktory on this Mac',

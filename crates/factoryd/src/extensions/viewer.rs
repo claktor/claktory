@@ -563,8 +563,8 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     let args: ShowArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let folder = {
         let inner = factory.lock();
-        let Some(me) = inner.config.agent(agent) else { return Err("You're no longer in this Claktory.".to_owned()) };
-        crate::runner::places(&factory.home, &inner.config, me).folder
+        let me = super::caller(&inner.config, agent)?;
+        crate::runner::places(&factory.home, &inner.config, me, &[]).folder
     };
     let asked = args.path.trim();
     if asked.is_empty() {

@@ -87,6 +87,7 @@ const ACCOUNT_ID: &str = "factoryAccount";
 const ACCOUNT_LABEL: &str = "factoryLabel";
 const ACCOUNT_IDENTITY: &str = "factoryIdentity";
 const EXHAUSTED_UNTIL: &str = "factoryExhaustedUntil";
+const FABLE_EXHAUSTED_UNTIL: &str = "factoryFableExhaustedUntil";
 const OUT_OF_CREDIT: &str = "factoryOutOfCredit";
 const MORE_ACCOUNTS: &str = "factoryAccounts";
 
@@ -104,8 +105,13 @@ pub struct Account {
     /// empty when unknown.
     pub identity: String,
     /// It reached a usage limit: skipped until then, in ms since 1970; 0
-    /// when it has capacity.
+    /// when it has capacity. Models that draw on the normal limits; Fable
+    /// has `fable_exhausted_until`.
     pub exhausted_until: u64,
+    /// As `exhausted_until`, for Anthropic's Fable models, whose usage
+    /// counts against a weekly limit of their own: at the normal weekly
+    /// limit the account can still run Fable, and the other way round.
+    pub fable_exhausted_until: u64,
     /// An API key that ran out of credit: since when, in ms since 1970; 0
     /// when it has credit as far as Factory knows.
     pub out_of_credit_since: u64,
@@ -117,7 +123,15 @@ impl Account {
     pub fn new(credential: Credential) -> Account {
         let mut id = uuid::Uuid::new_v4().simple().to_string();
         id.truncate(8);
-        Account { id, label: String::new(), identity: String::new(), exhausted_until: 0, out_of_credit_since: 0, credential }
+        Account {
+            id,
+            label: String::new(),
+            identity: String::new(),
+            exhausted_until: 0,
+            fable_exhausted_until: 0,
+            out_of_credit_since: 0,
+            credential,
+        }
     }
 }
 
@@ -127,11 +141,12 @@ fn account_from(value: &Value, position: usize) -> Result<Account, Error> {
     let mut text = |key: &str| object.remove(key).and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
     let (id, label, identity) = (text(ACCOUNT_ID), text(ACCOUNT_LABEL), text(ACCOUNT_IDENTITY));
     let exhausted_until = object.remove(EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
+    let fable_exhausted_until = object.remove(FABLE_EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
     let out_of_credit_since = object.remove(OUT_OF_CREDIT).and_then(|value| value.as_u64()).unwrap_or(0);
     let credential =
         if value.is_object() { serde_json::from_value(Value::Object(object))? } else { serde_json::from_value(value.clone())? };
     let id = if id.is_empty() { (position + 1).to_string() } else { id };
-    Ok(Account { id, label, identity, exhausted_until, out_of_credit_since, credential })
+    Ok(Account { id, label, identity, exhausted_until, fable_exhausted_until, out_of_credit_since, credential })
 }
 
 fn account_value(account: &Account) -> Result<Value, Error> {
@@ -146,6 +161,9 @@ fn account_value(account: &Account) -> Result<Value, Error> {
         }
         if account.exhausted_until != 0 {
             object.insert(EXHAUSTED_UNTIL.into(), Value::from(account.exhausted_until));
+        }
+        if account.fable_exhausted_until != 0 {
+            object.insert(FABLE_EXHAUSTED_UNTIL.into(), Value::from(account.fable_exhausted_until));
         }
         if account.out_of_credit_since != 0 {
             object.insert(OUT_OF_CREDIT.into(), Value::from(account.out_of_credit_since));

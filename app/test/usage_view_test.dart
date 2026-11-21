@@ -175,6 +175,15 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('By account'), findsNothing, reason: 'no accounts yet');
+    // The ranges are tabs in one row.
+    expect(
+      tester.getCenter(find.text('All time')).dy,
+      tester.getCenter(find.text('Today')).dy,
+    );
+    expect(
+      tester.getTopLeft(find.text('All time')).dx,
+      greaterThan(tester.getTopRight(find.text('30 days')).dx),
+    );
 
     await tester.tap(find.text('Today'));
     await settle(tester);

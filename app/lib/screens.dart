@@ -24,6 +24,7 @@ const settingsSections = {
   'devices',
   'resources',
   'display',
+  'voice',
 };
 
 /// When the person last used this app: a click, a touch, a scroll, the

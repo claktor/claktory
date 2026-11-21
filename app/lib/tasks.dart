@@ -6,6 +6,8 @@ import 'controls.dart';
 import 'explorer.dart';
 import 'extensions.dart';
 import 'identity.dart';
+import 'mobile/presentation.dart';
+import 'mobile/metrics.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -76,10 +78,8 @@ class _Heading extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -95,7 +95,8 @@ class _Empty extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: Space.s, vertical: Space.s),
     child: Text(
       text,
-      style: TextStyles.body.copyWith(color: Palette.of(context).textFaint),
+      style: TypeScale.of(context).body
+          .copyWith(color: Palette.of(context).textFaint),
     ),
   );
 }
@@ -160,153 +161,186 @@ class _TaskRowState extends State<TaskRow> {
     }
   }
 
+  /// On a phone Stop asks first: it ends what the task runs, and a finger
+  /// can land on it by mistake.
+  Future<void> _confirmStop() async {
+    if (isPhoneLayout(context)) {
+      final sure = await showActions<bool>(
+        context,
+        title: widget.task.command,
+        message: 'It stops right away.',
+        actions: const [SheetAction('Stop task', true, destructive: true)],
+        cancelLabel: 'Keep running',
+      );
+      if (sure != true || !mounted) return;
+    }
+    await _stop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
     final task = widget.task;
     final failed = !task.running && taskFailed(task.status);
     final owner = widget.own ? null : widget.store.agent(task.agentId);
     final started = DateTime.fromMillisecondsSinceEpoch(task.started.toInt());
-    final caption = TextStyles.caption.copyWith(
+    final caption = TypeScale.of(context).caption.copyWith(
       color: palette.textFaint,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
-    return Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s,
-          vertical: Space.s - 2,
-        ),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: Space.l + 2,
-              height: 18,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: task.running
-                    ? const LiveDot()
-                    : Dot(color: failed ? palette.danger : palette.textFaint),
-              ),
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    task.command,
-                    maxLines: _open ? null : 2,
-                    overflow: _open ? null : TextOverflow.ellipsis,
-                    style: TextStyles.code.copyWith(
-                      color: task.running ? palette.text : palette.textMuted,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  // What's known about it, wrapping in a narrow panel.
-                  Wrap(
-                    spacing: Space.s,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text(task.id, style: caption),
-                      if (!widget.own)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            owner == null
-                                ? const UnknownCharacter(size: 20)
-                                : AgentCharacter(agent: owner, size: 20),
-                            const SizedBox(width: Space.xs),
-                            Text(
-                              owner?.name ?? task.agentId,
-                              style: TextStyles.caption.copyWith(
-                                color: palette.textMuted,
-                              ),
-                            ),
-                          ],
-                        ),
-                      Text(logTime(started), style: caption),
-                      Ticking(
-                        active: task.running,
-                        builder: (context, now) => Text(
-                          formatDuration(
-                            Duration(
-                              milliseconds:
-                                  (task.running
-                                      ? now.millisecondsSinceEpoch
-                                      : task.ended.toInt()) -
-                                  task.started.toInt(),
-                            ),
-                            whole: task.running,
-                          ),
-                          style: caption.copyWith(color: palette.textMuted),
-                        ),
-                      ),
-                      if (!task.running && task.status.isNotEmpty)
-                        Text(
-                          task.status,
-                          style: TextStyles.caption.copyWith(
-                            color: failed ? palette.danger : palette.textMuted,
-                          ),
-                        ),
-                    ],
-                  ),
-                  if (_error != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: ErrorLine(
-                        _error!,
-                        about:
-                            'Stopping ${task.id} of agent ${task.agentId} '
-                            'was refused.',
-                      ),
-                    ),
-                  if (_open) ...[
-                    const SizedBox(height: Space.s),
-                    if (task.logTail.isEmpty)
-                      Text(
-                        task.running ? 'No output yet' : 'No output',
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                        ),
-                      )
-                    else
-                      CodeBlock(task.logTail, links: true),
-                    if (task.logPath.isNotEmpty) ...[
-                      const SizedBox(height: Space.xs),
-                      Text(
-                        shortPath(task.logPath),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                        ),
-                      ),
-                    ],
-                  ],
-                ],
-              ),
-            ),
-            if (task.running) ...[
-              const SizedBox(width: Space.s),
-              Button(label: 'Stop', onPressed: _stopping ? null : _stop),
-            ],
-            const SizedBox(width: Space.s),
-            SizedBox(
-              height: task.running ? 28 : 18,
-              child: Center(
-                child: Chevron(
-                  color: hovered ? palette.textMuted : palette.textFaint,
-                  down: _open,
+    final stop = Button(
+      label: 'Stop',
+      onPressed: _stopping ? null : _confirmStop,
+    );
+    return Semantics(
+      container: true,
+      expanded: _open,
+      child: Pressable(
+        onTap: () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.s,
+            vertical: Space.s - 2,
+          ),
+          decoration: BoxDecoration(
+            color: hovered ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: Space.l + 2,
+                height: 18,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: task.running
+                      ? const LiveDot()
+                      : Dot(color: failed ? palette.danger : palette.textFaint),
                 ),
               ),
-            ),
-          ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      task.command,
+                      maxLines: _open ? null : 2,
+                      overflow: _open ? null : TextOverflow.ellipsis,
+                      style: TypeScale.of(context).code.copyWith(
+                        color: task.running ? palette.text : palette.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    // What's known about it, wrapping in a narrow panel.
+                    Wrap(
+                      spacing: Space.s,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(task.id, style: caption),
+                        if (!widget.own)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              owner == null
+                                  ? const UnknownCharacter(size: 20)
+                                  : AgentCharacter(agent: owner, size: 20),
+                              const SizedBox(width: Space.xs),
+                              Flexible(
+                                child: Text(
+                                  owner?.name ?? task.agentId,
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textMuted),
+                                ),
+                              ),
+                            ],
+                          ),
+                        Text(logTime(started), style: caption),
+                        Ticking(
+                          active: task.running,
+                          builder: (context, now) => Text(
+                            formatDuration(
+                              Duration(
+                                milliseconds:
+                                    (task.running
+                                        ? now.millisecondsSinceEpoch
+                                        : task.ended.toInt()) -
+                                    task.started.toInt(),
+                              ),
+                              whole: task.running,
+                            ),
+                            style: caption.copyWith(color: palette.textMuted),
+                          ),
+                        ),
+                        if (!task.running && task.status.isNotEmpty)
+                          Text(
+                            task.status,
+                            style: TypeScale.of(context).caption.copyWith(
+                              color: failed
+                                  ? palette.danger
+                                  : palette.textMuted,
+                            ),
+                          ),
+                      ],
+                    ),
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: ErrorLine(
+                          _error!,
+                          about:
+                              'Stopping ${task.id} of agent ${task.agentId} '
+                              'was refused.',
+                        ),
+                      ),
+                    // On a phone Stop is under it once it's open: beside it
+                    // it would leave the command no room.
+                    if (phone && _open && task.running) ...[
+                      const SizedBox(height: Space.s),
+                      stop,
+                    ],
+                    if (_open) ...[
+                      const SizedBox(height: Space.s),
+                      if (task.logTail.isEmpty)
+                        Text(
+                          task.running ? 'No output yet' : 'No output',
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
+                        )
+                      else
+                        CodeBlock(task.logTail, links: true),
+                      if (task.logPath.isNotEmpty) ...[
+                        const SizedBox(height: Space.xs),
+                        Text(
+                          shortPath(task.logPath),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
+                        ),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+              if (task.running && !phone) ...[
+                const SizedBox(width: Space.s),
+                stop,
+              ],
+              const SizedBox(width: Space.s),
+              SizedBox(
+                height: task.running && !phone ? 28 : 18,
+                child: Center(
+                  child: Chevron(
+                    color: hovered ? palette.textMuted : palette.textFaint,
+                    down: _open,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

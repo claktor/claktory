@@ -6,6 +6,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
+import 'mobile/metrics.dart' show TypeScale;
 import 'login.dart';
 import 'name_step.dart' show StepCard;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -176,9 +177,15 @@ class _ConnectModelState extends State<ConnectModel> {
   List<Widget> _heading(BuildContext context, String title, String body) {
     final palette = Palette.of(context);
     return [
-      Text(title, style: TextStyles.emphasis.copyWith(color: palette.text)),
+      Text(
+        title,
+        style: TypeScale.of(context).emphasis.copyWith(color: palette.text),
+      ),
       const SizedBox(height: Space.s),
-      Text(body, style: TextStyles.body.copyWith(color: palette.textMuted)),
+      Text(
+        body,
+        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+      ),
       const SizedBox(height: Space.xl),
     ];
   }
@@ -234,7 +241,8 @@ class _ConnectModelState extends State<ConnectModel> {
             Expanded(
               child: Text(
                 'Rivet can answer once a model is connected.',
-                style: TextStyles.caption.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
               ),
             )
           else
@@ -313,7 +321,7 @@ class _ConnectModelState extends State<ConnectModel> {
     return [
       Text(
         'Connected',
-        style: TextStyles.emphasis.copyWith(color: palette.text),
+        style: TypeScale.of(context).emphasis.copyWith(color: palette.text),
       ),
       const SizedBox(height: Space.l),
       Row(
@@ -323,7 +331,7 @@ class _ConnectModelState extends State<ConnectModel> {
           Flexible(
             child: Text(
               plan,
-              style: TextStyles.label.copyWith(color: palette.text),
+              style: TypeScale.of(context).label.copyWith(color: palette.text),
             ),
           ),
         ],
@@ -333,7 +341,7 @@ class _ConnectModelState extends State<ConnectModel> {
         _step && rivet != null
             ? '${rivet.name} is ready.'
             : 'Your agents can work now.',
-        style: TextStyles.body.copyWith(color: palette.textMuted),
+        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
       ),
       const SizedBox(height: Space.xl),
       Align(
@@ -399,14 +407,14 @@ class _Choice extends StatelessWidget {
                     children: [
                       Text(
                         title,
-                        style: TextStyles.label.copyWith(color: palette.text),
+                        style: TypeScale.of(context).label
+                            .copyWith(color: palette.text),
                       ),
                       const SizedBox(height: 2),
                       Text(
                         note,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textMuted,
-                        ),
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.textMuted),
                       ),
                     ],
                   ),

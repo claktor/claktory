@@ -7,6 +7,9 @@ import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import 'identity.dart';
+import 'selection.dart' show CopyShape, Unselectable;
+import 'mobile/metrics.dart';
+import 'mobile/navigation.dart';
 import 'loopback_forward.dart' show openLink;
 
 /// Builds one block of rendered text: [span] is all it shows (with its
@@ -96,6 +99,7 @@ class _MarkdownState extends State<Markdown> {
     final renderer = _Renderer(
       palette,
       color ?? palette.text,
+      TypeScale.of(context),
       textBlock == null ? null : _Blocks(textBlock),
       (href) {
         final url = Uri.tryParse(href);
@@ -111,9 +115,13 @@ class _MarkdownState extends State<Markdown> {
     );
     final blocks = renderer.blocks(nodes);
     _links.finish();
-    final column = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: blocks,
+    // Copied, its blocks are paragraphs: a blank line between them.
+    final column = CopyShape(
+      separator: '\n\n',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: blocks,
+      ),
     );
     if (!widget.shortLinks) return column;
     return OverlayPortal(
@@ -368,34 +376,34 @@ class CodeBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final code = TypeScale.of(context).code;
     return Container(
       decoration: BoxDecoration(
         color: palette.sidebar,
         borderRadius: BorderRadius.circular(Radii.panel),
         border: Border.all(color: palette.hairline),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.m,
-          vertical: Space.s + 2,
+      // Its sideways scroll is its own: a phone's drawer doesn't take it.
+      child: NoDrawerGesture(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.m,
+            vertical: Space.s + 2,
+          ),
+          child:
+              text ??
+              (links && webAddresses.hasMatch(this.code)
+                  ? _LinkedCode(
+                      this.code,
+                      style: code.copyWith(color: color ?? palette.text),
+                    )
+                  : Text(
+                      this.code,
+                      softWrap: false,
+                      style: code.copyWith(color: color ?? palette.text),
+                    )),
         ),
-        child:
-            text ??
-            (links && webAddresses.hasMatch(code)
-                ? _LinkedCode(
-                    code,
-                    style: TextStyles.code.copyWith(
-                      color: color ?? palette.text,
-                    ),
-                  )
-                : Text(
-                    code,
-                    softWrap: false,
-                    style: TextStyles.code.copyWith(
-                      color: color ?? palette.text,
-                    ),
-                  )),
       ),
     );
   }
@@ -522,7 +530,8 @@ InlineSpan _linked(InlineSpan span, LinkLook look) {
 class _Renderer {
   _Renderer(
     this.palette,
-    this.color, [
+    this.color,
+    this.type, [
     this.textBlocks,
     this.link,
     this.shortened,
@@ -530,6 +539,9 @@ class _Renderer {
 
   final Palette palette;
   final Color color;
+
+  /// Its type: 17pt reading text on a phone, the Mac's 13pt elsewhere.
+  final TypeScale type;
 
   /// How a link to `href` looks and opens; null where links don't open.
   final LinkLook? Function(String href)? link;
@@ -541,7 +553,7 @@ class _Renderer {
   /// addresses shown so; null where they show whole.
   final Set<String>? shortened;
 
-  TextStyle get _body => TextStyles.body.copyWith(color: color);
+  TextStyle get _body => type.body.copyWith(color: color);
 
   List<Widget> blocks(List<md.Node> nodes) {
     final widgets = <Widget>[];
@@ -571,9 +583,11 @@ class _Renderer {
       case 'h2':
         return _rich(
           node.children,
-          TextStyles.emphasis.copyWith(
+          type.emphasis.copyWith(
             color: color,
-            fontSize: node.tag == 'h1' ? 18 : 16,
+            // A step and two over the text: 18 and 16 over the Mac's 13,
+            // 22 and 20 over a phone's 17.
+            fontSize: type.body.fontSize! + (node.tag == 'h1' ? 5 : 3),
           ),
         );
       case 'h3':
@@ -582,7 +596,7 @@ class _Renderer {
       case 'h6':
         return _rich(
           node.children,
-          TextStyles.label.copyWith(color: color, fontWeight: FontWeight.w600),
+          type.label.copyWith(color: color, fontWeight: FontWeight.w600),
         );
       case 'pre':
         final code = _trimTrailingNewline(node.textContent);
@@ -592,7 +606,7 @@ class _Renderer {
           text: blocks?.block(
             TextSpan(
               text: code,
-              style: TextStyles.code.copyWith(color: palette.text),
+              style: type.code.copyWith(color: palette.text),
             ),
             (span) => Text.rich(span, softWrap: false),
           ),
@@ -606,15 +620,19 @@ class _Renderer {
           decoration: BoxDecoration(
             border: Border(left: BorderSide(color: palette.hairline, width: 2)),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: _Renderer(
-              palette,
-              palette.textMuted,
-              textBlocks,
-              link,
-              shortened,
-            ).blocks(node.children ?? const []),
+          child: CopyShape(
+            separator: '\n\n',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: _Renderer(
+                palette,
+                palette.textMuted,
+                type,
+                textBlocks,
+                link,
+                shortened,
+              ).blocks(node.children ?? const []),
+            ),
           ),
         );
       case 'hr':
@@ -635,24 +653,34 @@ class _Renderer {
       final marker = ordered ? '${number++}.' : '•';
       if (items.isNotEmpty) items.add(const SizedBox(height: Space.xs));
       items.add(
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: ordered ? 22 : 14,
-              child: Text(
-                marker,
-                style: _body.copyWith(color: palette.textMuted),
+        // Copied with more than itself, an item keeps its marker, its
+        // other lines under its text; the marker isn't selected on its own.
+        CopyShape(
+          lead: '$marker ',
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: ordered ? 22 : 14,
+                child: Unselectable(
+                  child: Text(
+                    marker,
+                    style: _body.copyWith(color: palette.textMuted),
+                  ),
+                ),
               ),
-            ),
-            Expanded(child: _listItem(item)),
-          ],
+              Expanded(child: _listItem(item)),
+            ],
+          ),
         ),
       );
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: items,
+    return CopyShape(
+      separator: '\n',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: items,
+      ),
     );
   }
 
@@ -680,9 +708,12 @@ class _Renderer {
       }
     }
     flushInline();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: parts,
+    return CopyShape(
+      separator: '\n',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: parts,
+      ),
     );
   }
 
@@ -702,7 +733,7 @@ class _Renderer {
               ),
               child: _rich(
                 cell.children,
-                header ? TextStyles.label.copyWith(color: color) : _body,
+                header ? type.label.copyWith(color: color) : _body,
               ),
             ),
           );
@@ -726,11 +757,18 @@ class _Renderer {
       addRows(section, header: section.tag == 'thead');
     }
     if (rows.isEmpty) return const SizedBox.shrink();
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Table(
-        defaultColumnWidth: const IntrinsicColumnWidth(),
-        children: rows,
+    return NoDrawerGesture(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        // Copied, a row's cells are tab-separated, rows on lines of their
+        // own, as a spreadsheet takes them.
+        child: CopyShape(
+          cells: true,
+          child: Table(
+            defaultColumnWidth: const IntrinsicColumnWidth(),
+            children: rows,
+          ),
+        ),
       ),
     );
   }

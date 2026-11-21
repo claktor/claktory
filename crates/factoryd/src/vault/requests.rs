@@ -5,7 +5,7 @@ use std::sync::Arc;
 use factory_protocol::v1;
 
 use super::{Key, Value, Vault, VaultError, env};
-use crate::factory::{Factory, RequestError};
+use crate::factory::{Factory, RequestError, host_event};
 
 /// How long a wrong passphrase takes to be refused, so guessing is slow.
 const WRONG_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -49,6 +49,7 @@ pub(crate) async fn unlock(factory: &Arc<Factory>, passphrase: &str) -> Result<(
     if !factory.vault.is_open() {
         factory.vault.unlock(vmk);
         factory.vault_changed();
+        crate::account::opened_by_hand(factory);
     }
     Ok(())
 }
@@ -62,6 +63,7 @@ pub(crate) async fn change_passphrase(factory: &Arc<Factory>, old: &str, new: &s
     if !factory.vault.is_open() {
         factory.vault.unlock(reopened);
         factory.vault_changed();
+        crate::account::opened_by_hand(factory);
     }
     Ok(())
 }
@@ -300,13 +302,91 @@ pub(crate) async fn set_locked_mode(
     Ok(session.answer())
 }
 
+/// The admin agent that takes approved requests: Rivet when it's an admin
+/// with Secrets on, else the first such admin in the settings order; never
+/// the asker itself (no agent may end up granting to itself), and None
+/// when there's no other.
+pub(crate) fn secrets_admin(config: &crate::config::Config, asker: &str) -> Option<String> {
+    let qualifies = |agent: &&crate::config::AgentConfig| {
+        agent.id != asker && crate::proposals::is_admin(agent) && crate::extensions::enabled(agent, crate::extensions::secrets::ID)
+    };
+    let agents = &config.agents;
+    agents
+        .iter()
+        .find(|agent| agent.id == "rivet" && qualifies(agent))
+        .or_else(|| agents.iter().find(qualifies))
+        .map(|agent| agent.id.clone())
+}
+
+/// The person approved the need: the request passes to the admin agent,
+/// which finds a matching secret or collects a new one. The admin is
+/// re-picked here in case the one chosen at request time is gone.
+fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: &str) -> Result<(), RequestError> {
+    let admin = {
+        let inner = factory.lock();
+        let stored = inner
+            .config
+            .agent(&asked.admin_agent_id)
+            .filter(|agent| {
+                agent.id != asked.agent_id
+                    && crate::proposals::is_admin(agent)
+                    && crate::extensions::enabled(agent, crate::extensions::secrets::ID)
+            })
+            .map(|agent| agent.id.clone());
+        stored.or_else(|| secrets_admin(&inner.config, &asked.agent_id))
+    };
+    let Some(admin) = admin else {
+        return Err(VaultError::Invalid("No admin agent can take this request: give a secret or add one directly.".to_owned()).into());
+    };
+    let approved = factory.vault.approve_request(&asked.agent_id, &asked.id, &admin, comment)?;
+    factory.vault_changed();
+    show_everywhere(factory, approved.clone());
+    let (person, asker_name) = {
+        let inner = factory.lock();
+        let asker_name = inner.config.agent(&asked.agent_id).map_or_else(|| asked.agent_id.clone(), |agent| agent.name.clone());
+        (inner.config.person_capitalized().to_owned(), asker_name)
+    };
+    let wanted = approved.new_secret.clone().unwrap_or_default();
+    let variables: Vec<&str> = wanted.variables.iter().map(|variable| variable.name.as_str()).collect();
+    let variables = if variables.is_empty() { "none named".to_owned() } else { variables.join(", ") };
+    let summary = format!("{person} approved {asker_name}'s request for {}", approved.secret_name);
+    let mut text = format!(
+        "{summary}: find it one.\n\nIt needs: {}\nVariables it expects: {variables}\nWhy it asked: {}",
+        if wanted.description.is_empty() { approved.secret_name.as_str() } else { wanted.description.as_str() },
+        approved.reason
+    );
+    if !comment.trim().is_empty() {
+        text.push_str(&format!("\n{person} added: {}", comment.trim()));
+    }
+    text.push_str(&format!(
+        "\n\nGive it a matching secret from the vault: secrets_list to look, then secrets_grant with request: \"{id}\" (and aliases if its variable names differ). When none fits, secrets_collect with request: \"{id}\" asks {person} to add one: the card shows in your conversation, prefilled, and they type the values straight into the vault; you never see them. You'll be told how it ends either way.",
+        id = approved.id
+    ));
+    let event = factory_agent::Event {
+        source: factory_agent::EventSource::Host,
+        from: "Claktory".to_owned(),
+        id: String::new(),
+        summary: format!("{summary}."),
+        transient: false,
+    };
+    factory.deliver_event(&admin, text, event);
+    Ok(())
+}
+
 /// The person gives an agent what it asked for (a new secret made from
 /// `entries`, or an existing one), or dismisses the request; its entry
-/// shows the decision, and the agent is told.
+/// shows the decision, and the agent is told. With `approve_only`, they
+/// approve the need instead, and the admin agent takes it from there.
 pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
     let asked = factory.vault.pending_request(agent, &request.request_id)?;
+    if request.approve && request.approve_only {
+        if asked.state() == v1::SecretRequestState::Approved {
+            return Err(VaultError::Invalid("It's approved already; the admin agent is on it.".to_owned()).into());
+        }
+        return approve_to_admin(factory, &asked, &request.comment);
+    }
     let given = if request.approve {
         let mut aliases = std::collections::BTreeMap::new();
         let secret = if !request.secret_id.is_empty() {
@@ -332,8 +412,28 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     let decided =
         factory.vault.decide_request(agent, &asked.id, given.as_ref().map(|(id, name)| (id.as_str(), name.as_str())), &request.comment)?;
     factory.vault_changed();
-    // Its entry shows the decision.
-    show(factory, decided);
+    // Its entry shows the decision, the admin agent's card too.
+    show_everywhere(factory, decided);
+    // An admin agent that was working it hears the person handled it.
+    if asked.state() == v1::SecretRequestState::Approved && !asked.admin_agent_id.is_empty() {
+        let (person, asker_name) = {
+            let inner = factory.lock();
+            let asker_name = inner.config.agent(agent).map_or_else(|| agent.to_owned(), |found| found.name.clone());
+            (inner.config.person_capitalized().to_owned(), asker_name)
+        };
+        let summary = match &given {
+            Some((_, name)) => format!("{person} gave {asker_name} {name} for its request themselves; nothing more to do"),
+            None => format!("{person} dismissed {asker_name}'s request for {} themselves; nothing more to do", asked.secret_name),
+        };
+        let event = factory_agent::Event {
+            source: factory_agent::EventSource::Host,
+            from: "Claktory".to_owned(),
+            id: String::new(),
+            summary: format!("{summary}."),
+            transient: true,
+        };
+        factory.deliver_event(&asked.admin_agent_id, format!("{summary}."), event);
+    }
     let person = factory.lock().config.person_capitalized().to_owned();
     let comment = request.comment.trim();
     // What it got, and nothing else of the vault.
@@ -349,44 +449,43 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     }
     summary.push('.');
     let text = format!("{summary}{what}\n\nYou asked because: {}", asked.reason);
-    let event = factory_agent::Event {
-        source: factory_agent::EventSource::Host,
-        from: "Claktory".to_owned(),
-        id: String::new(),
-        summary,
-        transient: false,
-    };
+    let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
 }
 
-/// The other names an existing secret given for `asked` is given under:
-/// the person's (`request.aliases`), none (`as_is`, or the secret sets every
-/// name asked for), or the one missing name paired with the one unused
-/// variable. Any other mismatch is the person's to settle.
-fn aliases_for(
+/// The secret `secret_ref` names (id or name) and the other names it's
+/// given under for `asked`: `given`'s (trimmed), none (`as_is`, or the
+/// secret sets every name asked for), or the one missing name paired with
+/// the one unused variable. Any other mismatch is the caller's to settle.
+fn alias_plan(
     factory: &Factory,
     asked: &v1::SecretRequest,
-    request: &v1::DecideSecretRequest,
-) -> Result<std::collections::BTreeMap<String, String>, RequestError> {
-    if !request.aliases.is_empty() {
-        return Ok(request.aliases.iter().map(|(alias, variable)| (alias.trim().to_owned(), variable.trim().to_owned())).collect());
-    }
-    if request.as_is {
-        return Ok(std::collections::BTreeMap::new());
-    }
+    secret_ref: &str,
+    given: &std::collections::BTreeMap<String, String>,
+    as_is: bool,
+) -> Result<(String, std::collections::BTreeMap<String, String>), RequestError> {
     let state = factory.vault.state(|_, _| false);
-    let Some(secret) = state.secrets.iter().find(|secret| secret.id == request.secret_id || secret.name == request.secret_id) else {
-        return Err(VaultError::NoSecret(request.secret_id.clone()).into());
+    let Some(secret) = state.secrets.iter().find(|secret| secret.id == secret_ref || secret.name == secret_ref) else {
+        return Err(VaultError::NoSecret(secret_ref.to_owned()).into());
     };
+    if !given.is_empty() {
+        return Ok((
+            secret.id.clone(),
+            given.iter().map(|(alias, variable)| (alias.trim().to_owned(), variable.trim().to_owned())).collect(),
+        ));
+    }
+    if as_is {
+        return Ok((secret.id.clone(), std::collections::BTreeMap::new()));
+    }
     let has: Vec<&str> = secret.variables.iter().map(|variable| variable.name.as_str()).collect();
     let wanted: Vec<&str> =
         asked.new_secret.iter().flat_map(|wanted| wanted.variables.iter().map(|variable| variable.name.as_str())).collect();
     let missing: Vec<&str> = wanted.iter().copied().filter(|name| !has.contains(name)).collect();
     let unused: Vec<&str> = has.iter().copied().filter(|name| !wanted.contains(name)).collect();
     match (missing.as_slice(), unused.as_slice()) {
-        ([], _) => Ok(std::collections::BTreeMap::new()),
-        ([alias], [variable]) => Ok(std::collections::BTreeMap::from([((*alias).to_owned(), (*variable).to_owned())])),
+        ([], _) => Ok((secret.id.clone(), std::collections::BTreeMap::new())),
+        ([alias], [variable]) => Ok((secret.id.clone(), std::collections::BTreeMap::from([((*alias).to_owned(), (*variable).to_owned())]))),
         _ => Err(VaultError::Invalid(format!(
             "{} sets {}, not {}: choose which of its variables each name is, or give it as it is.",
             secret.name,
@@ -395,6 +494,59 @@ fn aliases_for(
         ))
         .into()),
     }
+}
+
+/// The other names an existing secret given for `asked` is given under; the
+/// person's pick resolved as `alias_plan` says.
+fn aliases_for(
+    factory: &Factory,
+    asked: &v1::SecretRequest,
+    request: &v1::DecideSecretRequest,
+) -> Result<std::collections::BTreeMap<String, String>, RequestError> {
+    alias_plan(factory, asked, &request.secret_id, &request.aliases, request.as_is).map(|(_, aliases)| aliases)
+}
+
+/// An admin agent gives an approved request an existing secret: the grant
+/// goes to the asker, with the aliases the request needs, the request is
+/// granted, and the asker is told. Returns the secret's name and the
+/// asker's id, for the admin's answer.
+pub(crate) fn fulfil_request(
+    factory: &Arc<Factory>,
+    admin: &str,
+    request_id: &str,
+    secret_ref: &str,
+    aliases: &std::collections::BTreeMap<String, String>,
+    as_is: bool,
+) -> Result<(String, String), RequestError> {
+    let asked = factory.vault.approved_request(request_id)?;
+    let agent = asked.agent_id.clone();
+    if agent == admin {
+        return Err(VaultError::Invalid("You can't give a secret to yourself; ask the person.".to_owned()).into());
+    }
+    factory.known_agent(&agent)?;
+    let (secret_id, aliases) = alias_plan(factory, &asked, secret_ref, aliases, as_is)?;
+    let name = factory.vault.grant_as(&secret_id, &agent, admin, &aliases)?;
+    // The person's approval comment stays with the decided request.
+    let decided = factory.vault.decide_request(&agent, &asked.id, Some((secret_id.as_str(), name.as_str())), &asked.comment)?;
+    factory.vault_changed();
+    show_everywhere(factory, decided);
+    let (person, admin_name) = {
+        let inner = factory.lock();
+        let admin_name = inner.config.agent(admin).map_or_else(|| admin.to_owned(), |found| found.name.clone());
+        (inner.config.person_capitalized().to_owned(), admin_name)
+    };
+    let label = factory.vault.granted(&agent).remove(&secret_id).unwrap_or_else(|| name.clone());
+    let summary = format!("{person} approved your request and {admin_name} gave you {name}: pass it in bash's `secrets`");
+    let text = format!("{summary}.\n\nIt's {label}.\n\nYou asked because: {}", asked.reason);
+    let event = factory_agent::Event {
+        source: factory_agent::EventSource::Host,
+        from: "Claktory".to_owned(),
+        id: String::new(),
+        summary: format!("{summary}."),
+        transient: false,
+    };
+    factory.deliver_event(&agent, text, event);
+    Ok((name, agent))
 }
 
 /// Shows a request as it is now in its agent's conversation.
@@ -409,6 +561,44 @@ pub(crate) fn show(factory: &Factory, request: v1::SecretRequest) {
     if let Some(entry) = entry {
         factory.send_change(&inner, &agent, crate::transcript::Change::Entry(entry));
         // Whether it waits for the person shows with the agent.
+        factory.broadcast_workspace(&inner);
+    }
+}
+
+/// The admin agent `id` is being deleted: the open requests it held go
+/// back to the person (their admin cleared, collecting ended), so the
+/// asker's card is theirs to answer directly again, and counts in Needs
+/// you again. New requests pick the next admin by themselves.
+pub(crate) fn forget_admin(factory: &Factory, id: &str) {
+    let orphaned = match factory.vault.forget_admin(id) {
+        Ok(orphaned) => orphaned,
+        Err(error) => {
+            tracing::error!(agent = %id, %error, "could not hand back the secret requests it held");
+            return;
+        }
+    };
+    for request in orphaned {
+        show_everywhere(factory, request);
+    }
+}
+
+/// Shows a request in its asker's conversation and, when an admin agent's
+/// conversation shows its card (secrets_collect), there too.
+pub(crate) fn show_everywhere(factory: &Factory, request: v1::SecretRequest) {
+    let admin = request.admin_agent_id.clone();
+    let asker = request.agent_id.clone();
+    show(factory, request.clone());
+    if admin.is_empty() || admin == asker {
+        return;
+    }
+    let mut inner = factory.lock();
+    let entry = inner
+        .agents
+        .get_mut(&admin)
+        .and_then(|runtime| runtime.transcript.as_mut())
+        .and_then(|transcript| transcript.set_secret_request(request));
+    if let Some(entry) = entry {
+        factory.send_change(&inner, &admin, crate::transcript::Change::Entry(entry));
         factory.broadcast_workspace(&inner);
     }
 }
@@ -468,13 +658,7 @@ pub(crate) fn expire_requests(factory: &Arc<Factory>, now: i64) {
             "{summary}: it waited 12 hours without an answer, so it can't be answered any more. If you still need it, ask again with secrets_request.\n\nYou asked because: {}",
             asked.reason
         );
-        let event = factory_agent::Event {
-            source: factory_agent::EventSource::Host,
-            from: "Claktory".to_owned(),
-            id: String::new(),
-            summary: format!("{summary}."),
-            transient: false,
-        };
+        let event = host_event(format!("{summary}."));
         factory.deliver_event(agent, text, event);
     }
 }

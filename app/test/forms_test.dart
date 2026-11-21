@@ -1,4 +1,5 @@
 import 'package:factory_app/controls.dart' show TextField;
+import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -91,8 +92,12 @@ void main() {
     final harness = Harness(folders.snapshot());
     await harness.show(tester, size: const Size(375, 812));
     await pumpFrames(tester);
-    // A phone's project menu offers its settings.
-    await tester.tap(find.text('Factory').first);
+    // A phone's project, in the drawer, offers its settings under More.
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
+    await pumpFrames(tester);
+    await tester.tap(find.bySemanticsLabel('Factory options'));
     await pumpFrames(tester);
     await tester.tap(find.text('Project settings'));
     await pumpFrames(tester);

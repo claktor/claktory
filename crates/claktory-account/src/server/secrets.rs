@@ -109,17 +109,60 @@ impl Secrets {
         if key.is_empty() || key.chars().any(|character| character.is_whitespace() || character.is_control()) {
             return Err("that isn't an API key".to_owned());
         }
+        let (_, mut file) = Secrets::read_file(path)?;
+        *field(&mut file) = key.to_owned();
+        Secrets::replace(path, &file)
+    }
+
+    /// Replaces the keys `rotate` names with new ones, keeping everything
+    /// else, after copying the file as it was to `<FILE>.before-<unix time>`
+    /// (readable only by its owner), which it returns. A new `signing_key`
+    /// makes every Claktory sign in again (it pins the key); their vaults
+    /// open by themselves after. A new `k_share` changes every Claktory's
+    /// service share: each vault opens only with its recovery key, once.
+    pub fn rotate(path: &Path, rotate: Rotate, now: i64) -> Result<(Secrets, std::path::PathBuf), String> {
+        if !rotate.signing_key && !rotate.k_share {
+            return Err("say which key to rotate".to_owned());
+        }
+        let (text, mut file) = Secrets::read_file(path)?;
+        let before = path.with_file_name(format!(
+            "{}.before-{now}",
+            path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+        ));
+        write_new(&before, &text)?;
+        if rotate.k_share {
+            file.k_share = b64(*random_32());
+        }
+        if rotate.signing_key {
+            file.signing_key = b64(*random_32());
+        }
+        Secrets::replace(path, &file)?;
+        Ok((Secrets::load(path)?, before))
+    }
+
+    /// The file's text and contents, once it loads as secrets.
+    fn read_file(path: &Path) -> Result<(Zeroizing<String>, Zeroizing<File>), String> {
         Secrets::load(path)?;
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|error| format!("can't read {}: {error}", path.display()))?);
-        let mut file: File = serde_json::from_str(&text).map_err(|error| format!("{} isn't a secrets file: {error}", path.display()))?;
-        *field(&mut file) = key.to_owned();
-        let file = Zeroizing::new(file);
-        let text = Zeroizing::new(serde_json::to_string_pretty(&*file).map_err(|error| error.to_string())? + "\n");
+        let file: File = serde_json::from_str(&text).map_err(|error| format!("{} isn't a secrets file: {error}", path.display()))?;
+        Ok((text, Zeroizing::new(file)))
+    }
+
+    /// Writes `file` beside `path`, then over it in one step.
+    fn replace(path: &Path, file: &File) -> Result<(), String> {
+        let text = Zeroizing::new(serde_json::to_string_pretty(file).map_err(|error| error.to_string())? + "\n");
         let partial = path.with_extension("partial");
         let _ = std::fs::remove_file(&partial);
         write_new(&partial, &text)?;
         std::fs::rename(&partial, path).map_err(|error| format!("can't replace {}: {error}", path.display()))
     }
+}
+
+/// Which keys `Secrets::rotate` replaces.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rotate {
+    pub signing_key: bool,
+    pub k_share: bool,
 }
 
 /// Writes a new file only its owner can read.

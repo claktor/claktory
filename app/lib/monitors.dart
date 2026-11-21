@@ -4,6 +4,9 @@ import 'backend.dart';
 import 'controls.dart';
 import 'extensions.dart' show logTime;
 import 'identity.dart';
+import 'mobile/lines.dart';
+import 'mobile/presentation.dart';
+import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
@@ -92,10 +95,8 @@ class _Heading extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -119,8 +120,8 @@ class _Line extends StatelessWidget {
       child: Text(
         text,
         style: caption
-            ? TextStyles.caption.copyWith(color: palette.textMuted)
-            : TextStyles.body.copyWith(color: palette.textFaint),
+            ? TypeScale.of(context).caption.copyWith(color: palette.textMuted)
+            : TypeScale.of(context).body.copyWith(color: palette.textFaint),
       ),
     );
   }
@@ -212,9 +213,26 @@ class _MonitorRowState extends State<MonitorRow> {
     }
   }
 
+  /// On a phone Cancel asks first: it can't be undone, and a finger can
+  /// land on it by mistake.
+  Future<void> _cancel() async {
+    if (isPhoneLayout(context)) {
+      final sure = await showActions<bool>(
+        context,
+        title: widget.monitor.name,
+        message: "It won't fire again.",
+        actions: const [SheetAction('Cancel monitor', true, destructive: true)],
+        cancelLabel: 'Keep monitor',
+      );
+      if (sure != true || !mounted) return;
+    }
+    await _change(MonitorAction.MONITOR_ACTION_CANCEL);
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
     final monitor = widget.monitor;
     final state = monitor.state;
     final active = state == MonitorState.MONITOR_STATE_ACTIVE;
@@ -222,7 +240,7 @@ class _MonitorRowState extends State<MonitorRow> {
     final ended =
         state == MonitorState.MONITOR_STATE_DONE ||
         state == MonitorState.MONITOR_STATE_CANCELLED;
-    final caption = TextStyles.caption.copyWith(
+    final caption = TypeScale.of(context).caption.copyWith(
       color: palette.textFaint,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
@@ -236,176 +254,189 @@ class _MonitorRowState extends State<MonitorRow> {
         ? '1 fire'
         : '${monitor.fires} fires';
     DateTime time(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
-    return Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s,
-          vertical: Space.s - 2,
-        ),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: Space.l + 2,
-              height: 18,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Dot(
-                  color: active
-                      ? palette.signal
-                      : failed
-                      ? palette.danger
-                      : ended
-                      ? palette.textFaint
-                      : palette.textMuted,
+    final actions = ended
+        ? const <Widget>[]
+        : [
+            Button(
+              label: active ? 'Pause' : 'Resume',
+              onPressed: _busy
+                  ? null
+                  : () => _change(
+                      active
+                          ? MonitorAction.MONITOR_ACTION_PAUSE
+                          : MonitorAction.MONITOR_ACTION_RESUME,
+                    ),
+            ),
+            Button(label: 'Cancel', onPressed: _busy ? null : _cancel),
+          ];
+    return Semantics(
+      container: true,
+      expanded: _open,
+      child: Pressable(
+        onTap: () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.s,
+            vertical: Space.s - 2,
+          ),
+          decoration: BoxDecoration(
+            color: hovered ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: Space.l + 2,
+                height: 18,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Dot(
+                    color: active
+                        ? palette.signal
+                        : failed
+                        ? palette.danger
+                        : ended
+                        ? palette.textFaint
+                        : palette.textMuted,
+                  ),
                 ),
               ),
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    monitor.name,
-                    maxLines: _open ? null : 1,
-                    overflow: _open ? null : TextOverflow.ellipsis,
-                    style: TextStyles.label.copyWith(
-                      color: ended ? palette.textMuted : palette.text,
-                    ),
-                  ),
-                  Text(
-                    monitor.when,
-                    maxLines: _open ? null : 2,
-                    overflow: _open ? null : TextOverflow.ellipsis,
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
-                  ),
-                  const SizedBox(height: 2),
-                  // What's known about it, wrapping in a narrow panel.
-                  Wrap(
-                    spacing: Space.s,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text('m${monitor.id}', style: caption),
-                      if (!active)
-                        Text(
-                          monitorStateLabel(monitor),
-                          style: muted.copyWith(
-                            color: failed ? palette.danger : null,
-                          ),
-                        ),
-                      if (failed)
-                        TellRivet(
-                          error: monitorStateLabel(monitor),
-                          about:
-                              'Monitor m${monitor.id} ("${monitor.name}") of '
-                              'agent ${widget.agentId} failed.',
-                          link: true,
-                        ),
-                      if (active && monitor.nextDue > 0)
-                        Ticking(
-                          active: true,
-                          builder: (context, now) =>
-                              Text(nextDueLabel(monitor, now), style: muted),
-                        ),
-                      Text(
-                        monitor.lastFired > 0
-                            ? 'last fired ${logTime(time(monitor.lastFired.toInt()))}'
-                            : 'never fired',
-                        style: caption,
-                      ),
-                      Text(fires, style: caption),
-                      if (monitor.until > 0 && !ended)
-                        Text(
-                          'until ${logTime(time(monitor.until.toInt()))}',
-                          style: caption,
-                        ),
-                      if (monitor.idleOnly) Text('while idle', style: caption),
-                    ],
-                  ),
-                  if (_error != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: ErrorLine(
-                        _error!,
-                        about:
-                            'Changing monitor m${monitor.id} of agent '
-                            '${widget.agentId} was refused.',
-                      ),
-                    ),
-                  if (_open) ...[
-                    const SizedBox(height: Space.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      'Tells it',
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
+                      monitor.name,
+                      maxLines: _open ? null : 1,
+                      overflow: _open ? null : TextOverflow.ellipsis,
+                      style: TypeScale.of(context).label.copyWith(
+                        color: ended ? palette.textMuted : palette.text,
                       ),
+                    ),
+                    Text(
+                      monitor.when,
+                      maxLines: _open ? null : 2,
+                      overflow: _open ? null : TextOverflow.ellipsis,
+                      style: TypeScale.of(context).body
+                          .copyWith(color: palette.textMuted),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      monitor.prompt,
-                      style: TextStyles.body.copyWith(color: palette.text),
-                    ),
-                    const SizedBox(height: Space.xs),
-                    Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text:
-                                'Set ${logTime(time(monitor.created.toInt()))} by ',
-                          ),
-                          TextSpan(
-                            text: monitor.createdBy.isEmpty
-                                ? 'you'
-                                : setter?.name ?? monitor.createdBy,
-                            style: TextStyle(
-                              color: setter == null
-                                  ? palette.textMuted
-                                  : agentColor(setter.color),
+                    // What's known about it, wrapping in a narrow panel.
+                    Wrap(
+                      spacing: Space.s,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text('m${monitor.id}', style: caption),
+                        if (!active)
+                          Text(
+                            monitorStateLabel(monitor),
+                            style: muted.copyWith(
+                              color: failed ? palette.danger : null,
                             ),
                           ),
-                        ],
-                      ),
-                      style: caption,
+                        if (failed)
+                          TellRivet(
+                            error: monitorStateLabel(monitor),
+                            about:
+                                'Monitor m${monitor.id} ("${monitor.name}") of '
+                                'agent ${widget.agentId} failed.',
+                            link: true,
+                          ),
+                        if (active && monitor.nextDue > 0)
+                          Ticking(
+                            active: true,
+                            builder: (context, now) =>
+                                Text(nextDueLabel(monitor, now), style: muted),
+                          ),
+                        Text(
+                          monitor.lastFired > 0
+                              ? 'last fired ${logTime(time(monitor.lastFired.toInt()))}'
+                              : 'never fired',
+                          style: caption,
+                        ),
+                        Text(fires, style: caption),
+                        if (monitor.until > 0 && !ended)
+                          Text(
+                            'until ${logTime(time(monitor.until.toInt()))}',
+                            style: caption,
+                          ),
+                        if (monitor.idleOnly)
+                          Text('while idle', style: caption),
+                      ],
                     ),
-                  ],
-                ],
-              ),
-            ),
-            if (!ended) ...[
-              const SizedBox(width: Space.s),
-              Button(
-                label: active ? 'Pause' : 'Resume',
-                onPressed: _busy
-                    ? null
-                    : () => _change(
-                        active
-                            ? MonitorAction.MONITOR_ACTION_PAUSE
-                            : MonitorAction.MONITOR_ACTION_RESUME,
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: ErrorLine(
+                          _error!,
+                          about:
+                              'Changing monitor m${monitor.id} of agent '
+                              '${widget.agentId} was refused.',
+                        ),
                       ),
-              ),
-              Button(
-                label: 'Cancel',
-                onPressed: _busy
-                    ? null
-                    : () => _change(MonitorAction.MONITOR_ACTION_CANCEL),
-              ),
-            ],
-            const SizedBox(width: Space.xs),
-            SizedBox(
-              height: ended ? 18 : 28,
-              child: Center(
-                child: Chevron(
-                  color: hovered ? palette.textMuted : palette.textFaint,
-                  down: _open,
+                    if (_open) ...[
+                      const SizedBox(height: Space.s),
+                      Text(
+                        'Tells it',
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.textFaint),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        monitor.prompt,
+                        style: TypeScale.of(context).body
+                            .copyWith(color: palette.text),
+                      ),
+                      const SizedBox(height: Space.xs),
+                      Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text:
+                                  'Set ${logTime(time(monitor.created.toInt()))} by ',
+                            ),
+                            TextSpan(
+                              text: monitor.createdBy.isEmpty
+                                  ? 'you'
+                                  : setter?.name ?? monitor.createdBy,
+                              style: TextStyle(
+                                color: setter == null
+                                    ? palette.textMuted
+                                    : agentColor(setter.color),
+                              ),
+                            ),
+                          ],
+                        ),
+                        style: caption,
+                      ),
+                    ],
+                    // On a phone its actions are under it once it's open:
+                    // beside it they'd leave its name no room.
+                    if (phone && _open && actions.isNotEmpty) ...[
+                      const SizedBox(height: Space.s),
+                      ControlsLine(children: actions),
+                    ],
+                  ],
                 ),
               ),
-            ),
-          ],
+              if (!phone && !ended) ...[
+                const SizedBox(width: Space.s),
+                ...actions,
+              ],
+              const SizedBox(width: Space.xs),
+              SizedBox(
+                height: ended || phone ? 18 : 28,
+                child: Center(
+                  child: Chevron(
+                    color: hovered ? palette.textMuted : palette.textFaint,
+                    down: _open,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

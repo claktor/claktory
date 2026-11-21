@@ -115,9 +115,10 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
         .filter(|key| seal_share(&[0; 32], key, "check", 0).is_some())
         .ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
     let request = check_code(service, &body.request_id, &body.code, "claktory")?;
+    let proven = holds_key(service, call, request.claktory_id.as_deref().unwrap_or_default())?;
     let token = b64(*random_32());
     let now = service.now();
-    let registered = db::register(&mut service.db(), &request, &token, now)?;
+    let registered = db::register(&mut service.db(), &request, &token, now, proven)?;
     if let (db::Registered::Done { .. }, Some(location)) = (&registered, service.locate(&call.ip)) {
         let conn = service.db();
         if let Some(claktory) = db::claktory(&conn, request.claktory_id.as_deref().unwrap_or_default())? {
@@ -153,6 +154,26 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
         sealed_share,
         service_key: service.service_key(),
     }))
+}
+
+/// Whether a sign-in's verify is signed (Claktory-Time and
+/// Claktory-Signature, without a token) by the backend key the Claktory
+/// with that id has now: only it may move to another account. Unsigned, or
+/// signed by another key, it's false; a clock that's off or a signature
+/// seen before is refused as for signed requests, leaving the code to use
+/// again.
+fn holds_key(service: &Service, call: &Call, claktory_id: &str) -> Result<bool, ApiError> {
+    if call.header(SIGNATURE_HEADER).is_none() {
+        return Ok(false);
+    }
+    let Some(key) = db::claktory(&service.db(), claktory_id)?.and_then(|existing| verifying_key(&existing.backend_key)) else {
+        return Ok(false);
+    };
+    match signed_by(service, call, &key, ApiError::unauthorized) {
+        Ok(()) => Ok(true),
+        Err(error) if error.body.error == "unauthorized" => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The Claktory a signed request is from: its token, its time and its
@@ -359,6 +380,35 @@ pub(super) fn endpoints(service: &Service, call: &Call) -> Result<Reply, ApiErro
     db::set_identity(&conn, &claktory.id, name.as_deref(), color.as_deref(), relays.as_deref())?;
     db::touch(&conn, &claktory, None, now)?;
     Ok(Reply::json(&EndpointsSet { count }))
+}
+
+/// `POST /v1/move`: a Claktory moved to another computer, and its new copy
+/// replaces the token and backend key the old copy has.
+pub(super) async fn move_claktory(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+    let claktory = authenticate(service, call)?;
+    let body: MoveRequest = call.json()?;
+    let token_fine = unb64_32(&body.machine_token).is_some();
+    if !token_fine || verifying_key(&body.backend_key).is_none() || !valid_label(&body.version) || !valid_label(&body.platform) {
+        return Err(ApiError::invalid("A field is missing or out of range."));
+    }
+    service.limit(&[(&format!("move:{}", claktory.id), 86_400, 10)])?;
+    let name = clean_name(&body.name);
+    let from = clean_name(&body.from);
+    let now = service.now();
+    let email = {
+        let conn = service.db();
+        if !db::moved(&conn, &claktory.id, &body.backend_key, &body.machine_token, &name, &body.version, &body.platform)? {
+            return Err(ApiError::invalid("That token is in use."));
+        }
+        db::touch(&conn, &claktory, service.locate(&call.ip).as_ref(), now)?;
+        db::account_email(&conn, &claktory.account_id)?
+    };
+    tracing::info!("moved: Claktory {} to {name}", claktory.id);
+    if let Some(email) = email {
+        let notice = mail::moved_mail(&service.config.mail_domain, &email, &from, &name, now, &call.ip, &service.config.account_page);
+        let _ = service.send(&notice, false).await;
+    }
+    Ok(Reply::json(&MoveDone { epoch: claktory.epoch }))
 }
 
 pub(super) fn allowlist(service: &Service, call: &Call) -> Result<Reply, ApiError> {

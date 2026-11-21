@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/account.dart';
 import 'api/tunnel.dart';
 
 import 'dart:async';
@@ -67,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -233166192;
+  int get rustContentHash => 1305742125;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -94,6 +95,8 @@ abstract class RustLibApi extends BaseApi {
     required int port,
   });
 
+  String crateApiTunnelTunnelHandlePath({required TunnelHandle that});
+
   int crateApiTunnelTunnelHandlePort({required TunnelHandle that});
 
   Future<void> crateApiTunnelTunnelHandleReconnect({
@@ -101,6 +104,13 @@ abstract class RustLibApi extends BaseApi {
   });
 
   TunnelStatus crateApiTunnelTunnelHandleStatus({required TunnelHandle that});
+
+  Uint8List crateApiAccountAccountPublicKey({required String key});
+
+  Uint8List crateApiAccountAccountSign({
+    required String key,
+    required List<int> message,
+  });
 
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
     required String deviceKey,
@@ -299,7 +309,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  int crateApiTunnelTunnelHandlePort({required TunnelHandle that}) {
+  String crateApiTunnelTunnelHandlePath({required TunnelHandle that}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
@@ -309,6 +319,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTunnelTunnelHandlePathConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTunnelTunnelHandlePathConstMeta =>
+      const TaskConstMeta(debugName: "TunnelHandle_path", argNames: ["that"]);
+
+  @override
+  int crateApiTunnelTunnelHandlePort({required TunnelHandle that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_16,
@@ -339,7 +375,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 8,
             port: port_,
           );
         },
@@ -370,7 +406,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_tunnel_status,
@@ -385,6 +421,58 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiTunnelTunnelHandleStatusConstMeta =>
       const TaskConstMeta(debugName: "TunnelHandle_status", argNames: ["that"]);
+
+  @override
+  Uint8List crateApiAccountAccountPublicKey({required String key}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(key, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAccountAccountPublicKeyConstMeta,
+        argValues: [key],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAccountAccountPublicKeyConstMeta =>
+      const TaskConstMeta(debugName: "account_public_key", argNames: ["key"]);
+
+  @override
+  Uint8List crateApiAccountAccountSign({
+    required String key,
+    required List<int> message,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(key, serializer);
+          sse_encode_list_prim_u_8_loose(message, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAccountAccountSignConstMeta,
+        argValues: [key, message],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAccountAccountSignConstMeta => const TaskConstMeta(
+    debugName: "account_sign",
+    argNames: ["key", "message"],
+  );
 
   @override
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
@@ -404,7 +492,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 12,
             port: port_,
           );
         },
@@ -436,7 +524,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(deviceKey, serializer);
           sse_encode_String(endpointId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_pairing_ids,
@@ -582,6 +670,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<String> dco_decode_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<int>;
   }
 
   @protected
@@ -799,6 +893,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_String(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
   }
 
   @protected
@@ -1021,6 +1122,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_prim_u_8_loose(
+    List<int> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(
+      self is Uint8List ? self : Uint8List.fromList(self),
+    );
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1156,7 +1269,13 @@ class TunnelHandleImpl extends RustOpaque implements TunnelHandle {
   Future<ForwardHandle> forwardPort({required int port}) => RustLib.instance.api
       .crateApiTunnelTunnelHandleForwardPort(that: this, port: port);
 
-  /// Where the app connects: ws://127.0.0.1:<port>.
+  /// The path the app asks for at [port]: `/<secret>`, the tunnel's own.
+  /// Nothing else there is forwarded, so no other program on this device
+  /// passes for it. Never shown, saved or logged.
+  String path() =>
+      RustLib.instance.api.crateApiTunnelTunnelHandlePath(that: this);
+
+  /// Where the app connects: ws://127.0.0.1:<port><path>.
   int port() => RustLib.instance.api.crateApiTunnelTunnelHandlePort(that: this);
 
   /// After the app was suspended or the network changed: the connection

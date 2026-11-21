@@ -13,6 +13,7 @@ import 'explorer.dart' show shortPath;
 import 'extensions.dart' show StatusMark, statusLabel;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'layout.dart';
 import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
@@ -285,20 +286,23 @@ class ToolLine extends StatelessWidget {
           if (subject.isNotEmpty)
             TextSpan(
               text: lead.isEmpty ? subject : ' $subject',
-              style: (code ? TextStyles.code : TextStyles.body).copyWith(
-                color: palette.text,
-              ),
+              style:
+                  (code
+                          ? TypeScale.of(context).code
+                          : TypeScale.of(context).body)
+                      .copyWith(color: palette.text),
             ),
           if (after.isNotEmpty)
             TextSpan(
               text: '  $after',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
         ],
       ),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: TextStyles.body.copyWith(color: palette.textMuted),
+      style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
     );
   }
 }
@@ -314,9 +318,8 @@ class _Trailing extends StatelessWidget {
   Widget build(BuildContext context) => Text(
     text,
     maxLines: 1,
-    style: TextStyles.caption.copyWith(
-      color: color ?? Palette.of(context).textFaint,
-    ),
+    style: TypeScale.of(context).caption
+        .copyWith(color: color ?? Palette.of(context).textFaint),
   );
 }
 
@@ -337,7 +340,7 @@ class _Link extends StatelessWidget {
         text,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyles.body.copyWith(
+        style: TypeScale.of(context).body.copyWith(
           color: color,
           decoration: hovered && onTap != null
               ? TextDecoration.underline
@@ -392,7 +395,7 @@ class ToolAgent extends StatelessWidget {
               return NameThenRole(
                 name: shownName,
                 role: role ?? agent?.role ?? '',
-                style: TextStyles.label.copyWith(
+                style: TypeScale.of(context).label.copyWith(
                   color: nameColor,
                   fontWeight: FontWeight.w600,
                   decoration: known && hovered
@@ -457,7 +460,6 @@ class _ShowMoreState extends State<ShowMore> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -489,17 +491,10 @@ class _ShowMoreState extends State<ShowMore> {
         if (_taller)
           Align(
             alignment: Alignment.centerLeft,
-            child: Pressable(
+            child: _Toggle(
+              top: 2,
+              label: _whole ? 'Show less' : 'Show more',
               onTap: () => setState(() => _whole = !_whole),
-              builder: (context, hovered) => Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Text(
-                  _whole ? 'Show less' : 'Show more',
-                  style: TextStyles.caption.copyWith(
-                    color: hovered ? palette.text : palette.textMuted,
-                  ),
-                ),
-              ),
             ),
           ),
       ],
@@ -644,9 +639,8 @@ class _Faint extends StatelessWidget {
     text,
     maxLines: lines,
     overflow: TextOverflow.ellipsis,
-    style: TextStyles.caption.copyWith(
-      color: color ?? Palette.of(context).textMuted,
-    ),
+    style: TypeScale.of(context).caption
+        .copyWith(color: color ?? Palette.of(context).textMuted),
   );
 }
 
@@ -763,7 +757,7 @@ class _SendLine extends StatelessWidget {
             // Its role then, or now when the call didn't say.
             role: !single ? '' : (r.role.isEmpty ? null : r.role),
           );
-    final words = TextStyles.body.copyWith(color: palette.textMuted);
+    final words = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     return Row(
       children: [
         Text('→', style: words),
@@ -866,15 +860,8 @@ class _FirstLineState extends State<FirstLine> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    Widget toggle(String label) => Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => Text(
-        label,
-        style: TextStyles.caption.copyWith(
-          color: hovered ? palette.text : palette.textMuted,
-        ),
-      ),
-    );
+    Widget toggle(String label) =>
+        _Toggle(label: label, onTap: () => setState(() => _open = !_open));
     if (_open) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -891,7 +878,7 @@ class _FirstLineState extends State<FirstLine> {
       );
     }
     final first = _first(widget.text);
-    final style = TextStyles.body.copyWith(color: palette.textMuted);
+    final style = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     final lines = widget.text
         .trim()
         .split('\n')
@@ -1028,7 +1015,10 @@ class TalkCard extends StatelessWidget {
     final name = agent?.name ?? talk.name;
     final rows = <Widget>[
       if (talk.reason.isNotEmpty)
-        Text(talk.reason, style: TextStyles.body.copyWith(color: palette.text)),
+        Text(
+          talk.reason,
+          style: TypeScale.of(context).body.copyWith(color: palette.text),
+        ),
       if (talk.message.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
         FirstLine(talk.message),
@@ -1068,6 +1058,41 @@ class TalkCard extends StatelessWidget {
   }
 }
 
+/// "Show more" or "Show less" under something cut short: small print on
+/// a Mac; on a phone a finger's height, still reading as small print.
+class _Toggle extends StatelessWidget {
+  const _Toggle({required this.label, required this.onTap, this.top = 0});
+
+  final String label;
+  final VoidCallback onTap;
+
+  /// Space over it on a Mac.
+  final double top;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
+    return Semantics(
+      container: true,
+      button: true,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
+          alignment: phone ? AlignmentDirectional.centerStart : null,
+          padding: EdgeInsets.only(top: phone ? 0 : top),
+          child: Text(
+            label,
+            style: TypeScale.of(context).caption
+                .copyWith(color: hovered ? palette.text : palette.textMuted),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// "Talk to Arjun": the agent's resting character and its name on a tint
 /// of its color, stronger while hovered.
 class _TalkButton extends StatelessWidget {
@@ -1090,7 +1115,11 @@ class _TalkButton extends StatelessWidget {
           onTap: onTap,
           builder: (context, hovered) => AnimatedContainer(
             duration: Motion.fast,
-            height: 28,
+            // A finger's height on a phone, taller with larger text.
+            height: isPhoneLayout(context) ? null : 28,
+            constraints: isPhoneLayout(context)
+                ? const BoxConstraints(minHeight: Touch.target)
+                : null,
             padding: const EdgeInsets.symmetric(horizontal: Space.m),
             decoration: BoxDecoration(
               color: color.withValues(alpha: hovered ? 0.28 : 0.16),
@@ -1104,7 +1133,7 @@ class _TalkButton extends StatelessWidget {
                 const SizedBox(width: Space.s),
                 Text(
                   label,
-                  style: TextStyles.label.copyWith(
+                  style: TypeScale.of(context).label.copyWith(
                     color: palette.text,
                     fontWeight: FontWeight.w500,
                   ),
@@ -1185,7 +1214,8 @@ class _ItemRow extends StatelessWidget {
       if (label.isNotEmpty)
         TextSpan(
           text: '  $label',
-          style: TextStyles.caption.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textMuted),
         ),
     ];
     return _Row(
@@ -1201,7 +1231,10 @@ class _ItemRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text.rich(TextSpan(children: words), style: TextStyles.body),
+          Text.rich(
+            TextSpan(children: words),
+            style: TypeScale.of(context).body,
+          ),
           if (note.isNotEmpty) _Faint(note),
           if (problem.isNotEmpty) _Faint(problem, color: palette.danger),
         ],
@@ -1546,7 +1579,7 @@ Widget? _tasksListBody(BuildContext context, ToolCallInfo call) {
           ),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyles.code.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).code.copyWith(color: palette.textMuted),
         ),
       ),
   ]);
@@ -1654,7 +1687,7 @@ class _ShowLine extends StatelessWidget {
       children: [
         Text(
           call.done ? 'Showing' : 'Opening',
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(width: Space.xs),
         Flexible(
@@ -1772,7 +1805,7 @@ class _FetchLine extends StatelessWidget {
       children: [
         Text(
           call.done ? 'Read' : 'Reading',
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(width: Space.xs),
         Flexible(
@@ -1837,10 +1870,14 @@ Widget? _sqlBody(BuildContext context, ToolCallInfo call) {
   if (sql.isEmpty) return null;
   // Three lines of code.
   return ShowMore(
-    height: 3 * TextStyles.code.fontSize! * TextStyles.code.height!,
+    height:
+        3 *
+        TypeScale.of(context).code.fontSize! *
+        TypeScale.of(context).code.height!,
     child: Text(
       sql,
-      style: TextStyles.code.copyWith(color: Palette.of(context).textMuted),
+      style: TypeScale.of(context).code
+          .copyWith(color: Palette.of(context).textMuted),
     ),
   );
 }
@@ -1887,7 +1924,7 @@ class _SecretLine extends StatelessWidget {
     final agents = _secretAgents(context, call);
     final done = call.done;
     final lead = give ? (done ? 'Gave' : 'Giving') : (done ? 'Took' : 'Taking');
-    final words = TextStyles.body.copyWith(color: palette.textMuted);
+    final words = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     return Row(
       children: [
         Flexible(child: ToolLine(lead, subject: secret)),
@@ -1967,13 +2004,14 @@ Widget? _secretsListBody(BuildContext context, ToolCallInfo call) {
               ),
               TextSpan(
                 text: '  ${_list(secret['variables']).map(_string).join(', ')}',
-                style: TextStyles.code.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).code
+                    .copyWith(color: palette.textFaint),
               ),
             ],
           ),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyles.body,
+          style: TypeScale.of(context).body,
         ),
       ),
   ]);

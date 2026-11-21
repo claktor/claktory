@@ -20,6 +20,15 @@ class WorkspaceStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Forgets the workspace, as for another Claktory: empty again, and not
+  /// [received] until that one's arrives, so nothing takes "not known yet"
+  /// for "has nothing".
+  void clear() {
+    _workspace = Workspace();
+    _received = false;
+    notifyListeners();
+  }
+
   Agent? get selectedAgent => agent(_workspace.selectedAgentId);
 
   Agent? agent(String id) {
@@ -188,6 +197,10 @@ class TranscriptStore extends ChangeNotifier {
   var _earlier = 0;
 
   void load(Transcript transcript) {
+    if (_sameConversation(transcript)) {
+      _merge(transcript);
+      return;
+    }
     for (final entry in _entries) {
       entry.dispose();
     }
@@ -201,6 +214,42 @@ class TranscriptStore extends ChangeNotifier {
       _insert(EntryModel(entry));
     }
     _changed(listChanged: true);
+  }
+
+  /// Whether [transcript] is the conversation already held, sent again
+  /// (the agent selected again, its project focused, a reconnect): its
+  /// first entry is one held, unchanged in time and kind, and it ends no
+  /// sooner than what's held. A cleared conversation starts over at other
+  /// entries, so it loads afresh.
+  bool _sameConversation(Transcript transcript) {
+    if (transcript.agentId != _agentId ||
+        _entries.isEmpty ||
+        transcript.entries.isEmpty) {
+      return false;
+    }
+    final first = transcript.entries.first;
+    final held = _bySeq[first.seq.toInt()];
+    return held != null &&
+        held.entry.timestampMs == first.timestampMs &&
+        held.entry.whichKind() == first.whichKind() &&
+        transcript.entries.last.seq.toInt() >= _entries.last.seq;
+  }
+
+  /// Takes [transcript], the conversation held sent again, in place: what
+  /// changed meanwhile is replaced, what's new added, and the entries paged
+  /// in before it are kept, so views keep their place.
+  void _merge(Transcript transcript) {
+    var added = false;
+    for (final entry in transcript.entries) {
+      final existing = _bySeq[entry.seq.toInt()];
+      if (existing == null) {
+        _insert(EntryModel(entry));
+        added = true;
+      } else if (existing.entry != entry) {
+        existing.replace(entry);
+      }
+    }
+    _changed(listChanged: added);
   }
 
   /// Puts [entries], earlier ones the backend sent for [agentId], before
@@ -289,3 +338,61 @@ bool isAdminAgent(Agent agent) => agent.extensions.any(
 /// an admin agent, "Workspace" for others.
 String outsideProjectsLabel(Agent agent) =>
     isAdminAgent(agent) ? 'Admin' : 'Workspace';
+
+/// The selected pipe's messages, oldest first: the backend sends the latest
+/// when a pipe is selected (PipeTranscript), each new or changed one after
+/// (PipeMessageUpdate), and earlier ones on request.
+class PipeChat extends ChangeNotifier {
+  String _pipeId = '';
+  final List<PipeMessage> _messages = [];
+  var _hasEarlier = false;
+  var _loads = 0;
+
+  /// The pipe these are of; empty before one is selected.
+  String get pipeId => _pipeId;
+  List<PipeMessage> get messages => List.unmodifiable(_messages);
+  bool get hasEarlier => _hasEarlier;
+
+  /// How many times a pipe's messages have loaded; views key on it.
+  int get loads => _loads;
+
+  void load(PipeTranscript transcript) {
+    _pipeId = transcript.pipeId;
+    _hasEarlier = transcript.hasEarlier;
+    _loads++;
+    _messages
+      ..clear()
+      ..addAll(transcript.messages)
+      ..sort((a, b) => a.seq.compareTo(b.seq));
+    notifyListeners();
+  }
+
+  void update(PipeMessageUpdate update) {
+    if (update.pipeId != _pipeId) return;
+    final message = update.message;
+    final at = _messages.indexWhere((m) => m.seq == message.seq);
+    if (at >= 0) {
+      _messages[at] = message;
+    } else {
+      var index = _messages.length;
+      while (index > 0 && _messages[index - 1].seq > message.seq) {
+        index--;
+      }
+      _messages.insert(index, message);
+    }
+    notifyListeners();
+  }
+
+  /// Earlier messages, before the first one held.
+  void prepend(PipeMessagePage page) {
+    if (page.pipeId != _pipeId) return;
+    final first = _messages.isEmpty ? null : _messages.first.seq;
+    final earlier = [
+      for (final message in page.messages)
+        if (first == null || message.seq < first) message,
+    ]..sort((a, b) => a.seq.compareTo(b.seq));
+    _messages.insertAll(0, earlier);
+    _hasEarlier = page.hasEarlier;
+    notifyListeners();
+  }
+}

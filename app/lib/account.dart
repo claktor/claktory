@@ -10,10 +10,12 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'markdown.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'name_step.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
-import 'screens.dart' show ScreenOpener;
 import 'selection.dart';
 import 'settings_view.dart';
 import 'usage.dart';
@@ -29,37 +31,21 @@ import 'usage.dart';
 /// the step comes back at the next launch.
 ValueNotifier<bool> signInPutOff(Backend backend) => _choice(backend);
 
-/// The person asked to sign in (Settings → Account's Sign in…) though
-/// they'd said Not now: the step shows again until they sign in or say
-/// Not now once more. Like [signInPutOff], it lasts until the app quits,
-/// and notifies through it.
-void askSignIn(Backend backend) {
-  final choice = _choice(backend);
-  choice.value = false;
-  choice.wanted = true;
-}
+/// The person asked to sign in (Settings → Account's Sign in…) after
+/// Continue for now: the step shows again.
+void askSignIn(Backend backend) => _choice(backend).value = false;
 
-_SignInChoice _choice(Backend backend) => _putOff[backend] ??= _SignInChoice();
+ValueNotifier<bool> _choice(Backend backend) =>
+    _putOff[backend] ??= ValueNotifier(false);
 
-final _putOff = Expando<_SignInChoice>('sign-in put off');
-
-class _SignInChoice extends ValueNotifier<bool> {
-  _SignInChoice() : super(false);
-
-  bool get wanted => _wanted;
-  var _wanted = false;
-  set wanted(bool wanted) {
-    if (wanted == _wanted) return;
-    _wanted = wanted;
-    notifyListeners();
-  }
-}
+final _putOff = Expando<ValueNotifier<bool>>('sign-in put off');
 
 /// Whether to ask the person to sign in: the backend is connected, has
 /// said what it knows, and isn't signed in (or is waiting for the code),
-/// unless they've put it off for now. A backend that knows no account
-/// (`Workspace.account` unset) isn't asked about, nor one the person said
-/// Not now to (SKIPPED), unless they've asked to sign in since.
+/// unless claktory.com couldn't be reached and they went on for now.
+/// Signing in is required: nothing else in the app works until it's done.
+/// A backend that knows no account (`Workspace.account` unset) isn't
+/// asked about; one an older version let skip (SKIPPED) is.
 bool asksSignIn(BuildContext context) {
   final backend = AppScope.of(context);
   final store = backend.workspace;
@@ -67,11 +53,9 @@ bool asksSignIn(BuildContext context) {
   final workspace = store.workspace;
   if (!workspace.hasAccount()) return false;
   final state = workspace.account.state;
-  if (state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED) {
-    return _choice(backend).wanted;
-  }
   if (state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT &&
-      state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE) {
+      state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE &&
+      state != ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED) {
     return false;
   }
   return !signInPutOff(backend).value;
@@ -85,6 +69,9 @@ bool looksLikeEmail(String text) =>
 /// Opens the account's page on the web; tests replace it.
 @visibleForTesting
 Future<bool> Function(Uri url) openAccountPage = launchUrl;
+
+/// What claktory.com keeps and why, linked from the sign-in step.
+final privacyPage = Uri.parse('https://claktory.com/privacy');
 
 /// How long after a code is sent before another can be asked for.
 const resendAfter = Duration(seconds: 30);
@@ -218,27 +205,6 @@ class _SignInStepState extends State<SignInStep> {
     }
   }
 
-  /// Whether Not now is offered: a Claktory from before sign-in, or one
-  /// the person already said Not now to and came back to.
-  bool get _canSkip =>
-      _account.skippable ||
-      _account.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SKIPPED;
-
-  Future<void> _skip() async {
-    final backend = _backend;
-    // A Claktory from before with nothing open lands on Rivet, opened
-    // first: once skipped, the step goes, and this with it.
-    final workspace = backend.workspace.workspace;
-    final rivet = rivetIn(workspace);
-    if (workspace.selectedAgentId.isEmpty && rivet != null) {
-      ScreenOpener.openConversation(context, rivet.id);
-    }
-    if (_account.skippable && !await _run(backend.skipAccountSignIn)) {
-      return;
-    }
-    _choice(backend).wanted = false;
-  }
-
   Future<void> _resend() async {
     final backend = _backend;
     if (await _run(backend.accountResend) && mounted) {
@@ -261,28 +227,42 @@ class _SignInStepState extends State<SignInStep> {
     ),
   );
 
-  Widget _title(Palette palette, String title, String body) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Text(title, style: TextStyles.emphasis.copyWith(color: palette.text)),
-      const SizedBox(height: Space.s),
-      Text(body, style: TextStyles.body.copyWith(color: palette.textMuted)),
-      const SizedBox(height: Space.xl),
-    ],
-  );
+  Widget _title(BuildContext context, String title, String body) {
+    final palette = Palette.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          header: true,
+          child: Text(
+            title,
+            style: stepTitleStyle(context).copyWith(color: palette.text),
+          ),
+        ),
+        const SizedBox(height: Space.s),
+        Text(
+          body,
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+        ),
+        const SizedBox(height: Space.xl),
+      ],
+    );
+  }
 
-  Widget _errorLine(Palette palette) => _error == null
+  Widget _errorLine(BuildContext context) => _error == null
       ? const SizedBox.shrink()
       : Padding(
           padding: const EdgeInsets.only(top: Space.s),
           child: Text(
             _error!,
-            style: TextStyles.caption.copyWith(color: palette.danger),
+            style: TypeScale.of(context).caption
+                .copyWith(color: Palette.of(context).danger),
           ),
         );
 
   Widget _emailStep(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
     return ListenableBuilder(
       listenable: _email,
       builder: (context, _) => Column(
@@ -290,7 +270,7 @@ class _SignInStepState extends State<SignInStep> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _title(
-            palette,
+            context,
             'Sign in to Claktory',
             "Enter your email address. You'll get a code to sign in.",
           ),
@@ -299,48 +279,81 @@ class _SignInStepState extends State<SignInStep> {
             controller: _email,
             placeholder: 'Email address',
             autofocus: true,
+            kind: InputKind.email,
+            scrollPadding: stepFieldScrollPadding(context),
             onSubmitted: (_) => _sendCode(),
           ),
-          _errorLine(palette),
+          _errorLine(context),
           const SizedBox(height: Space.xl),
-          Wrap(
-            alignment: WrapAlignment.end,
-            spacing: Space.s,
-            runSpacing: Space.s,
-            children: [
-              if (_canSkip && !_changingEmail)
-                Button(label: 'Not now', onPressed: _busy ? null : _skip),
-              // Back to the code already sent, from typing another address.
-              if (_changingEmail &&
-                  _account.state ==
-                      ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE)
-                Button(
-                  label: 'Back',
-                  onPressed: () => setState(() {
-                    _changingEmail = false;
-                    _error = null;
-                  }),
-                ),
+          _buttons(context, [
+            Button(
+              label: 'Send code',
+              primary: true,
+              onPressed: _email.text.trim().isEmpty || _busy ? null : _sendCode,
+            ),
+            // Back to the code already sent, from typing another address.
+            if (_changingEmail &&
+                _account.state ==
+                    ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE)
               Button(
-                label: 'Send code',
-                primary: true,
-                onPressed: _email.text.trim().isEmpty || _busy
-                    ? null
-                    : _sendCode,
+                label: 'Back',
+                onPressed: () => setState(() {
+                  _changingEmail = false;
+                  _error = null;
+                }),
               ),
-            ],
-          ),
-          const SizedBox(height: Space.l),
-          Text(
-            'Claktory shares your email, roughly where it runs, and how much '
-            "it's used (agents, hours, tokens). Never your conversations, "
-            'files or secrets.',
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+          ]),
+          SizedBox(height: phone ? Space.s : Space.l),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Semantics(
+              link: true,
+              child: Pressable(
+                onTap: () => openAccountPage(privacyPage),
+                builder: (context, hovered) {
+                  final link = Text(
+                    'How Claktory uses your email',
+                    style: TypeScale.of(context).caption.copyWith(
+                      color: hovered ? palette.textMuted : palette.textFaint,
+                      decoration: TextDecoration.underline,
+                      decorationColor: hovered
+                          ? palette.textMuted
+                          : palette.textFaint,
+                    ),
+                  );
+                  // A finger's height on a phone.
+                  return phone
+                      ? ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            minHeight: Touch.target,
+                          ),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            widthFactor: 1,
+                            child: link,
+                          ),
+                        )
+                      : link;
+                },
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+
+  /// The step's buttons, its action first: along the end of the card, the
+  /// action last, or on a phone one under another, the action on top.
+  Widget _buttons(BuildContext context, List<Widget> buttons) =>
+      isPhoneLayout(context)
+      ? StepButtons(children: buttons)
+      : Wrap(
+          alignment: WrapAlignment.end,
+          spacing: Space.s,
+          runSpacing: Space.s,
+          children: buttons.reversed.toList(),
+        );
 
   Widget _codeStep(BuildContext context) {
     final palette = Palette.of(context);
@@ -350,6 +363,34 @@ class _SignInStepState extends State<SignInStep> {
         ? null
         : DateTime.fromMillisecondsSinceEpoch(account.codeExpiresMs.toInt())
               .subtract(codeLife);
+    final resend = Ticking(
+      active:
+          sentAt != null && DateTime.now().isBefore(sentAt.add(resendAfter)),
+      builder: (context, now) {
+        final wait = sentAt == null
+            ? Duration.zero
+            : sentAt.add(resendAfter).difference(now);
+        if (_resent && wait > Duration.zero) {
+          return _note(context, 'New code sent.');
+        }
+        if (wait > Duration.zero) {
+          return _note(
+            context,
+            'Resend in ${(wait.inMilliseconds / 1000).ceil()}s',
+          );
+        }
+        return Button(label: 'Resend code', onPressed: _busy ? null : _resend);
+      },
+    );
+    final different = Button(
+      label: 'Use a different email',
+      onPressed: () => setState(() {
+        _changingEmail = true;
+        _error = null;
+        _offerNewCode = false;
+        if (_email.text.isEmpty) _email.text = account.email;
+      }),
+    );
     return ListenableBuilder(
       listenable: _code,
       builder: (context, _) => Column(
@@ -357,7 +398,7 @@ class _SignInStepState extends State<SignInStep> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _title(
-            palette,
+            context,
             'Check your email',
             'Enter the 6-digit code sent to ${account.email}. It works for '
                 '15 minutes.',
@@ -366,16 +407,19 @@ class _SignInStepState extends State<SignInStep> {
             key: const ValueKey('code'),
             controller: _code,
             autofocus: true,
+            kind: InputKind.oneTimeCode,
+            scrollPadding: stepFieldScrollPadding(context),
             onSubmitted: (_) => _code.text.length == 6 ? _verify() : null,
           ),
-          _errorLine(palette),
+          _errorLine(context),
           const SizedBox(height: Space.s),
           Text(
             [
               if (account.codeFrom.isNotEmpty) "It's from ${account.codeFrom}.",
               "Can't find it? Check your spam folder.",
             ].join(' '),
-            style: TextStyles.caption.copyWith(color: palette.textFaint),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textFaint),
           ),
           if (_offerNewCode) ...[
             const SizedBox(height: Space.s),
@@ -388,113 +432,86 @@ class _SignInStepState extends State<SignInStep> {
             ),
           ],
           const SizedBox(height: Space.xl),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Wrap(
-                  spacing: Space.xs,
-                  runSpacing: Space.xs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Ticking(
-                      active:
-                          sentAt != null &&
-                          DateTime.now().isBefore(sentAt.add(resendAfter)),
-                      builder: (context, now) {
-                        final wait = sentAt == null
-                            ? Duration.zero
-                            : sentAt.add(resendAfter).difference(now);
-                        if (_resent && wait > Duration.zero) {
-                          return _note(palette, 'New code sent.');
-                        }
-                        if (wait > Duration.zero) {
-                          return _note(
-                            palette,
-                            'Resend in ${(wait.inMilliseconds / 1000).ceil()}s',
-                          );
-                        }
-                        return Button(
-                          label: 'Resend code',
-                          onPressed: _busy ? null : _resend,
-                        );
-                      },
-                    ),
-                    if (_canSkip)
-                      Button(label: 'Not now', onPressed: _busy ? null : _skip),
-                    Button(
-                      label: 'Use a different email',
-                      onPressed: () => setState(() {
-                        _changingEmail = true;
-                        _error = null;
-                        _offerNewCode = false;
-                        if (_email.text.isEmpty) _email.text = account.email;
-                      }),
-                    ),
-                  ],
+          if (isPhoneLayout(context))
+            StepButtons(children: [_continueButton(), resend, different])
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: Space.xs,
+                    runSpacing: Space.xs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [resend, different],
+                  ),
                 ),
-              ),
-              const SizedBox(width: Space.s),
-              Button(
-                label: 'Continue',
-                primary: true,
-                onPressed: _code.text.length == 6 && !_busy ? _verify : null,
-              ),
-            ],
-          ),
+                const SizedBox(width: Space.s),
+                _continueButton(),
+              ],
+            ),
         ],
       ),
     );
   }
 
-  /// A quiet line where a button sits, as tall as one.
-  Widget _note(Palette palette, String text) => SizedBox(
-    height: 28,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Space.m),
-      child: Center(
-        widthFactor: 1,
-        child: Text(
-          text,
-          style: TextStyles.label.copyWith(color: palette.textFaint),
-        ),
-      ),
-    ),
+  /// Sends the code typed, once it's whole.
+  Widget _continueButton() => Button(
+    label: 'Continue',
+    primary: true,
+    onPressed: _code.text.length == 6 && !_busy ? _verify : null,
   );
 
+  /// A quiet line where a button sits, as tall as one.
+  Widget _note(BuildContext context, String text) {
+    final phone = isPhoneLayout(context);
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: phone ? Touch.target : 28),
+      child: SizedBox(
+        height: phone ? null : 28,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.m),
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              text,
+              textAlign: TextAlign.center,
+              style: TypeScale.of(context).label
+                  .copyWith(color: Palette.of(context).textFaint),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _unreachable(BuildContext context) {
-    final palette = Palette.of(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _title(
-          palette,
+          context,
           "Can't reach claktory.com right now.",
           "You can start now and sign in once it's back. Secrets aren't "
               'available until then.',
         ),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: Space.s,
-          runSpacing: Space.s,
-          children: [
-            Button(
-              label: 'Continue for now',
-              onPressed: () => signInPutOff(_backend).value = true,
-            ),
-            Button(
-              label: 'Try again',
-              primary: true,
-              onPressed: _busy
-                  ? null
-                  : () {
-                      final retry = _retry!;
-                      _run(retry);
-                    },
-            ),
-          ],
-        ),
+        _buttons(context, [
+          Button(
+            label: 'Try again',
+            primary: true,
+            onPressed: _busy
+                ? null
+                : () {
+                    final retry = _retry!;
+                    _run(retry);
+                  },
+          ),
+          Button(
+            label: 'Continue for now',
+            onPressed: () => signInPutOff(_backend).value = true,
+          ),
+        ]),
       ],
     );
   }
@@ -539,8 +556,11 @@ class _AccountSettingsState extends State<AccountSettings>
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_UNSPECIFIED;
     final revoked =
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
-    final muted = TextStyles.body.copyWith(color: palette.textMuted);
-    final caption = TextStyles.caption.copyWith(color: palette.textMuted);
+    final type = TypeScale.of(context);
+    final muted = type.body.copyWith(color: palette.textMuted);
+    final caption = type.caption.copyWith(color: palette.textMuted);
+    // On a phone at the largest text, an action goes under its words.
+    final stack = isPhoneLayout(context) && largeText(context);
 
     /// "At sign-in · 2 h ago": what was sent, and when.
     String sentLabel(String label, Int64 ms) =>
@@ -560,16 +580,16 @@ class _AccountSettingsState extends State<AccountSettings>
         SettingRow(
           label: 'Email',
           child: signedOut
-              ? Row(
+              ? _line(
+                  stack: stack,
                   children: [
                     Text('Not signed in', style: muted),
-                    const SizedBox(width: Space.m),
                     Button(label: 'Sign in…', onPressed: _signIn),
                   ],
                 )
               : Text(
                   account.email,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: type.body.copyWith(color: palette.text),
                 ),
         ),
         if (revoked)
@@ -582,7 +602,7 @@ class _AccountSettingsState extends State<AccountSettings>
                   'This Claktory was removed from your account at '
                   'claktory.com. Sign in again so your secrets unlock on '
                   'their own after a restart.',
-                  style: TextStyles.body.copyWith(color: palette.danger),
+                  style: type.body.copyWith(color: palette.danger),
                 ),
                 const SizedBox(height: Space.s),
                 Button(label: 'Sign in again', onPressed: _signInAgain),
@@ -594,21 +614,21 @@ class _AccountSettingsState extends State<AccountSettings>
             label: 'This Claktory',
             child: Text(
               account.name,
-              style: TextStyles.body.copyWith(color: palette.text),
+              style: type.body.copyWith(color: palette.text),
             ),
           ),
         SettingRow(
           label: 'Service',
-          child: Row(
+          child: _line(
+            stack: stack,
             children: [
               Flexible(
                 child: Text(
                   serviceHost(account.service),
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: type.body.copyWith(color: palette.text),
                 ),
               ),
-              const SizedBox(width: Space.m),
               Button(
                 label: 'Change…',
                 onPressed: () => showModal(
@@ -626,7 +646,7 @@ class _AccountSettingsState extends State<AccountSettings>
             account.lastContactMs.toInt() == 0
                 ? 'Never'
                 : formatAge(account.lastContactMs.toInt(), DateTime.now()),
-            style: TextStyles.body.copyWith(color: palette.text),
+            style: type.body.copyWith(color: palette.text),
           ),
         ),
         if (account.problem.isNotEmpty)
@@ -657,23 +677,32 @@ class _AccountSettingsState extends State<AccountSettings>
                 Pressable(
                   onTap: () => setState(() => _showSent = !_showSent),
                   builder: (context, hovered) => Unselectable(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Chevron(
-                          color: hovered ? palette.text : palette.textMuted,
-                          down: _showSent,
-                        ),
-                        const SizedBox(width: Space.xs),
-                        Flexible(
-                          child: Text(
-                            'Show exactly what was sent',
-                            style: TextStyles.label.copyWith(
-                              color: hovered ? palette.text : palette.textMuted,
+                    child: Container(
+                      // A finger's height on a phone.
+                      constraints: isPhoneLayout(context)
+                          ? const BoxConstraints(minHeight: Touch.target)
+                          : null,
+                      color: const Color(0x00000000),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Chevron(
+                            color: hovered ? palette.text : palette.textMuted,
+                            down: _showSent,
+                          ),
+                          const SizedBox(width: Space.xs),
+                          Flexible(
+                            child: Text(
+                              'Show exactly what was sent',
+                              style: type.label.copyWith(
+                                color: hovered
+                                    ? palette.text
+                                    : palette.textMuted,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -682,9 +711,7 @@ class _AccountSettingsState extends State<AccountSettings>
                     const SizedBox(height: Space.s),
                     Text(
                       label,
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
-                      ),
+                      style: type.caption.copyWith(color: palette.textFaint),
                     ),
                     const SizedBox(height: Space.xs),
                     CodeBlock(prettyJson(json)),
@@ -719,7 +746,52 @@ class _AccountSettingsState extends State<AccountSettings>
               ),
           ],
         ),
+        // Last and apart: it can't be undone. The account site asks once
+        // more before it deletes anything.
+        const SizedBox(height: Space.xl),
+        _line(
+          stack: stack,
+          children: [
+            Button(
+              label: 'Delete account…',
+              onPressed: () =>
+                  openAccountPage(deleteAccountPage(account.service)),
+            ),
+            Expanded(
+              child: Text(
+                'Deletes your email and everything linked to it at '
+                '${accountSiteName(account.service)}, after asking.',
+                style: type.caption.copyWith(color: palette.textFaint),
+              ),
+            ),
+          ],
+        ),
         failureLine(palette),
+      ],
+    );
+  }
+
+  /// Words and a button side by side, [Space.m] apart; [stack]ed, one
+  /// under the other at the start, each as wide as it needs.
+  Widget _line({required bool stack, required List<Widget> children}) {
+    if (!stack) {
+      return Row(
+        children: [
+          for (final (i, child) in children.indexed) ...[
+            if (i > 0) const SizedBox(width: Space.m),
+            child,
+          ],
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final (i, child) in children.indexed) ...[
+          if (i > 0) const SizedBox(height: Space.s),
+          // Room to wrap, not to fill.
+          if (child is Flexible) child.child else child,
+        ],
       ],
     );
   }
@@ -740,6 +812,17 @@ Uri accountPage(String service) {
     return Uri.parse('https://claktory.com/account');
   }
   return uri.replace(path: '/account');
+}
+
+/// Where the account is deleted on its service: the account site's
+/// confirm step, signing in first if need be.
+Uri deleteAccountPage(String service) =>
+    accountPage(service).replace(path: '/account/delete');
+
+/// "claktory.com" for claktory.com's service, else its host.
+String accountSiteName(String service) {
+  final host = Uri.tryParse(service)?.host ?? '';
+  return host.isEmpty || host == 'account.claktory.com' ? 'claktory.com' : host;
 }
 
 /// [json] indented, or as it is when it isn't JSON.
@@ -860,6 +943,7 @@ class _ServiceFormState extends State<_ServiceForm> {
             controller: _address,
             placeholder: 'https://account.claktory.com',
             autofocus: true,
+            kind: InputKind.url,
             onSubmitted: (_) => _save(),
           ),
         ),
@@ -907,46 +991,55 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final type = TypeScale.of(context);
     final key = _key;
+    final copy = key == null
+        ? null
+        : Button(
+            label: _copied ? 'Copied' : 'Copy',
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: key));
+              setState(() => _copied = true);
+            },
+          );
+    final done = Button(label: 'Done', primary: true, onPressed: widget.close);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
           'Your recovery key',
-          style: TextStyles.emphasis.copyWith(color: palette.text),
+          style: type.emphasis.copyWith(color: palette.text),
         ),
         const SizedBox(height: Space.s),
         Text(
           "It unlocks your secrets if claktory.com can't be reached or your "
           'account is gone. Keep it somewhere safe, such as your password '
           'manager.',
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: type.body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.xl),
         if (key != null)
           CodeBlock(key)
         else if (_error case final error?)
-          Text(error, style: TextStyles.caption.copyWith(color: palette.danger))
+          Text(error, style: type.caption.copyWith(color: palette.danger))
         else
           // Asked for; it comes in a moment.
           const SizedBox(height: 40),
         const SizedBox(height: Space.xl),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            if (key != null)
-              Button(
-                label: _copied ? 'Copied' : 'Copy',
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: key));
-                  setState(() => _copied = true);
-                },
-              ),
-            const SizedBox(width: Space.s),
-            Button(label: 'Done', primary: true, onPressed: widget.close),
-          ],
-        ),
+        // On a phone at the largest text, one under another, Done first,
+        // each the sheet's width.
+        if (isPhoneLayout(context) && largeText(context))
+          StepButtons(children: [done, ?copy])
+        else
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              ?copy,
+              const SizedBox(width: Space.s),
+              done,
+            ],
+          ),
       ],
     );
   }

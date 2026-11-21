@@ -172,3 +172,52 @@ async fn an_account_has_ten_claktories_at_most() {
     let answer = instance.post("/v1/sign-in/verify", &verify, &eleventh.ip).await;
     assert_eq!((answer.status, answer.error().as_str()), (403, "too_many_claktories"));
 }
+
+/// Signed out of one account, a Claktory signs in to another with one code:
+/// its verify is signed with the backend key it has, which proves it's the
+/// same Claktory, so it moves. Signed with another key it's still taken,
+/// and the code isn't spent on a clock that's off.
+#[tokio::test]
+async fn a_claktory_proving_its_key_moves_to_another_account_with_one_code() {
+    let instance = start().await;
+    let mut claktory = Claktory::new("198.51.100.9");
+    let first = instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+
+    let started: SignInStarted = instance.start_sign_in(&claktory, "ana@example.com", "Mac mini").await.json();
+    let ephemeral = Ephemeral::new();
+    let verify =
+        SignInVerify { request_id: started.request_id, code: instance.last_code("ana@example.com"), eph_pub: ephemeral.public_b64() };
+    let body = serde_json::to_vec(&verify).unwrap();
+    let signed = |key: &ed25519_dalek::SigningKey, time: i64| {
+        vec![
+            (TIME_HEADER, time.to_string()),
+            (SIGNATURE_HEADER, sign_request(key, "POST", "/v1/sign-in/verify", time, &body)),
+            ("x-forwarded-for", claktory.ip.clone()),
+        ]
+    };
+    let answer = instance.send("POST", "/v1/sign-in/verify", body.clone(), &signed(&new_signing_key(), instance.now())).await;
+    assert_eq!(answer.error(), "claktory_taken", "another key proves nothing");
+
+    let started: SignInStarted = instance.start_sign_in(&claktory, "ana@example.com", "Mac mini").await.json();
+    let verify = SignInVerify { request_id: started.request_id, code: instance.last_code("ana@example.com"), ..verify };
+    let body = serde_json::to_vec(&verify).unwrap();
+    let headers = |time: i64| {
+        vec![
+            (TIME_HEADER, time.to_string()),
+            (SIGNATURE_HEADER, sign_request(&claktory.key, "POST", "/v1/sign-in/verify", time, &body)),
+            ("x-forwarded-for", claktory.ip.clone()),
+        ]
+    };
+    let answer = instance.send("POST", "/v1/sign-in/verify", body.clone(), &headers(instance.now() - 1000)).await;
+    assert_eq!(answer.error(), "clock_skew", "a clock that's off is said so");
+    let answer = instance.send("POST", "/v1/sign-in/verify", body.clone(), &headers(instance.now())).await;
+    assert_eq!(answer.status, 200, "the same code, still good: {}", answer.text());
+    let moved: SignedIn = answer.json();
+    assert_ne!(moved.account_id, first.account_id);
+    assert_eq!((moved.email.as_str(), moved.claktory_id.as_str(), moved.epoch), ("ana@example.com", claktory.id.as_str(), 2));
+    assert!(ephemeral.open(&moved.sealed_share, &claktory.id, 2).is_some());
+
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+    let owner: String = conn.query_row("SELECT account_id FROM claktories WHERE id = ?1", [&claktory.id], |row| row.get(0)).unwrap();
+    assert_eq!(owner, moved.account_id, "the old account no longer has it");
+}

@@ -4,6 +4,7 @@ import 'package:factory_app/forms.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/transcript.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
@@ -108,6 +109,146 @@ void main() {
       expect(find.textContaining('test result: ok'), findsOneWidget);
     },
   );
+
+  testWidgets("the agent's own replies are bubbles too, washed with its "
+      "color and edged in it, apart from other agents' filled ones", (
+    tester,
+  ) async {
+    final agent = builder(working: false)..color = 'violet';
+    final harness = Harness(workspace(agents: [agent, writer()]));
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          Entry(
+            seq: Int64(1),
+            assistant: AssistantText(text: 'I shipped it.'),
+          ),
+          Entry(
+            seq: Int64(2),
+            event: Event(
+              source: EventSource.EVENT_SOURCE_AGENT,
+              from: 'Writer',
+              fromId: 'a2',
+              text: 'The notes are ready.',
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    Bubble bubbleOf(String text) => tester.widget<Bubble>(
+      find.ancestor(
+        of: find.textContaining(text),
+        matching: find.byType(Bubble),
+      ),
+    );
+    const violet = Color(0xFF7B52E0);
+    final own = bubbleOf('I shipped it.');
+    expect(own.outgoing, isFalse);
+    expect(own.wide, isTrue);
+    expect(own.color, violet.withValues(alpha: 0.14));
+    expect(own.edge, violet.withValues(alpha: 0.5));
+    final theirs = bubbleOf('The notes are ready.');
+    expect(theirs.edge, isNull);
+    expect(theirs.color, const Color(0xFF1F8549));
+  });
+
+  testWidgets('a right click on any message offers Reply, which quotes it '
+      "into the message box, naming another agent's", (tester) async {
+    final agent = builder(working: false);
+    final harness = Harness(workspace(agents: [agent, writer()]));
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          Entry(
+            seq: Int64(1),
+            user: UserText(text: 'Ship it'),
+          ),
+          Entry(
+            seq: Int64(2),
+            assistant: AssistantText(text: 'I shipped it.'),
+          ),
+          Entry(
+            seq: Int64(3),
+            event: Event(
+              source: EventSource.EVENT_SOURCE_AGENT,
+              from: 'Writer',
+              fromId: 'a2',
+              text: 'The notes are ready.\n\nAlso sent to: Lena (Backend).',
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+
+    final mouse = await tester.createGesture(
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryButton,
+    );
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    Future<void> reply(Finder message) async {
+      await mouse.moveTo(tester.getCenter(message));
+      await tester.pump();
+      await mouse.down(tester.getCenter(message));
+      await mouse.up();
+      await settle(tester);
+      expect(find.text('Reply'), findsOneWidget);
+      await tester.tap(find.text('Reply'));
+      await settle(tester);
+    }
+
+    await reply(find.textContaining('I shipped it.'));
+    expect(harness.drafts.of('a1'), startsWith('> I shipped it.'));
+
+    harness.drafts.set('a1', '');
+    await reply(find.textContaining('The notes are ready.'));
+    final quoted = harness.drafts.of('a1');
+    expect(quoted, contains('Writer'));
+    expect(quoted, contains('> The notes are ready.'));
+    expect(quoted, isNot(contains('Also sent to')));
+
+    harness.drafts.set('a1', '');
+    await reply(find.text('Ship it'));
+    expect(harness.drafts.of('a1'), startsWith('> Ship it'));
+  });
+
+  testWidgets("on an iPhone, touch and hold a message for Reply", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final agent = builder(working: false);
+    final harness = Harness(
+      workspace(agents: [agent, writer()])..selectedAgentId = 'a1',
+    );
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          Entry(
+            seq: Int64(1),
+            assistant: AssistantText(text: 'I shipped it.'),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    final message = find.descendant(
+      of: find.byType(TranscriptView),
+      matching: find.textContaining('I shipped it.'),
+    );
+    await tester.longPress(message.first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Reply'));
+    await pumpFrames(tester);
+    expect(harness.drafts.of('a1'), startsWith('> I shipped it.'));
+  });
 
   group("another agent's message opens its conversation", () {
     Future<Harness> showMessage(

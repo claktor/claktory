@@ -13,6 +13,11 @@ import 'controls.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/lines.dart';
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/presentation.dart' show showPanel;
+import 'mobile/input.dart' show InputKind;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -81,7 +86,8 @@ class SecretsSettings extends StatelessWidget {
             if (vault.secrets.isEmpty)
               Text(
                 'No secrets yet.',
-                style: TextStyles.body.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
               )
             else
               for (final secret in vault.secrets)
@@ -121,7 +127,8 @@ class SecretsSettings extends StatelessWidget {
               'them in everything agents read. An agent you give a secret to '
               'could still find a way to reveal it, so give each agent only '
               'what it needs.',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ],
         );
@@ -165,7 +172,10 @@ class _Locked extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(why, style: TextStyles.body.copyWith(color: palette.text)),
+          Text(
+            why,
+            style: TypeScale.of(context).body.copyWith(color: palette.text),
+          ),
           const SizedBox(height: Space.m),
           Wrap(
             spacing: Space.s,
@@ -247,6 +257,9 @@ class _UnlockSecretsFormState extends State<UnlockSecretsForm> {
         child: TextField(
           controller: _key,
           autofocus: true,
+          // Typed or pasted as it is.
+          autocorrect: false,
+          textCapitalization: TextCapitalization.none,
           onSubmitted: (_) => _submit(),
         ),
       ),
@@ -292,14 +305,14 @@ class _ToggleRow extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  style: TextStyles.body.copyWith(color: palette.text),
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.text),
                 ),
                 if (note != null)
                   Text(
                     note!,
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
                   ),
               ],
             ),
@@ -509,18 +522,16 @@ class _SecretRowState extends State<_SecretRow> {
                           children: [
                             Text(
                               secret.name,
-                              style: TextStyles.label.copyWith(
-                                color: palette.text,
-                              ),
+                              style: TypeScale.of(context).label
+                                  .copyWith(color: palette.text),
                             ),
                             if (secret.description.isNotEmpty)
                               Text(
                                 secret.description,
                                 maxLines: _open ? null : 2,
                                 overflow: _open ? null : TextOverflow.ellipsis,
-                                style: TextStyles.body.copyWith(
-                                  color: palette.textMuted,
-                                ),
+                                style: TypeScale.of(context).body
+                                    .copyWith(color: palette.textMuted),
                               ),
                             if (secret.hasConnection())
                               ConnectionHeadline(secret: secret)
@@ -532,23 +543,21 @@ class _SecretRowState extends State<_SecretRow> {
                                   for (final variable in secret.variables)
                                     variable.name,
                                 ].join(', '),
-                                style: TextStyles.caption.copyWith(
+                                style: TypeScale.of(context).caption.copyWith(
                                   fontFamily: TextStyles.mono,
                                   color: palette.textFaint,
                                 ),
                               ),
                             Text(
                               summary,
-                              style: TextStyles.caption.copyWith(
-                                color: palette.textFaint,
-                              ),
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textFaint),
                             ),
                             for (final warning in secret.warnings)
                               Text(
                                 warning,
-                                style: TextStyles.caption.copyWith(
-                                  color: palette.danger,
-                                ),
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.danger),
                               ),
                           ],
                         ),
@@ -612,7 +621,7 @@ class _SecretRowState extends State<_SecretRow> {
                           variable.file
                               ? '${variable.name} (file)'
                               : variable.name,
-                          style: TextStyles.caption.copyWith(
+                          style: TypeScale.of(context).caption.copyWith(
                             fontFamily: TextStyles.mono,
                             color: palette.textMuted,
                           ),
@@ -622,7 +631,7 @@ class _SecretRowState extends State<_SecretRow> {
                               (variable.hint.isEmpty
                                   ? '••••••'
                                   : '••••••${variable.hint}'),
-                          style: TextStyles.body.copyWith(
+                          style: TypeScale.of(context).body.copyWith(
                             fontFamily: TextStyles.mono,
                             color: palette.text,
                           ),
@@ -653,7 +662,7 @@ class _SecretRowState extends State<_SecretRow> {
                         now.difference(shownAt).inSeconds;
                     return Text(
                       'Hides in ${left < 0 ? 0 : left}s',
-                      style: TextStyles.caption.copyWith(
+                      style: TypeScale.of(context).caption.copyWith(
                         color: palette.textFaint,
                         fontFeatures: const [FontFeature.tabularFigures()],
                       ),
@@ -667,7 +676,7 @@ class _SecretRowState extends State<_SecretRow> {
               padding: const EdgeInsets.only(top: Space.xs),
               child: Text(
                 _note!,
-                style: TextStyles.caption.copyWith(
+                style: TypeScale.of(context).caption.copyWith(
                   color: _noteIsError ? palette.danger : palette.textMuted,
                 ),
               ),
@@ -701,7 +710,7 @@ class _SecretRowState extends State<_SecretRow> {
             const SizedBox(height: Space.m),
             Text(
               'Recent use',
-              style: TextStyles.caption.copyWith(
+              style: TypeScale.of(context).caption.copyWith(
                 color: palette.textFaint,
                 fontWeight: FontWeight.w500,
               ),
@@ -748,7 +757,7 @@ class _GrantRow extends StatelessWidget {
                   if (grant.aliases.isNotEmpty)
                     TextSpan(
                       text: '  also as ${grant.aliases.keys.join(', ')}',
-                      style: TextStyles.caption.copyWith(
+                      style: TypeScale.of(context).caption.copyWith(
                         color: palette.textMuted,
                         fontFamily: TextStyles.mono,
                       ),
@@ -759,13 +768,12 @@ class _GrantRow extends StatelessWidget {
                           '  ${grant.runningTasks} running '
                           '${grant.runningTasks == 1 ? 'task' : 'tasks'} '
                           'using it',
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
-                      ),
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textFaint),
                     ),
                 ],
               ),
-              style: TextStyles.body,
+              style: TypeScale.of(context).body,
             ),
           ),
           Button(
@@ -821,7 +829,7 @@ class _UseLine extends StatelessWidget {
       ),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: TextStyles.caption,
+      style: TypeScale.of(context).caption,
     );
   }
 }
@@ -1004,16 +1012,15 @@ class _AgentPicker extends StatelessWidget {
                       const SizedBox(width: Space.s),
                       Text(
                         agent.name,
-                        style: TextStyles.body.copyWith(color: palette.text),
+                        style: TypeScale.of(context).body
+                            .copyWith(color: palette.text),
                       ),
                       if (agent.role.isNotEmpty) ...[
                         const SizedBox(width: Space.s),
                         Text(
                           agent.role,
-                          style: TextStyles.caption.copyWith(
-                            fontSize: 11,
-                            color: palette.textFaint,
-                          ),
+                          style: TypeScale.of(context).caption
+                              .copyWith(fontSize: 11, color: palette.textFaint),
                         ),
                       ],
                     ],
@@ -1166,6 +1173,7 @@ class _SecretFormState extends State<SecretForm> {
           child: TextField(
             controller: _name,
             placeholder: 'Cloudflare',
+            kind: InputKind.text,
             autofocus: editing == null,
           ),
         ),
@@ -1175,6 +1183,7 @@ class _SecretFormState extends State<SecretForm> {
           child: TextField(
             controller: _description,
             placeholder: secretGrantsExample,
+            kind: InputKind.multiline,
             maxLines: 3,
             minLines: 1,
           ),
@@ -1192,16 +1201,14 @@ class _SecretFormState extends State<SecretForm> {
   List<Widget> _values(Palette palette, SecretInfo? editing) => [
     Text(
       'Values',
-      style: TextStyles.caption.copyWith(
-        color: palette.textMuted,
-        fontWeight: FontWeight.w500,
-      ),
+      style: TypeScale.of(context).caption
+          .copyWith(color: palette.textMuted, fontWeight: FontWeight.w500),
     ),
     if (editing != null)
       Text(
         'Leave the values empty to keep them. To change one, enter them '
         'all.',
-        style: TextStyles.caption.copyWith(color: palette.textFaint),
+        style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
       ),
     const SizedBox(height: Space.xs + 2),
     for (final (index, variable) in _variables.indexed)
@@ -1249,6 +1256,8 @@ class _VariableFields extends StatelessWidget {
                 child: TextField(
                   controller: variable.name,
                   placeholder: 'CLOUDFLARE_API_TOKEN',
+                  autocorrect: false,
+                  textCapitalization: TextCapitalization.characters,
                 ),
               ),
               if (onRemove != null) ...[
@@ -1267,13 +1276,16 @@ class _VariableFields extends StatelessWidget {
               ? TextField(
                   controller: variable.value,
                   placeholder: 'Paste the file’s contents',
+                  kind: InputKind.multiline,
+                  autocorrect: false,
+                  textCapitalization: TextCapitalization.none,
                   maxLines: 6,
                   minLines: 3,
                 )
               : TextField(
                   controller: variable.value,
                   placeholder: 'Paste the value',
-                  obscureText: true,
+                  kind: InputKind.secret,
                 ),
           const SizedBox(height: Space.xs),
           _ToggleRow(
@@ -1406,6 +1418,9 @@ class _EnvFormState extends State<EnvForm> {
           TextField(
             controller: _text,
             placeholder: 'Paste here',
+            kind: InputKind.multiline,
+            autocorrect: false,
+            textCapitalization: TextCapitalization.none,
             maxLines: 8,
             minLines: 8,
             autofocus: true,
@@ -1428,15 +1443,14 @@ class _EnvFormState extends State<EnvForm> {
         for (final name in names)
           Text(
             name,
-            style: TextStyles.body.copyWith(
-              fontFamily: TextStyles.mono,
-              color: palette.text,
-            ),
+            style: TypeScale.of(context).body
+                .copyWith(fontFamily: TextStyles.mono, color: palette.text),
           ),
         for (final warning in preview.warnings)
           Text(
             warning,
-            style: TextStyles.caption.copyWith(color: palette.danger),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.danger),
           ),
         const SizedBox(height: Space.l),
         if (names.length > 1)
@@ -1455,7 +1469,11 @@ class _EnvFormState extends State<EnvForm> {
           Field(
             label: 'Name',
             note: 'Agents ask for it by this name.',
-            child: TextField(controller: _name, placeholder: 'Cloudflare'),
+            child: TextField(
+              controller: _name,
+              placeholder: 'Cloudflare',
+              kind: InputKind.text,
+            ),
           ),
           Field(
             label: secretGrantsLabel,
@@ -1463,6 +1481,7 @@ class _EnvFormState extends State<EnvForm> {
             child: TextField(
               controller: _description,
               placeholder: secretGrantsExample,
+              kind: InputKind.multiline,
               maxLines: 3,
               minLines: 1,
             ),
@@ -1512,7 +1531,8 @@ class AgentSecretsSummary extends StatelessWidget {
         ];
         return Text(
           agentSecretsSummary(names),
-          style: TextStyles.caption.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textMuted),
         );
       },
     );
@@ -1582,7 +1602,8 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
           child: vault.secrets.isEmpty
               ? Text(
                   'No secrets yet. Add them in Settings → Secrets.',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 )
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1604,9 +1625,8 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
                     if (_error != null)
                       Text(
                         _error!,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.danger,
-                        ),
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: palette.danger),
                       ),
                   ],
                 ),
@@ -1660,14 +1680,16 @@ class AgentSecretsPanel extends StatelessWidget {
               Text(
                 "Secrets are locked. Agents can't use them until you unlock "
                 'them in Settings → Secrets.',
-                style: TextStyles.caption.copyWith(color: palette.signal),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.signal),
               ),
               const SizedBox(height: Space.m),
             ],
             if (given.isEmpty)
               Text(
                 '${agent?.name ?? agentId} has no secrets yet.',
-                style: TextStyles.body.copyWith(color: palette.textFaint),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
               )
             else
               for (final (:secret, :grant) in given)
@@ -1702,7 +1724,8 @@ class AgentSecretsPanel extends StatelessWidget {
             Text(
               '${agent?.name ?? agentId} uses them without ever seeing their '
               'values.',
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ],
         );
@@ -1739,56 +1762,70 @@ class _GivenSecret extends StatelessWidget {
     ].join(' · ');
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.m),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
+      child: Builder(
+        builder: (context) {
+          final about = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                secret.name,
+                style: TypeScale.of(context).label
+                    .copyWith(color: palette.text),
+              ),
+              if (secret.description.isNotEmpty)
                 Text(
-                  secret.name,
-                  style: TextStyles.label.copyWith(color: palette.text),
+                  secret.description,
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textMuted),
                 ),
-                if (secret.description.isNotEmpty)
-                  Text(
-                    secret.description,
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textMuted,
-                    ),
+              if (secret.variables.isNotEmpty)
+                Text(
+                  [
+                    for (final variable in secret.variables) variable.name,
+                    // The names it gets it under too, as it asked.
+                    for (final alias in grant.aliases.keys) 'also as $alias',
+                  ].join(', '),
+                  style: TypeScale.of(context).code.copyWith(
+                    fontSize: isPhoneLayout(context) ? null : 11,
+                    color: palette.textMuted,
                   ),
-                if (secret.variables.isNotEmpty)
-                  Text(
-                    [
-                      for (final variable in secret.variables) variable.name,
-                      // The names it gets it under too, as it asked.
-                      for (final alias in grant.aliases.keys) 'also as $alias',
-                    ].join(', '),
-                    style: TextStyles.code.copyWith(
-                      fontSize: 11,
-                      color: palette.textMuted,
-                    ),
-                  ),
-                if (when.isNotEmpty)
-                  Text(
-                    when,
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: Space.s),
-          Button(
+                ),
+              if (when.isNotEmpty)
+                Text(
+                  when,
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
+                ),
+            ],
+          );
+          final takeBack = Button(
             label: 'Take back',
             onPressed: () => showModal(
               context,
               (context, close) =>
                   TakeBackForm(secret: secret, grant: grant, close: close),
             ),
-          ),
-        ],
+          );
+          // At the largest text on a phone, Take back goes under it.
+          if (isPhoneLayout(context) && largeText(context)) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                about,
+                const SizedBox(height: Space.s),
+                takeBack,
+              ],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(child: about),
+              const SizedBox(width: Space.s),
+              takeBack,
+            ],
+          );
+        },
       ),
     );
   }
@@ -1835,16 +1872,16 @@ class _SecretPicker extends StatelessWidget {
                     children: [
                       Text(
                         secret.name,
-                        style: TextStyles.body.copyWith(color: palette.text),
+                        style: TypeScale.of(context).body
+                            .copyWith(color: palette.text),
                       ),
                       if (secret.description.isNotEmpty)
                         Text(
                           secret.description,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyles.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
                         ),
                     ],
                   ),
@@ -1904,16 +1941,105 @@ SecretInfo? closestSecret(NewSecret wanted, List<SecretInfo> secrets) {
   return null;
 }
 
-/// An agent's request for a secret, in its conversation and at the top of
-/// Settings → Secrets: what it asks for and why, in its color. Pending, the
-/// person gives one of their secrets (Choose one) or adds a new one filled
-/// in from the request (Add new), or dismisses it with a word why. Decided,
-/// what was given and when. The backend sends the entry back decided; the
-/// card keeps nothing.
+/// Why the secret chosen for [agent]'s request may not be the one it
+/// needs: it sets [sets], and of the names [asked] for, not all. With
+/// none matching, a check that it's the right one.
+String mismatchLine({
+  required String agent,
+  required List<String> asked,
+  required List<String> sets,
+}) {
+  final missing = [
+    for (final name in asked)
+      if (!sets.contains(name)) name,
+  ];
+  final check = "Check it's the one $agent needs.";
+  // Some match: only what it leaves out.
+  if (missing.length < asked.length) {
+    return "This secret doesn't set ${_or(missing)}.";
+  }
+  if (missing.length == 1) {
+    return 'This secret sets ${_and(sets)}, not ${missing.single}. $check';
+  }
+  return "This secret doesn't set ${_or(missing)}. $check";
+}
+
+String _or(List<String> names) => _joined(names, 'or');
+String _and(List<String> names) => _joined(names, 'and');
+String _joined(List<String> names, String last) => names.length < 2
+    ? names.join()
+    : '${names.sublist(0, names.length - 1).join(', ')} $last ${names.last}';
+
+/// What a waiting request asks of the person, in a line (Needs you):
+/// [shownIn] is whose conversation shows it, the admin agent's for the
+/// secret it collects.
+String secretRequestSummary(
+  SecretRequest request,
+  Workspace workspace, {
+  String? shownIn,
+}) {
+  final name = request.newSecret.name.isNotEmpty
+      ? request.newSecret.name
+      : request.secretName;
+  if (request.collecting &&
+      request.adminAgentId.isNotEmpty &&
+      shownIn == request.adminAgentId &&
+      shownIn != request.agentId) {
+    final asker =
+        [
+          for (final agent in workspace.agents)
+            if (agent.id == request.agentId) agent.name,
+        ].firstOrNull ??
+        request.agentId;
+    return 'Asks you to add a secret for $asker: $name';
+  }
+  if (request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED) {
+    final admin = [
+      for (final agent in workspace.agents)
+        if (agent.id == request.adminAgentId) agent.name,
+    ].firstOrNull;
+    return '${admin ?? 'An admin agent'} is finding it: $name';
+  }
+  if (request.adminAgentId.isNotEmpty && request.secretId.isEmpty) {
+    return 'Needs a secret: $name';
+  }
+  return request.secretName.isNotEmpty
+      ? 'Asks for ${request.secretName}'
+      : 'Asks for a secret: $name';
+}
+
+/// An agent's request for a secret, in its conversation and in Needs you:
+/// what it needs and why, in its color. With an admin agent to pass it to
+/// (SecretRequest.admin_agent_id), the person approves the need, or
+/// dismisses it, and the admin agent finds the secret or asks for it to be
+/// added; Choose a secret… does it directly instead. Without one, the
+/// person gives one of their secrets (Your secrets) or adds a new one
+/// filled in from the request (New secret), or dismisses it with a word
+/// why. In the admin agent's conversation, while it collects the secret
+/// (SecretRequest.collecting), it's the new secret to add, filled in.
+/// Decided, what was given and when. The backend sends the entry back
+/// decided; the card keeps nothing.
 class SecretRequestCard extends StatefulWidget {
-  const SecretRequestCard(this.request, {super.key});
+  const SecretRequestCard(
+    this.request, {
+    super.key,
+    this.shownIn,
+    this.direct = false,
+    this.onDecided,
+  });
 
   final SecretRequest request;
+
+  /// The agent whose conversation (or Needs you item) shows it: the admin
+  /// agent's shows the secret it collects.
+  final String? shownIn;
+
+  /// Giving or adding directly, without the card around it: Choose a
+  /// secret…'s dialog.
+  final bool direct;
+
+  /// Decided from here (the dialog closes).
+  final VoidCallback? onDecided;
 
   @override
   State<SecretRequestCard> createState() => _SecretRequestCardState();
@@ -1982,12 +2108,27 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   /// From before agents described what they need: it names a secret.
   bool get _names => request.secretId.isNotEmpty;
 
+  bool get _waiting =>
+      request.state == SecretRequestState.SECRET_REQUEST_STATE_PENDING ||
+      request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+
+  /// The admin agent's add-secret card for the request it collects.
+  bool get _collect =>
+      request.collecting &&
+      request.adminAgentId.isNotEmpty &&
+      widget.shownIn == request.adminAgentId &&
+      widget.shownIn != request.agentId;
+
+  /// The person approves the need, and the admin agent does the rest.
+  bool get _approves =>
+      !widget.direct && !_collect && !_names && request.adminAgentId.isNotEmpty;
+
   Future<void> _give(List<SecretInfo> secrets) async {
     if (_deciding) return;
     final adding = !_names && _adding == true;
     final chosen = secrets.any((secret) => secret.id == _chosen);
     if (!_names && !adding && !chosen) {
-      setState(() => _error = 'Choose a secret to give, or add a new one.');
+      setState(() => _error = 'Choose a secret, or add a new one.');
       return;
     }
     if (adding && _name.text.trim().isEmpty) {
@@ -2076,6 +2217,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     });
     try {
       await send();
+      widget.onDecided?.call();
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
@@ -2091,20 +2233,26 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       builder: (context, _) => _card(
         context,
         store.agent(request.agentId),
+        request.adminAgentId.isEmpty ? null : store.agent(request.adminAgentId),
         store.workspace.vault.secrets,
       ),
     );
   }
 
-  Widget _card(BuildContext context, Agent? agent, List<SecretInfo> secrets) {
+  Widget _card(
+    BuildContext context,
+    Agent? agent,
+    Agent? admin,
+    List<SecretInfo> secrets,
+  ) {
     final palette = Palette.of(context);
-    final color = agentColor(agent?.color ?? 'slate');
     final name = agent?.name ?? request.agentId;
-    final pending =
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_GRANTED &&
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_DISMISSED &&
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_EXPIRED &&
-        request.state != SecretRequestState.SECRET_REQUEST_STATE_WITHDRAWN;
+    final adminName = admin?.name ?? request.adminAgentId;
+    // The admin agent's card is in its color, with its character.
+    final shown = _collect ? admin : agent;
+    final color = agentColor(shown?.color ?? 'slate');
+    final pending = _waiting;
+    if (_collect) _adding = true;
     final description = _names
         ? [
                 for (final secret in secrets)
@@ -2112,7 +2260,26 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
               ].firstOrNull ??
               ''
         : request.newSecret.description;
-    if (pending && !_names && _adding == null) {
+    if (widget.direct && widget.onDecided != null) {
+      // In Choose a secret…'s dialog, which says whose it is.
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: _pending(context, palette, name, secrets),
+      );
+    }
+    final String title;
+    if (_collect) {
+      title =
+          '$adminName asks you to add a secret for $name: '
+          '${request.newSecret.name}';
+    } else if (_names) {
+      title = '$name asks for ${request.secretName}';
+    } else if (_approves) {
+      title = '$name needs a secret: ${request.newSecret.name}';
+    } else {
+      title = '$name asks for a secret: ${request.newSecret.name}';
+    }
+    if (pending && !_names && _adding == null && !_approves) {
       // Chooses the secret that looks like the one asked for, if any;
       // otherwise adds the one it describes.
       final closest = closestSecret(request.newSecret, secrets);
@@ -2133,28 +2300,25 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         children: [
           Row(
             children: [
-              if (agent != null) ...[
-                AgentCharacter(agent: agent, size: 20),
+              if (shown != null) ...[
+                AgentCharacter(agent: shown, size: 20),
                 const SizedBox(width: Space.xs + 2),
               ],
               Flexible(
                 child: Text(
-                  _names
-                      ? '$name asks for ${request.secretName}'
-                      : '$name asks for a secret: ${request.newSecret.name}',
-                  style: TextStyles.caption.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  title,
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: color, fontWeight: FontWeight.w600),
                 ),
               ),
               // The agent changed what it asks for since it asked.
-              if (pending && request.updatedMs > 0) ...[
+              if (pending && request.updatedMs > 0 && !_collect) ...[
                 const SizedBox(width: Space.s),
                 Text(
                   'Updated '
                   '${logTime(DateTime.fromMillisecondsSinceEpoch(request.updatedMs.toInt()))}',
-                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint),
                 ),
               ],
             ],
@@ -2172,7 +2336,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             ),
           ],
           const SizedBox(height: Space.m),
-          if (pending)
+          if (pending && _approves)
+            ..._approval(context, palette, name, adminName)
+          else if (pending)
             ..._pending(context, palette, name, secrets)
           else
             ..._decided(palette, color, name),
@@ -2203,35 +2369,37 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     }
     return [
       if (!_names) ...[
-        Row(
-          children: [
-            _ModeTab(
-              title: 'Choose one',
-              selected: !adding,
-              onTap: () => setState(() {
-                _adding = false;
-                _error = null;
-              }),
-            ),
-            const SizedBox(width: Space.s),
-            _ModeTab(
-              title: 'Add new',
-              selected: adding,
-              onTap: () => setState(() {
-                _adding = true;
-                _error = null;
-              }),
-            ),
-          ],
-        ),
-        const SizedBox(height: Space.m),
+        if (!_collect)
+          ControlsLine(
+            children: [
+              _ModeTab(
+                title: 'Your secrets',
+                selected: !adding,
+                onTap: () => setState(() {
+                  _adding = false;
+                  _error = null;
+                }),
+              ),
+              _ModeTab(
+                title: 'New secret',
+                selected: adding,
+                onTap: () => setState(() {
+                  _adding = true;
+                  _error = null;
+                }),
+              ),
+            ],
+          ),
+        if (!_collect) const SizedBox(height: Space.m),
         if (!adding)
           secrets.isEmpty
               ? Padding(
                   padding: const EdgeInsets.only(bottom: Space.l),
                   child: Text(
-                    "You don't have any secrets yet.",
-                    style: TextStyles.body.copyWith(color: palette.textMuted),
+                    "You don't have any secrets yet. Add one under New "
+                    'secret.',
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.textMuted),
                   ),
                 )
               : Field(
@@ -2260,12 +2428,19 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             padding: const EdgeInsets.only(bottom: Space.m),
             child: Text(
               "Filled in from $agent's request. Change anything you need.",
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ),
+          // Each field carries its own name to a screen reader: the
+          // label above it may have scrolled away.
           Field(
             label: 'Name',
-            child: TextField(controller: _name),
+            child: TextField(
+              controller: _name,
+              kind: InputKind.text,
+              semanticsLabel: 'Name',
+            ),
           ),
           Field(
             label: secretGrantsLabel,
@@ -2273,7 +2448,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             child: TextField(
               controller: _description,
               placeholder: secretGrantsExample,
+              kind: InputKind.multiline,
               maxLines: 3,
+              semanticsLabel: secretGrantsLabel,
             ),
           ),
           for (final value in _values)
@@ -2284,7 +2461,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                 children: [
                   Text(
                     value.file ? '${value.name.text} (file)' : value.name.text,
-                    style: TextStyles.caption.copyWith(
+                    style: TypeScale.of(context).caption.copyWith(
                       fontFamily: TextStyles.mono,
                       color: palette.textMuted,
                     ),
@@ -2294,74 +2471,184 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                       ? TextField(
                           controller: value.value,
                           placeholder: 'Paste the file’s contents',
+                          kind: InputKind.multiline,
+                          autocorrect: false,
+                          textCapitalization: TextCapitalization.none,
                           maxLines: 6,
                           minLines: 3,
+                          semanticsLabel: '${value.name.text} (file)',
                         )
                       : TextField(
                           controller: value.value,
                           placeholder: 'Paste the value',
-                          obscureText: true,
+                          kind: InputKind.secret,
+                          semanticsLabel: value.name.text,
                         ),
                 ],
               ),
             ),
         ],
       ],
-      Row(
-        children: [
-          Expanded(
-            child: Text(
-              _error ?? '$agent never sees the value.',
-              style: TextStyles.caption.copyWith(
-                color: _error == null ? palette.textFaint : palette.danger,
-              ),
-            ),
+      ActionLine(
+        lead: Text(
+          _error ?? '$agent never sees the value.',
+          style: TypeScale.of(context).caption.copyWith(
+            color: _error == null ? palette.textFaint : palette.danger,
           ),
-          const SizedBox(width: Space.s),
-          Button(
-            label: give,
-            primary: true,
-            onPressed: _deciding || (!_names && !adding && secrets.isEmpty)
-                ? null
-                : () => _give(secrets),
-          ),
-        ],
+        ),
+        action: Button(
+          label: give,
+          primary: true,
+          onPressed: _deciding || (!_names && !adding && secrets.isEmpty)
+              ? null
+              : () => _give(secrets),
+        ),
       ),
       const SizedBox(height: Space.m),
-      Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _comment,
-              placeholder: 'Tell $agent why (optional)',
-              onSubmitted: (_) => _dismiss(),
-            ),
-          ),
-          const SizedBox(width: Space.s),
-          Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
-        ],
+      ActionLine(
+        lead: TextField(
+          controller: _comment,
+          placeholder: 'Tell $agent why (optional)',
+          semanticsLabel: 'Tell $agent why (optional)',
+          kind: InputKind.text,
+          onSubmitted: (_) => _dismiss(),
+        ),
+        action: Button(
+          label: 'Dismiss',
+          onPressed: _deciding ? null : _dismiss,
+        ),
       ),
     ];
   }
 
-  /// The chosen secret doesn't set every name the agent asked for: what
-  /// it sets, and whether to give it under those names too, each as which
-  /// of its variables, or as it is.
+  /// The need, to approve: what it needs as fine print, Approve, Dismiss
+  /// with a word why, and Choose a secret… to give or add one directly.
+  /// Approved, who's on it instead of Approve.
+  List<Widget> _approval(
+    BuildContext context,
+    Palette palette,
+    String agent,
+    String admin,
+  ) {
+    final type = TypeScale.of(context);
+    final approved =
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+    final variables = [
+      for (final variable in request.newSecret.variables) variable.name,
+    ];
+    final String status;
+    if (!approved) {
+      status = _error ?? '$admin finds the right one, or asks you to add it.';
+    } else if (request.collecting) {
+      status = _error ?? "Waiting for you to add it in $admin's conversation.";
+    } else {
+      status = _error ?? 'Approved. $admin is finding it.';
+    }
+    final statusLine = Text(
+      status,
+      style: type.caption.copyWith(
+        color: _error != null
+            ? palette.danger
+            : approved
+            ? palette.textMuted
+            : palette.textFaint,
+      ),
+    );
+    return [
+      if (variables.isNotEmpty) ...[
+        Text(
+          variables.length == 1
+              ? 'Sets ${variables.single}'
+              : 'Sets ${_and(variables)}',
+          style: type.caption.copyWith(
+            fontFamily: TextStyles.mono,
+            color: palette.textFaint,
+          ),
+        ),
+        const SizedBox(height: Space.m),
+      ],
+      if (approved)
+        statusLine
+      else
+        ActionLine(
+          lead: statusLine,
+          action: Button(
+            label: 'Approve',
+            primary: true,
+            onPressed: _deciding ? null : _approve,
+          ),
+        ),
+      const SizedBox(height: Space.m),
+      ActionLine(
+        lead: TextField(
+          controller: _comment,
+          placeholder: 'Tell $agent why (optional)',
+          semanticsLabel: 'Tell $agent why (optional)',
+          kind: InputKind.text,
+          onSubmitted: (_) => _dismiss(),
+        ),
+        action: Button(
+          label: 'Dismiss',
+          onPressed: _deciding ? null : _dismiss,
+        ),
+      ),
+      const SizedBox(height: Space.s),
+      Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: Button(
+          label: 'Choose a secret…',
+          onPressed: _deciding ? null : () => _chooseDirectly(agent),
+        ),
+      ),
+    ];
+  }
+
+  Future<void> _approve() => _decide(
+    () => AppScope.of(context).decideSecretRequest(
+      request.agentId,
+      request.id,
+      approve: true,
+      approveOnly: true,
+    ),
+  );
+
+  /// Today's card in a dialog: give one of the person's secrets or add a
+  /// new one, without the admin agent.
+  Future<void> _chooseDirectly(String agent) => showPanel(
+    context,
+    title: 'Choose a secret for $agent',
+    tall: true,
+    builder: (context, close) => SingleChildScrollView(
+      child: SecretRequestCard(request, direct: true, onDecided: close),
+    ),
+  );
+
+  /// The chosen secret doesn't set every name the agent asked for: which
+  /// it doesn't, and whether to give it under those names too, each as
+  /// which of its variables, or as it is.
   Widget _mismatch(Palette palette, String agent, SecretInfo secret) {
     final missing = _missing(secret);
-    final caption = TextStyles.caption.copyWith(color: palette.textMuted);
-    final mono = TextStyles.caption.copyWith(
-      fontFamily: TextStyles.mono,
-      color: palette.text,
-    );
+    final own = [for (final variable in secret.variables) variable.name];
+    // Several rows, one per name asked for, to say which variable each is.
+    final rows = missing.length > 1 || own.length > 1;
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
+    final mono = TypeScale.of(context).caption
+        .copyWith(fontFamily: TextStyles.mono, color: palette.text);
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            '$agent asked for ${missing.join(', ')}, but ${secret.name} sets '
-            '${secret.variables.map((v) => v.name).join(', ')}.',
+            mismatchLine(
+              agent: agent,
+              asked: [
+                for (final variable in request.newSecret.variables)
+                  variable.name,
+              ],
+              sets: own,
+            ),
             style: caption,
           ),
           const SizedBox(height: Space.s),
@@ -2370,39 +2657,58 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                 ? 'Also give it as ${missing.single}'
                 : 'Also give it under the names $agent asked for',
             note: _alias
-                ? null
-                : secret.variables.length == 1
-                ? '$agent gets it only as ${secret.variables.single.name}.'
+                ? rows
+                      ? null
+                      : '$agent gets its value as ${own.single} and '
+                            '${missing.single}.'
+                : own.length == 1
+                ? '$agent gets it only as ${own.single}.'
                 : '$agent gets it under its own names only.',
             value: _alias,
             onChanged: (on) => setState(() => _alias = on),
           ),
-          if (_alias && (missing.length > 1 || secret.variables.length > 1))
+          if (_alias && rows)
             for (final name in missing)
               Padding(
                 padding: const EdgeInsets.only(top: Space.s),
-                child: Row(
-                  children: [
-                    Expanded(child: Text(name, style: mono)),
-                    const SizedBox(width: Space.s),
-                    SizedBox(
-                      width: 220,
-                      child: Select<String>(
-                        value: _aliasFor(name, secret),
-                        options: [
-                          for (final variable in secret.variables)
-                            SelectOption(variable.name, 'is ${variable.name}'),
-                          const SelectOption('', 'Leave it out'),
-                        ],
-                        onChanged: (variable) =>
-                            setState(() => _aliases[name] = variable),
-                      ),
-                    ),
-                  ],
+                child: _aliasRow(
+                  name: Text(name, style: mono),
+                  choice: Select<String>(
+                    value: _aliasFor(name, secret),
+                    options: [
+                      for (final variable in secret.variables)
+                        SelectOption(variable.name, 'Same as ${variable.name}'),
+                      const SelectOption('', 'Leave it out'),
+                    ],
+                    onChanged: (variable) =>
+                        setState(() => _aliases[name] = variable),
+                  ),
                 ),
               ),
         ],
       ),
+    );
+  }
+
+  /// A name asked for and which of the secret's variables it is: side by
+  /// side, or on a phone the choice under the name, the column's width.
+  Widget _aliasRow({required Widget name, required Widget choice}) {
+    if (isPhoneLayout(context)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          name,
+          const SizedBox(height: Space.xs),
+          choice,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        Expanded(child: name),
+        const SizedBox(width: Space.s),
+        SizedBox(width: 280, child: choice),
+      ],
     );
   }
 
@@ -2419,13 +2725,17 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     final given = request.givenSecretName.isNotEmpty
         ? request.givenSecretName
         : request.secretName;
+    // Approved first, it may have been the admin agent that gave it.
+    final byAdmin =
+        request.approvedMs > 0 &&
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_GRANTED;
     return [
-      // Who decided: the person (not when it expired or the agent took it
-      // back).
+      // Who decided: the person (not when it expired, the agent took it
+      // back, or it may have been the admin agent).
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!expired && !withdrawn) ...[
+          if (!expired && !withdrawn && !byAdmin) ...[
             const PersonAvatar(size: 16),
             const SizedBox(width: Space.xs + 2),
           ],
@@ -2435,11 +2745,13 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                 children: [
                   TextSpan(
                     text: withdrawn
-                        ? 'Withdrawn by $agent'
+                        ? '$agent withdrew it'
                         : expired
                         ? 'Expired'
                         : dismissed
                         ? 'Dismissed'
+                        : byAdmin
+                        ? '$agent got $given'
                         : 'Gave $given to $agent',
                     style: TextStyle(
                       color: dismissed || expired || withdrawn
@@ -2456,7 +2768,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                     ),
                 ],
               ),
-              style: TextStyles.caption,
+              style: TypeScale.of(context).caption,
             ),
           ),
         ],
@@ -2465,7 +2777,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         const SizedBox(height: Space.xs),
         Text(
           '“${request.comment}”',
-          style: TextStyles.body.copyWith(color: palette.textMuted),
+          style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
       ],
     ];
@@ -2507,7 +2819,7 @@ class _ModeTab extends StatelessWidget {
           ),
           child: Text(
             title,
-            style: TextStyles.body.copyWith(
+            style: TypeScale.of(context).body.copyWith(
               color: selected || hovered ? palette.text : palette.textMuted,
             ),
           ),

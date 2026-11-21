@@ -4,6 +4,9 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'explorer.dart' show shortPath;
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
+import 'mobile/lines.dart';
+import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// An agent's database, read-only: where its file is, then its tables and
@@ -38,7 +41,8 @@ class DatabaseView extends StatelessWidget {
             ),
             child: Text(
               shortPath(database.path),
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
             ),
           ),
         if (database.tables.isEmpty)
@@ -49,7 +53,8 @@ class DatabaseView extends StatelessWidget {
             ),
             child: Text(
               'No tables yet. The agent makes them when it has data to keep.',
-              style: TextStyles.body.copyWith(color: palette.textFaint),
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textFaint),
             ),
           ),
         if (tables.isNotEmpty) ...[
@@ -79,10 +84,8 @@ class _Heading extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.xs),
       child: Text(
         text,
-        style: TextStyles.caption.copyWith(
-          color: palette.textFaint,
-          fontWeight: FontWeight.w500,
-        ),
+        style: TypeScale.of(context).caption
+            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -117,98 +120,116 @@ class _TableState extends State<_Table> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final table = widget.table;
-    return Pressable(
-      onTap: () => setState(() => _open = !_open),
-      builder: (context, hovered) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Space.s,
-          vertical: Space.xs + 1,
-        ),
-        decoration: BoxDecoration(
-          color: hovered ? palette.hover : null,
-          borderRadius: BorderRadius.circular(Radii.control),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                SizedBox(
-                  width: 14,
-                  child: Center(
-                    child: Chevron(
-                      color: hovered ? palette.textMuted : palette.textFaint,
-                      down: _open,
-                    ),
-                  ),
+    return Semantics(
+      container: true,
+      expanded: _open,
+      child: Pressable(
+        onTap: () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.s,
+            vertical: Space.xs + 1,
+          ),
+          decoration: BoxDecoration(
+            color: hovered ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ConstrainedBox(
+                // A finger's height on a phone.
+                constraints: BoxConstraints(
+                  minHeight: isPhoneLayout(context) ? Touch.target - 10 : 0,
                 ),
-                const SizedBox(width: Space.xs),
-                Expanded(
-                  child: Text(
-                    table.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyles.code.copyWith(color: palette.text),
-                  ),
-                ),
-                const SizedBox(width: Space.s),
-                Text(
-                  rowsLabel(table.rows),
-                  style: TextStyles.caption.copyWith(
-                    color: palette.textFaint,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ],
-            ),
-            if (_open)
-              Padding(
-                padding: const EdgeInsets.only(
-                  left: 14 + Space.xs,
-                  top: Space.xs,
-                  bottom: Space.xs,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                child: Row(
                   children: [
-                    if (table.columns.isEmpty)
-                      Text(
-                        'No columns.',
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
+                    SizedBox(
+                      width: 14,
+                      child: Center(
+                        child: Chevron(
+                          color: hovered
+                              ? palette.textMuted
+                              : palette.textFaint,
+                          down: _open,
                         ),
                       ),
-                    for (final column in table.columns)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 1),
-                        child: Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                column.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyles.code.copyWith(
-                                  color: palette.textMuted,
-                                ),
-                              ),
-                            ),
-                            if (column.type.isNotEmpty) ...[
-                              const SizedBox(width: Space.s),
-                              Text(
-                                column.type,
-                                style: TextStyles.caption.copyWith(
-                                  color: palette.textFaint,
-                                ),
-                              ),
-                            ],
-                          ],
+                    ),
+                    const SizedBox(width: Space.xs),
+                    Expanded(
+                      // At the largest text on a phone, its rows go under
+                      // its name.
+                      child: ActionLine(
+                        lead: Text(
+                          table.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TypeScale.of(context).code
+                              .copyWith(color: palette.text),
+                        ),
+                        gap: largeText(context) ? 0 : Space.s,
+                        action: Text(
+                          rowsLabel(table.rows),
+                          style: TypeScale.of(context).caption.copyWith(
+                            color: palette.textFaint,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
                         ),
                       ),
+                    ),
                   ],
                 ),
               ),
-          ],
+              if (_open)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: 14 + Space.xs,
+                    top: Space.xs,
+                    bottom: Space.xs,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (table.columns.isEmpty)
+                        Text(
+                          'No columns.',
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
+                        ),
+                      for (final column in table.columns)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 1),
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  column.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).code
+                                      .copyWith(color: palette.textMuted),
+                                ),
+                              ),
+                              if (column.type.isNotEmpty) ...[
+                                const SizedBox(width: Space.s),
+                                Flexible(
+                                  child: Text(
+                                    column.type,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TypeScale.of(context).caption
+                                        .copyWith(color: palette.textFaint),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

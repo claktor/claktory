@@ -467,6 +467,27 @@ pub struct EndpointsSet {
     pub count: usize,
 }
 
+/// `POST /v1/move`, signed with the old token and key: the moved Claktory's new ones.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MoveRequest {
+    /// The new backend key (Ed25519 public, b64).
+    pub backend_key: String,
+    /// The new machine token: 32 random bytes, b64, chosen by the Claktory.
+    pub machine_token: String,
+    /// The new computer's name.
+    pub name: String,
+    pub version: String,
+    pub platform: String,
+    /// The old computer's name, for the email.
+    #[serde(default)]
+    pub from: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MoveDone {
+    pub epoch: u64,
+}
+
 /// `GET /v1/relay/allowlist`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Allowlist {

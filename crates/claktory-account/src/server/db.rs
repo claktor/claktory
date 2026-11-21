@@ -413,6 +413,30 @@ pub fn claktory_by_token(conn: &Connection, token: &str) -> rusqlite::Result<Opt
     conn.query_row(&format!("{CLAKTORY} WHERE token_hash = ?1"), params![hash(token)], claktory_row).optional()
 }
 
+/// A Claktory moved: its new backend key and token replace the old (which
+/// stop working), and its computer's name, version and platform are the
+/// new computer's. False when the token is another Claktory's already.
+pub fn moved(
+    conn: &Connection,
+    id: &str,
+    backend_key: &str,
+    token: &str,
+    name: &str,
+    version: &str,
+    platform: &str,
+) -> rusqlite::Result<bool> {
+    let taken: bool =
+        conn.query_row("SELECT EXISTS (SELECT 1 FROM claktories WHERE token_hash = ?1)", params![hash(token)], |row| row.get(0))?;
+    if taken {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE claktories SET backend_key = ?2, token_hash = ?3, name = ?4, version = ?5, platform = ?6 WHERE id = ?1",
+        params![id, backend_key, hash(token), name, version, platform],
+    )?;
+    Ok(true)
+}
+
 pub fn claktories(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec<Claktory>> {
     let mut statement = conn.prepare(&format!("{CLAKTORY} WHERE account_id = ?1 ORDER BY created"))?;
     statement.query_map(params![account_id], claktory_row)?.collect()
@@ -435,8 +459,10 @@ pub const CLAKTORIES_PER_ACCOUNT: u32 = 10;
 
 /// Signs a Claktory in from a request whose code was right: makes the
 /// account if it's new, then registers the Claktory, or gives one signing in
-/// again a new token, backend key and epoch, undoing a removal.
-pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64) -> rusqlite::Result<Registered> {
+/// again a new token, backend key and epoch, undoing a removal. `proven`:
+/// the Claktory proved it holds the backend key it has now, so it may move
+/// from another account (signed out there, signing in to this one).
+pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64, proven: bool) -> rusqlite::Result<Registered> {
     let (Some(id), Some(name), Some(backend_key), Some(version), Some(platform)) =
         (&request.claktory_id, &request.name, &request.backend_key, &request.version, &request.platform)
     else {
@@ -448,6 +474,7 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64)
     if let Some(existing) = &existing
         && existing.account_id != account_id
         && existing.revoked_at.is_none()
+        && !proven
     {
         return Ok(Registered::Taken);
     }
@@ -462,7 +489,8 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64)
     let epoch = match &existing {
         Some(existing) => {
             if existing.account_id != account_id {
-                // Removed by its old account: what that account knew of it goes.
+                // Removed by its old account, or moving from it: what that
+                // account knew of it goes.
                 tx.execute("DELETE FROM endpoints WHERE claktory_id = ?1", params![id])?;
                 tx.execute("DELETE FROM share_releases WHERE claktory_id = ?1", params![id])?;
                 anonymize(&tx, id)?;

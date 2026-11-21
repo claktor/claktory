@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'forms.dart' show AgentSettingsForm;
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
@@ -60,7 +61,8 @@ class ExtensionAbout extends StatelessWidget {
             if (extension.description.isNotEmpty)
               Text(
                 extension.description,
-                style: TextStyles.body.copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textMuted),
               ),
             for (final option in extension.options)
               Padding(
@@ -123,14 +125,12 @@ class _OptionLine extends StatelessWidget {
       children: [
         Text(
           option.label,
-          style: TextStyles.caption.copyWith(
-            color: palette.textFaint,
-            fontWeight: FontWeight.w500,
-          ),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
         ),
         Text(
           shown.isEmpty ? 'None' : shown,
-          style: TextStyles.body.copyWith(color: palette.text),
+          style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
       ],
     );

@@ -120,6 +120,48 @@ xcodebuild archive -quiet \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
   CODE_SIGNING_ALLOWED=NO
 
+# Every binary the app embeds must be loadable by the phone's dyld. A stale
+# build cache can slip an old dylib in: the tunnel's Rust library, linked
+# while an older Xcode was selected, reached TestFlight on 2026-11-21 and
+# failed every dlopen on the phone with "mis-aligned LINKEDIT string pool"
+# (the Simulator doesn't enforce it). So check what dyld checks, before
+# anything is signed or uploaded: 8-aligned symbol and string tables, and
+# the modern LC_BUILD_VERSION stamp (its absence means an old toolchain
+# linked the binary).
+app_dir="$archive/Products/Applications/Runner.app"
+problems=""
+for binary in "$app_dir/Runner" "$app_dir"/Frameworks/*.framework/*; do
+  [ -f "$binary" ] || continue
+  file -b "$binary" | grep -q Mach-O || continue
+  found="$(otool -l "$binary" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+bad = []
+symtab = re.search(r"cmd LC_SYMTAB\n\s*cmdsize \d+\n\s*symoff (\d+)\n\s*nsyms \d+\n\s*stroff (\d+)", text)
+if symtab:
+    for name, off in (("symbol table", int(symtab.group(1))), ("string pool", int(symtab.group(2)))):
+        if off % 8:
+            bad.append(f"its {name} (offset {off}) is not 8-byte aligned, which the phone refuses")
+if "cmd LC_BUILD_VERSION" not in text:
+    bad.append("it has no LC_BUILD_VERSION: an old toolchain linked it")
+print("; ".join(bad))
+')"
+  # And dyld's own reader: it refuses exactly what the phone would.
+  if ! dyld="$(xcrun dyld_info -platform "$binary" 2>&1)"; then
+    dyld="$(printf '%s' "$dyld" | grep -v "^$binary" | tail -1)"
+    found="${found:+$found; }dyld_info: ${dyld:-it refuses the file}"
+  fi
+  [ -z "$found" ] || problems="$problems
+  - ${binary#"$app_dir"/}: $found"
+done
+if [ -n "$problems" ]; then
+  {
+    echo "Not uploading: the phone's dyld would refuse what the app embeds:$problems"
+    echo "A stale cache usually did it: delete app/.dart_tool/hooks_runner and app/build/ios, check xcode-select, and build again."
+  } >&2
+  exit 1
+fi
+
 destination=export
 $upload && destination=upload
 options="$out/ExportOptions.plist"

@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart';
 import 'resources.dart' show formatBytes;
 
 /// A file on this device, to send with a message.
@@ -58,6 +60,7 @@ String mimeOf(String name) {
         'json': 'application/json',
         'html': 'text/html',
         'zip': 'application/zip',
+        'm4a': 'audio/mp4',
       }[name.substring(dot + 1).toLowerCase()] ??
       '';
 }
@@ -119,6 +122,12 @@ class FileDrop {
 
   static const _channel = MethodChannel('factory/window');
 
+  /// Whether this platform's window takes files dropped on it: only the
+  /// Mac's does (MainFlutterWindow.swift). Elsewhere (an iPhone, an iPad,
+  /// Android at any width) nothing here touches the window's channel, and
+  /// no overlay shows.
+  static bool get windowDrops => defaultTargetPlatform == TargetPlatform.macOS;
+
   /// Files are being dragged over the window.
   static final over = ValueNotifier<bool>(false);
 
@@ -143,7 +152,7 @@ class FileDrop {
   static var _listening = false;
 
   static void _listen() {
-    if (_listening) return;
+    if (_listening || !windowDrops) return;
     _listening = true;
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -161,14 +170,38 @@ class FileDrop {
     });
   }
 
-  /// Whether the window takes files dropped on it now: while it shows a
-  /// message box.
-  static Future<void> accept(bool on) async {
+  /// The message box the window's drops go to, if one shows ([claim]).
+  static Object? _owner;
+
+  /// Whether the message box showing takes files; null when none shows.
+  /// The drop overlay says what dropping would do from it.
+  static final takesFiles = ValueNotifier<bool?>(null);
+
+  /// [owner], a message box, is the one showing: files dropped on the
+  /// window go to it if it [takesFiles]. A new box claims before the one
+  /// it replaces lets go, so the last to claim keeps it.
+  static void claim(Object owner, {required bool takesFiles}) {
+    _owner = owner;
+    FileDrop.takesFiles.value = takesFiles;
+    unawaited(_accept(takesFiles));
+  }
+
+  /// [owner] is gone; if it was the one showing, no box is.
+  static void release(Object owner) {
+    if (!identical(_owner, owner)) return;
+    _owner = null;
+    takesFiles.value = null;
+    unawaited(_accept(false));
+  }
+
+  /// Whether the window takes files dropped on it now.
+  static Future<void> _accept(bool on) async {
+    if (!windowDrops) return;
     _listen();
     try {
       await _channel.invokeMethod<void>('takeFiles', on);
     } on Exception {
-      // No native window (tests, or a platform without drops).
+      // No native window (a test without one).
     }
   }
 }
@@ -229,8 +262,11 @@ class AttachmentChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final progress = this.progress;
+    // On a phone, a finger's size, its × too (research mobile.md §4).
+    final phone = isPhoneLayout(context);
+    final type = TypeScale.of(context);
     final chip = Container(
-      height: 28,
+      height: phone ? Touch.target : 28,
       constraints: const BoxConstraints(maxWidth: maxWidth),
       decoration: BoxDecoration(
         color: palette.canvas,
@@ -265,7 +301,9 @@ class AttachmentChip extends StatelessWidget {
                     name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyles.label.copyWith(color: palette.text),
+                    style: (phone ? type.secondary : TextStyles.label).copyWith(
+                      color: palette.text,
+                    ),
                   ),
                 ),
                 const SizedBox(width: Space.xs + 2),
@@ -273,7 +311,7 @@ class AttachmentChip extends StatelessWidget {
                   progress == null
                       ? formatBytes(Int64(size))
                       : '${(progress * 100).floor()}%',
-                  style: TextStyles.caption.copyWith(
+                  style: type.caption.copyWith(
                     color: palette.textFaint,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
@@ -282,16 +320,20 @@ class AttachmentChip extends StatelessWidget {
                   Pressable(
                     onTap: onRemove,
                     builder: (context, hovered) => Semantics(
+                      // On a phone its own element, or the chip's others
+                      // merge into it.
+                      container: phone,
                       button: true,
                       label: 'Remove $name',
+                      onTap: phone ? onRemove : null,
                       child: SizedBox.square(
-                        dimension: 24,
+                        dimension: phone ? Touch.target : 24,
                         child: Center(
                           child: ExtensionGlyph(
                             icon: 'x',
                             name: 'Remove',
                             color: hovered ? palette.text : palette.textFaint,
-                            size: 12,
+                            size: phone ? 16 : 12,
                           ),
                         ),
                       ),

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "idiom": "phone",
+  "ios_app_on_mac": false,
+  "os_version": "27.2",
+  "hardware_keyboard": false,
+  "pencil": {
+    "hover": false,
+    "squeeze": false,
+    "double_tap": false
+  },
+  "pdf_page_overlay": {
+    "available": true,
+    "min_os": "16.0"
+  },
+  "stroke_recognizer": {
+    "available": true,
+    "min_os": "27.0"
+  }
+}

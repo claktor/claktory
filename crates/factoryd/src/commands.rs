@@ -76,11 +76,17 @@ impl Factory {
             runtime.doing = None;
             // A fresh start: idle from now, whatever its last run did.
             self.reset_presence(id);
+            // It has read no pipe yet.
+            crate::pipes::agents::clear_taint(self, id);
+            // Its questions went with the old conversation.
+            if let Err(error) = crate::extensions::ask::cleared(&self.store, id) {
+                tracing::warn!(agent = %id, %error, "could not dismiss its questions");
+            }
             self.broadcast_workspace(&inner);
         }
         let dir = self.home.agent_dir(id);
         archive(&dir).await?;
-        let (transcript, persist) = Transcript::cleared(dir)?;
+        let (transcript, persist) = Transcript::cleared(dir, id.to_owned())?;
         write_atomic(&persist.path, &persist.bytes).await?;
         let mut inner = self.lock();
         if let Some(runtime) = inner.agents.get_mut(id) {

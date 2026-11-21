@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "kind": "creation_params",
+  "view_type": "claktory/ink",
+  "arguments": {
+    "schema_version": 1,
+    "leaf_id": "leaf-7f3a",
+    "surface": "image",
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/photos/whiteboard.heic",
+      "sha256": "745a23c14bbeb5af0ff63c531e150562d9753aed2aa060e6fc055c1c16df1b3b",
+      "mime": "image/heic",
+      "size": 2210331
+    },
+    "document": {
+      "file": "<render cache>/demo-mac/745a23c1/whiteboard.heic",
+      "sha256": "745a23c14bbeb5af0ff63c531e150562d9753aed2aa060e6fc055c1c16df1b3b"
+    },
+    "layers": [
+      {
+        "page_1based": null,
+        "ink_layer_id": "layer-whiteboard",
+        "revision": 1
+      }
+    ],
+    "drawing_policy": "any_input",
+    "persistence": {
+      "mode": "online"
+    },
+    "active": true,
+    "ink": {
+      "paper": "#FFFFFFFF",
+      "appearance": "light"
+    }
+  }
+}

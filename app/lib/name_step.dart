@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -5,7 +7,10 @@ import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
-import 'rail.dart' show Claktories, ClaktoriesScope, Claktory;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/metrics.dart' show Touch, TypeScale, withoutInsets;
+import 'rail.dart'
+    show Claktories, ClaktoriesBackStrip, ClaktoriesScope, Claktory;
 import 'scope.dart';
 
 /// Whether to ask the person's name: the backend is connected and has said
@@ -142,75 +147,108 @@ class _NameStepState extends State<NameStep> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
+    final type = TypeScale.of(context);
     return StepCard(
       child: ListenableBuilder(
         listenable: _name,
-        builder: (context, _) => Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              "What's your name?",
-              style: TextStyles.emphasis.copyWith(color: palette.text),
-            ),
-            const SizedBox(height: Space.s),
-            Text(
-              'Your agents will call you by it.',
-              style: TextStyles.body.copyWith(color: palette.textMuted),
-            ),
-            const SizedBox(height: Space.xl),
-            TextField(
-              controller: _name,
-              placeholder: 'First name',
-              autofocus: true,
-              onSubmitted: (_) => _save(),
-            ),
-            if (_suggestion case final suggestion?
-                when _name.text.trim().isEmpty) ...[
+        builder: (context, _) {
+          final save = _name.text.trim().isEmpty || _saving ? null : _save;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Semantics(
+                header: true,
+                child: Text(
+                  "What's your name?",
+                  style: stepTitleStyle(context).copyWith(color: palette.text),
+                ),
+              ),
               const SizedBox(height: Space.s),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Semantics(
-                  button: true,
-                  child: Pressable(
-                    onTap: () => _name.value = TextEditingValue(
-                      text: suggestion,
-                      selection: TextSelection.collapsed(
-                        offset: suggestion.length,
+              Text(
+                'Your agents will call you by it.',
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+              const SizedBox(height: Space.xl),
+              TextField(
+                controller: _name,
+                placeholder: 'First name',
+                autofocus: true,
+                kind: InputKind.name,
+                scrollPadding: stepFieldScrollPadding(context),
+                onSubmitted: (_) => _save(),
+              ),
+              if (_suggestion case final suggestion?
+                  when _name.text.trim().isEmpty) ...[
+                SizedBox(height: phone ? 0 : Space.s),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Semantics(
+                    button: true,
+                    child: Pressable(
+                      onTap: () => _name.value = TextEditingValue(
+                        text: suggestion,
+                        selection: TextSelection.collapsed(
+                          offset: suggestion.length,
+                        ),
                       ),
-                    ),
-                    builder: (context, hovered) => Text(
-                      '$suggestion?',
-                      style: TextStyles.body.copyWith(
-                        color: hovered ? palette.text : palette.textMuted,
-                        decoration: TextDecoration.underline,
-                        decorationColor: hovered
-                            ? palette.text
-                            : palette.textMuted,
-                      ),
+                      builder: (context, hovered) {
+                        final text = Text(
+                          '$suggestion?',
+                          style: type.body.copyWith(
+                            color: hovered ? palette.text : palette.textMuted,
+                            decoration: TextDecoration.underline,
+                            decorationColor: hovered
+                                ? palette.text
+                                : palette.textMuted,
+                          ),
+                        );
+                        // A finger's height on a phone.
+                        return phone
+                            ? ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  minHeight: Touch.target,
+                                  minWidth: Touch.target,
+                                ),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  widthFactor: 1,
+                                  child: text,
+                                ),
+                              )
+                            : text;
+                      },
                     ),
                   ),
                 ),
-              ),
+              ],
+              if (_error case final error?) ...[
+                const SizedBox(height: Space.s),
+                Text(
+                  error,
+                  style: type.caption.copyWith(color: palette.danger),
+                ),
+              ],
+              const SizedBox(height: Space.xl),
+              if (phone)
+                StepButtons(
+                  children: [
+                    Button(label: 'Continue', primary: true, onPressed: save),
+                  ],
+                )
+              else
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Button(
+                    label: 'Continue',
+                    primary: true,
+                    onPressed: save,
+                  ),
+                ),
             ],
-            if (_error case final error?) ...[
-              const SizedBox(height: Space.s),
-              Text(
-                error,
-                style: TextStyles.caption.copyWith(color: palette.danger),
-              ),
-            ],
-            const SizedBox(height: Space.xl),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Button(
-                label: 'Continue',
-                primary: true,
-                onPressed: _name.text.trim().isEmpty || _saving ? null : _save,
-              ),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -218,6 +256,11 @@ class _NameStepState extends State<NameStep> {
 
 /// A first-launch step's card, over the whole window: a 400px floating
 /// card on a 40% black scrim, scrolling when the window is too short.
+///
+/// On a phone, a page of its own instead: the way back to the
+/// Claktories along the top when there's a list to go back to, then the
+/// step scrolling between the safe areas and above the keyboard, so what's
+/// typed and the button under it stay in view.
 class StepCard extends StatelessWidget {
   const StepCard({super.key, required this.child});
 
@@ -226,6 +269,7 @@ class StepCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    if (isPhoneLayout(context)) return _page(context, palette);
     return ColoredBox(
       color: const Color(0xFF000000).withValues(alpha: 0.4),
       child: SafeArea(
@@ -248,6 +292,85 @@ class StepCard extends StatelessWidget {
       ),
     );
   }
+
+  Widget _page(BuildContext context, Palette palette) {
+    final safe = MediaQuery.paddingOf(context);
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    return ColoredBox(
+      color: palette.canvas,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // The strip, which keeps clear of the status bar itself, or
+          // where there's none, room for the status bar.
+          Stack(
+            children: [
+              SizedBox(height: safe.top),
+              const ClaktoriesBackStrip(),
+            ],
+          ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                left: safe.left,
+                right: safe.right,
+                bottom: math.max(safe.bottom, keyboard),
+              ),
+              child: withoutInsets(
+                context,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(
+                    Touch.gutter,
+                    Space.xxl,
+                    Touch.gutter,
+                    Space.xl,
+                  ),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: child,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// How much room a step's field keeps around it when it scrolls into view:
+/// on a phone, enough under it that the step's button stays above the
+/// keyboard too.
+EdgeInsets stepFieldScrollPadding(BuildContext context) =>
+    isPhoneLayout(context)
+    ? const EdgeInsets.fromLTRB(20, 20, 20, 160)
+    : const EdgeInsets.all(20);
+
+/// A step's heading: emphasis in its card, a page's title on a phone.
+TextStyle stepTitleStyle(BuildContext context) =>
+    isPhoneLayout(context) ? TypeScale.of(context).title : TextStyles.emphasis;
+
+/// A step's buttons on a phone, under what they act on: the step's action
+/// first, then the others, each the page's width and a finger tall.
+class StepButtons extends StatelessWidget {
+  const StepButtons({super.key, required this.children});
+
+  /// The primary first.
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      for (final (index, button) in children.indexed) ...[
+        if (index > 0) const SizedBox(height: Space.s),
+        button,
+      ],
+    ],
+  );
 }
 
 /// Keeps Esc and the like from reaching what's under the step.

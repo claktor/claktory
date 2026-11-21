@@ -31,7 +31,7 @@ fn now_ms() -> i64 {
 #[derive(Debug)]
 pub(crate) struct Code {
     pub(crate) token: String,
-    endpoint: EndpointId,
+    pub(crate) endpoint: EndpointId,
     relays: Vec<String>,
     pub(crate) addresses: Vec<SocketAddr>,
 }
@@ -170,7 +170,7 @@ async fn workspace(socket: &mut Socket) -> v1::Workspace {
 
 /// This machine's pairing code, once Factory has written it with the
 /// tunnel's address (a new home's first one has none until it binds).
-async fn local_pairing(dir: &Path) -> String {
+pub(crate) async fn local_pairing(dir: &Path) -> String {
     let path = dir.join("home/remote/local-pairing");
     for _ in 0..200 {
         if let Ok(code) = std::fs::read_to_string(&path)
