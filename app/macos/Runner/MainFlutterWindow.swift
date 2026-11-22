@@ -39,6 +39,8 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
     // The video viewer's player (VideoPlayers.swift).
     VideoPlayers.register(with: flutterViewController.registrar(forPlugin: "VideoPlayers"))
+    // The PDF viewer (PaperViewer.swift).
+    Paper.register(with: flutterViewController.registrar(forPlugin: "Paper"))
     // Setting Claktory up from the app downloaded as a disk image (Setup.swift).
     Setup.register(with: flutterViewController.engine.binaryMessenger)
     // Links the app opens, such as claktory://add?code=… (AppDelegate.swift).
@@ -54,6 +56,8 @@ class MainFlutterWindow: NSWindow {
     // The system's notifications, and whether the person is using the app
     // (Notifications.swift).
     Notifications.register(with: flutterViewController.engine.binaryMessenger, window: self)
+    // Browser control's broker, idle until the app starts it (BrowserBridge.swift).
+    BrowserBridge.register(with: flutterViewController.engine.binaryMessenger)
 
     windowChannel = FlutterMethodChannel(
       name: "factory/window", binaryMessenger: flutterViewController.engine.binaryMessenger)

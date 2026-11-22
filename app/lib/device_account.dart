@@ -281,6 +281,16 @@ class DeviceAccountService {
     );
   }
 
+  /// A signed call to another of the service's device routes, such as an
+  /// account-level app's (user_apps/session.dart): [body] as JSON, none
+  /// for a GET. Answers the answer's JSON; throws [AccountServiceError] or
+  /// [AccountServiceUnreachable].
+  Future<Map<String, Object?>> signed(
+    String method,
+    String path, [
+    Map<String, Object?>? body,
+  ]) => _call(method, path, body);
+
   /// One call, [body] as JSON (none for a GET). A signed call refused for
   /// the clock or as a replay signs again once.
   Future<Map<String, Object?>> _call(
@@ -541,6 +551,31 @@ class DeviceAccount extends ChangeNotifier {
     );
     return made.assertion;
   }
+
+  /// A signed call to one of the service's device routes (an
+  /// account-level app's), as this device; signs it out here when the
+  /// service no longer has it signed in.
+  Future<Map<String, Object?>> signed(
+    String method,
+    String path, [
+    Map<String, Object?>? body,
+  ]) => _whileSignedIn(() => _api.signed(method, path, body));
+
+  /// Who this device is at the service: its account, its name there, and
+  /// its key as the service writes it (base64url), which is also its leaf
+  /// id in direct messages. Null when the service no longer has it signed
+  /// in.
+  Future<({String accountId, String name, String deviceKey})?> whoAmI() =>
+      _whileSignedIn(() async {
+        final api = _api;
+        final me = await api.me();
+        if (me == null) return null;
+        return (
+          accountId: me.accountId,
+          name: me.name,
+          deviceKey: b64(await api.keys.publicKey(_key)),
+        );
+      });
 
   /// Whether the service still has this device signed in (it can be
   /// removed at claktory.com/account); signs it out here if not.

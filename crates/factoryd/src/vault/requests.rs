@@ -5,6 +5,7 @@ use std::sync::Arc;
 use factory_protocol::v1;
 
 use super::{Key, Value, Vault, VaultError, env};
+use crate::decisions::note;
 use crate::factory::{Factory, RequestError, host_event};
 
 /// How long a wrong passphrase takes to be refused, so guessing is slow.
@@ -389,9 +390,7 @@ fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: 
         if wanted.description.is_empty() { approved.secret_name.as_str() } else { wanted.description.as_str() },
         approved.reason
     );
-    if !comment.trim().is_empty() {
-        text.push_str(&format!("\n{person} added: {}", comment.trim()));
-    }
+    text.push_str(&note(&person, comment));
     text.push_str(&format!(
         "\n\nGive it a matching secret from the vault: secrets_list to look, then secrets_grant with request: \"{id}\" (and aliases if its variable names differ). When none fits, secrets_collect with request: \"{id}\" asks {person} to add one: the card shows in your conversation, prefilled, and they type the values straight into the vault; you never see them. You'll be told how it ends either way.",
         id = approved.id
@@ -403,6 +402,7 @@ fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: 
         summary: format!("{summary}."),
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     factory.deliver_event(&admin, text, event);
     Ok(())
@@ -415,6 +415,7 @@ fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: 
 pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
+    crate::decisions::comment(&request.comment)?;
     let asked = factory.vault.pending_request(agent, &request.request_id)?;
     if !asked.generate.is_empty() && request.approve {
         if request.approve_only {
@@ -476,6 +477,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
             summary: format!("{summary}."),
             transient: true,
             pipe_seqs: Vec::new(),
+            provenance: None,
         };
         factory.deliver_event(&asked.admin_agent_id, format!("{summary}."), event);
     }
@@ -590,22 +592,17 @@ pub(crate) fn fulfil_request(
         summary: format!("{summary}."),
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     factory.deliver_event(&agent, text, event);
     Ok((name, agent))
 }
 
-/// A note for the asker, as its writer's ("Matt's note: …", "Rivet's
-/// note: …"), on a line of its own; empty without one.
-fn note(writer: &str, note: &str) -> String {
-    let note = note.trim();
-    if note.is_empty() { String::new() } else { format!("\n\n{writer}'s note: {note}") }
-}
-
 /// The person approves a generate request (#252): the vault makes the key,
-/// seals its private half as a new secret (asking each time unless they
-/// said not to), hides it from every output at once, and gives it to the
-/// asker, or to no one as it asked. The asker is told its public half only.
+/// seals its private half as a new secret (asking each time only if they
+/// turned that on; an older app that doesn't say gets the same default),
+/// hides it from every output at once, and gives it to the asker, or to no
+/// one as it asked. The asker is told its public half only.
 fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = asked.agent_id.as_str();
     let wanted = asked.new_secret.clone().unwrap_or_default();
@@ -623,7 +620,7 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
     let values = [Value { variable: variable.clone(), value: made.private, file: true }];
     let id = factory.vault.create_secret(&name, &description, &values, "")?;
     drop(values);
-    let asks = request.ask_each_time.unwrap_or(true);
+    let asks = request.ask_each_time.unwrap_or(false);
     if asks {
         factory.vault.set_ask_each_time(&id, true)?;
     }

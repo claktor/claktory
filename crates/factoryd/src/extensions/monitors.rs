@@ -14,7 +14,7 @@
 //! them.
 
 mod run;
-mod when;
+pub(crate) mod when;
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -566,7 +566,7 @@ fn tool<R: super::Reply>(
         description,
         parameters,
         super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = super::live(factory)?;
             run(&factory, &agent, args).map(super::Reply::result).map_err(factory_agent::Error::Other)
         }),
     )

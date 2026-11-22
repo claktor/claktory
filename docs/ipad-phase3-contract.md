@@ -46,6 +46,10 @@ A PDF must arrive as one version: never half an old file and half a new one. `Re
 - **`ReadFile`, new field `expected_sha256`:** when set and the file's SHA-256 is now different, the answer is `FileContent` with empty data and `error` "changed". The app then starts again from offset 0 rather than mixing versions. Videos can use it too.
 - **PDFs read like videos:** `application/pdf` is read in 8 MiB ranges from any offset, for files up to **64 MiB**. Larger ones are refused with a sentence for the person ("This PDF is too big to open here (80 MB)."). Today a PDF read from offset 0 falls under text's 2 MB cap. That's the one behavior change.
 
+- **A pane kind "pdf":** `extensions/viewer.rs`'s kinds today are text, image and video, and a PDF falls to none of them, so no agent can open one in a pane. Add "pdf", chosen for `application/pdf` before the text check. Apps without a PDF viewer already say "Claktory can't show this kind of file here yet." for a kind they don't know, so nothing else needs changing for them.
+
+Phase 2 (the iPad's PDF surface) needs this section and the "pdf" kind before a PDF opens end to end. They're small, so they could come first, ahead of the rest of phase 3. Saving ink needs §3 and §4.
+
 The app keeps the assembled file only as a cache that isn't the source of truth. Native opens it only after its SHA-256 matches `source.sha256` (Yuki's `create_pdf.json`). No page parsing on the backend: page metadata comes from the client and is checked only for shape (§5).
 
 ## 3. Ink blobs: staged privately, content-addressed

@@ -54,6 +54,13 @@ Future<(Harness, WorkbenchFocus)> _show(WidgetTester tester, Size size) async {
   return (harness, focus);
 }
 
+/// What was sent besides the paper's reads (its document host fetches it):
+/// nothing, when only the window changed.
+List<Object> _changes(Harness harness) => [
+  for (final message in harness.backend.sent)
+    if (!message.hasReadFile()) message,
+];
+
 Finder _pane(String id) => find.byKey(ValueKey('pane-$id'));
 
 void main() {
@@ -70,7 +77,7 @@ void main() {
     await tester.tap(_pane('paper'));
     await tester.pump();
     expect(focus.projectionOf('a1')!.focused, 'paper');
-    expect(harness.backend.sent, isEmpty);
+    expect(_changes(harness), isEmpty);
   });
 
   testWidgets('a focused window shows one pane, and the switch the other', (
@@ -87,7 +94,7 @@ void main() {
     expect(find.byKey(const ValueKey('conversation')), findsNothing);
     expect(focus.projectionOf('a1')!.hidden, ['chat']);
     // Only the focus moved: the agent's layout is as it was.
-    expect(harness.backend.sent, isEmpty);
+    expect(_changes(harness), isEmpty);
   });
 
   testWidgets('narrowing and widening the window sends nothing and keeps '
@@ -107,6 +114,6 @@ void main() {
     await tester.pump();
     expect(_pane('paper'), findsOneWidget);
     expect(_pane('chat'), findsOneWidget);
-    expect(harness.backend.sent, isEmpty);
+    expect(_changes(harness), isEmpty);
   });
 }

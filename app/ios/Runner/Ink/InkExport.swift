@@ -110,6 +110,65 @@ enum InkExport {
     }.flatMap { finish($0, region: region, drawing: drawing) }
   }
 
+  // MARK: A layer's preview
+
+  /// The ink alone, on transparent, turned as the document is shown: at 2
+  /// pixels per drawing unit, within [maxLongEdge] and [maxBytes]
+  /// (layer_*.json's `ink_preview`), for other devices to lay over their
+  /// own rendering of the page.
+  static func preview(
+    _ drawing: PKDrawing, size: CGSize, rotation: Int, maxLongEdge: CGFloat, maxBytes: Int
+  ) -> (png: Data, width: Int, height: Int)? {
+    guard size.width > 0, size.height > 0 else { return nil }
+    var scale = min(2, maxLongEdge / max(size.width, size.height))
+    for _ in 0..<12 {
+      let format = UIGraphicsImageRendererFormat()
+      format.scale = 1
+      format.opaque = false
+      let pixels = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+      let rect = CGRect(origin: .zero, size: size)
+      let flat = UIGraphicsImageRenderer(size: pixels, format: format).image { context in
+        context.cgContext.scaleBy(x: scale, y: scale)
+        ink(drawing, rect: rect, scale: scale).draw(in: rect)
+      }
+      let image = turned(flat, degrees: rotation)
+      if let png = image.pngData(), png.count <= maxBytes, let cg = image.cgImage {
+        return (png, cg.width, cg.height)
+      }
+      scale *= 0.85
+    }
+    return nil
+  }
+
+  /// A temporary file of Dart's to upload and delete (ink-export, 0600,
+  /// protected while the iPad is locked).
+  static func write(_ data: Data, ext: String) -> URL? {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ink-export")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("\(UUID().uuidString).\(ext)")
+    guard (try? data.write(to: url, options: [.atomic, .completeFileProtection])) != nil else {
+      return nil
+    }
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return url
+  }
+
+  /// [rotated], keeping what's transparent.
+  private static func turned(_ image: UIImage, degrees: Int) -> UIImage {
+    guard degrees != 0, let cg = image.cgImage else { return image }
+    let w = CGFloat(cg.width), h = CGFloat(cg.height)
+    let size = degrees == 180 ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = false
+    return UIGraphicsImageRenderer(size: size, format: format).image { context in
+      let c = context.cgContext
+      c.translateBy(x: size.width / 2, y: size.height / 2)
+      c.rotate(by: CGFloat(degrees) * .pi / 180)
+      image.draw(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+    }
+  }
+
   // MARK: Parts
 
   /// Renders at the largest scale within the long edge (and [maxScale]

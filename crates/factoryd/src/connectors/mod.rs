@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use crate::encoding::same as equal_in_constant_time;
 use crate::factory::{Factory, RequestError};
 use crate::locking::lock as guard;
 use crate::transcript::now_ms;
@@ -501,8 +502,9 @@ struct Flow {
     challenge: String,
     /// A connection to connect again in place.
     reconnect: String,
-    /// The suggestion it answers.
+    /// The suggestion it answers, and the person's comment for its agent.
     proposal: Option<v1::ConnectProposal>,
+    comment: String,
     /// PASTE: what `start_paste` kept for checking the token.
     pending: Control,
     /// The browser's answer was taken (codes are used once).
@@ -578,10 +580,6 @@ fn redirect_matches(pattern: &str, uri: &str) -> bool {
                 && port.parse::<u32>().is_ok_and(|port| (1..=65535).contains(&port))
         }),
     }
-}
-
-fn equal_in_constant_time(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 impl Broker {
@@ -722,6 +720,7 @@ impl Factory {
             }
             fields.insert(field.id.clone(), value.to_owned());
         }
+        let comment = crate::decisions::comment(&request.comment)?.to_owned();
         let mut proposal = None;
         if !request.proposal_id.is_empty() {
             let found = self.vault.connect_proposal(&request.proposal_id)?;
@@ -766,6 +765,7 @@ impl Factory {
             challenge: String::new(),
             reconnect: request.secret_id.clone(),
             proposal,
+            comment,
             pending: Control::new(String::new()),
             finished: false,
             cancel: CancellationToken::new(),
@@ -1014,10 +1014,11 @@ impl Factory {
         let found = {
             let flows = guard(&self.broker.flows);
             flows.iter().find(|flow| flow.view.id == id).map(|flow| {
-                (flow.recipe.clone(), flow.reconnect.clone(), flow.view.proposal_id.clone(), flow.access.id.clone(), flow.cancel.clone())
+                let proposal = (flow.view.proposal_id.clone(), flow.comment.clone());
+                (flow.recipe.clone(), flow.reconnect.clone(), proposal, flow.access.id.clone(), flow.cancel.clone())
             })
         };
-        let Some((recipe, reconnect, proposal_id, access_id, cancel)) = found else { return };
+        let Some((recipe, reconnect, (proposal_id, comment), access_id, cancel)) = found else { return };
         self.broker.update(id, |flow| flow.view.state = ConnectFlowState::Checking.into());
         self.flows_changed();
         let inspected = tokio::select! {
@@ -1083,7 +1084,7 @@ impl Factory {
             Broker::end(flow, ConnectFlowState::Connected);
         });
         if !proposal_id.is_empty() {
-            proposals::connected(self, &proposal_id, &secret_id, &secret_name, spec, &meta);
+            proposals::connected(self, &proposal_id, (&secret_id, &secret_name), spec, &meta, &comment);
         }
         self.vault_changed();
     }

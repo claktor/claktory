@@ -1,8 +1,10 @@
+import 'dart:typed_data';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
 import '../hook/build.dart' show iosTriples, macTriples, rustFlags;
+import '../hook/macho.dart';
 
 /// The tunnel's Rust library is built so an iPhone will load it: for the
 /// iOS the app runs on, and stripped by Xcode rather than rustc (why, in
@@ -49,10 +51,84 @@ void main() {
       rustFlags('aarch64-apple-ios', home: '/h'),
       contains('-C strip=none'),
     );
-    expect(
-      rustFlags('aarch64-apple-darwin', home: '/h'),
-      isNot(contains('strip')),
-    );
-    expect(rustFlags('aarch64-apple-darwin', home: ''), isEmpty);
+    // The Mac's too: macOS 27's dyld checks the string pool's alignment.
+    for (final triple in macTriples) {
+      expect(rustFlags(triple, home: '/h'), contains('-C strip=none'));
+    }
+    expect(rustFlags('aarch64-apple-darwin', home: ''), '-C strip=none');
+  });
+
+  group('the hook refuses an Apple library dyld would refuse', () {
+    /// A 64-bit Mach-O for [cpu] whose LC_SYMTAB puts its strings at
+    /// [stroff].
+    Uint8List thin(int stroff, {int cpu = 0x0100000C}) {
+      final data = ByteData(32 + 24);
+      data
+        ..setUint32(0, 0xFEEDFACF, Endian.little)
+        ..setUint32(4, cpu, Endian.little)
+        ..setUint32(12, 6, Endian.little) // a dylib
+        ..setUint32(16, 1, Endian.little)
+        ..setUint32(20, 24, Endian.little)
+        ..setUint32(32, 0x2, Endian.little)
+        ..setUint32(36, 24, Endian.little)
+        ..setUint32(48, stroff, Endian.little);
+      return data.buffer.asUint8List();
+    }
+
+    Uint8List universal(List<Uint8List> slices) {
+      const page = 64;
+      final bytes = BytesBuilder();
+      final header = ByteData(8 + 20 * slices.length)
+        ..setUint32(0, 0xCAFEBABE)
+        ..setUint32(4, slices.length);
+      var offset = page;
+      for (final (i, slice) in slices.indexed) {
+        final cpu = ByteData.sublistView(slice).getUint32(4, Endian.little);
+        header
+          ..setUint32(8 + i * 20, cpu)
+          ..setUint32(8 + i * 20 + 8, offset)
+          ..setUint32(8 + i * 20 + 12, slice.length);
+        offset += page;
+      }
+      bytes.add(header.buffer.asUint8List());
+      for (final slice in slices) {
+        bytes.add(Uint8List(page * (bytes.length ~/ page + 1) - bytes.length));
+        bytes.add(slice);
+      }
+      return bytes.toBytes();
+    }
+
+    test('strings on 8: it loads', () {
+      expect(misalignedStringPools(thin(15392368)), isEmpty);
+    });
+
+    test("strings 4 bytes off: refused, naming the slice", () {
+      // Abbacchio's arm64 Mac slice, 2026-11-22.
+      expect(misalignedStringPools(thin(15392364)), [
+        'arm64: the symbol strings start at 15392364, 4 bytes off 8',
+      ]);
+    });
+
+    test('a universal library: each slice checked', () {
+      final both = universal([thin(16909960, cpu: 0x01000007), thin(15392364)]);
+      expect(misalignedStringPools(both), [
+        'arm64: the symbol strings start at 15392364, 4 bytes off 8',
+      ]);
+      expect(
+        misalignedStringPools(
+          universal([thin(16909960, cpu: 0x01000007), thin(15392368)]),
+        ),
+        isEmpty,
+      );
+    });
+
+    test("Android's ELF isn't Mach-O: left alone", () {
+      expect(
+        misalignedStringPools(
+          Uint8List.fromList([0x7F, 0x45, 0x4C, 0x46, ...List.filled(60, 0)]),
+        ),
+        isEmpty,
+      );
+    });
   });
 }

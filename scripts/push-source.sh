@@ -15,23 +15,25 @@
 # refused, to sort out by hand. One exception: a new repository's lone
 # README-only first commit is replaced (once, with a lease on it).
 #
-#   scripts/push-source.sh URL [--version vX.Y.Z] [--expect SHA] [--dry-run]
+#   scripts/push-source.sh URL [--version vX.Y.Z] [--source SHA] [--expect SHA] [--dry-run]
 #
 # URL: the repository (https://github.com/OWNER/NAME.git, pushed with gh's
 # sign-in, or a path to try it on a bare repository). --version: the release
-# (by default the newest in main's docs/CHANGELOG.md). --expect: refuse unless
-# main is that commit (what a release was built from). --dry-run: check
-# everything and say what it would push, without pushing.
+# (by default the newest in that commit's docs/CHANGELOG.md). --source: the
+# commit whose files are published, a release's own source, which must be on
+# main (main itself by default). --expect: refuse unless main is that commit.
+# --dry-run: check everything and say what it would push, without pushing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
-URL="" EXPECT="" DRY=false VERSION=""
-usage() { echo "usage: scripts/push-source.sh URL [--version vX.Y.Z] [--expect SHA] [--dry-run]" >&2; exit 2; }
+URL="" EXPECT="" DRY=false VERSION="" FROM=""
+usage() { echo "usage: scripts/push-source.sh URL [--version vX.Y.Z] [--source SHA] [--expect SHA] [--dry-run]" >&2; exit 2; }
 while (($#)); do
   case "$1" in
     --version) VERSION="${2:-}"; shift 2 || usage ;;
     --expect) EXPECT="${2:-}"; shift 2 || usage ;;
+    --source) FROM="${2:-}"; shift 2 || usage ;;
     --dry-run) DRY=true; shift ;;
     -*) usage ;;
     *) [[ -z "$URL" ]] || usage; URL="$1"; shift ;;
@@ -54,8 +56,15 @@ SHA="$(git rev-parse HEAD)"
   echo "main moved on to $SHA since the release was built from $EXPECT; not pushing" >&2
   exit 1
 }
+if [[ -n "$FROM" ]]; then
+  FROM="$(git rev-parse --verify -q "$FROM^{commit}")" && git merge-base --is-ancestor "$FROM" "$SHA" || {
+    echo "the source to publish isn't a commit on main; not pushing" >&2
+    exit 1
+  }
+  SHA="$FROM"
+fi
 [[ -n "$VERSION" ]] || VERSION="$(git show "$SHA:docs/CHANGELOG.md" | sed -n 's/^## \(v[0-9][0-9.]*\)$/\1/p' | head -1)"
-[[ -n "$VERSION" ]] || { echo "main's docs/CHANGELOG.md has no released version" >&2; exit 1; }
+[[ -n "$VERSION" ]] || { echo "${SHA:0:10}'s docs/CHANGELOG.md has no released version" >&2; exit 1; }
 
 "$ROOT/scripts/check-secrets.sh" "$SHA"
 

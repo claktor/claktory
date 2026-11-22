@@ -125,6 +125,53 @@ void main() {
     expect(find.text('Copy'), findsOneWidget);
   });
 
+  testWidgets('a written answer dismissed sends what was typed as the '
+      'comment, and the dismissed card shows it', (tester) async {
+    final harness = Harness(_workspace());
+    final ask = _ask()..wantsText = true;
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: ask),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    // Its answer box is the comment; no second field.
+    expect(find.text('Add a comment'), findsNothing);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AskPersonCard),
+        matching: find.byType(EditableText),
+      ),
+      'Do it after the release',
+    );
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    expect(harness.last.answerAsk.dismiss, isTrue);
+    expect(harness.last.answerAsk.text, 'Do it after the release');
+
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(
+            seq: Int64(7),
+            timestampMs: Int64(1000),
+            askPerson: ask.deepCopy()
+              ..state = AskPersonState.ASK_PERSON_STATE_DISMISSED
+              ..answer = 'Do it after the release',
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(find.textContaining('Left to June'), findsOneWidget);
+    expect(find.text('Do it after the release'), findsOneWidget);
+  });
+
   testWidgets('on a phone at the largest text, Copy goes under the command', (
     tester,
   ) async {

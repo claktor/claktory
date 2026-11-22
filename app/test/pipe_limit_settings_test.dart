@@ -97,9 +97,15 @@ void main() {
       expect(_toggle(tester, secret).onChanged, isNull, reason: secret);
     }
     expect(_toggle(tester, 'AWS').value, isTrue, reason: 'still given');
-    await tester.tap(find.text('Stripe'));
-    await tester.tap(find.text('AWS'));
+    // The form scrolls: each row in view before its tap, so the tap is
+    // on it and not on what's over it (the footer's Delete agent).
+    for (final secret in ['Stripe', 'AWS']) {
+      await tester.ensureVisible(find.text(secret));
+      await pumpFrames(tester);
+      await tester.tap(find.text(secret));
+    }
     await pumpFrames(tester);
+    expect(find.text('Delete Liaison?'), findsNothing);
     expect(
       harness.backend.sent.where(
         (m) => m.hasGrantSecret() || m.hasRevokeSecret(),

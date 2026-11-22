@@ -162,7 +162,11 @@ void main() {
       'setActive',
       'goToPage',
       'exportComposite',
+      'exportLayer',
       'layerSaved',
+      'search',
+      'recognizeText',
+      'reloadDocument',
     };
     const toDart = {
       'ready',
@@ -173,6 +177,9 @@ void main() {
       'toolChanged',
       'strokeActive',
       'strokeInterrupted',
+      'linkTapped',
+      'strokeSelectionChanged',
+      'pencilAction',
       'error',
     };
     for (final name in _names(
@@ -231,11 +238,164 @@ void main() {
             'os_too_old',
             'drawing_unreadable',
             'export_too_large',
+            'document_too_large',
           ],
           contains((_read(name)['arguments'] as Map)['code']),
           reason: name,
         );
       }
+    });
+  });
+
+  group('phase 3: PDFs', () {
+    test('an outline names pages that exist, depth first', () {
+      final a = _read('bridge/ev_ready_outline.json')['arguments'] as Map;
+      final count = a['page_count'] as int;
+      var depth = 0;
+      for (final e in (a['outline'] as List).cast<Map>()) {
+        expect(e['title'], isA<String>());
+        expect(e['page_1based'] as int, inInclusiveRange(1, count));
+        // A child is at most one level below the entry before it.
+        expect(e['depth'] as int, lessThanOrEqualTo(depth + 1));
+        depth = e['depth'] as int;
+      }
+    });
+
+    test('search answers its query, with regions on their pages', () {
+      final f = _read('bridge/cmd_search.json');
+      final args = f['arguments'] as Map, result = f['result'] as Map;
+      expect(result['query'], args['query']);
+      expect(result['truncated'], isA<bool>());
+      for (final m in (result['matches'] as List).cast<Map>()) {
+        expect(m['page_1based'], isA<int>());
+        final r = _region(m['region']);
+        expect(
+          const Rect.fromLTWH(0, 0, 1, 1).expandToInclude(r),
+          const Rect.fromLTWH(0, 0, 1, 1),
+        );
+        expect(
+          (m['text'] as String).toLowerCase(),
+          contains((args['query'] as String).toLowerCase()),
+        );
+      }
+    });
+
+    test('a page limit says the count and the limit', () {
+      final a =
+          _read('bridge/ev_error_document_too_large.json')['arguments'] as Map;
+      expect(a['page_count'] as int, greaterThan(a['max_pages'] as int));
+      expect(a['recoverable'], isFalse);
+    });
+
+    test('a link tapped is only told, as a URL', () {
+      final a = _read('bridge/ev_link_tapped.json')['arguments'] as Map;
+      expect(Uri.parse(a['url'] as String).hasScheme, isTrue);
+    });
+  });
+
+  group('phase 4: handwriting and interruptions', () {
+    test('a candidate names the drawing it was read from', () {
+      for (final name in _names(
+        'bridge',
+      ).where((n) => n.contains('cmd_recognize_text'))) {
+        final r = _read(name)['result'] as Map;
+        if (r['available'] != true) {
+          // Below iPadOS 27: an answer, never text, no cloud fallback.
+          expect(r['reason'], 'os_too_old', reason: name);
+          expect(r['min_os'], '27.0', reason: name);
+          expect(r['text'], isNull, reason: name);
+          continue;
+        }
+        expect(r['drawing_sha256'], matches(_sha), reason: name);
+        expect(r['base_revision'], isA<int>(), reason: name);
+        expect(r['recognition_version'], isA<int>(), reason: name);
+        expect(r['languages'], isA<List>(), reason: name);
+        // A stale answer never carries text.
+        if (r['stale'] == true) expect(r['text'], isNull, reason: name);
+      }
+    });
+
+    test('a region scope carries its region', () {
+      for (final name in _names(
+        'bridge',
+      ).where((n) => n.contains('cmd_recognize_text'))) {
+        final a = _read(name)['arguments'] as Map;
+        expect(['selection', 'region', 'all'], contains(a['scope']));
+        if (a['scope'] == 'region') _region(a['region']);
+      }
+    });
+
+    test('ready says whether handwriting can be read, from 27', () {
+      for (final name in _names(
+        'bridge',
+      ).where((n) => n.contains('ev_ready_handwriting'))) {
+        final h = (_read(name)['arguments'] as Map)['handwriting'] as Map;
+        expect(h['min_os'], '27.0', reason: name);
+        if (h['available'] == true) {
+          expect(h['recognition_version'], isA<int>(), reason: name);
+          expect(h['supported_languages'], isNotEmpty, reason: name);
+        }
+      }
+    });
+
+    test('an interrupted stroke names a known reason', () {
+      for (final name in _names(
+        'bridge',
+      ).where((n) => n.contains('ev_stroke_interrupted'))) {
+        final a = _read(name)['arguments'] as Map;
+        expect(
+          [
+            'resize',
+            'rotate',
+            'undo',
+            'hidden',
+            'drawing_off',
+            'background',
+            'reload',
+          ],
+          contains(a['reason']),
+          reason: name,
+        );
+        expect(a['kept'], isA<bool>(), reason: name);
+      }
+    });
+  });
+
+  group('a PDF changing while open', () {
+    test('a reload says which pages changed and which ink is outdated', () {
+      final r = _read('bridge/cmd_reload_document.json')['result'] as Map;
+      expect(r['source_sha256'], matches(_sha));
+      expect(r['previous_sha256'], matches(_sha));
+      expect(r['source_sha256'], isNot(r['previous_sha256']));
+      final count = r['page_count'] as int;
+      expect((r['pages'] as List).length, count);
+      final changed = (r['pages_changed'] as List).cast<int>().toSet();
+      final added = (r['pages_added'] as List).cast<int>().toSet();
+      final removed = (r['pages_removed'] as List).cast<int>().toSet();
+      for (final p in [...changed, ...added]) {
+        expect(p, inInclusiveRange(1, count));
+      }
+      for (final p in removed) {
+        expect(p, greaterThan(count));
+      }
+      // Ink stays only on pages that didn't change; the rest is outdated,
+      // never moved.
+      for (final l in (r['kept_layers'] as List).cast<Map>()) {
+        final p = l['page_1based'] as int;
+        expect(changed.contains(p) || removed.contains(p), isFalse);
+      }
+      for (final l in (r['outdated_layers'] as List).cast<Map>()) {
+        final p = l['page_1based'] as int;
+        expect(changed.contains(p) || removed.contains(p), isTrue);
+      }
+    });
+
+    test('a refused reload keeps the version shown', () {
+      final f = _read('bridge/cmd_reload_document_mismatch.json');
+      expect(f['result'], isNull);
+      final e = f['error'] as Map;
+      expect(e['code'], 'document_hash_mismatch');
+      expect((e['details'] as Map)['shown_sha256'], matches(_sha));
     });
   });
 
@@ -438,6 +598,30 @@ void main() {
         result,
         layers['layer-paper-p3']!['coordinate_space'] as Map,
       );
+      // Exporting page 3 to save it gives exactly what its layer keeps:
+      // its space, its drawing and its preview, at the revision before.
+      final saved = _read('bridge/cmd_export_layer.json')['result'] as Map;
+      final layer = layers['layer-paper-p3']!;
+      expect(saved['coordinate_space'], layer['coordinate_space']);
+      expect(saved['source_sha256'], (layer['source'] as Map)['sha256']);
+      expect(saved['base_revision'], layer['parent_revision']);
+      final drawing = saved['drawing'] as Map;
+      final keptDrawing = layer['drawing'] as Map;
+      for (final key in [
+        'format',
+        'content_version',
+        'sha256',
+        'bytes',
+        'space',
+        'drawing_to_document',
+      ]) {
+        expect(drawing[key], keptDrawing[key], reason: 'drawing.$key');
+      }
+      final preview = saved['ink_preview'] as Map;
+      final keptPreview = layer['ink_preview'] as Map;
+      for (final key in ['sha256', 'pixel_width', 'pixel_height', 'bytes']) {
+        expect(preview[key], keptPreview[key], reason: 'ink_preview.$key');
+      }
     });
   });
 }

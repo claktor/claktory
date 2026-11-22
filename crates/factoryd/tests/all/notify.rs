@@ -201,6 +201,83 @@ async fn the_settings_and_each_agents_choice_decide() {
     assert_eq!(workspace.agents.iter().find(|agent| agent.id == "builder").expect("builder").notify(), v1::NotifyMode::Never);
 }
 
+fn change(change: impl FnOnce(&mut v1::NotificationSettingsChange)) -> client_message::Body {
+    let mut fields = v1::NotificationSettingsChange::default();
+    change(&mut fields);
+    client_message::Body::UpdateSettings(v1::UpdateSettings { notification_change: Some(fields), ..Default::default() })
+}
+
+fn shown(workspace: &v1::Workspace) -> v1::NotificationSettings {
+    workspace.settings.clone().expect("settings").notifications.expect("notifications")
+}
+
+/// What the app sends for one switch changes only that one (B4), so two
+/// devices changing different ones at once both stay.
+#[tokio::test]
+async fn a_change_sets_only_its_own_settings() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let before = shown(&view.workspace);
+    // Quiet hours' time zone: the computer's, whatever the settings.
+    assert_eq!(before.time_zone, jiff::tz::TimeZone::system().iana_name().unwrap_or_default());
+    assert_eq!(before.utc_offset_minutes, jiff::ZonedDateTime::now().offset().seconds() / 60);
+
+    apply_request(&mut client, &mut view, change(|change| change.alerts = Some(false))).await;
+    assert_eq!(shown(&view.workspace), v1::NotificationSettings { alerts: false, ..before.clone() });
+
+    apply_request(
+        &mut client,
+        &mut view,
+        change(|change| {
+            change.preview = Some(v1::NotifyPreview::Who.into());
+            change.quiet_hours = Some(true);
+            change.quiet_start = Some(22 * 60);
+            change.quiet_end = Some(7 * 60);
+        }),
+    )
+    .await;
+    let expected = v1::NotificationSettings {
+        alerts: false,
+        preview: v1::NotifyPreview::Who.into(),
+        quiet_hours: true,
+        quiet_start: 22 * 60,
+        quiet_end: 7 * 60,
+        ..before.clone()
+    };
+    assert_eq!(shown(&view.workspace), expected);
+
+    // Checked as a whole message is: refused, nothing changes.
+    let refused = apply_request(&mut client, &mut view, change(|change| change.quiet_end = Some(24 * 60))).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("quiet_end")), "{refused:?}");
+    let refused = apply_request(
+        &mut client,
+        &mut view,
+        change(|change| {
+            change.needs_you = Some(false);
+            change.relay = Some("http://push.example.com".into());
+        }),
+    )
+    .await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("relay")), "{refused:?}");
+    assert_eq!(shown(&view.workspace), expected);
+
+    // Two devices at once, each with its own switch.
+    let (mut other, _, _) = Client::connect(addr).await;
+    let (first, second) =
+        tokio::join!(client.request(change(|change| change.replies = Some(false))), other.request(change(|change| change.desktop_replies = Some(true))));
+    assert!(matches!(first.body, Body::Ack(_)) && matches!(second.body, Body::Ack(_)), "{:?} {:?}", first.body, second.body);
+    let (_client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(shown(&workspace), v1::NotificationSettings { replies: false, desktop_replies: true, ..expected.clone() });
+
+    // The whole message still replaces them all (older apps).
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, settings(|_| {})).await;
+    let replaced = shown(&view.workspace);
+    assert!(replaced.alerts && replaced.replies && !replaced.quiet_hours && replaced.preview() == v1::NotifyPreview::Full, "{replaced:?}");
+}
+
 #[tokio::test]
 async fn an_agent_notifies_six_times_an_hour() {
     let (_dir, _factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;

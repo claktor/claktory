@@ -690,7 +690,7 @@ impl Ctx {
             }
         }
         let map = path_map(&self.home, &manifest, &given);
-        found.extend(problems(&self.home, &manifest, &map, None, self.staging.bytes()).map_err(|error| error.to_string())?);
+        found.extend(problems(&self.home, &manifest, &map, None, self.staging.bytes(), true).map_err(|error| error.to_string())?);
         let missing: Vec<String> = tools.iter().filter(|tool| !on_path(tool)).cloned().collect();
         let mut state = load_state(&self.home).map_err(|error| error.to_string())?.unwrap_or_default();
         if state.switched.is_empty() {

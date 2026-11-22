@@ -1,0 +1,74 @@
+id = "charts"
+name = "Charts"
+version = "0.2.0"
+world = "claktory:app@1.1"
+publisher = "claktory"
+description = "Live charts of what your agents do: runs, messages, tokens and more, from Claktory's records and your agents' databases."
+icon = "chart-column"
+storage_mb = 5
+memory_mb = 32
+instructions = """
+Charts shows the person dashboards of live charts. A dashboard is JSON:
+
+{"id": "claktory", "name": "Claktory", "time": {"from": "now-7d", "to": "now"}, "refresh_s": 30,
+ "variables": [{"name": "agent", "label": "Agent", "query": {"source": "factory-records", "sql": "SELECT agent, MAX(agent_name) FROM agent_usage GROUP BY agent"}}],
+ "panels": [{"id": "runs", "title": "Runs", "grid": {"x": 0, "y": 0, "w": 6, "h": 4},
+   "query": {"source": "factory-records", "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to AND ($agent = '' OR agent = $agent) GROUP BY 1 ORDER BY 1"},
+   "viz": {"kind": "timeseries", "x": "time", "unit": "runs"}}],
+ "_rev": 3}
+
+- A query is one read-only SQLite statement (SELECT or WITH) against a source charts_list names as granted: factory-records (Claktory's records: runs, messages, checklist_items, agent_usage, tasks, monitors…) or agent:<id> (an agent's own database).
+- Values are bound, never written into the SQL: $from and $to are the range shown in milliseconds ($from_s and $to_s in seconds), $now is now, $step (and $step_s) a bucket that gives at most about 100 of them, and $<name> each variable's chosen value, "" for All. Don't use ?.
+- A variable's query answers its options: the value, then what shows (optional).
+- viz.kind is stat (the last column's total, its rows a spark line), timeseries, bars, stackedBars, pie, scatter or table. x names the column across (the first if not), y the columns to draw (every other numeric one if not), series_by a column whose values make the series (then y names one at most). color is palette, agent (series are agents' ids: their colors and names), signal or muted. columns, for a table: [{"name", "title", "format": "text"|"number"|"time"}].
+- grid: 12 columns; panels with the same y share a row; w 1–12, h 1–12 (a chart is 50 points a unit).
+- Change a dashboard with charts_get, then charts_put of the whole of it with the _rev you read: a put on a revision someone has changed since is refused. Every put keeps the version before it (charts_get with previous: true). Try a query with charts_query before putting it (with "dashboard": its id, when it uses the dashboard's variables).
+"""
+
+[[scopes]]
+id = "view"
+label = "See dashboards"
+tools = ["charts_list", "charts_get"]
+
+[[scopes]]
+id = "edit"
+label = "Change dashboards, and read anything Charts can read"
+tools = ["charts_list", "charts_get", "charts_put", "charts_delete", "charts_query"]
+
+[[tools]]
+name = "charts_list"
+description = "Lists the dashboards (id, name, panels, variables, _rev) and the data sources Charts reads, and whether the person granted each."
+parameters = { type = "object", properties = {} }
+
+[[tools]]
+name = "charts_get"
+description = "A dashboard's whole definition, as JSON, or its previous version."
+parameters = { type = "object", required = ["id"], properties = { id = { type = "string", description = "The dashboard's id." }, previous = { type = "boolean", description = "The version before the current one (or before it was deleted)." } } }
+
+[[tools]]
+name = "charts_put"
+description = "Keeps a whole dashboard, new or changed, after checking it; the version it replaces is kept. Send the _rev you read so a change made since isn't lost. Says which panels' queries fail."
+parameters = { type = "object", required = ["dashboard"], properties = { dashboard = { type = "object", description = "The whole dashboard: id, name, time, refresh_s, variables, panels, and _rev when changing one.", required = ["id", "name"], properties = { id = { type = "string", description = "Lowercase letters, digits, - and _." }, name = { type = "string" }, time = { type = "object", properties = { from = { type = "string" }, to = { type = "string" } } }, refresh_s = { type = "integer", minimum = 10, maximum = 86400 }, variables = { type = "array", maxItems = 4, items = { type = "object", required = ["name", "query"], properties = { name = { type = "string" }, label = { type = "string" }, default = { type = "string" }, query = { type = "object", required = ["source", "sql"], properties = { source = { type = "string" }, sql = { type = "string" } } } } } }, panels = { type = "array", maxItems = 24, items = { type = "object", required = ["id", "title", "query", "viz"], properties = { id = { type = "string" }, title = { type = "string" }, grid = { type = "object", properties = { x = { type = "integer" }, y = { type = "integer" }, w = { type = "integer" }, h = { type = "integer" } } }, query = { type = "object", required = ["source", "sql"], properties = { source = { type = "string" }, sql = { type = "string" } } }, viz = { type = "object", required = ["kind"], properties = { kind = { type = "string", enum = ["stat", "timeseries", "bars", "stackedBars", "pie", "scatter", "table"] }, unit = { type = "string" }, x = { type = "string" }, y = { type = "array", items = { type = "string" } }, series_by = { type = "string" }, color = { type = "string", enum = ["palette", "agent", "signal", "muted"] }, columns = { type = "array", items = { type = "object" } } } } } } }, _rev = { type = "integer" } } } } }
+
+[[tools]]
+name = "charts_delete"
+description = "Deletes a dashboard. Its last version is kept: charts_get with previous: true, then charts_put, brings it back."
+parameters = { type = "object", required = ["id"], properties = { id = { type = "string" } } }
+
+[[tools]]
+name = "charts_query"
+description = "Runs one read-only SQL statement against a granted source, bound as a panel's is ($from, $to, $step, your variables), and answers at most 200 rows, tab-separated."
+parameters = { type = "object", required = ["source", "sql"], properties = { source = { type = "string", description = "factory-records, or agent:<id>." }, sql = { type = "string" }, from = { type = "string", description = "The range's start: now-7d (the default), now-24h, or milliseconds." }, to = { type = "string", description = "Its end: now (the default)." }, dashboard = { type = "string", description = "A dashboard whose variables the SQL uses, each at its default (\"\" for All), so a panel's query runs as it is." }, variables = { type = "object", description = "Values for $names in the SQL, such as {\"agent\": \"rivet\"}; they win over the dashboard's." } } }
+
+[[views]]
+id = "main"
+title = "Charts"
+
+[[data]]
+kind = "factory-records"
+reason = "To chart your agents' runs, messages, tokens and tasks."
+
+[[data]]
+kind = "agent-database"
+agent = "*"
+reason = "To chart what an agent keeps in its own database, when you turn it on."

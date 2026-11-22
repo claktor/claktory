@@ -580,6 +580,7 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
         summary,
         transient: false,
         pipe_seqs: fresh.iter().map(|message| message.seq).collect(),
+        provenance: None,
     };
     taint(factory, &lead, pipe);
     factory.deliver_event(&lead, text, event);
@@ -588,6 +589,12 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
 /// Tells the agent that wrote a message what became of it: `who` did it,
 /// the person when None.
 pub(crate) fn tell(factory: &Arc<Factory>, agent: &str, record: &Record, who: Option<&str>, what: &str, text: &str) {
+    tell_noted(factory, agent, record, who, what, text, "");
+}
+
+/// `tell`, with the person's note on their decision (`crate::decisions`)
+/// after what happened.
+pub(crate) fn tell_noted(factory: &Arc<Factory>, agent: &str, record: &Record, who: Option<&str>, what: &str, text: &str, note: &str) {
     if agent.is_empty() {
         return;
     }
@@ -595,7 +602,7 @@ pub(crate) fn tell(factory: &Arc<Factory>, agent: &str, record: &Record, who: Op
     let summary = format!("{who} {what} on the pipe \"{}\"", record.name);
     let quoted: String = text.chars().take(500).collect();
     let event = host_event(summary.clone());
-    factory.deliver_event(agent, format!("{summary}.\n\nYour message:\n{quoted}"), event);
+    factory.deliver_event(agent, format!("{summary}.{note}\n\nYour message:\n{quoted}"), event);
 }
 
 /// Tells the agent that wrote a message the other side refused it, with
@@ -615,6 +622,107 @@ pub(crate) fn tell_refused(factory: &Arc<Factory>, agent: &str, record: &Record,
 }
 
 // ---- Taint ----
+//
+// What an agent has read from outside the person's Claktory, kept until
+// /clear, by key: a pipe by its id, and every other kind with a prefix
+// (`Kind`). Every kind is alike to the gates: its secrets need the person,
+// its messages say so, and Rivet's move and app-access tools refuse it.
+
+/// What a taint key stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind<'a> {
+    /// A pipe, by id: keys with no prefix, as stored before there were kinds.
+    Pipe(&'a str),
+    /// A web page read through browser control: its site's origin, as
+    /// Chrome spells it ("browser:https://example.com").
+    Browser(&'a str),
+    /// A conversation in the person's direct messages, by the account's id
+    /// for it ("dm:<conversation>", `crate::user_apps::dms`).
+    Dm(&'a str),
+}
+
+const BROWSER: &str = "browser:";
+const DM: &str = "dm:";
+
+impl<'a> Kind<'a> {
+    pub(crate) fn of(key: &'a str) -> Kind<'a> {
+        if let Some(origin) = key.strip_prefix(BROWSER) {
+            Kind::Browser(origin)
+        } else if let Some(conversation) = key.strip_prefix(DM) {
+            Kind::Dm(conversation)
+        } else {
+            Kind::Pipe(key)
+        }
+    }
+
+    /// Its key, as kept.
+    pub(crate) fn key(self) -> String {
+        match self {
+            Kind::Pipe(id) => id.to_owned(),
+            Kind::Browser(origin) => format!("{BROWSER}{origin}"),
+            Kind::Dm(conversation) => format!("{DM}{conversation}"),
+        }
+    }
+
+    /// PipeTaint.kind: empty for a pipe.
+    fn proto(self) -> &'static str {
+        match self {
+            Kind::Pipe(_) => "",
+            Kind::Browser(_) => "browser",
+            Kind::Dm(_) => "dm",
+        }
+    }
+
+    /// What was read, in the word messages are signed with: "pipe", "web".
+    fn word(self) -> &'static str {
+        match self {
+            Kind::Pipe(_) => "pipe",
+            Kind::Browser(_) => "web",
+            Kind::Dm(_) => "direct-message",
+        }
+    }
+}
+
+/// How the cards name what `key` stands for: a pipe by its name now, a site
+/// by its origin in ASCII. Never something a peer chose alone.
+pub(crate) fn taint_name(factory: &Factory, key: &str) -> String {
+    match Kind::of(key) {
+        Kind::Pipe(id) => factory.pipes.get(id).map(|record| record.name).unwrap_or_default(),
+        Kind::Browser(origin) => origin.to_owned(),
+        Kind::Dm(conversation) => crate::user_apps::dms::taint_name(factory, conversation),
+    }
+}
+
+/// What `agent` has read, in words for its refusals: "a pipe", "a page on
+/// https://example.com", or several, joined.
+pub(crate) fn what_was_read(factory: &Factory, agent: &str) -> String {
+    let mut said: Vec<String> = Vec::new();
+    for key in factory.pipes.tainted(agent) {
+        let words = match Kind::of(&key) {
+            Kind::Pipe(_) => "a pipe".to_owned(),
+            Kind::Browser(origin) => format!("a page on {origin}"),
+            Kind::Dm(conversation) => crate::user_apps::dms::read_words(factory, conversation),
+        };
+        if !said.contains(&words) {
+            said.push(words);
+        }
+    }
+    said.join(" and ")
+}
+
+/// How messages from `agent` to the others are signed while it's tainted
+/// (" (has read untrusted pipe content)", "… web content"); empty when it
+/// isn't.
+pub(crate) fn taint_label(factory: &Factory, agent: &str) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    for key in factory.pipes.tainted(agent) {
+        let word = Kind::of(&key).word();
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    if words.is_empty() { String::new() } else { format!(" (has read untrusted {} content)", words.join(" and ")) }
+}
 
 /// The agent has read the pipe: until /clear, its secrets need the person.
 pub(crate) fn taint(factory: &Factory, agent: &str, pipe: &str) {
@@ -701,17 +809,27 @@ pub(crate) fn routes(factory: &Factory, agent: &str) -> Vec<v1::PipeTaint> {
     let name = |id: &String| inner.config.agent(id).map_or_else(|| id.clone(), |agent| agent.name.clone());
     taint
         .iter()
-        .map(|(pipe, via)| v1::PipeTaint {
-            pipe_name: factory.pipes.get(pipe).map(|record| record.name).unwrap_or_default(),
-            pipe_id: pipe.clone(),
-            via_names: via.iter().map(name).collect(),
+        .map(|(key, via)| {
+            let kind = Kind::of(key);
+            v1::PipeTaint {
+                pipe_name: taint_name(factory, key),
+                pipe_id: if let Kind::Pipe(id) = kind { id.to_owned() } else { String::new() },
+                via_names: via.iter().map(name).collect(),
+                kind: kind.proto().to_owned(),
+            }
         })
         .collect()
 }
 
 /// `routes`, as kept with a card (its tool call's details, a column).
 pub(crate) fn routes_json(routes: &[v1::PipeTaint]) -> Value {
-    routes.iter().map(|route| json!({"pipe": route.pipe_name, "pipe_id": route.pipe_id, "via": route.via_names})).collect()
+    routes
+        .iter()
+        .map(|route| match route.kind.as_str() {
+            "" => json!({"pipe": route.pipe_name, "pipe_id": route.pipe_id, "via": route.via_names}),
+            kind => json!({"pipe": route.pipe_name, "kind": kind, "via": route.via_names}),
+        })
+        .collect()
 }
 
 /// `routes_json` read back; nothing from what isn't.
@@ -724,6 +842,7 @@ pub(crate) fn routes_from_json(value: &Value) -> Vec<v1::PipeTaint> {
         .map(|route| v1::PipeTaint {
             pipe_name: text(route, "pipe"),
             pipe_id: text(route, "pipe_id"),
+            kind: text(route, "kind"),
             via_names: route
                 .get("via")
                 .and_then(Value::as_array)
@@ -735,9 +854,6 @@ pub(crate) fn routes_from_json(value: &Value) -> Vec<v1::PipeTaint> {
         })
         .collect()
 }
-
-/// How messages from a tainted agent to the others are signed.
-pub(crate) const TAINT_LABEL: &str = " (has read untrusted pipe content)";
 
 // ---- Secrets while tainted ----
 
@@ -837,18 +953,31 @@ fn ask(
     background: bool,
 ) -> factory_agent::agent::Block {
     let pipes: Vec<String> = read.iter().filter_map(|id| factory.pipes.get(id)).map(|record| record.name).collect();
+    let others: Vec<String> = read
+        .iter()
+        .filter_map(|key| match Kind::of(key) {
+            Kind::Pipe(_) => None,
+            Kind::Browser(origin) => Some(format!("a page on {origin}")),
+            Kind::Dm(conversation) => Some(crate::user_apps::dms::read_words(factory, conversation)),
+        })
+        .collect();
     let person = factory.lock().config.person().to_owned();
     let taint = routes_json(&routes(factory, agent));
     let secrets = serde_json::to_string(&names).unwrap_or_default();
-    let reason = if pipes.is_empty() {
+    let reason = if pipes.is_empty() && others.is_empty() {
         format!(
             "Not run: {} asks {person} each time it's used, so they're asked in your conversation to allow this exact command once. You'll be told when they decide; then run the same command again, exactly as it was.",
             asking.join(", ")
         )
     } else {
         format!(
-            "Not run: you've read the pipe {}, so using a secret ({}) needs {person}'s approval each time. They're asked in your conversation; you'll be told when they decide, then run the command again.",
-            pipes.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "),
+            "Not run: you've read {}, so using a secret ({}) needs {person}'s approval each time. They're asked in your conversation; you'll be told when they decide, then run the command again.",
+            pipes
+                .iter()
+                .map(|name| format!("the pipe \"{name}\""))
+                .chain(others.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" and "),
             names.join(", ")
         )
     };
@@ -945,6 +1074,7 @@ const ANSWER_WITHIN_MS: i64 = 12 * 3_600_000;
 pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApproval) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
+    let comment = crate::decisions::comment(&request.comment)?;
     factory.ensure_loaded(agent).await?;
     let id = {
         let inner = factory.lock();
@@ -1003,12 +1133,32 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
     } else {
         format!("{person} didn't allow you to use {}", names.join(", "))
     };
+    let note = crate::decisions::note(&person, comment);
     let text = if state == "allowed" {
-        format!("{summary}: run the same command again, exactly as it was; any other command with them asks again.")
+        format!("{summary}: run the same command again, exactly as it was; any other command with them asks again.{note}")
     } else {
-        format!("{summary}.")
+        format!("{summary}.{note}")
     };
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Kind;
+
+    /// Each kind reads back as itself, and a key without a known prefix is
+    /// a pipe's: a conversation's or a site's own text never makes it
+    /// another kind.
+    #[test]
+    fn a_taint_key_reads_back_as_its_kind() {
+        for kind in [Kind::Pipe("3f9a0c"), Kind::Browser("https://example.com"), Kind::Dm("c1:browser:x")] {
+            assert_eq!(Kind::of(&kind.key()), kind);
+        }
+        assert_eq!(Kind::of("dm:browser:https://example.com"), Kind::Dm("browser:https://example.com"));
+        assert_eq!(Kind::of("browser:dm:x"), Kind::Browser("dm:x"));
+        assert_eq!(Kind::of("3f9a0c").proto(), "");
+        assert_eq!(Kind::Dm("c1").proto(), "dm");
+    }
 }

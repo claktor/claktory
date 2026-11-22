@@ -95,6 +95,7 @@ impl Factory {
             summary: done.summary(),
             transient: false,
             pipe_seqs: Vec::new(),
+            provenance: None,
         };
         self.deliver_event(agent, done.text(), event);
         crate::extensions::tasks::refresh_view(self);

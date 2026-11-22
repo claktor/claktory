@@ -1,1 +1,5 @@
 #include "Generated.xcconfig"
+
+// The scheme of the links this build opens (links.dart): claktory:// is
+// always the real Claktory's; Claktory Dev's is claktory-dev (scripts/ios.sh).
+CLAKTORY_URL_SCHEME = claktory

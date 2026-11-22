@@ -1,22 +1,57 @@
 //! The private tunnel, for Dart: a device key, and a tunnel to a backend
 //! that the app reaches at ws://127.0.0.1:<port><path>.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, Mutex};
 
 use flutter_rust_bridge::frb;
 
 use crate::forward;
 use crate::tunnel::{self, Failure, Path, Phase};
 
-/// The tunnel's own runtime: iroh's tasks outlive any one call from Dart.
-static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("tunnel").enable_all().build().expect("the tunnel's runtime")
-});
+/// The tunnels' own runtime: iroh's tasks outlive any one call from Dart.
+/// Made on first use, and made afresh by [fresh_runtime] when it stops
+/// answering ([runtime_answers]), as relaunching the app would (#214).
+static RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
 
-/// A tunnel to one backend.
+/// The current runtime's handle, making it if there's none.
+fn runtime() -> tokio::runtime::Handle {
+    let mut slot = RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    slot.get_or_insert_with(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("tunnel")
+            .enable_all()
+            .build()
+            .expect("the tunnel's runtime")
+    })
+    .handle()
+    .clone()
+}
+
+/// Whether the tunnels' runtime runs a task: one that never answers (the
+/// app times this out) is stuck, and only [fresh_runtime] gets past it.
+pub async fn runtime_answers() -> bool {
+    runtime().spawn(async {}).await.is_ok()
+}
+
+/// Ends the tunnels' runtime without waiting for it, and with it every
+/// tunnel it ran (their tasks dropped, their endpoints with them); the next
+/// tunnel opens on a new one. What relaunching the app does, without
+/// relaunching it: only for a runtime that stopped answering (#214).
+#[frb(sync)]
+pub fn fresh_runtime() {
+    let old = RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    if let Some(old) = old {
+        old.shutdown_background();
+    }
+}
+
+/// A tunnel to one backend, on the runtime it was opened on: once that's
+/// ended ([fresh_runtime]), its calls return at once.
 #[frb(opaque)]
 pub struct TunnelHandle {
     tunnel: Arc<tunnel::Tunnel>,
+    runtime: tokio::runtime::Handle,
 }
 
 /// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
@@ -33,7 +68,9 @@ pub async fn open_tunnel(
     // library would find it missing here.
     #[cfg(target_os = "android")]
     crate::android::ready()?;
-    RUNTIME
+    let runtime = runtime();
+    runtime
+        .clone()
         .spawn(async move {
             let key = tunnel::parse_key(&device_key)?;
             let backend = tunnel::backend_addr(&endpoint_id, &relays, &addresses)?;
@@ -41,7 +78,7 @@ pub async fn open_tunnel(
             // changed (tunnel.rs).
             let make: tunnel::MakeEndpoint = Arc::new(move || Box::pin(tunnel::device_endpoint(key.clone())));
             let tunnel = tunnel::Tunnel::open_with(make, tunnel::REBUILD_AFTER, backend).await?;
-            Ok(TunnelHandle { tunnel: Arc::new(tunnel) })
+            Ok(TunnelHandle { tunnel: Arc::new(tunnel), runtime })
         })
         .await?
 }
@@ -107,13 +144,13 @@ impl TunnelHandle {
     /// again.
     pub async fn reconnect(&self) {
         let tunnel = self.tunnel.clone();
-        let _ = RUNTIME.spawn(async move { tunnel.reconnect().await }).await;
+        let _ = self.runtime.spawn(async move { tunnel.reconnect().await }).await;
     }
 
     /// Stops it: the port closes, and so does the connection.
     pub async fn close(&self) {
         let tunnel = self.tunnel.clone();
-        let _ = RUNTIME.spawn(async move { tunnel.close().await }).await;
+        let _ = self.runtime.spawn(async move { tunnel.close().await }).await;
     }
 
     /// Forwards this device's localhost [port] (127.0.0.1 and ::1) to the
@@ -123,8 +160,9 @@ impl TunnelHandle {
     /// dialled first, so a backend from before it fails here (Unsupported).
     pub async fn forward_port(&self, port: u16) -> Result<ForwardHandle, ForwardError> {
         let tunnel = self.tunnel.clone();
-        match RUNTIME.spawn(async move { forward::forward(&tunnel, port).await }).await {
-            Ok(Ok(forward)) => Ok(ForwardHandle { forward: Arc::new(forward) }),
+        let runtime = self.runtime.clone();
+        match runtime.spawn(async move { forward::forward(&tunnel, port).await }).await {
+            Ok(Ok(forward)) => Ok(ForwardHandle { forward: Arc::new(forward), runtime }),
             Ok(Err(error)) => Err(error.into()),
             Err(error) => Err(ForwardError { kind: ForwardErrorKind::Failed, message: error.to_string() }),
         }
@@ -135,6 +173,7 @@ impl TunnelHandle {
 #[frb(opaque)]
 pub struct ForwardHandle {
     forward: Arc<forward::Forward>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl ForwardHandle {
@@ -152,7 +191,7 @@ impl ForwardHandle {
     /// Stops listening; connections being carried finish on their own.
     pub async fn stop(&self) {
         let forward = self.forward.clone();
-        let _ = RUNTIME.spawn(async move { forward.stop() }).await;
+        let _ = self.runtime.spawn(async move { forward.stop() }).await;
     }
 }
 

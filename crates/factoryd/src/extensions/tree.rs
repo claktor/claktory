@@ -31,8 +31,7 @@ static MANIFEST: Manifest = Manifest {
 
 const NEVER: &str = "Never make a git worktree, clone or copy of the repository yourself.";
 
-const LAND: &str =
-    "Land your work: fast-forward the main checkout's branch to your branch. Commit first, and rebase onto the main branch if it moved on.";
+const LAND: &str = "Land your work: fast-forward the main checkout's branch to your branch. Commit first, and rebase onto the main branch if it moved on. It refuses a branch that would put files back to versions the main branch had before (undoing others' work); allow_rewinds: true lands it anyway, only for a revert you mean.";
 
 pub(crate) struct Tree;
 
@@ -57,8 +56,9 @@ impl Extension for Tree {
         if !in_repo {
             return Vec::new();
         }
-        let handler: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, _args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+        let handler: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, args| async move {
+            let allow_rewinds = args.get("allow_rewinds").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let factory = super::live(factory)?;
             let checkout = {
                 let inner = factory.lock();
                 let me = super::caller(&inner.config, &agent).map_err(factory_agent::Error::Other)?;
@@ -67,13 +67,17 @@ impl Extension for Tree {
             let Some(checkout) = checkout else {
                 return Err(factory_agent::Error::Other("You have no checkout of your own to land.".into()));
             };
-            let landed = tokio::task::spawn_blocking(move || trees::land(&checkout))
+            let landed = tokio::task::spawn_blocking(move || trees::land(&checkout, allow_rewinds))
                 .await
                 .map_err(|error| factory_agent::Error::Other(error.to_string()))?;
             let text = landed.map_err(factory_agent::Error::Other)?;
             Ok(ToolResult::text(text, json!({})))
         });
-        let parameters = json!({"type": "object", "properties": {}, "additionalProperties": false});
+        let parameters = json!({
+            "type": "object",
+            "properties": {"allow_rewinds": {"type": "boolean"}},
+            "additionalProperties": false,
+        });
         vec![super::tool("tree_land", "Land work", LAND, parameters, handler)]
     }
 }

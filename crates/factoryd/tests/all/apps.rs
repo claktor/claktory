@@ -589,3 +589,41 @@ async fn dev_install() {
         .ok();
     println!("app: {:#?}", found(&view));
 }
+
+/// Claktory's own apps key (#C7) changes no install: an app keeps updating
+/// with the key it was installed with, stays as trusted as it was, and no
+/// other key replaces it.
+#[tokio::test]
+async fn an_installed_app_keeps_updating_with_its_own_key_and_no_other() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    factory.set_vault_passphrase_cost("argon2id m=1024 t=1 p=1");
+    let stand = Stand::new();
+    factory.set_apps_host(stand.launcher());
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let manifest =
+        MANIFEST.split("[[secrets]]").next().expect("head").to_owned() + &MANIFEST[MANIFEST.find("[[scopes]]").expect("scopes")..];
+    let key = SigningKey::from_bytes(&[9; 32]);
+    for version in ["0.1.0", "0.2.0"] {
+        let manifest = manifest.replace("version = \"0.1.0\"", &format!("version = \"{version}\""));
+        let bundle = clapp(&manifest, b"\0asm\x01\0\0\0", &key);
+        let install = v1::InstallLocalApp { content: bundle.clone(), ..Default::default() };
+        let reviewed = apply_request(&mut client, &mut view, Request::InstallLocalApp(install)).await;
+        let Body::AppPermissions(permissions) = reviewed else { panic!("expected permissions, got {reviewed:?}") };
+        assert_eq!(permissions.tier(), v1::AppTier::Local);
+        let approve = v1::InstallLocalApp { content: bundle, approve: true, sha256: permissions.sha256.clone(), ..Default::default() };
+        apply_request(&mut client, &mut view, Request::InstallLocalApp(approve)).await;
+        view.follow(&mut client, |view| app(view).is_some_and(|app| app.version == version)).await;
+        assert_eq!(app(&view).expect("app").tier(), v1::AppTier::Local);
+    }
+
+    let other = clapp(&manifest.replace("0.1.0", "0.3.0"), b"\0asm\x01\0\0\0", &SigningKey::from_bytes(&[3; 32]));
+    let refused =
+        apply_request(&mut client, &mut view, Request::InstallLocalApp(v1::InstallLocalApp { content: other, ..Default::default() })).await;
+    assert_eq!(
+        failure(&refused),
+        "This Telegram comes from a different publisher than the one installed. To install it, uninstall that one first."
+    );
+    assert_eq!(app(&view).expect("app").version, "0.2.0");
+}

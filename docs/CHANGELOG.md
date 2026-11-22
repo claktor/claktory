@@ -6,6 +6,38 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.17
+Released 2026-11-22 12:51 UTC.
+- Fixed: On iPhone, notifications could stop arriving, with nothing to say why, when the iPhone couldn't finish setting them up with your Claktory. Now it tries again each time it connects, and Settings → Notifications says when it couldn't, with Try again.
+- Fixed: Agents' web searches fail far less often. When a search engine shows a CAPTCHA or stops answering, Claktory tries the next of several free engines, such as DuckDuckGo, Bing and Yahoo, and favours the ones that have been answering. When none can answer, the agent learns when to try again.
+- Fixed: On a Mac with an Intel processor, Claktory couldn't connect to your other Claktories or pair devices, because part of it failed to load.
+- Added: Turn on Advanced diagnostics in Settings when something keeps going wrong, such as connecting: Claktory and your devices record how it happens, so your agents can find the cause. It stays on your Claktory, never includes messages, and is kept for 14 days.
+- Changed: A key the vault generates for an agent no longer asks you each time it's used, unless you turn on Ask each time when you approve it.
+- Added: Usage shows how many agents were working at once, above the token chart, so you can see when they were busiest.
+- Added: Check for updates in Settings looks for a new version of Claktory right away, so you don't have to wait for the Update banner. It tells you whether you're up to date, a new version is on its way or ready, or why it couldn't check.
+- Added: Agents can send each other quiet messages that don't interrupt: the other agent reads them the next time it starts working, so less time and money goes on interruptions. An agent shows how many quiet messages are waiting for it.
+- Fixed: Moving Claktory to another computer over the network stopped at any project folder outside your home folder, such as one on another disk, and suggested an option that move doesn't have. Now that folder moves into your home folder there, in a folder named after this computer. Rivet tells you where before you confirm, and can leave a folder out if you ask.
+- Fixed: On iPhone, tapping a file you sent in a conversation opens it again.
+- Fixed: On the Mac, when Settings, the Marketplace or What's new is squeezed into a narrow pane, its text no longer looks cut off at the edge. The edge fades out to show there's more, and you can scroll sideways to see it.
+- Fixed: On iPhone, at the largest text sizes, a page's title, such as Notifications, no longer breaks in the middle of a word.
+- Added: Ask Rivet to move your Claktory to another computer, and it does the move for you. For a server, add the key Rivet gives you and it sets the server up itself; for another Mac, paste one line in Terminal there and give Rivet the code it shows. You still confirm the move. Afterwards Rivet tells you how it went: whether your secrets are unlocked, which devices have connected, whether your sign-ins work and your project folders are in place, and what your agents used that the new computer doesn't have.
+- Fixed: A pipe could stop sending after you approved it, or start again after you paused or closed it, if the other Claktory was talking at that moment. A new pipe could also close by itself right after it was joined, saying the other side had closed it. Pipes now keep what you chose.
+- Fixed: Messages still waiting to go when a pipe closed, from either side, said "Not delivered yet" for ever. They now say they weren't sent because the pipe closed.
+- Fixed: An agent can no longer land work that would quietly undo what other agents landed in the meantime. Claktory names the files and says how to fix it, and lands a revert only when the agent says it means one.
+- Fixed: On iPhone, at the largest text sizes, the top of the menu no longer pushes your agents off the screen. It scrolls on its own instead.
+- Added: On iPhone, scan a Claktory's code with the Camera app to open Claktory and connect. Every way of connecting, whether a scan, a link or a pasted code, now asks you first and warns you when that Claktory isn't on your account.
+- Added: PDFs open on the Mac and iPhone: scroll and zoom, select and copy text, and find words, with ⌘F on the Mac or Search in More on iPhone. A link in a PDF asks before it opens.
+- Added: Choose what Claktory notifies you about in Settings → Notifications: which kinds, how much a notification shows, quiet hours, and a test notification. Turn notifications on or off for a single agent in its settings.
+- Fixed: On iPhone, the buttons on a card, such as Dismiss and Approve, stay together at the right edge, under your thumb, instead of stacking up beside their words. When they can't share a line, at the largest text sizes, each spans the card's width.
+- Added: Add a comment when you approve or dismiss anything an agent asks of you, such as a question, a secret or a proposal. The agent gets it with your answer.
+- Added: Checklist items say what they're waiting for: your decision, something for you to do, another agent, or something outside. Items waiting for you show in Needs you even when no one asked, an item opens again by itself once what it waited for is done, and work set aside for now shows as Parked instead of Blocked. In Settings → Checklist, choose how soon Claktory follows up on blocked items.
+- Fixed: On iPhone, Claktory could show Reconnecting… until you quit the app and opened it again, after the phone was locked for a few minutes, say. Now it reconnects within seconds when you come back, and starts over by itself if that doesn't work. To reconnect right away, tap Reconnecting… or Can't connect above the message box (click it on the Mac). When your Claktory can't be reached at all, conversations on any device say so and what to do.
+- Added: Work moves faster between agents: one can hand work straight to the next and leave its lead a copy that doesn't interrupt it, so the lead still sees what happened without passing everything on. You see the copies in the lead's Messaging panel, and an agent's message says what it's replying to.
+- Added: Needs you has a History tab with everything you answered, approved, declined or dismissed in the last 30 days. Search it by agent or words, and click or tap one to go back to it in its conversation.
+- Fixed: Build caches in a busy agent's checkout could grow past their limit in Settings → Resources and fill your disk, because Claktory cleared them only while the agent was idle. Now it also clears them while the agent waits on its model, never during a build.
+- Fixed: A pipe you joined without naming it took the name the other side gave it, which could pass for Claktory's own, such as "Claktory Security". Now it's called "Pipe joined 22 Nov" until you rename it.
+- Fixed: When Screen Time or your organization blocked the microphone on iPhone, Claktory sent you to Settings, where you couldn't allow it. Now it says the microphone isn't allowed on this device.
+
 ## v0.1.16
 Released 2026-11-22 03:22 UTC.
 - Added: Your Mac and iPhone tell you when an agent needs you or answers you: the iPhone even when Claktory is closed or the phone is locked, the Mac while Claktory is open, even in the background. Click or tap a notification to go straight to that conversation. On iPhone, what it says is private and encrypted all the way to your phone.

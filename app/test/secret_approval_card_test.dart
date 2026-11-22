@@ -1,8 +1,10 @@
 // The card a held secret use waits on (SecretApproval): under who asks, a
 // line per pipe the command may come from (P1's taint), the agent's own
 // read or heard through others.
+import 'package:factory_app/decision.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -117,6 +119,30 @@ void main() {
     );
   });
 
+  testWidgets('a page read, not a pipe, says so', (tester) async {
+    await _card(
+      tester,
+      _approval(
+        pipes: [],
+        taint: [
+          PipeTaint(kind: 'browser', pipeName: 'https://docs.example.com'),
+        ],
+      ),
+    );
+    expect(
+      find.text(
+        'June has read a page on https://docs.example.com, so Claktory asks '
+        'you before it uses a secret. Allow it only if this command is what '
+        'you expect.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text('from June, which read a page on https://docs.example.com'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('a command that keeps running says it can use the secret the '
       'whole time', (tester) async {
     await _card(tester, _approval(asks: ['AWS'], keepsRunning: true));
@@ -131,5 +157,26 @@ void main() {
   testWidgets('one that ends when done says nothing of it', (tester) async {
     await _card(tester, _approval(asks: ['AWS']));
     expect(find.textContaining('keeps running'), findsNothing);
+  });
+
+  testWidgets("Don't allow (or Allow once) takes a comment for the agent", (
+    tester,
+  ) async {
+    final harness = await _card(tester, _approval());
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    expect(find.text('June gets it with your answer.'), findsOneWidget);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+      'Use the staging bucket.',
+    );
+    await tester.tap(find.text("Don't allow"));
+    await settle(tester);
+    final decided = harness.last.decideSecretApproval;
+    expect(decided.allow, isFalse);
+    expect(decided.comment, 'Use the staging bucket.');
   });
 }

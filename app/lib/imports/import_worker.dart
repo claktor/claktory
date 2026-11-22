@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'claude_export.dart';
 
@@ -9,28 +10,60 @@ class ExportCancelled implements Exception {
   const ExportCancelled();
 }
 
-/// An export being read: its preview, or why not, and a way to stop it.
-abstract class ExportJob {
-  /// The preview; throws [ExportFailure], or [ExportCancelled] once
+/// Work on an export in an isolate of its own: its result, or why not,
+/// and a way to stop it.
+abstract class ImportJob<T> {
+  /// The result; throws [ExportFailure], or [ExportCancelled] once
   /// [cancel]led.
-  Future<ExportPreview> get result;
+  Future<T> get result;
 
-  /// Stops reading it at once.
+  /// Stops it at once.
   void cancel();
 }
+
+/// An export being read for its preview.
+typedef ExportJob = ImportJob<ExportPreview>;
 
 /// Reads the export at [path] in an isolate of its own, so a file built to
 /// take long or take memory never holds up the app: checked for size
 /// before it's read, stopped past [deadline], and stopped at once by
-/// [ExportJob.cancel]. Nothing leaves this device.
+/// [ImportJob.cancel]. Nothing leaves this device.
 ExportJob readExportFile(
   String path, {
   ExportLimits limits = const ExportLimits(),
   Duration deadline = const Duration(seconds: 30),
-}) => _IsolateJob(path, limits, deadline);
+}) => runOnExport(
+  path,
+  (bytes) => readClaudeExport(bytes, limits: limits),
+  limits: limits,
+  deadline: deadline,
+);
 
-class _IsolateJob implements ExportJob {
-  _IsolateJob(String path, ExportLimits limits, Duration deadline) {
+/// Runs [work] on the bytes of the export at [path] in an isolate of its
+/// own, as [readExportFile] reads it: the file's size checked first,
+/// stopped past [deadline] or when cancelled. [work] goes to the isolate,
+/// so it may only hold what can be sent there.
+ImportJob<T> runOnExport<T>(
+  String path,
+  T Function(Uint8List bytes) work, {
+  ExportLimits limits = const ExportLimits(),
+  Duration deadline = const Duration(seconds: 30),
+}) => _IsolateJob<T>(path, work, limits, deadline);
+
+/// What the isolate answers when [work] worked.
+class _Done<T> {
+  const _Done(this.value);
+
+  final T value;
+}
+
+class _IsolateJob<T> implements ImportJob<T> {
+  _IsolateJob(
+    String path,
+    T Function(Uint8List bytes) work,
+    ExportLimits limits,
+    Duration deadline,
+  ) {
     _port.listen(_receive);
     _timer = Timer(
       deadline,
@@ -42,8 +75,8 @@ class _IsolateJob implements ExportJob {
       ),
     );
     Isolate.spawn(
-      _read,
-      (_port.sendPort, path, limits),
+      _run<T>,
+      (_port.sendPort, path, limits, work),
       onError: _port.sendPort,
       onExit: _port.sendPort,
       errorsAreFatal: true,
@@ -62,20 +95,20 @@ class _IsolateJob implements ExportJob {
   }
 
   final _port = ReceivePort();
-  final _done = Completer<ExportPreview>();
+  final _done = Completer<T>();
   Isolate? _isolate;
   late final Timer _timer;
 
   @override
-  Future<ExportPreview> get result => _done.future;
+  Future<T> get result => _done.future;
 
   @override
   void cancel() => _end(const ExportCancelled());
 
   void _receive(Object? message) {
     switch (message) {
-      case ExportPreview preview:
-        _end(preview);
+      case _Done<T> done:
+        _end(done);
       case ExportFailure failure:
         _end(failure);
       // An error it didn't expect ([error, stack] as text), or its end
@@ -87,29 +120,31 @@ class _IsolateJob implements ExportJob {
     }
   }
 
-  /// [outcome] is the preview, or what to throw.
+  /// [outcome] is the result ([_Done]), or what to throw.
   void _end(Object outcome) {
     if (_done.isCompleted) return;
     _timer.cancel();
     _port.close();
     _isolate?.kill(priority: Isolate.immediate);
-    if (outcome is ExportPreview) {
-      _done.complete(outcome);
+    if (outcome is _Done<T>) {
+      _done.complete(outcome.value);
     } else {
       _done.completeError(outcome);
     }
   }
 }
 
-void _read((SendPort, String, ExportLimits) job) {
-  final (reply, path, limits) = job;
+void _run<T>(
+  (SendPort, String, ExportLimits, T Function(Uint8List bytes)) job,
+) {
+  final (reply, path, limits, work) = job;
   Object outcome;
   try {
     final file = File(path);
     if (file.lengthSync() > limits.maxInput) {
       throw const ExportFailure(ExportProblem.tooBig);
     }
-    outcome = readClaudeExport(file.readAsBytesSync(), limits: limits);
+    outcome = _Done<T>(work(file.readAsBytesSync()));
   } on ExportFailure catch (failure) {
     outcome = failure;
   } on FileSystemException catch (error) {

@@ -65,9 +65,12 @@ stamp_version() {
 # release channel stamped into it (FACTORY_UPDATE_URL, see scripts/publish.sh).
 backend_fingerprint() {
   local root
-  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  root="${SRC_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   (
     cd "$root"
+    # Built with this Mac's home folder remapped (release_rustflags): a
+    # backend from before that carries the home path, so it's never reused.
+    echo "build: home remapped (Rust, C, C++, Objective-C)"
     find crates proto -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
     shasum -a 256 Cargo.toml Cargo.lock docs/MANUAL.md
     if [[ -n "${FACTORY_UPDATE_URL:-}" ]]; then
@@ -218,6 +221,146 @@ add_helpers() {
   if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
   if [[ -d "$release/supervisor/Claktory Agents.app" ]]; then
     ditto "$release/supervisor/Claktory Agents.app" "$helpers/Claktory Agents.app"
+  fi
+}
+
+# Release builds carry no trace of this Mac (Fugo, 2026-11-22): its user name,
+# home folder, host name and folder layout would go public in every binary.
+# Rust's panic locations name the registry and toolchain under $HOME, so
+# release cargo builds remap it; Dart's AOT snapshot names the generated
+# plugin registrant's absolute path (dart-lang/sdk#55282), so the app is
+# built from an export of the commit in one fixed, private folder; and
+# check_no_traces refuses whatever still carries one.
+
+# Flags for a release build for the Mac, exported for cargo: $HOME as ~.
+# Only the Mac target's, so the tunnel's own per-target flags (app/hook)
+# aren't overridden. The C, C++ and Objective-C that crates build (ggml in
+# claktory-speech, through cc and CMake) name their sources in __FILE__ for
+# assertions, so those compilers map $HOME too: CFLAGS_<target> reach cc and
+# CMake's C and C++ flags; CMake's Objective-C flags come only from a define
+# (TRANSCRIBE_CMAKE_ARGS, transcribe-cpp-sys's pass-through to CMake).
+release_rustflags() {
+  local triple map="-ffile-prefix-map=$HOME=~"
+  export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="--remap-path-prefix=$HOME=~"
+  export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS="--remap-path-prefix=$HOME=~"
+  for triple in aarch64_apple_darwin x86_64_apple_darwin; do
+    export "CFLAGS_$triple=$map" "CXXFLAGS_$triple=$map"
+  done
+  export TRANSCRIBE_CMAKE_ARGS="-DCMAKE_OBJC_FLAGS=$map -DCMAKE_OBJCXX_FLAGS=$map"
+}
+
+# DIR, made private (0700) if it's absent, and refused unless it's a folder
+# of ours, mode 700 and not a link: /tmp is everyone's, and a folder someone
+# else made first could have its contents swapped mid-build (Fugo).
+private_dir() {
+  local dir="$1" owner mode
+  if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+    (umask 077 && mkdir -m 700 "$dir")
+  fi
+  [[ -d "$dir" && ! -L "$dir" ]] || { echo "$dir isn't a plain folder; not building there" >&2; return 1; }
+  if [[ "$(uname)" == Darwin ]]; then
+    owner="$(stat -f %u "$dir")" mode="$(stat -f %Lp "$dir")"
+  else
+    owner="$(stat -c %u "$dir")" mode="$(stat -c %a "$dir")"
+  fi
+  [[ "$owner" == "$(id -u)" && "$mode" == 700 ]] || {
+    echo "$dir isn't this user's private folder (owner $owner, mode $mode); not building there. Remove it and try again." >&2
+    return 1
+  }
+}
+
+# The fixed folder release builds run in: COMMIT's files exported from the
+# checkout ORIGIN into /tmp/claktory-release/src (the same path every time,
+# so the binaries name only it), keeping its target/ so cargo builds stay
+# warm. Prints the folder. One build at a time: release_unlock lets go.
+RELEASE_BUILD=/tmp/claktory-release
+release_tree() {
+  local origin="$1" commit="$2" src="$RELEASE_BUILD/src" holder
+  private_dir "$RELEASE_BUILD" || return 1
+  if ! (umask 077 && mkdir "$RELEASE_BUILD/lock" 2>/dev/null); then
+    holder="$(cat "$RELEASE_BUILD/lock/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+      echo "another release build (pid $holder) is using $RELEASE_BUILD; try again when it's done" >&2
+      return 1
+    fi
+    rm -rf "$RELEASE_BUILD/lock"
+    (umask 077 && mkdir "$RELEASE_BUILD/lock") || return 1
+  fi
+  echo "$$" >"$RELEASE_BUILD/lock/pid" || return 1
+  private_dir "$src" || return 1
+  if [[ -e "$src/target" || -L "$src/target" ]]; then private_dir "$src/target" || return 1; fi
+  # Run in $(...), where errexit is off: every step says when it failed.
+  find "$src" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + || return 1
+  # -m: the files get now as their time, not the commit's, so cargo never
+  # takes a kept target/'s newer output for theirs (building an older
+  # commit, or one made before the last build, would reuse stale code).
+  git -C "$origin" archive --format=tar "$commit" | tar -x -m -C "$src" || return 1
+  if [[ ! -e "$src/target" ]]; then (umask 077 && mkdir -m 700 "$src/target") || return 1; fi
+  echo "$src"
+}
+# Pub's package cache for a release build, in the same private folder and
+# kept between runs like target/: the plugins' native sources are compiled
+# from it, and their paths end up in the app's debug map.
+release_pub_cache() {
+  private_dir "$RELEASE_BUILD/pub-cache" || return 1
+  export PUB_CACHE="$RELEASE_BUILD/pub-cache"
+}
+release_unlock() {
+  [[ "$(cat "$RELEASE_BUILD/lock/pid" 2>/dev/null)" == "$$" ]] && rm -rf "$RELEASE_BUILD/lock"
+  return 0
+}
+
+# What this Mac would give away in a binary: its home folder, user name,
+# host names and agents' checkouts.
+traces() {
+  local name
+  printf '%s\n' "$HOME" "/Users/$USER" "/home/$USER" ".factory/trees"
+  for name in "$(hostname -s 2>/dev/null)" "$(scutil --get ComputerName 2>/dev/null)" "$(scutil --get LocalHostName 2>/dev/null)"; do
+    [[ ${#name} -ge 4 ]] && printf '%s\n' "$name"
+  done
+  return 0
+}
+
+# Refuses (exit 1, naming each file and what it holds) unless no Mach-O or
+# ELF file under the given paths carries one of this Mac's traces.
+check_no_traces() {
+  local patterns found="" file hits
+  patterns="$(mktemp)"
+  traces | sort -u >"$patterns"
+  while IFS= read -r -d '' file; do
+    case "$(file -b "$file")" in *Mach-O* | *ELF*) ;; *) continue ;; esac
+    # Raw bytes, not strings(1): Apple's reads a Mach-O's sections only,
+    # not its symbol table, where debug-map entries name source paths (Fugo).
+    hits="$(LC_ALL=C grep -a -F -c -f "$patterns" "$file" || true)"
+    [[ "$hits" == 0 ]] || found="$found
+  $file: $hits ($(LC_ALL=C grep -a -F -o -f "$patterns" "$file" | sort | uniq -c | sort -rn | head -3 | awk '{print $2" ×"$1}' | sed "s|$HOME|\$HOME|g" | paste -sd, -))"
+  done < <(find "$@" -type f -print0)
+  rm -f "$patterns"
+  if [[ -n "$found" ]]; then
+    echo "these binaries carry this Mac's home folder, user or host name; not shipping them:$found" >&2
+    return 1
+  fi
+}
+
+# Claktory's browser helper (crates/claktory-browser-host, browser-control.md
+# §6), the native-messaging host Chrome starts for Claktory's extension, put
+# in APP's Contents/Helpers. FLAVOR real or dev: each is its own build (the
+# dev feature fixes Claktory Dev's host name, socket, extension and app into
+# it), and PROFILE release or debug. A Dev helper is signed ad hoc here, with
+# its fixed identifier, before the app is sealed around it; a real one is
+# signed with the Developer ID by scripts/sign-release.sh, and ad hoc only
+# when the release is (a real helper refuses to run ad hoc anyway).
+add_browser_host() {
+  local app="$1" flavor="$2" profile="$3" root features=() build=()
+  root="${SRC_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  [[ "$flavor" == dev ]] && features=(--features dev)
+  [[ "$profile" == release ]] && build=(--release)
+  [[ "$profile" == release ]] && release_rustflags
+  cargo build --manifest-path "$root/Cargo.toml" ${build[@]+"${build[@]}"} -p claktory-browser-host ${features[@]+"${features[@]}"}
+  mkdir -p "$app/Contents/Helpers"
+  cp "$root/target/$profile/claktory-browser-host" "$app/Contents/Helpers/claktory-browser-host"
+  if [[ "$flavor" == dev ]]; then
+    codesign --force --sign - --identifier com.claktory.browser-host.dev "$app/Contents/Helpers/claktory-browser-host"
   fi
 }
 

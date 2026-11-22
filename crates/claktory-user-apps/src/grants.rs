@@ -44,7 +44,7 @@ pub const APPS: &[App] = &[App {
     id: "dms",
     scopes: &[
         Scope { name: "dm.read", per_minute: 60, per_hour: 600 },
-        Scope { name: "dm.draft", per_minute: 20, per_hour: 200 },
+        Scope { name: "dm.draft", per_minute: 5, per_hour: 20 },
         Scope { name: "dm.send", per_minute: 10, per_hour: 60 },
         Scope { name: "dm.subscribe", per_minute: 10, per_hour: 100 },
     ],
@@ -332,6 +332,24 @@ pub fn list(db: &mut Connection, caller: &Caller, now_ms: i64) -> Result<Vec<Gra
     Ok(grants)
 }
 
+/// The live grants of `app` that a Claktory's agents hold under its
+/// registration `epoch`: what its own leaf may reach (DMs end to end, whose
+/// conversations a Claktory's leaf is in). Reads only.
+pub fn of_claktory(
+    db: &Connection,
+    account_id: &str,
+    claktory_id: &str,
+    epoch: u64,
+    app: &str,
+    now_ms: i64,
+) -> rusqlite::Result<Vec<Grant>> {
+    let mut statement = db.prepare(&format!(
+        "SELECT {COLUMNS} FROM grants WHERE app = ?1 AND account_id = ?2 AND claktory_id = ?3 AND epoch = ?4
+         AND (expires = 0 OR expires > ?5) ORDER BY granted, id"
+    ))?;
+    statement.query_map(params![app, account_id, claktory_id, epoch as i64, now_ms], read_grant)?.collect()
+}
+
 fn forget(transaction: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
     transaction.execute("DELETE FROM grant_uses WHERE grant_id = ?1", [id])?;
     transaction.execute("DELETE FROM grants WHERE id = ?1", [id])?;
@@ -369,6 +387,32 @@ pub fn check(
     resource: Option<&Resource>,
     now_ms: i64,
 ) -> Result<String, Refused> {
+    let (id, spec) = holds(transaction, caller, app, scope, resource, now_ms)?;
+    count(transaction, &id, spec, now_ms)?;
+    Ok(id)
+}
+
+/// The same, counting nothing: for a use already counted, such as sending
+/// a message the person approved, counted when the agent proposed it.
+pub fn live(
+    transaction: &Connection,
+    caller: &Caller,
+    app: &str,
+    scope: &str,
+    resource: Option<&Resource>,
+    now_ms: i64,
+) -> Result<String, Refused> {
+    Ok(holds(transaction, caller, app, scope, resource, now_ms)?.0)
+}
+
+fn holds(
+    transaction: &Connection,
+    caller: &Caller,
+    app: &str,
+    scope: &str,
+    resource: Option<&Resource>,
+    now_ms: i64,
+) -> Result<(String, &'static Scope), Refused> {
     let Caller::Backend { account_id, claktory_id, epoch, agent: Some(agent) } = caller else {
         return Err(Refused::NotGranted);
     };
@@ -394,13 +438,19 @@ pub fn check(
     if !live || !grant.scopes.iter().any(|granted| granted == scope) || !reaches {
         return Err(Refused::NotGranted);
     }
+    Ok((grant.id, spec))
+}
+
+/// Counts a use of `spec` by the grant `id`, refusing past its quota.
+fn count(transaction: &Transaction<'_>, id: &str, spec: &Scope, now_ms: i64) -> Result<(), Refused> {
+    let scope = spec.name;
     let now = now_ms / 1000;
     for (span, limit) in [(60, spec.per_minute), (3600, spec.per_hour)] {
         let start = now - now % span;
         let used: i64 = transaction
             .query_row(
                 "SELECT count FROM grant_uses WHERE grant_id = ?1 AND scope = ?2 AND span = ?3 AND window_start = ?4",
-                params![grant.id, scope, span, start],
+                params![id, scope, span, start],
                 |row| row.get(0),
             )
             .optional()?
@@ -414,11 +464,39 @@ pub fn check(
         transaction.execute(
             "INSERT INTO grant_uses (grant_id, scope, window_start, span, count) VALUES (?1, ?2, ?3, ?4, 1)
              ON CONFLICT (grant_id, scope, span, window_start) DO UPDATE SET count = count + 1",
-            params![grant.id, scope, start, span],
+            params![id, scope, start, span],
         )?;
     }
-    transaction.execute("DELETE FROM grant_uses WHERE grant_id = ?1 AND window_start < ?2", params![grant.id, now - 7200])?;
-    Ok(grant.id)
+    transaction.execute("DELETE FROM grant_uses WHERE grant_id = ?1 AND window_start < ?2", params![id, now - 7200])?;
+    Ok(())
+}
+
+/// Takes `resource` out of every grant of `app` the `accounts` hold (a
+/// conversation that ended: a friend removed or blocked), in the caller's
+/// transaction. A grant left naming nothing, in an app whose grants need
+/// resources, goes. How many grants changed.
+pub fn drop_resource(transaction: &Transaction<'_>, app: &str, accounts: &[&str], resource: &Resource) -> rusqlite::Result<usize> {
+    let Some(spec) = self::app(app) else { return Ok(0) };
+    let mut changed = 0;
+    for account in accounts {
+        let held: Vec<Grant> = {
+            let mut statement = transaction.prepare(&format!("SELECT {COLUMNS} FROM grants WHERE app = ?1 AND account_id = ?2"))?;
+            statement.query_map(params![app, account], read_grant)?.collect::<Result<_, _>>()?
+        };
+        for grant in held.into_iter().filter(|grant| grant.resources.contains(resource)) {
+            let left: Vec<&Resource> = grant.resources.iter().filter(|named| *named != resource).collect();
+            if left.is_empty() && spec.needs_resources {
+                forget(transaction, &grant.id)?;
+            } else {
+                transaction.execute(
+                    "UPDATE grants SET resources = ?2 WHERE id = ?1",
+                    params![grant.id, serde_json::to_string(&left).unwrap_or_default()],
+                )?;
+            }
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 /// Forgets an account's grants (the account was deleted).
@@ -498,6 +576,37 @@ mod tests {
         refused(&mut db, &other_account, "dm.read", Some(&c1));
         let transaction = db.transaction().expect("transaction");
         assert_eq!(check(&transaction, &as_june, "no-such-app", "dm.read", Some(&c1), NOW), Err(Refused::NotGranted));
+    }
+
+    #[test]
+    fn an_ended_conversation_leaves_every_grant_that_named_it() {
+        let mut db = db();
+        let both = Put {
+            app: "dms".into(),
+            agent: june(),
+            scopes: vec!["dm.read".into()],
+            resources: vec![conversation("c1"), conversation("c2")],
+            expires_ms: 0,
+        };
+        put(&mut db, &backend(3, None), both, NOW).expect("granted");
+        let kai = Actor { id: "kai".into(), incarnation: "inc-1".into() };
+        let only = Put {
+            app: "dms".into(),
+            agent: kai.clone(),
+            scopes: vec!["dm.read".into()],
+            resources: vec![conversation("c1")],
+            expires_ms: 0,
+        };
+        put(&mut db, &backend(3, None), only, NOW).expect("granted");
+        let transaction = db.transaction().expect("transaction");
+        assert_eq!(drop_resource(&transaction, "dms", &["other"], &conversation("c1")), Ok(0), "not theirs");
+        assert_eq!(drop_resource(&transaction, "dms", &["acct", "other"], &conversation("c1")), Ok(2));
+        transaction.commit().expect("commit");
+        let as_june = backend(3, Some(june()));
+        assert_eq!(allowed(&mut db, &as_june, "dm.read", Some(&conversation("c1")), NOW), Err(Refused::NotGranted));
+        assert!(allowed(&mut db, &as_june, "dm.read", Some(&conversation("c2")), NOW).is_ok(), "the other stays");
+        let left: i64 = db.query_row("SELECT COUNT(*) FROM grants", [], |row| row.get(0)).expect("count");
+        assert_eq!(left, 1, "kai's named nothing else, so it went");
     }
 
     #[test]

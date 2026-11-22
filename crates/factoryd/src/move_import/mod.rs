@@ -43,6 +43,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::home::Home;
+use crate::store::query;
 use crate::transcript::now_ms;
 use crate::uploads::available as free_bytes;
 
@@ -436,7 +437,7 @@ fn steps(home: &Home, mut state: State, given: &[(PathBuf, PathBuf)], hold: bool
     let map = PathMap::new(state.map.clone());
     if state.step == Step::Prepare {
         progress("prepare", "Checking and preparing the settings and records…");
-        check(home, &manifest, &map, &bundle)?;
+        check(home, &manifest, &map, &bundle, hold)?;
         state.old_app_code = prepare(home, &manifest, &map, &bundle)?;
         state.step = Step::Switch;
         save_state(home, &state)?;
@@ -450,7 +451,7 @@ fn steps(home: &Home, mut state: State, given: &[(PathBuf, PathBuf)], hold: bool
     if state.step == Step::Folders {
         progress("folders", "Making the project folders again…");
         for folder in &manifest.folders {
-            restore_folder(home, &mut state, folder, &map, &bundle)?;
+            restore_folder(home, &mut state, folder, &map, &bundle, hold)?;
         }
         state.step = Step::Checkouts;
         save_state(home, &state)?;
@@ -570,8 +571,8 @@ fn path_map(home: &Home, manifest: &Manifest, given: &[(PathBuf, PathBuf)]) -> P
 
 // ---- 2. checks ----
 
-fn check(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Result<(), ImportError> {
-    match problems(home, manifest, map, Some(bundle), 0)?.into_iter().next() {
+fn check(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path, by_wire: bool) -> Result<(), ImportError> {
+    match problems(home, manifest, map, Some(bundle), 0, by_wire)?.into_iter().next() {
         Some(problem) => Err(ImportError::Refused(problem)),
         None => Ok(()),
     }
@@ -580,8 +581,16 @@ fn check(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Resu
 /// What stops `manifest` from going here, in sentences: its version, its
 /// databases' schemas and whether it came before (with the bundle at
 /// hand), the folders' places, and the disk, with `staged` bytes of it
-/// here already.
-fn problems(home: &Home, manifest: &Manifest, map: &PathMap, bundle: Option<&Path>, staged: u64) -> Result<Vec<String>, ImportError> {
+/// here already. `by_wire`: a move over the network (`receive`), where the
+/// source says where folders go and `--map` isn't asked for.
+fn problems(
+    home: &Home,
+    manifest: &Manifest,
+    map: &PathMap,
+    bundle: Option<&Path>,
+    staged: u64,
+    by_wire: bool,
+) -> Result<Vec<String>, ImportError> {
     let mut problems = Vec::new();
     let here = crate::update::VERSION;
     if too_new(&manifest.version, here) {
@@ -595,21 +604,38 @@ fn problems(home: &Home, manifest: &Manifest, map: &PathMap, bundle: Option<&Pat
     }
     for folder in &manifest.folders {
         let Some(to) = map.path(&folder.path) else {
-            problems.push(format!(
-                "{} isn't in your home folder, so Claktory can't tell where it goes here: say with --map {}=/where/it/goes.",
-                folder.path.display(),
-                folder.path.display()
-            ));
+            // Only an older source leaves one out of its map.
+            problems.push(if by_wire {
+                format!(
+                    "{} isn't in your home folder, and the Claktory it comes from is too old to say where it goes here. Update Claktory on {} and move again, or leave the folder out of the move.",
+                    folder.path.display(),
+                    manifest.source.machine
+                )
+            } else {
+                format!(
+                    "{} isn't in your home folder, so Claktory can't tell where it goes here: say with --map {}=/where/it/goes.",
+                    folder.path.display(),
+                    folder.path.display()
+                )
+            });
             continue;
         };
         // Folders in this home are checked once it's switched over.
         if !to.starts_with(home.root()) && !empty_or_missing(&to) {
-            problems.push(format!(
-                "{} is already there and isn't empty, so {} can't go there. Move it away, or put the folder elsewhere with --map {}=/elsewhere.",
-                to.display(),
-                folder.path.display(),
-                folder.path.display()
-            ));
+            problems.push(if by_wire {
+                format!(
+                    "{} is already there and isn't empty, so {} can't go there. Move it away and move again, or leave the folder out of the move.",
+                    to.display(),
+                    folder.path.display()
+                )
+            } else {
+                format!(
+                    "{} is already there and isn't empty, so {} can't go there. Move it away, or put the folder elsewhere with --map {}=/elsewhere.",
+                    to.display(),
+                    folder.path.display(),
+                    folder.path.display()
+                )
+            });
         }
     }
     if let Err(ImportError::Refused(problem) | ImportError::Failed(problem)) = room(home.root(), manifest.requires.disk_bytes, staged) {
@@ -722,7 +748,9 @@ fn network_kind(stat: &libc::statfs) -> Option<String> {
 // ---- 3. prepare ----
 
 /// What prepare changes, copied from the bundle into `<home>/import/work`.
-const CHANGED: [&str; 4] = ["config.json", "factory.db", "vault", "remote"];
+/// What's prepared in the work folder rather than taken as it is: changed
+/// (settings, records, the vault), or checked (ink blobs, `crate::ink`).
+const CHANGED: [&str; 5] = ["config.json", "factory.db", "vault", "remote", "annotations"];
 
 /// Makes the changed copies in `<home>/import/work` from the bundle, anew;
 /// returns the code for the old computer's app, if it had one.
@@ -739,6 +767,11 @@ fn prepare(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Re
         }
     }
     let work_home = Home::new(work.clone());
+    // A blob is trusted by its name: one whose bytes say otherwise stays behind.
+    let dropped = crate::ink::drop_bad_blobs(&work_home).map_err(|error| failed("Can't check the drawings", error))?;
+    if dropped > 0 {
+        tracing::warn!(dropped, "left out ink blobs whose content isn't what their names say");
+    }
     repath_config(&work_home, home.root(), map)?;
     repath_records(&work_home, manifest, map)?;
     if work.join("vault/vault.db").exists() {
@@ -798,10 +831,8 @@ fn repath_records(home: &Home, manifest: &Manifest, map: &PathMap) -> Result<(),
     let mut db = store.db();
     let records = |error: rusqlite::Error| failed("Can't move the records' paths", error);
     let transaction = db.transaction().map_err(records)?;
-    let rows: Vec<(String, i64, String, String)> = {
-        let mut statement = transaction.prepare("SELECT agent, id, spec, cursor FROM monitors").map_err(records)?;
-        statement.query_map([], crate::store::row4).map_err(records)?.collect::<Result<_, _>>().map_err(records)?
-    };
+    let rows: Vec<(String, i64, String, String)> =
+        query(&transaction, "SELECT agent, id, spec, cursor FROM monitors", [], crate::store::row4).map_err(records)?;
     for (agent, id, spec, cursor) in rows {
         let moved = match serde_json::from_str::<serde_json::Value>(&spec) {
             Ok(value) => repath_json(value, map).to_string(),
@@ -821,10 +852,7 @@ fn repath_records(home: &Home, manifest: &Manifest, map: &PathMap) -> Result<(),
             .execute("UPDATE monitors SET spec = ?3, cursor = ?4 WHERE agent = ?1 AND id = ?2", params![agent, id, moved, cursor])
             .map_err(records)?;
     }
-    let logs: Vec<(i64, String)> = {
-        let mut statement = transaction.prepare("SELECT id, log FROM tasks").map_err(records)?;
-        statement.query_map([], crate::store::row2).map_err(records)?.collect::<Result<_, _>>().map_err(records)?
-    };
+    let logs: Vec<(i64, String)> = query(&transaction, "SELECT id, log FROM tasks", [], crate::store::row2).map_err(records)?;
     for (id, log) in logs {
         let moved = map.path_or_same(Path::new(&log)).display().to_string();
         if moved != log {
@@ -832,15 +860,25 @@ fn repath_records(home: &Home, manifest: &Manifest, map: &PathMap) -> Result<(),
         }
     }
     transaction.execute("UPDATE tasks SET ended = ?1, status = 'stopped by the move' WHERE ended IS NULL", [now_ms()]).map_err(records)?;
-    for table in ["threads", "thread_files"] {
-        let paths: Vec<String> = {
-            let mut statement = transaction.prepare(&format!("SELECT DISTINCT path FROM {table}")).map_err(records)?;
-            statement.query_map([], |row| row.get(0)).map_err(records)?.collect::<Result<_, _>>().map_err(records)?
-        };
+    for table in ["threads", "thread_files", "ink_layers"] {
+        let paths: Vec<String> =
+            query(&transaction, &format!("SELECT DISTINCT path FROM {table}"), [], |row| row.get(0)).map_err(records)?;
         for path in paths {
             let moved = map.path_or_same(Path::new(&path)).display().to_string();
             if moved != path {
                 transaction.execute(&format!("UPDATE {table} SET path = ?2 WHERE path = ?1"), params![path, moved]).map_err(records)?;
+            }
+        }
+    }
+    // Review items' copies published to agents' uploads (empty until sent).
+    for column in ["published_context_path", "published_manifest_path"] {
+        let paths: Vec<String> =
+            query(&transaction, &format!("SELECT DISTINCT {column} FROM ink_items WHERE {column} != ''"), [], |row| row.get(0))
+                .map_err(records)?;
+        for path in paths {
+            let moved = map.path_or_same(Path::new(&path)).display().to_string();
+            if moved != path {
+                transaction.execute(&format!("UPDATE ink_items SET {column} = ?2 WHERE {column} = ?1"), params![path, moved]).map_err(records)?;
             }
         }
     }
@@ -1019,7 +1057,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn restore_folder(home: &Home, state: &mut State, folder: &Folder, map: &PathMap, bundle: &Path) -> Result<(), ImportError> {
+fn restore_folder(home: &Home, state: &mut State, folder: &Folder, map: &PathMap, bundle: &Path, by_wire: bool) -> Result<(), ImportError> {
     let to = map.path_or_same(&folder.path);
     if state.done.contains(&to) {
         return Ok(());
@@ -1029,12 +1067,20 @@ fn restore_folder(home: &Home, state: &mut State, folder: &Folder, map: &PathMap
         // Made by a try that didn't finish: made again.
         std::fs::remove_dir_all(&to).or_else(ignore_missing).map_err(|error| failed(&format!("Can't clear {}", to.display()), error))?;
     } else if !empty_or_missing(&to) {
-        return Err(ImportError::Refused(format!(
-            "{} is already there and isn't empty, so {} can't go there. Move it away, or undo this import with factoryd import --abandon and import again with --map {}=/elsewhere.",
-            to.display(),
-            folder.path.display(),
-            folder.path.display()
-        )));
+        return Err(ImportError::Refused(if by_wire {
+            format!(
+                "{} is already there and isn't empty, so {} can't go there. Move it away, then move again.",
+                to.display(),
+                folder.path.display()
+            )
+        } else {
+            format!(
+                "{} is already there and isn't empty, so {} can't go there. Move it away, or undo this import with factoryd import --abandon and import again with --map {}=/elsewhere.",
+                to.display(),
+                folder.path.display(),
+                folder.path.display()
+            )
+        }));
     } else {
         state.made.push(to.clone());
         save_state(home, state)?;
@@ -1222,7 +1268,7 @@ fn short(command: &str) -> String {
 }
 
 /// "macOS arm64", "Linux x86_64".
-fn platform(os: &str, arch: &str) -> String {
+pub(crate) fn platform(os: &str, arch: &str) -> String {
     let os = match os {
         "macos" => "macOS",
         "linux" => "Linux",
@@ -1234,7 +1280,7 @@ fn platform(os: &str, arch: &str) -> String {
 }
 
 /// Tools the agent's background tasks used that this computer hasn't got.
-fn missing_tools(db: &Connection, agent: &str) -> Vec<String> {
+pub(crate) fn missing_tools(db: &Connection, agent: &str) -> Vec<String> {
     const TOOLS: [&str; 20] = [
         "brew",
         "cargo",
@@ -1257,10 +1303,8 @@ fn missing_tools(db: &Connection, agent: &str) -> Vec<String> {
         "xcodebuild",
         "xcrun",
     ];
-    let commands: Vec<String> = db
-        .prepare("SELECT command FROM tasks WHERE agent = ?1 ORDER BY id DESC LIMIT 500")
-        .and_then(|mut statement| statement.query_map([agent], |row| row.get(0))?.collect())
-        .unwrap_or_default();
+    let commands: Vec<String> =
+        query(db, "SELECT command FROM tasks WHERE agent = ?1 ORDER BY id DESC LIMIT 500", [agent], |row| row.get(0)).unwrap_or_default();
     let used: BTreeSet<&str> = commands
         .iter()
         .flat_map(|command| command.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`')))

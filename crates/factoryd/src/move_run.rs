@@ -68,6 +68,8 @@ pub struct Saved {
     pub target_arch: String,
     pub target_version: String,
     pub map: Vec<(String, String)>,
+    /// Project folders left out of the move, as the person asked Rivet.
+    pub skip: Vec<String>,
     pub missing: Vec<String>,
     pub plan_bytes: u64,
     pub bytes_have: u64,
@@ -217,13 +219,13 @@ fn place(home: &Home) -> Place {
 
 /// StartMove.
 pub(crate) fn start(factory: &Arc<Factory>, code: &str) -> Result<(), RequestError> {
-    start_by(factory, code, "")
+    start_by(factory, code, "", Vec::new())
 }
 
 /// StartMove by the person, or by `agent` (Rivet's move_claktory): the move
 /// says so (`Move.started_by_agent_id`), and the person confirms its digits
-/// in the app all the same.
-pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str) -> Result<(), RequestError> {
+/// in the app all the same. `skip`: project folders to leave out.
+pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str, skip: Vec<String>) -> Result<(), RequestError> {
     if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
         return Err(refused("A move is already under way."));
     }
@@ -245,12 +247,12 @@ pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str) -> Resul
     }
     let _ = std::fs::remove_file(failed_path(&factory.home));
     factory.moving.clear();
-    begin(factory, code, None, agent);
+    begin(factory, code, None, agent, skip);
     Ok(())
 }
 
 /// Starts the driver: a new move, or one a restart interrupted while copying.
-fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agent: &str) {
+fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agent: &str, skip: Vec<String>) {
     let (control, controls) = mpsc::unbounded_channel();
     *locked(&factory.moving.control) = Some(control);
     factory.moving.freeze.store(false, Ordering::Relaxed);
@@ -273,8 +275,27 @@ fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agen
     factory.broadcast_workspace(&factory.lock());
     let weak = Arc::downgrade(factory);
     tokio::spawn(async move {
-        drive(weak, code, resumed, controls).await;
+        drive(weak, code, resumed, skip, controls).await;
     });
+}
+
+/// What the move leaves out, as it was asked.
+fn options(saved: &Saved) -> Options {
+    Options { skip: saved.skip.iter().map(PathBuf::from).collect(), ..Options::default() }
+}
+
+/// Where the projects' folders will go on `target`, before the plan is
+/// made: the home folders, and each folder outside them (not left out).
+fn planned_map(factory: &Factory, target: &move_source::Target, skip: &[String]) -> Vec<(String, String)> {
+    let place = place(&factory.home);
+    let folders: Vec<PathBuf> = {
+        let inner = factory.lock();
+        crate::move_report::projects_of(&inner.config).into_iter().flat_map(|(_, paths)| paths).collect()
+    };
+    let kept = folders.into_iter().filter(|folder| !skip.iter().any(|skipped| folder.starts_with(skipped)));
+    let mut map = move_source::default_map(&place, target);
+    map.extend(move_source::outside_map(&place, target, kept));
+    map
 }
 
 /// What a saved move showed.
@@ -343,7 +364,7 @@ pub fn resume(factory: &Arc<Factory>) {
         return;
     };
     tracing::info!(target = %saved.target_machine, round = saved.round, "carrying on moving this Claktory");
-    begin(factory, code, Some(saved), "");
+    begin(factory, code, Some(saved), "", Vec::new());
 }
 
 /// The app's side of the person, in the normal backend.
@@ -457,7 +478,13 @@ fn redialing_text(machine: &str) -> String {
 }
 
 /// The move in the normal backend: pairing and pre-copy, then the freeze.
-async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, mut controls: mpsc::UnboundedReceiver<Control>) {
+async fn drive(
+    weak: Weak<Factory>,
+    code: ReceiveCode,
+    resumed: Option<Saved>,
+    skip: Vec<String>,
+    mut controls: mpsc::UnboundedReceiver<Control>,
+) {
     let Some(factory) = weak.upgrade() else { return };
     let home = factory.home.clone();
     let freeze = factory.moving.freeze.clone();
@@ -524,14 +551,18 @@ async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, m
         return fail(why);
     }
     let mut saved =
-        resumed.unwrap_or_else(|| Saved { code: code.text(), export_id: move_export::new_export_id(), round: 1, ..Saved::default() });
+        resumed.unwrap_or_else(|| Saved { code: code.text(), export_id: move_export::new_export_id(), round: 1, skip, ..Saved::default() });
     saved.target_machine.clone_from(&machine);
     saved.target_os.clone_from(&target.os);
     saved.target_arch.clone_from(&target.arch);
     saved.target_version.clone_from(&target.version);
     if !confirmed_before {
+        // Where the folders will go, before the person confirms: those
+        // outside the home folders go under the other computer's home.
+        let planned = weak.upgrade().map(|factory| planned_map(&factory, &target, &saved.skip)).unwrap_or_default();
         let app = App { factory: weak.clone(), freeze: freeze.clone(), saved: saved.clone(), shown_at: None };
         app.update(|view| {
+            view.map = planned.iter().map(|(from, to)| v1::MovePath { from: from.clone(), to: to.clone() }).collect();
             view.phase = Phase::Confirm.into();
             view.target_machine.clone_from(&machine);
             view.target_os.clone_from(&target.os);
@@ -597,7 +628,7 @@ async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, m
     let place = place(&home);
     let first = saved.round.max(1);
     let copied = {
-        let options = Options::default();
+        let options = options(&saved);
         let copying = move_source::copy(&place, &options, &mut mover, &mut link, &saved.export_id, first, &mut app);
         tokio::pin!(copying);
         loop {
@@ -791,7 +822,7 @@ async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::
             Ok(link) => link,
             Err(problem) => return Frozen::Failed(format!("{} Nothing was moved.", problem.text(&machine))),
         };
-        let options = Options::default();
+        let options = options(&saved);
         let finishing = move_source::finish(&place, &options, &mut mover, &mut link, &saved.export_id, saved.round, &mut person);
         let finished = tokio::select! {
             finished = finishing => Some(finished),

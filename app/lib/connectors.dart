@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart' show TextCapitalization;
 import 'package:flutter/widgets.dart';
@@ -10,12 +9,14 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart';
+import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -33,8 +34,21 @@ import 'web_auth.dart';
 Future<bool> Function(Uri url) openConnectPage = launchUrl;
 
 /// Whether this device catches the service's answer in the system's sign-in
-/// sheet (the iPhone) rather than on an address of its own (the Mac).
-bool connectInSheet = Platform.isIOS;
+/// sheet on the app's own scheme (a touch device: an iPhone, an iPad, an
+/// Android phone or tablet, which use the device's system sign-in flow)
+/// rather than on an address of its own (a Mac). Asked each time,
+/// from the platform's policy, so tests that change the platform get its
+/// answer.
+bool get connectInSheet =>
+    debugConnectInSheet ?? PhonePlatformPolicy.current.touch;
+
+/// Sets [debugConnectInSheet], as tests do.
+set connectInSheet(bool value) => debugConnectInSheet = value;
+
+/// One way or the other in tests, whatever the platform; null (as tests
+/// leave it when they're done) follows the platform's policy.
+@visibleForTesting
+bool? debugConnectInSheet;
 
 /// The sign-in sheet, and closing it. Tests replace them.
 Future<Uri?> Function(Uri url, String scheme) connectSheet = webAuth;
@@ -154,6 +168,7 @@ class ConnectRun extends ChangeNotifier {
     Map<String, String> fields = const {},
     String proposalId = '',
     String secretId = '',
+    String comment = '',
   }) async {
     await _end();
     final generation = ++_generation;
@@ -198,6 +213,7 @@ class ConnectRun extends ChangeNotifier {
           proposalId: proposalId,
           redirectUri: redirect,
           secretId: secretId,
+          comment: comment,
         ),
       );
       if (generation != _generation) {
@@ -922,6 +938,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
         accessId: fields.access,
         fields: fields.filled,
         proposalId: proposal.id,
+        comment: _comment.text.trim(),
       ),
     );
   }
@@ -1105,12 +1122,13 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
     ];
   }
 
+  /// Dismiss, and a comment for the agent that goes with it or with
+  /// Connect.
   Widget _dismissRow(String agent) => ActionLine(
-    lead: TextField(
+    lead: DecisionComment(
       controller: _comment,
-      placeholder: 'Tell $agent why (optional)',
-      kind: InputKind.text,
-      onSubmitted: (_) => _dismiss(),
+      agent: agent,
+      enabled: !_dismissing,
     ),
     action: Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
   );

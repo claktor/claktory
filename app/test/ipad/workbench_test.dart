@@ -139,10 +139,7 @@ void main() {
       );
       expect(tester.takeException(), isNull);
       final context = tester.element(find.byType(Workbench));
-      expect(
-        windowTier(context, const Size(744, 1133)),
-        WorkbenchTier.focused,
-      );
+      expect(windowTier(context, const Size(744, 1133)), WorkbenchTier.focused);
       expect(_key('workbench-panes'), findsOneWidget);
     }
   });

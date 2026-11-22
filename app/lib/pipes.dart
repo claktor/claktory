@@ -8,6 +8,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
@@ -20,8 +21,10 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'selection.dart';
-import 'taint_label.dart' show TaintLabel;
+import 'state.dart' show PipeChat;
+import 'taint_label.dart' show TaintLabel, taintRead;
 import 'transcript.dart' show Bubble, userAvatarSize;
+import 'waiting.dart' show EntryReveal;
 
 /// A pipe's color: its portal glyph, its header's bar and its line on the
 /// Map. Deep cyan, apart from the agents' colors, white text 4.5:1 on it.
@@ -50,6 +53,27 @@ String pipePeerName(Pipe pipe) {
   if (peer.ownerName.isNotEmpty) return peer.ownerName;
   if (peer.claktoryName.isNotEmpty) return peer.claktoryName;
   return 'the other side';
+}
+
+/// Who on this side hears the person's decision on [message], held in
+/// [pipe], with their comment: for one going out, the agent that wrote it
+/// (null for the person's own: no one); for one coming in, the pipe's
+/// lead (its liaison, when it has one). Never the other side.
+String? pipeDecisionHearer(
+  Workspace workspace,
+  Pipe pipe,
+  PipeMessage message,
+) {
+  final author = message.author;
+  final String id;
+  if (message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD) {
+    if (author.kind != PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT) return null;
+    id = author.agentId;
+  } else {
+    id = pipe.leadId;
+  }
+  final agent = workspace.agents.where((agent) => agent.id == id).firstOrNull;
+  return agent?.name ?? (id.isEmpty ? null : 'Your agent');
 }
 
 /// The other side of [pipe] as its Claktory is called ("Ana's Claktory"),
@@ -914,9 +938,14 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   var _busy = false;
   String? _error;
 
+  /// The person's comment, for this side's lead with either answer; never
+  /// the other side's.
+  final _comment = TextEditingController();
+
   @override
   void dispose() {
     _liaisonName.dispose();
+    _comment.dispose();
     super.dispose();
   }
 
@@ -951,6 +980,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               : null,
           reviewIncoming: approve ? _reviewIncoming : null,
           reviewOutgoing: approve ? _reviewOutgoing : null,
+          comment: _comment.text.trim(),
         ),
       );
     } on RequestFailure catch (failure) {
@@ -1139,6 +1169,14 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               ),
             ],
           ),
+          // Approved, the lead chosen here hears it; declined, the agent
+          // that set the pipe up (or Rivet): only this side's agents.
+          DecisionComment(
+            controller: _comment,
+            agent: 'your agents',
+            note: 'Only your agents see it, not ${pipePeerClaktory(pipe)}.',
+            enabled: !_busy,
+          ),
         ],
       ),
     );
@@ -1155,6 +1193,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   }
 }
 
+/// What [EntryReveal.reachExtra] names to open a pipe with no liaison at
+/// one of its messages (pipeItemKey(seq)).
+String pipeChatRevealId(String pipeId) => 'pipe:$pipeId';
+
 /// A pipe's messages, newest at the bottom, built only as they show; the
 /// earlier ones load as the person scrolls up.
 class _PipeChatView extends StatefulWidget {
@@ -1170,6 +1212,15 @@ class _PipeChatViewState extends State<_PipeChatView> {
   final _scroll = ScrollController();
   var _loading = false;
 
+  /// Each message's place, to go to one (from Needs you's History).
+  final _keys = <int, GlobalKey>{};
+  EntryReveal? _reveal;
+  PipeChat? _chat;
+
+  /// Steps taken towards the message asked for, so a search that can't
+  /// find it ends.
+  var _steps = 0;
+
   @override
   void initState() {
     super.initState();
@@ -1177,9 +1228,77 @@ class _PipeChatViewState extends State<_PipeChatView> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (backend.reveal != _reveal) {
+      _reveal?.removeListener(_revealSoon);
+      _reveal = backend.reveal..addListener(_revealSoon);
+    }
+    if (backend.pipeChat != _chat) {
+      _chat?.removeListener(_revealSoon);
+      _chat = backend.pipeChat..addListener(_revealSoon);
+    }
+    _revealSoon();
+  }
+
+  @override
   void dispose() {
+    _reveal?.removeListener(_revealSoon);
+    _chat?.removeListener(_revealSoon);
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _revealSoon() {
+    if (_reveal?.extra?.agentId != pipeChatRevealId(widget.pipe.id)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealMessage());
+  }
+
+  /// Goes to the message [EntryReveal.extra] names, once it's this pipe's:
+  /// further up while it's above what's built (loading earlier pages as
+  /// it goes), then puts it in the middle of the view.
+  void _revealMessage() {
+    final reveal = _reveal;
+    final target = reveal?.extra;
+    if (reveal == null ||
+        target == null ||
+        !mounted ||
+        target.agentId != pipeChatRevealId(widget.pipe.id)) {
+      return;
+    }
+    final chat = AppScope.of(context).pipeChat;
+    // Not loaded yet: looked at again when it is.
+    if (chat.pipeId != widget.pipe.id || !_scroll.hasClients) return;
+    final seq = target.key is String
+        ? int.tryParse((target.key as String).replaceFirst('pipe:', ''))
+        : null;
+    final messages = chat.messages;
+    final here = messages.any((message) => message.seq.toInt() == seq);
+    if (seq == null || (!here && !chat.hasEarlier) || _steps > 60) {
+      // Gone, or not to be found: the pipe stays at its end.
+      reveal.usedExtra(target);
+      _steps = 0;
+      return;
+    }
+    final place = _keys[seq]?.currentContext;
+    if (place != null) {
+      reveal.usedExtra(target);
+      _steps = 0;
+      Scrollable.ensureVisible(place, alignment: 0.5);
+      return;
+    }
+    // Further up (reversed: towards the far end), which also loads the
+    // earlier page once near the top; looked at again next frame.
+    _steps++;
+    final position = _scroll.position;
+    position.jumpTo(
+      (position.pixels + position.viewportDimension * 0.8).clamp(
+        0,
+        position.maxScrollExtent,
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealMessage());
   }
 
   void _maybeLoadEarlier() {
@@ -1252,10 +1371,16 @@ class _PipeChatViewState extends State<_PipeChatView> {
                       Space.xl,
                       0,
                     ),
-                    child: PipeMessageView(
-                      key: ValueKey(message.seq),
-                      pipe: widget.pipe,
-                      message: message,
+                    child: KeyedSubtree(
+                      key: _keys.putIfAbsent(
+                        message.seq.toInt(),
+                        GlobalKey.new,
+                      ),
+                      child: PipeMessageView(
+                        key: ValueKey(message.seq),
+                        pipe: widget.pipe,
+                        message: message,
+                      ),
                     ),
                   ),
                 ),
@@ -1295,14 +1420,27 @@ class _PipeMessageViewState extends State<PipeMessageView> {
   var _busy = false;
   String? _error;
 
+  /// The person's comment with their decision, for this side's agent only.
+  final _comment = TextEditingController();
+
+  @override
+  void dispose() {
+    _comment.dispose();
+    super.dispose();
+  }
+
   Future<void> _decide(bool allow) async {
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await AppScope.of(context)
-          .decidePipeMessage(widget.pipe.id, widget.message.seq.toInt(), allow);
+      await AppScope.of(context).decidePipeMessage(
+        widget.pipe.id,
+        widget.message.seq.toInt(),
+        allow,
+        comment: _comment.text.trim(),
+      );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
@@ -1598,6 +1736,18 @@ class _PipeMessageViewState extends State<PipeMessageView> {
               ),
             ],
           ),
+          if (pipeDecisionHearer(
+                AppScope.of(context).workspace.workspace,
+                widget.pipe,
+                message,
+              )
+              case final agent?)
+            DecisionComment(
+              controller: _comment,
+              agent: agent,
+              peer: pipePeerClaktory(widget.pipe),
+              enabled: !_busy,
+            ),
         ],
       );
     }
@@ -2766,26 +2916,46 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
   var _busy = false;
   String? _error;
 
+  /// The person's comment, sent with Allow once or Don't allow.
+  final _comment = TextEditingController();
+
+  @override
+  void dispose() {
+    _comment.dispose();
+    super.dispose();
+  }
+
   /// "AWS", "AWS and Stripe", "AWS, Stripe and GitHub".
   static String _listed(List<String> names) => names.length < 2
       ? names.join()
       : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
 
-  /// Why Claktory asks: [name] read the pipes [pipes], or the person set
-  /// some of its secrets to ask each time, or both.
-  String _why(String name, String pipes) {
+  /// What [name] read, by kind ("the pipe Acme and a page on
+  /// https://example.com"); from the pipes' names alone for an older
+  /// backend's card; empty when it read nothing.
+  String _read() {
+    final approval = widget.approval;
+    if (approval.taint.isNotEmpty) {
+      return _listed([for (final read in approval.taint) taintRead(read)]);
+    }
+    return approval.pipeNames.isEmpty
+        ? ''
+        : 'the pipe ${approval.pipeNames.join(', ')}';
+  }
+
+  /// Why Claktory asks: [name] read a pipe, a site or direct messages, or
+  /// the person set some of its secrets to ask each time, or both.
+  String _why(String name) {
     final asks = widget.approval.askEachTimeNames;
     const expect = 'Allow it only if this command is what you expect.';
+    final read = _read();
     if (asks.isEmpty) {
-      return '$name has read the pipe $pipes, so Claktory asks you before it '
-          'uses a secret. $expect';
+      return '$name has read $read, so Claktory asks you before it uses a '
+          'secret. $expect';
     }
     final set = 'you set ${_listed(asks)} to ask each time';
-    final read =
-        widget.approval.pipeNames.isNotEmpty ||
-        widget.approval.taint.isNotEmpty;
-    return read
-        ? '$name has read the pipe $pipes, and $set. $expect'
+    return read.isNotEmpty
+        ? '$name has read $read, and $set. $expect'
         : '${set[0].toUpperCase()}${set.substring(1)}. $expect';
   }
 
@@ -2795,8 +2965,12 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
       _error = null;
     });
     try {
-      await AppScope.of(context)
-          .decideSecretApproval(widget.approval.agentId, widget.seq, allow);
+      await AppScope.of(context).decideSecretApproval(
+        widget.approval.agentId,
+        widget.seq,
+        allow,
+        comment: _comment.text.trim(),
+      );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
@@ -2814,7 +2988,6 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
     final pending =
         approval.state == SecretApprovalState.SECRET_APPROVAL_STATE_PENDING;
     final secrets = approval.secretNames.join(', ');
-    final pipes = approval.pipeNames.join(', ');
     final decided = approval.decidedMs.toInt();
     return Container(
       padding: const EdgeInsets.all(Space.l),
@@ -2850,7 +3023,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
           TaintLabel(taint: approval.taint, agent: name),
           const SizedBox(height: Space.xs),
           Text(
-            _why(name, pipes),
+            _why(name),
             style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.s),
@@ -2879,7 +3052,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
             ),
           ],
           const SizedBox(height: Space.m),
-          if (pending)
+          if (pending) ...[
             Row(
               children: [
                 Expanded(
@@ -2904,8 +3077,9 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
                   onPressed: _busy ? null : () => _decide(true),
                 ),
               ],
-            )
-          else
+            ),
+            DecisionComment(controller: _comment, agent: name, enabled: !_busy),
+          ] else
             Row(
               children: [
                 if (approval.state !=

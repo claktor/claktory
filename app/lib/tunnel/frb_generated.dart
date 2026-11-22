@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/account.dart';
+import 'api/dm.dart';
 import 'api/tunnel.dart';
 
 import 'dart:async';
@@ -68,7 +69,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1305742125;
+  int get rustContentHash => 752292216;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -80,6 +81,232 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<void> crateApiDmDmDeviceAcceptList({
+    required DmDevice that,
+    required String account,
+    required List<int> deviceList,
+  });
+
+  Future<DmCommit> crateApiDmDmDeviceAddMembers({
+    required DmDevice that,
+    required List<int> groupId,
+    required List<String> keyPackages,
+  });
+
+  Future<void> crateApiDmDmDeviceCommitRefused({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<void> crateApiDmDmDeviceCommitTaken({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<String> crateApiDmDmDeviceCreateGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+  });
+
+  DmDeviceList? crateApiDmDmDeviceDeviceList({
+    required DmDevice that,
+    required String account,
+  });
+
+  Future<void> crateApiDmDmDeviceDropUnsent({
+    required DmDevice that,
+    required List<int> groupId,
+    required String clientMessageId,
+  });
+
+  Future<Uint8List> crateApiDmDmDeviceExportPins({required DmDevice that});
+
+  Future<DmHandoffDone> crateApiDmDmDeviceFinishHandoff({
+    required DmDevice that,
+    required DmHandoff handoff,
+    required List<int> sealed,
+    required BigInt nowMs,
+  });
+
+  Future<void> crateApiDmDmDeviceFirstContact({
+    required DmDevice that,
+    required String account,
+    required List<int> identityPublic,
+  });
+
+  Future<void> crateApiDmDmDeviceForgetGroup({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<List<DmGroup>> crateApiDmDmDeviceGroups({required DmDevice that});
+
+  Future<List<DmMessage>> crateApiDmDmDeviceHistory({
+    required DmDevice that,
+    required List<int> groupId,
+    PlatformInt64? beforeSeq,
+    required int limit,
+  });
+
+  Future<void> crateApiDmDmDeviceImportPins({
+    required DmDevice that,
+    required List<int> exported,
+  });
+
+  Future<Uint8List> crateApiDmDmDeviceIssueCertificate({
+    required DmDevice that,
+    required DmLeafKind kind,
+    required String leafId,
+    required List<int> signatureKey,
+    required String name,
+    required BigInt createdMs,
+  });
+
+  Future<void> crateApiDmDmDeviceJoinGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String welcome,
+    required PlatformInt64 seq,
+  });
+
+  Future<void> crateApiDmDmDeviceKeyChanged({
+    required DmDevice that,
+    required String account,
+    required List<int> identityPublic,
+  });
+
+  Future<List<String>> crateApiDmDmDeviceKeyPackages({
+    required DmDevice that,
+    required int count,
+  });
+
+  Future<String> crateApiDmDmDeviceLastResortKeyPackage({
+    required DmDevice that,
+  });
+
+  Future<List<DmMember>> crateApiDmDmDeviceMembers({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<DmDevice?> crateApiDmDmDeviceOpen({
+    required String path,
+    required List<int> storeKey,
+    required List<int> leafKey,
+    Uint8List? identityKey,
+  });
+
+  Future<DmMessage> crateApiDmDmDeviceOpenSide({
+    required DmDevice that,
+    required List<int> groupId,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  });
+
+  DmPin? crateApiDmDmDevicePin({
+    required DmDevice that,
+    required String account,
+  });
+
+  Future<DmProcessed> crateApiDmDmDeviceProcess({
+    required DmDevice that,
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  });
+
+  Future<DmCommit> crateApiDmDmDeviceRejoinGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String groupInfo,
+    required PlatformInt64 seq,
+  });
+
+  Future<DmCommit> crateApiDmDmDeviceRemoveMembers({
+    required DmDevice that,
+    required List<int> groupId,
+    required List<String> leafIds,
+  });
+
+  bool crateApiDmDmDeviceSafetyMatches({
+    required DmDevice that,
+    required String account,
+    required List<int> scanned,
+  });
+
+  DmSafety crateApiDmDmDeviceSafetyNumber({
+    required DmDevice that,
+    required String account,
+  });
+
+  Future<DmHandoffSealed> crateApiDmDmDeviceSealHandoff({
+    required DmDevice that,
+    required String qr,
+  });
+
+  Future<void> crateApiDmDmDeviceSeen({
+    required DmDevice that,
+    required String account,
+  });
+
+  Future<String> crateApiDmDmDeviceSend({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmContent content,
+    required PlatformInt64 nowMs,
+  });
+
+  Future<DmSetUp> crateApiDmDmDeviceSetUpFirst({
+    required DmDevice that,
+    required List<int> identityKey,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  });
+
+  Future<Uint8List> crateApiDmDmDeviceSignDeviceList({
+    required DmDevice that,
+    required BigInt version,
+    required BigInt createdMs,
+    required List<DmListed> leaves,
+  });
+
+  Future<DmHandoff> crateApiDmDmDeviceStartHandoff({
+    required DmDevice that,
+    required String leafId,
+    required String name,
+    required String platform,
+    required List<int> endpointId,
+  });
+
+  DmStatus crateApiDmDmDeviceStatus({required DmDevice that});
+
+  Future<List<DmUnsent>> crateApiDmDmDeviceUnsent({required DmDevice that});
+
+  Future<DmCommit> crateApiDmDmDeviceUpdateGroup({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<void> crateApiDmDmDeviceVerify({
+    required DmDevice that,
+    required String account,
+  });
+
+  Future<DmView> crateApiDmDmDeviceView({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  String crateApiDmDmHandoffComparison({required DmHandoff that});
+
+  String crateApiDmDmHandoffQr({required DmHandoff that});
+
   int crateApiTunnelForwardHandlePort({required ForwardHandle that});
 
   ForwardStatus crateApiTunnelForwardHandleStatus({
@@ -112,6 +339,16 @@ abstract class RustLibApi extends BaseApi {
     required List<int> message,
   });
 
+  Uint8List crateApiDmDmNewSecret();
+
+  Uint8List crateApiDmDmPublicKey({required List<int> secret});
+
+  Future<void> crateApiDmDmRemoveStore({required String path});
+
+  Future<DmView> crateApiDmDmViewDefault();
+
+  void crateApiTunnelFreshRuntime();
+
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
     required String deviceKey,
     required String endpointId,
@@ -123,6 +360,24 @@ abstract class RustLibApi extends BaseApi {
     required String deviceKey,
     required String endpointId,
   });
+
+  Future<bool> crateApiTunnelRuntimeAnswers();
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_DmDevice;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_DmDevice;
+
+  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_DmDevicePtr;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_DmHandoff;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_DmHandoff;
+
+  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_DmHandoffPtr;
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_ForwardHandle;
@@ -151,6 +406,1577 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<void> crateApiDmDmDeviceAcceptList({
+    required DmDevice that,
+    required String account,
+    required List<int> deviceList,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          sse_encode_list_prim_u_8_loose(deviceList, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceAcceptListConstMeta,
+        argValues: [that, account, deviceList],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceAcceptListConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_accept_list",
+        argNames: ["that", "account", "deviceList"],
+      );
+
+  @override
+  Future<DmCommit> crateApiDmDmDeviceAddMembers({
+    required DmDevice that,
+    required List<int> groupId,
+    required List<String> keyPackages,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_list_String(keyPackages, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_commit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceAddMembersConstMeta,
+        argValues: [that, groupId, keyPackages],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceAddMembersConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_add_members",
+        argNames: ["that", "groupId", "keyPackages"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceCommitRefused({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceCommitRefusedConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceCommitRefusedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_commit_refused",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceCommitTaken({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceCommitTakenConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceCommitTakenConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_commit_taken",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<String> crateApiDmDmDeviceCreateGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_box_autoadd_dm_group_kind(kind, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceCreateGroupConstMeta,
+        argValues: [that, groupId, kind],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceCreateGroupConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_create_group",
+        argNames: ["that", "groupId", "kind"],
+      );
+
+  @override
+  DmDeviceList? crateApiDmDmDeviceDeviceList({
+    required DmDevice that,
+    required String account,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_dm_device_list,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceDeviceListConstMeta,
+        argValues: [that, account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceDeviceListConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_device_list",
+        argNames: ["that", "account"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceDropUnsent({
+    required DmDevice that,
+    required List<int> groupId,
+    required String clientMessageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_String(clientMessageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceDropUnsentConstMeta,
+        argValues: [that, groupId, clientMessageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceDropUnsentConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_drop_unsent",
+        argNames: ["that", "groupId", "clientMessageId"],
+      );
+
+  @override
+  Future<Uint8List> crateApiDmDmDeviceExportPins({required DmDevice that}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceExportPinsConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceExportPinsConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_export_pins",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<DmHandoffDone> crateApiDmDmDeviceFinishHandoff({
+    required DmDevice that,
+    required DmHandoff handoff,
+    required List<int> sealed,
+    required BigInt nowMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+            handoff,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(sealed, serializer);
+          sse_encode_u_64(nowMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_handoff_done,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceFinishHandoffConstMeta,
+        argValues: [that, handoff, sealed, nowMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceFinishHandoffConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_finish_handoff",
+        argNames: ["that", "handoff", "sealed", "nowMs"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceFirstContact({
+    required DmDevice that,
+    required String account,
+    required List<int> identityPublic,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          sse_encode_list_prim_u_8_loose(identityPublic, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 10,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceFirstContactConstMeta,
+        argValues: [that, account, identityPublic],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceFirstContactConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_first_contact",
+        argNames: ["that", "account", "identityPublic"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceForgetGroup({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceForgetGroupConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceForgetGroupConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_forget_group",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<List<DmGroup>> crateApiDmDmDeviceGroups({required DmDevice that}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_dm_group,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceGroupsConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceGroupsConstMeta =>
+      const TaskConstMeta(debugName: "DmDevice_groups", argNames: ["that"]);
+
+  @override
+  Future<List<DmMessage>> crateApiDmDmDeviceHistory({
+    required DmDevice that,
+    required List<int> groupId,
+    PlatformInt64? beforeSeq,
+    required int limit,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_opt_box_autoadd_i_64(beforeSeq, serializer);
+          sse_encode_u_32(limit, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_dm_message,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceHistoryConstMeta,
+        argValues: [that, groupId, beforeSeq, limit],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceHistoryConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_history",
+    argNames: ["that", "groupId", "beforeSeq", "limit"],
+  );
+
+  @override
+  Future<void> crateApiDmDmDeviceImportPins({
+    required DmDevice that,
+    required List<int> exported,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(exported, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceImportPinsConstMeta,
+        argValues: [that, exported],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceImportPinsConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_import_pins",
+        argNames: ["that", "exported"],
+      );
+
+  @override
+  Future<Uint8List> crateApiDmDmDeviceIssueCertificate({
+    required DmDevice that,
+    required DmLeafKind kind,
+    required String leafId,
+    required List<int> signatureKey,
+    required String name,
+    required BigInt createdMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_dm_leaf_kind(kind, serializer);
+          sse_encode_String(leafId, serializer);
+          sse_encode_list_prim_u_8_loose(signatureKey, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_u_64(createdMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceIssueCertificateConstMeta,
+        argValues: [that, kind, leafId, signatureKey, name, createdMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceIssueCertificateConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_issue_certificate",
+        argNames: [
+          "that",
+          "kind",
+          "leafId",
+          "signatureKey",
+          "name",
+          "createdMs",
+        ],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceJoinGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String welcome,
+    required PlatformInt64 seq,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_box_autoadd_dm_group_kind(kind, serializer);
+          sse_encode_String(welcome, serializer);
+          sse_encode_i_64(seq, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceJoinGroupConstMeta,
+        argValues: [that, groupId, kind, welcome, seq],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceJoinGroupConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_join_group",
+        argNames: ["that", "groupId", "kind", "welcome", "seq"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceKeyChanged({
+    required DmDevice that,
+    required String account,
+    required List<int> identityPublic,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          sse_encode_list_prim_u_8_loose(identityPublic, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 17,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceKeyChangedConstMeta,
+        argValues: [that, account, identityPublic],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceKeyChangedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_key_changed",
+        argNames: ["that", "account", "identityPublic"],
+      );
+
+  @override
+  Future<List<String>> crateApiDmDmDeviceKeyPackages({
+    required DmDevice that,
+    required int count,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_u_32(count, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceKeyPackagesConstMeta,
+        argValues: [that, count],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceKeyPackagesConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_key_packages",
+        argNames: ["that", "count"],
+      );
+
+  @override
+  Future<String> crateApiDmDmDeviceLastResortKeyPackage({
+    required DmDevice that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceLastResortKeyPackageConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceLastResortKeyPackageConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_last_resort_key_package",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<List<DmMember>> crateApiDmDmDeviceMembers({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_dm_member,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceMembersConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceMembersConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_members",
+    argNames: ["that", "groupId"],
+  );
+
+  @override
+  Future<DmDevice?> crateApiDmDmDeviceOpen({
+    required String path,
+    required List<int> storeKey,
+    required List<int> leafKey,
+    Uint8List? identityKey,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(path, serializer);
+          sse_encode_list_prim_u_8_loose(storeKey, serializer);
+          sse_encode_list_prim_u_8_loose(leafKey, serializer);
+          sse_encode_opt_list_prim_u_8_strict(identityKey, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceOpenConstMeta,
+        argValues: [path, storeKey, leafKey, identityKey],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceOpenConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_open",
+    argNames: ["path", "storeKey", "leafKey", "identityKey"],
+  );
+
+  @override
+  Future<DmMessage> crateApiDmDmDeviceOpenSide({
+    required DmDevice that,
+    required List<int> groupId,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_String(envelope, serializer);
+          sse_encode_i_64(arrivedMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 22,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_message,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceOpenSideConstMeta,
+        argValues: [that, groupId, envelope, arrivedMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceOpenSideConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_open_side",
+    argNames: ["that", "groupId", "envelope", "arrivedMs"],
+  );
+
+  @override
+  DmPin? crateApiDmDmDevicePin({
+    required DmDevice that,
+    required String account,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_dm_pin,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDmDmDevicePinConstMeta,
+        argValues: [that, account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDevicePinConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_pin",
+    argNames: ["that", "account"],
+  );
+
+  @override
+  Future<DmProcessed> crateApiDmDmDeviceProcess({
+    required DmDevice that,
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_i_64(seq, serializer);
+          sse_encode_String(envelope, serializer);
+          sse_encode_i_64(arrivedMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 24,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_processed,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceProcessConstMeta,
+        argValues: [that, groupId, seq, envelope, arrivedMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceProcessConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_process",
+    argNames: ["that", "groupId", "seq", "envelope", "arrivedMs"],
+  );
+
+  @override
+  Future<DmCommit> crateApiDmDmDeviceRejoinGroup({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String groupInfo,
+    required PlatformInt64 seq,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_box_autoadd_dm_group_kind(kind, serializer);
+          sse_encode_String(groupInfo, serializer);
+          sse_encode_i_64(seq, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_commit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceRejoinGroupConstMeta,
+        argValues: [that, groupId, kind, groupInfo, seq],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceRejoinGroupConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_rejoin_group",
+        argNames: ["that", "groupId", "kind", "groupInfo", "seq"],
+      );
+
+  @override
+  Future<DmCommit> crateApiDmDmDeviceRemoveMembers({
+    required DmDevice that,
+    required List<int> groupId,
+    required List<String> leafIds,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_list_String(leafIds, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 26,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_commit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceRemoveMembersConstMeta,
+        argValues: [that, groupId, leafIds],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceRemoveMembersConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_remove_members",
+        argNames: ["that", "groupId", "leafIds"],
+      );
+
+  @override
+  bool crateApiDmDmDeviceSafetyMatches({
+    required DmDevice that,
+    required String account,
+    required List<int> scanned,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          sse_encode_list_prim_u_8_loose(scanned, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSafetyMatchesConstMeta,
+        argValues: [that, account, scanned],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSafetyMatchesConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_safety_matches",
+        argNames: ["that", "account", "scanned"],
+      );
+
+  @override
+  DmSafety crateApiDmDmDeviceSafetyNumber({
+    required DmDevice that,
+    required String account,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_safety,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSafetyNumberConstMeta,
+        argValues: [that, account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSafetyNumberConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_safety_number",
+        argNames: ["that", "account"],
+      );
+
+  @override
+  Future<DmHandoffSealed> crateApiDmDmDeviceSealHandoff({
+    required DmDevice that,
+    required String qr,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(qr, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 29,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_handoff_sealed,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSealHandoffConstMeta,
+        argValues: [that, qr],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSealHandoffConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_seal_handoff",
+        argNames: ["that", "qr"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceSeen({
+    required DmDevice that,
+    required String account,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 30,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSeenConstMeta,
+        argValues: [that, account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSeenConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_seen",
+    argNames: ["that", "account"],
+  );
+
+  @override
+  Future<String> crateApiDmDmDeviceSend({
+    required DmDevice that,
+    required List<int> groupId,
+    required DmContent content,
+    required PlatformInt64 nowMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_box_autoadd_dm_content(content, serializer);
+          sse_encode_i_64(nowMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 31,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSendConstMeta,
+        argValues: [that, groupId, content, nowMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSendConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_send",
+    argNames: ["that", "groupId", "content", "nowMs"],
+  );
+
+  @override
+  Future<DmSetUp> crateApiDmDmDeviceSetUpFirst({
+    required DmDevice that,
+    required List<int> identityKey,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(identityKey, serializer);
+          sse_encode_String(accountId, serializer);
+          sse_encode_String(leafId, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_u_64(nowMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 32,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_set_up,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSetUpFirstConstMeta,
+        argValues: [that, identityKey, accountId, leafId, name, nowMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSetUpFirstConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_set_up_first",
+        argNames: [
+          "that",
+          "identityKey",
+          "accountId",
+          "leafId",
+          "name",
+          "nowMs",
+        ],
+      );
+
+  @override
+  Future<Uint8List> crateApiDmDmDeviceSignDeviceList({
+    required DmDevice that,
+    required BigInt version,
+    required BigInt createdMs,
+    required List<DmListed> leaves,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_u_64(version, serializer);
+          sse_encode_u_64(createdMs, serializer);
+          sse_encode_list_dm_listed(leaves, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSignDeviceListConstMeta,
+        argValues: [that, version, createdMs, leaves],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSignDeviceListConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_sign_device_list",
+        argNames: ["that", "version", "createdMs", "leaves"],
+      );
+
+  @override
+  Future<DmHandoff> crateApiDmDmDeviceStartHandoff({
+    required DmDevice that,
+    required String leafId,
+    required String name,
+    required String platform,
+    required List<int> endpointId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(leafId, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_String(platform, serializer);
+          sse_encode_list_prim_u_8_loose(endpointId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 34,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceStartHandoffConstMeta,
+        argValues: [that, leafId, name, platform, endpointId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceStartHandoffConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_start_handoff",
+        argNames: ["that", "leafId", "name", "platform", "endpointId"],
+      );
+
+  @override
+  DmStatus crateApiDmDmDeviceStatus({required DmDevice that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 35)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_status,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDmDmDeviceStatusConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceStatusConstMeta =>
+      const TaskConstMeta(debugName: "DmDevice_status", argNames: ["that"]);
+
+  @override
+  Future<List<DmUnsent>> crateApiDmDmDeviceUnsent({required DmDevice that}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 36,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_dm_unsent,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceUnsentConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceUnsentConstMeta =>
+      const TaskConstMeta(debugName: "DmDevice_unsent", argNames: ["that"]);
+
+  @override
+  Future<DmCommit> crateApiDmDmDeviceUpdateGroup({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 37,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_commit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceUpdateGroupConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceUpdateGroupConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_update_group",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceVerify({
+    required DmDevice that,
+    required String account,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(account, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 38,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceVerifyConstMeta,
+        argValues: [that, account],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceVerifyConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_verify",
+    argNames: ["that", "account"],
+  );
+
+  @override
+  Future<DmView> crateApiDmDmDeviceView({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 39,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_view,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceViewConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceViewConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_view",
+    argNames: ["that", "groupId"],
+  );
+
+  @override
+  String crateApiDmDmHandoffComparison({required DmHandoff that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 40)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDmDmHandoffComparisonConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmHandoffComparisonConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmHandoff_comparison",
+        argNames: ["that"],
+      );
+
+  @override
+  String crateApiDmDmHandoffQr({required DmHandoff that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 41)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDmDmHandoffQrConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmHandoffQrConstMeta =>
+      const TaskConstMeta(debugName: "DmHandoff_qr", argNames: ["that"]);
+
+  @override
   int crateApiTunnelForwardHandlePort({required ForwardHandle that}) {
     return handler.executeSync(
       SyncTask(
@@ -160,7 +1986,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 42)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_16,
@@ -188,7 +2014,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 43)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_forward_status,
@@ -220,7 +2046,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 44,
             port: port_,
           );
         },
@@ -251,7 +2077,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 45,
             port: port_,
           );
         },
@@ -286,7 +2112,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 46,
             port: port_,
           );
         },
@@ -318,7 +2144,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 47)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -344,7 +2170,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 48)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_16,
@@ -375,7 +2201,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 49,
             port: port_,
           );
         },
@@ -406,7 +2232,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 50)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_tunnel_status,
@@ -429,7 +2255,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(key, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 51)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -456,7 +2282,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(key, serializer);
           sse_encode_list_prim_u_8_loose(message, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 52)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -473,6 +2299,128 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "account_sign",
     argNames: ["key", "message"],
   );
+
+  @override
+  Uint8List crateApiDmDmNewSecret() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 53)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmNewSecretConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmNewSecretConstMeta =>
+      const TaskConstMeta(debugName: "dm_new_secret", argNames: []);
+
+  @override
+  Uint8List crateApiDmDmPublicKey({required List<int> secret}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(secret, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 54)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmPublicKeyConstMeta,
+        argValues: [secret],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmPublicKeyConstMeta =>
+      const TaskConstMeta(debugName: "dm_public_key", argNames: ["secret"]);
+
+  @override
+  Future<void> crateApiDmDmRemoveStore({required String path}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(path, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 55,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmRemoveStoreConstMeta,
+        argValues: [path],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmRemoveStoreConstMeta =>
+      const TaskConstMeta(debugName: "dm_remove_store", argNames: ["path"]);
+
+  @override
+  Future<DmView> crateApiDmDmViewDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 56,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_view,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDmDmViewDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmViewDefaultConstMeta =>
+      const TaskConstMeta(debugName: "dm_view_default", argNames: []);
+
+  @override
+  void crateApiTunnelFreshRuntime() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 57)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTunnelFreshRuntimeConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTunnelFreshRuntimeConstMeta =>
+      const TaskConstMeta(debugName: "fresh_runtime", argNames: []);
 
   @override
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
@@ -492,7 +2440,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 58,
             port: port_,
           );
         },
@@ -524,7 +2472,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(deviceKey, serializer);
           sse_encode_String(endpointId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 59)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_pairing_ids,
@@ -541,6 +2489,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "pairing_ids",
     argNames: ["deviceKey", "endpointId"],
   );
+
+  @override
+  Future<bool> crateApiTunnelRuntimeAnswers() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 60,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTunnelRuntimeAnswersConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTunnelRuntimeAnswersConstMeta =>
+      const TaskConstMeta(debugName: "runtime_answers", argNames: []);
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_DmDevice => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_DmDevice => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_DmHandoff => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_DmHandoff => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff;
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_ForwardHandle => wire
@@ -565,6 +2556,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmDevice
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  DmHandoff
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   ForwardHandle
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     dynamic raw,
@@ -583,6 +2592,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmDevice
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  DmHandoff
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   ForwardHandle
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     dynamic raw,
@@ -598,6 +2625,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return TunnelHandleImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  DmDevice
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  DmHandoff
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -628,6 +2673,352 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  DmDevice
+  dco_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+      raw,
+    );
+  }
+
+  @protected
+  DmByAgent dco_decode_box_autoadd_dm_by_agent(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_by_agent(raw);
+  }
+
+  @protected
+  DmContent dco_decode_box_autoadd_dm_content(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_content(raw);
+  }
+
+  @protected
+  DmDeviceList dco_decode_box_autoadd_dm_device_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_device_list(raw);
+  }
+
+  @protected
+  DmGroupKind dco_decode_box_autoadd_dm_group_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_group_kind(raw);
+  }
+
+  @protected
+  DmMembers dco_decode_box_autoadd_dm_members(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_members(raw);
+  }
+
+  @protected
+  DmMessage dco_decode_box_autoadd_dm_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_message(raw);
+  }
+
+  @protected
+  DmPin dco_decode_box_autoadd_dm_pin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_pin(raw);
+  }
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_i_64(raw);
+  }
+
+  @protected
+  DmByAgent dco_decode_dm_by_agent(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return DmByAgent(
+      claktoryId: dco_decode_String(arr[0]),
+      agentId: dco_decode_String(arr[1]),
+      incarnation: dco_decode_String(arr[2]),
+      name: dco_decode_String(arr[3]),
+    );
+  }
+
+  @protected
+  DmCommit dco_decode_dm_commit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DmCommit(
+      commit: dco_decode_String(arr[0]),
+      welcome: dco_decode_opt_String(arr[1]),
+      groupInfo: dco_decode_opt_String(arr[2]),
+    );
+  }
+
+  @protected
+  DmContent dco_decode_dm_content(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DmContent(
+      kind: dco_decode_String(arr[0]),
+      clientMessageId: dco_decode_String(arr[1]),
+      text: dco_decode_opt_String(arr[2]),
+      byAgent: dco_decode_opt_box_autoadd_dm_by_agent(arr[3]),
+      extraJson: dco_decode_String(arr[4]),
+    );
+  }
+
+  @protected
+  DmDeviceList dco_decode_dm_device_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DmDeviceList(
+      version: dco_decode_u_64(arr[0]),
+      leaves: dco_decode_list_dm_listed(arr[1]),
+    );
+  }
+
+  @protected
+  DmGroup dco_decode_dm_group(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return DmGroup(
+      groupId: dco_decode_list_prim_u_8_strict(arr[0]),
+      kind: dco_decode_dm_group_kind(arr[1]),
+      seq: dco_decode_i_64(arr[2]),
+      epoch: dco_decode_u_64(arr[3]),
+    );
+  }
+
+  @protected
+  DmGroupKind dco_decode_dm_group_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DmGroupKind(
+      kind: dco_decode_dm_group_type(arr[0]),
+      accounts: dco_decode_list_String(arr[1]),
+      claktoryId: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  DmGroupType dco_decode_dm_group_type(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmGroupType.values[raw as int];
+  }
+
+  @protected
+  DmHandoffDone dco_decode_dm_handoff_done(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return DmHandoffDone(
+      accountId: dco_decode_String(arr[0]),
+      identityKey: dco_decode_list_prim_u_8_strict(arr[1]),
+      identityPublic: dco_decode_list_prim_u_8_strict(arr[2]),
+      certificate: dco_decode_list_prim_u_8_strict(arr[3]),
+    );
+  }
+
+  @protected
+  DmHandoffSealed dco_decode_dm_handoff_sealed(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return DmHandoffSealed(
+      sealed: dco_decode_list_prim_u_8_strict(arr[0]),
+      leafSignatureKey: dco_decode_list_prim_u_8_strict(arr[1]),
+      leafId: dco_decode_String(arr[2]),
+      name: dco_decode_String(arr[3]),
+      platform: dco_decode_String(arr[4]),
+      endpointId: dco_decode_list_prim_u_8_strict(arr[5]),
+      comparison: dco_decode_String(arr[6]),
+    );
+  }
+
+  @protected
+  DmLeafKind dco_decode_dm_leaf_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmLeafKind.values[raw as int];
+  }
+
+  @protected
+  DmListed dco_decode_dm_listed(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DmListed(
+      kind: dco_decode_dm_leaf_kind(arr[0]),
+      leafId: dco_decode_String(arr[1]),
+      signatureKey: dco_decode_list_prim_u_8_strict(arr[2]),
+    );
+  }
+
+  @protected
+  DmMember dco_decode_dm_member(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return DmMember(
+      account: dco_decode_String(arr[0]),
+      leafId: dco_decode_String(arr[1]),
+      kind: dco_decode_dm_leaf_kind(arr[2]),
+      name: dco_decode_String(arr[3]),
+    );
+  }
+
+  @protected
+  DmMembers dco_decode_dm_members(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DmMembers(
+      added: dco_decode_list_dm_member(arr[0]),
+      removed: dco_decode_list_dm_member(arr[1]),
+    );
+  }
+
+  @protected
+  DmMessage dco_decode_dm_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return DmMessage(
+      seq: dco_decode_i_64(arr[0]),
+      mine: dco_decode_bool(arr[1]),
+      fromAccount: dco_decode_String(arr[2]),
+      fromLeaf: dco_decode_String(arr[3]),
+      fromKindDevice: dco_decode_bool(arr[4]),
+      content: dco_decode_dm_content(arr[5]),
+      arrivedMs: dco_decode_i_64(arr[6]),
+      members: dco_decode_opt_box_autoadd_dm_members(arr[7]),
+    );
+  }
+
+  @protected
+  DmOutcome dco_decode_dm_outcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DmOutcome.values[raw as int];
+  }
+
+  @protected
+  DmPin dco_decode_dm_pin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DmPin(
+      identityPublic: dco_decode_list_prim_u_8_strict(arr[0]),
+      verified: dco_decode_bool(arr[1]),
+      changedUnseen: dco_decode_bool(arr[2]),
+      canSend: dco_decode_bool(arr[3]),
+      deviceListVersion: dco_decode_u_64(arr[4]),
+    );
+  }
+
+  @protected
+  DmProcessed dco_decode_dm_processed(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DmProcessed(
+      outcome: dco_decode_dm_outcome(arr[0]),
+      message: dco_decode_opt_box_autoadd_dm_message(arr[1]),
+      epoch: dco_decode_u_64(arr[2]),
+      why: dco_decode_String(arr[3]),
+      handshake: dco_decode_bool(arr[4]),
+    );
+  }
+
+  @protected
+  DmSafety dco_decode_dm_safety(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DmSafety(
+      digits: dco_decode_String(arr[0]),
+      qr: dco_decode_list_prim_u_8_strict(arr[1]),
+    );
+  }
+
+  @protected
+  DmSetUp dco_decode_dm_set_up(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DmSetUp(
+      identityPublic: dco_decode_list_prim_u_8_strict(arr[0]),
+      certificate: dco_decode_list_prim_u_8_strict(arr[1]),
+      deviceList: dco_decode_list_prim_u_8_strict(arr[2]),
+    );
+  }
+
+  @protected
+  DmStatus dco_decode_dm_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return DmStatus(
+      setUp: dco_decode_bool(arr[0]),
+      accountId: dco_decode_String(arr[1]),
+      leafId: dco_decode_String(arr[2]),
+      name: dco_decode_String(arr[3]),
+      leafPublic: dco_decode_list_prim_u_8_strict(arr[4]),
+      identityPublic: dco_decode_opt_list_prim_u_8_strict(arr[5]),
+    );
+  }
+
+  @protected
+  DmUnsent dco_decode_dm_unsent(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DmUnsent(
+      groupId: dco_decode_list_prim_u_8_strict(arr[0]),
+      clientMessageId: dco_decode_String(arr[1]),
+      envelope: dco_decode_String(arr[2]),
+      createdMs: dco_decode_i_64(arr[3]),
+      content: dco_decode_dm_content(arr[4]),
+    );
+  }
+
+  @protected
+  DmView dco_decode_dm_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return DmView(
+      draft: dco_decode_String(arr[0]),
+      draftMs: dco_decode_i_64(arr[1]),
+      readSeq: dco_decode_i_64(arr[2]),
+      deletedSeq: dco_decode_i_64(arr[3]),
+    );
   }
 
   @protected
@@ -667,9 +3058,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  List<DmGroup> dco_decode_list_dm_group(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_dm_group).toList();
+  }
+
+  @protected
+  List<DmListed> dco_decode_list_dm_listed(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_dm_listed).toList();
+  }
+
+  @protected
+  List<DmMember> dco_decode_list_dm_member(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_dm_member).toList();
+  }
+
+  @protected
+  List<DmMessage> dco_decode_list_dm_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_dm_message).toList();
+  }
+
+  @protected
+  List<DmUnsent> dco_decode_list_dm_unsent(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_dm_unsent).toList();
   }
 
   @protected
@@ -682,6 +3109,67 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  DmDevice?
+  dco_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            raw,
+          );
+  }
+
+  @protected
+  DmByAgent? dco_decode_opt_box_autoadd_dm_by_agent(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_by_agent(raw);
+  }
+
+  @protected
+  DmDeviceList? dco_decode_opt_box_autoadd_dm_device_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_device_list(raw);
+  }
+
+  @protected
+  DmMembers? dco_decode_opt_box_autoadd_dm_members(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_members(raw);
+  }
+
+  @protected
+  DmMessage? dco_decode_opt_box_autoadd_dm_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_message(raw);
+  }
+
+  @protected
+  DmPin? dco_decode_opt_box_autoadd_dm_pin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_pin(raw);
+  }
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_i_64(raw);
+  }
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_prim_u_8_strict(raw);
   }
 
   @protected
@@ -742,6 +3230,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
+  }
+
+  @protected
   int dco_decode_u_8(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -764,6 +3258,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_String(deserializer);
     return AnyhowException(inner);
+  }
+
+  @protected
+  DmDevice
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  DmHandoff
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
   }
 
   @protected
@@ -791,6 +3309,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmDevice
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  DmHandoff
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   ForwardHandle
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     SseDeserializer deserializer,
@@ -809,6 +3351,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return TunnelHandleImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  DmDevice
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmDeviceImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  DmHandoff
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return DmHandoffImpl.frbInternalSseDecode(
       sse_decode_usize(deserializer),
       sse_decode_i_32(deserializer),
     );
@@ -852,6 +3418,372 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmDevice
+  sse_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+      deserializer,
+    ));
+  }
+
+  @protected
+  DmByAgent sse_decode_box_autoadd_dm_by_agent(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_by_agent(deserializer));
+  }
+
+  @protected
+  DmContent sse_decode_box_autoadd_dm_content(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_content(deserializer));
+  }
+
+  @protected
+  DmDeviceList sse_decode_box_autoadd_dm_device_list(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_device_list(deserializer));
+  }
+
+  @protected
+  DmGroupKind sse_decode_box_autoadd_dm_group_kind(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_group_kind(deserializer));
+  }
+
+  @protected
+  DmMembers sse_decode_box_autoadd_dm_members(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_members(deserializer));
+  }
+
+  @protected
+  DmMessage sse_decode_box_autoadd_dm_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_message(deserializer));
+  }
+
+  @protected
+  DmPin sse_decode_box_autoadd_dm_pin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_pin(deserializer));
+  }
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_i_64(deserializer));
+  }
+
+  @protected
+  DmByAgent sse_decode_dm_by_agent(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_claktoryId = sse_decode_String(deserializer);
+    var var_agentId = sse_decode_String(deserializer);
+    var var_incarnation = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    return DmByAgent(
+      claktoryId: var_claktoryId,
+      agentId: var_agentId,
+      incarnation: var_incarnation,
+      name: var_name,
+    );
+  }
+
+  @protected
+  DmCommit sse_decode_dm_commit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_commit = sse_decode_String(deserializer);
+    var var_welcome = sse_decode_opt_String(deserializer);
+    var var_groupInfo = sse_decode_opt_String(deserializer);
+    return DmCommit(
+      commit: var_commit,
+      welcome: var_welcome,
+      groupInfo: var_groupInfo,
+    );
+  }
+
+  @protected
+  DmContent sse_decode_dm_content(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_String(deserializer);
+    var var_clientMessageId = sse_decode_String(deserializer);
+    var var_text = sse_decode_opt_String(deserializer);
+    var var_byAgent = sse_decode_opt_box_autoadd_dm_by_agent(deserializer);
+    var var_extraJson = sse_decode_String(deserializer);
+    return DmContent(
+      kind: var_kind,
+      clientMessageId: var_clientMessageId,
+      text: var_text,
+      byAgent: var_byAgent,
+      extraJson: var_extraJson,
+    );
+  }
+
+  @protected
+  DmDeviceList sse_decode_dm_device_list(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_version = sse_decode_u_64(deserializer);
+    var var_leaves = sse_decode_list_dm_listed(deserializer);
+    return DmDeviceList(version: var_version, leaves: var_leaves);
+  }
+
+  @protected
+  DmGroup sse_decode_dm_group(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_groupId = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_kind = sse_decode_dm_group_kind(deserializer);
+    var var_seq = sse_decode_i_64(deserializer);
+    var var_epoch = sse_decode_u_64(deserializer);
+    return DmGroup(
+      groupId: var_groupId,
+      kind: var_kind,
+      seq: var_seq,
+      epoch: var_epoch,
+    );
+  }
+
+  @protected
+  DmGroupKind sse_decode_dm_group_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_dm_group_type(deserializer);
+    var var_accounts = sse_decode_list_String(deserializer);
+    var var_claktoryId = sse_decode_String(deserializer);
+    return DmGroupKind(
+      kind: var_kind,
+      accounts: var_accounts,
+      claktoryId: var_claktoryId,
+    );
+  }
+
+  @protected
+  DmGroupType sse_decode_dm_group_type(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DmGroupType.values[inner];
+  }
+
+  @protected
+  DmHandoffDone sse_decode_dm_handoff_done(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_accountId = sse_decode_String(deserializer);
+    var var_identityKey = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_identityPublic = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_certificate = sse_decode_list_prim_u_8_strict(deserializer);
+    return DmHandoffDone(
+      accountId: var_accountId,
+      identityKey: var_identityKey,
+      identityPublic: var_identityPublic,
+      certificate: var_certificate,
+    );
+  }
+
+  @protected
+  DmHandoffSealed sse_decode_dm_handoff_sealed(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_sealed = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_leafSignatureKey = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_leafId = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_platform = sse_decode_String(deserializer);
+    var var_endpointId = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_comparison = sse_decode_String(deserializer);
+    return DmHandoffSealed(
+      sealed: var_sealed,
+      leafSignatureKey: var_leafSignatureKey,
+      leafId: var_leafId,
+      name: var_name,
+      platform: var_platform,
+      endpointId: var_endpointId,
+      comparison: var_comparison,
+    );
+  }
+
+  @protected
+  DmLeafKind sse_decode_dm_leaf_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DmLeafKind.values[inner];
+  }
+
+  @protected
+  DmListed sse_decode_dm_listed(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_dm_leaf_kind(deserializer);
+    var var_leafId = sse_decode_String(deserializer);
+    var var_signatureKey = sse_decode_list_prim_u_8_strict(deserializer);
+    return DmListed(
+      kind: var_kind,
+      leafId: var_leafId,
+      signatureKey: var_signatureKey,
+    );
+  }
+
+  @protected
+  DmMember sse_decode_dm_member(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_account = sse_decode_String(deserializer);
+    var var_leafId = sse_decode_String(deserializer);
+    var var_kind = sse_decode_dm_leaf_kind(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    return DmMember(
+      account: var_account,
+      leafId: var_leafId,
+      kind: var_kind,
+      name: var_name,
+    );
+  }
+
+  @protected
+  DmMembers sse_decode_dm_members(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_added = sse_decode_list_dm_member(deserializer);
+    var var_removed = sse_decode_list_dm_member(deserializer);
+    return DmMembers(added: var_added, removed: var_removed);
+  }
+
+  @protected
+  DmMessage sse_decode_dm_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_seq = sse_decode_i_64(deserializer);
+    var var_mine = sse_decode_bool(deserializer);
+    var var_fromAccount = sse_decode_String(deserializer);
+    var var_fromLeaf = sse_decode_String(deserializer);
+    var var_fromKindDevice = sse_decode_bool(deserializer);
+    var var_content = sse_decode_dm_content(deserializer);
+    var var_arrivedMs = sse_decode_i_64(deserializer);
+    var var_members = sse_decode_opt_box_autoadd_dm_members(deserializer);
+    return DmMessage(
+      seq: var_seq,
+      mine: var_mine,
+      fromAccount: var_fromAccount,
+      fromLeaf: var_fromLeaf,
+      fromKindDevice: var_fromKindDevice,
+      content: var_content,
+      arrivedMs: var_arrivedMs,
+      members: var_members,
+    );
+  }
+
+  @protected
+  DmOutcome sse_decode_dm_outcome(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DmOutcome.values[inner];
+  }
+
+  @protected
+  DmPin sse_decode_dm_pin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_identityPublic = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_verified = sse_decode_bool(deserializer);
+    var var_changedUnseen = sse_decode_bool(deserializer);
+    var var_canSend = sse_decode_bool(deserializer);
+    var var_deviceListVersion = sse_decode_u_64(deserializer);
+    return DmPin(
+      identityPublic: var_identityPublic,
+      verified: var_verified,
+      changedUnseen: var_changedUnseen,
+      canSend: var_canSend,
+      deviceListVersion: var_deviceListVersion,
+    );
+  }
+
+  @protected
+  DmProcessed sse_decode_dm_processed(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_outcome = sse_decode_dm_outcome(deserializer);
+    var var_message = sse_decode_opt_box_autoadd_dm_message(deserializer);
+    var var_epoch = sse_decode_u_64(deserializer);
+    var var_why = sse_decode_String(deserializer);
+    var var_handshake = sse_decode_bool(deserializer);
+    return DmProcessed(
+      outcome: var_outcome,
+      message: var_message,
+      epoch: var_epoch,
+      why: var_why,
+      handshake: var_handshake,
+    );
+  }
+
+  @protected
+  DmSafety sse_decode_dm_safety(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_digits = sse_decode_String(deserializer);
+    var var_qr = sse_decode_list_prim_u_8_strict(deserializer);
+    return DmSafety(digits: var_digits, qr: var_qr);
+  }
+
+  @protected
+  DmSetUp sse_decode_dm_set_up(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_identityPublic = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_certificate = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_deviceList = sse_decode_list_prim_u_8_strict(deserializer);
+    return DmSetUp(
+      identityPublic: var_identityPublic,
+      certificate: var_certificate,
+      deviceList: var_deviceList,
+    );
+  }
+
+  @protected
+  DmStatus sse_decode_dm_status(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_setUp = sse_decode_bool(deserializer);
+    var var_accountId = sse_decode_String(deserializer);
+    var var_leafId = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_leafPublic = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_identityPublic = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    return DmStatus(
+      setUp: var_setUp,
+      accountId: var_accountId,
+      leafId: var_leafId,
+      name: var_name,
+      leafPublic: var_leafPublic,
+      identityPublic: var_identityPublic,
+    );
+  }
+
+  @protected
+  DmUnsent sse_decode_dm_unsent(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_groupId = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_clientMessageId = sse_decode_String(deserializer);
+    var var_envelope = sse_decode_String(deserializer);
+    var var_createdMs = sse_decode_i_64(deserializer);
+    var var_content = sse_decode_dm_content(deserializer);
+    return DmUnsent(
+      groupId: var_groupId,
+      clientMessageId: var_clientMessageId,
+      envelope: var_envelope,
+      createdMs: var_createdMs,
+      content: var_content,
+    );
+  }
+
+  @protected
+  DmView sse_decode_dm_view(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_draft = sse_decode_String(deserializer);
+    var var_draftMs = sse_decode_i_64(deserializer);
+    var var_readSeq = sse_decode_i_64(deserializer);
+    var var_deletedSeq = sse_decode_i_64(deserializer);
+    return DmView(
+      draft: var_draft,
+      draftMs: var_draftMs,
+      readSeq: var_readSeq,
+      deletedSeq: var_deletedSeq,
+    );
+  }
+
+  @protected
   ForwardError sse_decode_forward_error(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_kind = sse_decode_forward_error_kind(deserializer);
@@ -884,6 +3816,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -891,6 +3829,66 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <String>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DmGroup> sse_decode_list_dm_group(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DmGroup>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_dm_group(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DmListed> sse_decode_list_dm_listed(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DmListed>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_dm_listed(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DmMember> sse_decode_list_dm_member(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DmMember>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_dm_member(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DmMessage> sse_decode_list_dm_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DmMessage>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_dm_message(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DmUnsent> sse_decode_list_dm_unsent(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DmUnsent>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_dm_unsent(deserializer));
     }
     return ans_;
   }
@@ -907,6 +3905,118 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmDevice?
+  sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+        deserializer,
+      ));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmByAgent? sse_decode_opt_box_autoadd_dm_by_agent(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_by_agent(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmDeviceList? sse_decode_opt_box_autoadd_dm_device_list(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_device_list(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmMembers? sse_decode_opt_box_autoadd_dm_members(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_members(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmMessage? sse_decode_opt_box_autoadd_dm_message(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_message(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmPin? sse_decode_opt_box_autoadd_dm_pin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_pin(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_i_64(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_prim_u_8_strict(deserializer));
+    } else {
+      return null;
+    }
   }
 
   @protected
@@ -968,6 +4078,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getBigUint64();
+  }
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8();
@@ -991,6 +4107,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmDeviceImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmHandoffImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
   }
 
   @protected
@@ -1021,6 +4163,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmDeviceImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmHandoffImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     ForwardHandle self,
     SseSerializer serializer,
@@ -1041,6 +4209,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(
       (self as TunnelHandleImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmDeviceImpl).frbInternalSseEncode(move: null),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as DmHandoffImpl).frbInternalSseEncode(move: null),
       serializer,
     );
   }
@@ -1084,6 +4278,286 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void
+  sse_encode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+      self,
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_by_agent(
+    DmByAgent self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_by_agent(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_content(
+    DmContent self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_content(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_device_list(
+    DmDeviceList self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_device_list(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_group_kind(
+    DmGroupKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_group_kind(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_members(
+    DmMembers self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_members(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_message(
+    DmMessage self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_message(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_pin(DmPin self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_pin(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_by_agent(DmByAgent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.claktoryId, serializer);
+    sse_encode_String(self.agentId, serializer);
+    sse_encode_String(self.incarnation, serializer);
+    sse_encode_String(self.name, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_commit(DmCommit self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.commit, serializer);
+    sse_encode_opt_String(self.welcome, serializer);
+    sse_encode_opt_String(self.groupInfo, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_content(DmContent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.kind, serializer);
+    sse_encode_String(self.clientMessageId, serializer);
+    sse_encode_opt_String(self.text, serializer);
+    sse_encode_opt_box_autoadd_dm_by_agent(self.byAgent, serializer);
+    sse_encode_String(self.extraJson, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_device_list(DmDeviceList self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self.version, serializer);
+    sse_encode_list_dm_listed(self.leaves, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_group(DmGroup self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.groupId, serializer);
+    sse_encode_dm_group_kind(self.kind, serializer);
+    sse_encode_i_64(self.seq, serializer);
+    sse_encode_u_64(self.epoch, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_group_kind(DmGroupKind self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_group_type(self.kind, serializer);
+    sse_encode_list_String(self.accounts, serializer);
+    sse_encode_String(self.claktoryId, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_group_type(DmGroupType self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_handoff_done(
+    DmHandoffDone self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.accountId, serializer);
+    sse_encode_list_prim_u_8_strict(self.identityKey, serializer);
+    sse_encode_list_prim_u_8_strict(self.identityPublic, serializer);
+    sse_encode_list_prim_u_8_strict(self.certificate, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_handoff_sealed(
+    DmHandoffSealed self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.sealed, serializer);
+    sse_encode_list_prim_u_8_strict(self.leafSignatureKey, serializer);
+    sse_encode_String(self.leafId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.platform, serializer);
+    sse_encode_list_prim_u_8_strict(self.endpointId, serializer);
+    sse_encode_String(self.comparison, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_leaf_kind(DmLeafKind self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_listed(DmListed self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_leaf_kind(self.kind, serializer);
+    sse_encode_String(self.leafId, serializer);
+    sse_encode_list_prim_u_8_strict(self.signatureKey, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_member(DmMember self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.account, serializer);
+    sse_encode_String(self.leafId, serializer);
+    sse_encode_dm_leaf_kind(self.kind, serializer);
+    sse_encode_String(self.name, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_members(DmMembers self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_dm_member(self.added, serializer);
+    sse_encode_list_dm_member(self.removed, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_message(DmMessage self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.seq, serializer);
+    sse_encode_bool(self.mine, serializer);
+    sse_encode_String(self.fromAccount, serializer);
+    sse_encode_String(self.fromLeaf, serializer);
+    sse_encode_bool(self.fromKindDevice, serializer);
+    sse_encode_dm_content(self.content, serializer);
+    sse_encode_i_64(self.arrivedMs, serializer);
+    sse_encode_opt_box_autoadd_dm_members(self.members, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_outcome(DmOutcome self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_pin(DmPin self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.identityPublic, serializer);
+    sse_encode_bool(self.verified, serializer);
+    sse_encode_bool(self.changedUnseen, serializer);
+    sse_encode_bool(self.canSend, serializer);
+    sse_encode_u_64(self.deviceListVersion, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_processed(DmProcessed self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_outcome(self.outcome, serializer);
+    sse_encode_opt_box_autoadd_dm_message(self.message, serializer);
+    sse_encode_u_64(self.epoch, serializer);
+    sse_encode_String(self.why, serializer);
+    sse_encode_bool(self.handshake, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_safety(DmSafety self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.digits, serializer);
+    sse_encode_list_prim_u_8_strict(self.qr, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_set_up(DmSetUp self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.identityPublic, serializer);
+    sse_encode_list_prim_u_8_strict(self.certificate, serializer);
+    sse_encode_list_prim_u_8_strict(self.deviceList, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_status(DmStatus self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.setUp, serializer);
+    sse_encode_String(self.accountId, serializer);
+    sse_encode_String(self.leafId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_list_prim_u_8_strict(self.leafPublic, serializer);
+    sse_encode_opt_list_prim_u_8_strict(self.identityPublic, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_unsent(DmUnsent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.groupId, serializer);
+    sse_encode_String(self.clientMessageId, serializer);
+    sse_encode_String(self.envelope, serializer);
+    sse_encode_i_64(self.createdMs, serializer);
+    sse_encode_dm_content(self.content, serializer);
+  }
+
+  @protected
+  void sse_encode_dm_view(DmView self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.draft, serializer);
+    sse_encode_i_64(self.draftMs, serializer);
+    sse_encode_i_64(self.readSeq, serializer);
+    sse_encode_i_64(self.deletedSeq, serializer);
+  }
+
+  @protected
   void sse_encode_forward_error(ForwardError self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_forward_error_kind(self.kind, serializer);
@@ -1113,11 +4587,74 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_dm_group(List<DmGroup> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_dm_group(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_dm_listed(
+    List<DmListed> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_dm_listed(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_dm_member(
+    List<DmMember> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_dm_member(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_dm_message(
+    List<DmMessage> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_dm_message(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_dm_unsent(
+    List<DmUnsent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_dm_unsent(item, serializer);
     }
   }
 
@@ -1141,6 +4678,124 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void
+  sse_encode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+        self,
+        serializer,
+      );
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_by_agent(
+    DmByAgent? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_by_agent(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_device_list(
+    DmDeviceList? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_device_list(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_members(
+    DmMembers? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_members(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_message(
+    DmMessage? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_message(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_pin(
+    DmPin? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_pin(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_i_64(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_prim_u_8_strict(self, serializer);
+    }
   }
 
   @protected
@@ -1191,6 +4846,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putBigUint64(self);
+  }
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self);
@@ -1206,6 +4867,396 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putBigUint64(self);
   }
+}
+
+@sealed
+class DmDeviceImpl extends RustOpaque implements DmDevice {
+  // Not to be used by end users
+  DmDeviceImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  DmDeviceImpl.frbInternalSseDecode(BigInt ptr, int externalSizeOnNative)
+    : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount:
+        RustLib.instance.api.rust_arc_increment_strong_count_DmDevice,
+    rustArcDecrementStrongCount:
+        RustLib.instance.api.rust_arc_decrement_strong_count_DmDevice,
+    rustArcDecrementStrongCountPtr:
+        RustLib.instance.api.rust_arc_decrement_strong_count_DmDevicePtr,
+  );
+
+  /// Takes [account]'s signed device list, as the worker serves it.
+  Future<void> acceptList({
+    required String account,
+    required List<int> deviceList,
+  }) => RustLib.instance.api.crateApiDmDmDeviceAcceptList(
+    that: this,
+    account: account,
+    deviceList: deviceList,
+  );
+
+  /// Adds the leaves of [key_packages] (envelopes' JSON) to [group_id].
+  Future<DmCommit> addMembers({
+    required List<int> groupId,
+    required List<String> keyPackages,
+  }) => RustLib.instance.api.crateApiDmDmDeviceAddMembers(
+    that: this,
+    groupId: groupId,
+    keyPackages: keyPackages,
+  );
+
+  /// The worker refused this device's commit (another came first): drop
+  /// it; the change can be made again on the new epoch.
+  Future<void> commitRefused({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceCommitRefused(that: this, groupId: groupId);
+
+  /// The worker took this device's commit to [group_id]: merge it.
+  Future<void> commitTaken({required List<int> groupId}) => RustLib.instance.api
+      .crateApiDmDmDeviceCommitTaken(that: this, groupId: groupId);
+
+  /// Starts the group [group_id] of [kind], with only this device in it.
+  /// Gives its GroupInfo at epoch 0 (an envelope's JSON), for the worker.
+  Future<String> createGroup({
+    required List<int> groupId,
+    required DmGroupKind kind,
+  }) => RustLib.instance.api.crateApiDmDmDeviceCreateGroup(
+    that: this,
+    groupId: groupId,
+    kind: kind,
+  );
+
+  /// [account]'s device list as this device last took it (checked then):
+  /// to add or remove one of the person's own leaves, the next version
+  /// lists these with the change.
+  DmDeviceList? deviceList({required String account}) => RustLib.instance.api
+      .crateApiDmDmDeviceDeviceList(that: this, account: account);
+
+  /// Gives up on sending [client_message_id] to [group_id] (the person
+  /// removed it, or the service refused it for good).
+  Future<void> dropUnsent({
+    required List<int> groupId,
+    required String clientMessageId,
+  }) => RustLib.instance.api.crateApiDmDmDeviceDropUnsent(
+    that: this,
+    groupId: groupId,
+    clientMessageId: clientMessageId,
+  );
+
+  /// The pins as JSON, for the person's other devices (the self group).
+  Future<Uint8List> exportPins() =>
+      RustLib.instance.api.crateApiDmDmDeviceExportPins(that: this);
+
+  /// On the new device: opens what the scanning device sent ([sealed])
+  /// and becomes the leaf its QR code named. The identity's secret comes
+  /// back for the platform key store.
+  Future<DmHandoffDone> finishHandoff({
+    required DmHandoff handoff,
+    required List<int> sealed,
+    required BigInt nowMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceFinishHandoff(
+    that: this,
+    handoff: handoff,
+    sealed: sealed,
+    nowMs: nowMs,
+  );
+
+  /// Pins [account]'s identity at first contact; a different key than
+  /// the one pinned is refused (that's [key_changed]).
+  Future<void> firstContact({
+    required String account,
+    required List<int> identityPublic,
+  }) => RustLib.instance.api.crateApiDmDmDeviceFirstContact(
+    that: this,
+    account: account,
+    identityPublic: identityPublic,
+  );
+
+  /// Forgets [group_id]: its MLS state, history and what waits to go
+  /// (revoked, unfriended, signed out).
+  Future<void> forgetGroup({required List<int> groupId}) => RustLib.instance.api
+      .crateApiDmDmDeviceForgetGroup(that: this, groupId: groupId);
+
+  /// Every group this device is in.
+  Future<List<DmGroup>> groups() =>
+      RustLib.instance.api.crateApiDmDmDeviceGroups(that: this);
+
+  /// [group_id]'s history, newest last: up to [limit] messages before
+  /// [before_seq] (all the newest without it).
+  Future<List<DmMessage>> history({
+    required List<int> groupId,
+    PlatformInt64? beforeSeq,
+    required int limit,
+  }) => RustLib.instance.api.crateApiDmDmDeviceHistory(
+    that: this,
+    groupId: groupId,
+    beforeSeq: beforeSeq,
+    limit: limit,
+  );
+
+  /// Pins from another of the person's own devices (never the service).
+  Future<void> importPins({required List<int> exported}) => RustLib.instance.api
+      .crateApiDmDmDeviceImportPins(that: this, exported: exported);
+
+  /// A certificate for one of the person's leaves (a Claktory enrolling,
+  /// H2), signed by their identity.
+  Future<Uint8List> issueCertificate({
+    required DmLeafKind kind,
+    required String leafId,
+    required List<int> signatureKey,
+    required String name,
+    required BigInt createdMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceIssueCertificate(
+    that: this,
+    kind: kind,
+    leafId: leafId,
+    signatureKey: signatureKey,
+    name: name,
+    createdMs: createdMs,
+  );
+
+  /// Joins [group_id] of [kind] from a [welcome] (an envelope's JSON);
+  /// the feed goes on after [seq].
+  Future<void> joinGroup({
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String welcome,
+    required PlatformInt64 seq,
+  }) => RustLib.instance.api.crateApiDmDmDeviceJoinGroup(
+    that: this,
+    groupId: groupId,
+    kind: kind,
+    welcome: welcome,
+    seq: seq,
+  );
+
+  /// [account]'s security key changed: sending waits until [seen].
+  Future<void> keyChanged({
+    required String account,
+    required List<int> identityPublic,
+  }) => RustLib.instance.api.crateApiDmDmDeviceKeyChanged(
+    that: this,
+    account: account,
+    identityPublic: identityPublic,
+  );
+
+  /// [count] one-time key packages for the worker's supply.
+  Future<List<String>> keyPackages({required int count}) => RustLib.instance.api
+      .crateApiDmDmDeviceKeyPackages(that: this, count: count);
+
+  /// The last-resort key package, which the worker hands out again once
+  /// the one-time ones are gone.
+  Future<String> lastResortKeyPackage() =>
+      RustLib.instance.api.crateApiDmDmDeviceLastResortKeyPackage(that: this);
+
+  /// Who's in [group_id] now, as their certificates say (those that
+  /// pass the checks now).
+  Future<List<DmMember>> members({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceMembers(that: this, groupId: groupId);
+
+  /// A proposal or an agent's draft in the channel [group_id], which
+  /// come by their own routes rather than the feed: decrypted once and
+  /// kept by its digest, so asked again it gives what it gave. Refused
+  /// unless a member sent it under the group's checks.
+  Future<DmMessage> openSide({
+    required List<int> groupId,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceOpenSide(
+    that: this,
+    groupId: groupId,
+    envelope: envelope,
+    arrivedMs: arrivedMs,
+  );
+
+  DmPin? pin({required String account}) =>
+      RustLib.instance.api.crateApiDmDmDevicePin(that: this, account: account);
+
+  /// The feed's next message for [group_id]: [seq] from the worker and its
+  /// [envelope] (JSON). In one transaction with what it changes; call in
+  /// seq order. A message this device can't take is dropped and the
+  /// position moves past it, so one bad message never stops the group.
+  Future<DmProcessed> process({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceProcess(
+    that: this,
+    groupId: groupId,
+    seq: seq,
+    envelope: envelope,
+    arrivedMs: arrivedMs,
+  );
+
+  /// Joins [group_id] again from the worker's GroupInfo ([group_info],
+  /// an envelope's JSON), with an external commit for the worker; the
+  /// feed goes on after [seq]. For a device whose state broke or that
+  /// was away too long.
+  Future<DmCommit> rejoinGroup({
+    required List<int> groupId,
+    required DmGroupKind kind,
+    required String groupInfo,
+    required PlatformInt64 seq,
+  }) => RustLib.instance.api.crateApiDmDmDeviceRejoinGroup(
+    that: this,
+    groupId: groupId,
+    kind: kind,
+    groupInfo: groupInfo,
+    seq: seq,
+  );
+
+  /// Removes the leaves [leaf_ids] from [group_id].
+  Future<DmCommit> removeMembers({
+    required List<int> groupId,
+    required List<String> leafIds,
+  }) => RustLib.instance.api.crateApiDmDmDeviceRemoveMembers(
+    that: this,
+    groupId: groupId,
+    leafIds: leafIds,
+  );
+
+  /// Whether [account]'s scanned QR code shows the same two keys.
+  bool safetyMatches({required String account, required List<int> scanned}) =>
+      RustLib.instance.api.crateApiDmDmDeviceSafetyMatches(
+        that: this,
+        account: account,
+        scanned: scanned,
+      );
+
+  /// The safety number with [account], for the key pinned now.
+  DmSafety safetyNumber({required String account}) => RustLib.instance.api
+      .crateApiDmDmDeviceSafetyNumber(that: this, account: account);
+
+  /// On the device that scanned [qr]: the person's identity and pins,
+  /// sealed for the new device only, and its leaf key for the device list.
+  Future<DmHandoffSealed> sealHandoff({required String qr}) =>
+      RustLib.instance.api.crateApiDmDmDeviceSealHandoff(that: this, qr: qr);
+
+  /// The person saw that [account]'s key changed.
+  Future<void> seen({required String account}) =>
+      RustLib.instance.api.crateApiDmDmDeviceSeen(that: this, account: account);
+
+  /// Encrypts [content] for [group_id], once: asked again for the same
+  /// retry id, it gives the same envelope (JSON) until that comes back.
+  /// Refused in a conversation while the friend's security key changed
+  /// and the person hasn't seen it ([seen]).
+  Future<String> send({
+    required List<int> groupId,
+    required DmContent content,
+    required PlatformInt64 nowMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceSend(
+    that: this,
+    groupId: groupId,
+    content: content,
+    nowMs: nowMs,
+  );
+
+  /// Sets up the person's first device: [identity_key] is a new identity
+  /// (kept in the platform key store first), this device is
+  /// [leaf_id] ("its account key") called [name], and the device list
+  /// names it alone, version 1.
+  Future<DmSetUp> setUpFirst({
+    required List<int> identityKey,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceSetUpFirst(
+    that: this,
+    identityKey: identityKey,
+    accountId: accountId,
+    leafId: leafId,
+    name: name,
+    nowMs: nowMs,
+  );
+
+  /// The person's device list at [version] (one more than the last),
+  /// signed, and taken into this device's own pins.
+  Future<Uint8List> signDeviceList({
+    required BigInt version,
+    required BigInt createdMs,
+    required List<DmListed> leaves,
+  }) => RustLib.instance.api.crateApiDmDmDeviceSignDeviceList(
+    that: this,
+    version: version,
+    createdMs: createdMs,
+    leaves: leaves,
+  );
+
+  /// Starts adding this device, [leaf_id] (its account key) called
+  /// [name] on [platform], reachable for history at the iroh endpoint
+  /// [endpoint_id], to the person's: shows the returned hand-off's QR code
+  /// to one of their devices that's set up.
+  Future<DmHandoff> startHandoff({
+    required String leafId,
+    required String name,
+    required String platform,
+    required List<int> endpointId,
+  }) => RustLib.instance.api.crateApiDmDmDeviceStartHandoff(
+    that: this,
+    leafId: leafId,
+    name: name,
+    platform: platform,
+    endpointId: endpointId,
+  );
+
+  DmStatus status() =>
+      RustLib.instance.api.crateApiDmDmDeviceStatus(that: this);
+
+  /// What was encrypted here and hasn't come back: to send again, as it is.
+  Future<List<DmUnsent>> unsent() =>
+      RustLib.instance.api.crateApiDmDmDeviceUnsent(that: this);
+
+  /// New keys for this device's leaf in [group_id].
+  Future<DmCommit> updateGroup({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceUpdateGroup(that: this, groupId: groupId);
+
+  /// The person compared safety numbers with [account], for the key
+  /// pinned now.
+  Future<void> verify({required String account}) => RustLib.instance.api
+      .crateApiDmDmDeviceVerify(that: this, account: account);
+
+  /// What the person's devices keep of the conversation [group_id]: its
+  /// draft, read position and deletion, through the self group.
+  Future<DmView> view({required List<int> groupId}) =>
+      RustLib.instance.api.crateApiDmDmDeviceView(that: this, groupId: groupId);
+}
+
+@sealed
+class DmHandoffImpl extends RustOpaque implements DmHandoff {
+  // Not to be used by end users
+  DmHandoffImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  DmHandoffImpl.frbInternalSseDecode(BigInt ptr, int externalSizeOnNative)
+    : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount:
+        RustLib.instance.api.rust_arc_increment_strong_count_DmHandoff,
+    rustArcDecrementStrongCount:
+        RustLib.instance.api.rust_arc_decrement_strong_count_DmHandoff,
+    rustArcDecrementStrongCountPtr:
+        RustLib.instance.api.rust_arc_decrement_strong_count_DmHandoffPtr,
+  );
+
+  /// The digits both devices show when the code is pasted rather than
+  /// scanned, as "51550 99913 70850 18796".
+  String comparison() =>
+      RustLib.instance.api.crateApiDmDmHandoffComparison(that: this);
+
+  /// The QR code's text.
+  String qr() => RustLib.instance.api.crateApiDmDmHandoffQr(that: this);
 }
 
 @sealed

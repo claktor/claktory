@@ -1,22 +1,32 @@
-import 'dart:io' show Platform;
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../attachments.dart' show pickAttachments, pickFiles;
+import '../backend.dart';
+import '../claktory_identity.dart' show claktoryName;
 import '../controls.dart';
 import '../forms.dart';
 import '../identity.dart';
 import '../message_time.dart' show dayLine;
 import '../mobile/metrics.dart';
+import '../mobile/navigation.dart' show PhoneRoutes;
+import '../mobile/platform_policy.dart';
+import '../protocol/factory/v1/factory.pb.dart';
+import '../scope.dart';
+import '../settings_view.dart' show modelLabel;
+import 'handoff.dart';
 import 'claude_export.dart';
 import 'import_worker.dart';
 
-// Bringing in conversations from a Claude export (Track B). B0a, this:
-// how to get the export, choosing it, reading it on this device and a
-// preview to choose from. Nothing is sent anywhere yet; B0b sends what's
-// chosen. Hidden: nothing in the app opens it yet.
+// Bringing in conversations from a Claude export (Track B): how to get
+// the export, choosing it, reading it on this device and a preview to
+// choose from (B0a); then the agent to give the chosen ones to, what goes
+// where, and handing them over (B0b, handoff.dart). Only the chosen
+// conversations leave the device. Hidden: nothing in the app opens it
+// yet.
 
 /// Opens the import: how to get a Claude export, then choosing one, then
 /// its preview.
@@ -35,7 +45,11 @@ Future<bool> Function(Uri url) openPrivacyPage = launchUrl;
 Future<String?> pickExportFile() async {
   final pick = exportFilePicker;
   if (pick != null) return pick();
-  final paths = Platform.isIOS ? await pickAttachments() : await pickFiles();
+  // A touch device's own picker (iPhone, iPad, Android), as the message
+  // box chooses; a Mac's open panel.
+  final paths = PhonePlatformPolicy.current.touch
+      ? await pickAttachments()
+      : await pickFiles();
   return paths.isEmpty ? null : paths.first;
 }
 
@@ -44,6 +58,24 @@ Future<String?> Function()? exportFilePicker;
 
 /// Reads the chosen file; tests set their own.
 ExportJob Function(String path) exportReader = readExportFile;
+
+/// Makes the files for the chosen conversations; tests set their own.
+ImportJob<List<ImportArtifact>> Function(
+  String path,
+  ExportPreview preview,
+  List<String> ids,
+)
+importPreparer = (path, preview, ids) => prepareImport(
+  path,
+  exportSha256: preview.sha256,
+  ids: ids,
+  nowMs: DateTime.now().millisecondsSinceEpoch,
+  leftOut: (
+    account: preview.account,
+    voice: preview.voice,
+    other: preview.other,
+  ),
+);
 
 /// What the person reads for each [ExportProblem].
 String exportProblemText(ExportProblem problem) => switch (problem) {
@@ -87,11 +119,28 @@ class _ImportExportFormState extends State<ImportExportForm> {
   final _chosen = <int>{};
   var _own = false;
 
+  /// The file chosen, read again for the conversations chosen.
+  String? _path;
+
+  /// Choosing where they go: none chosen at first.
+  var _destination = false;
+  String _agentId = '';
+
+  /// Making their files, then handing them over.
+  ImportJob<List<ImportArtifact>>? _preparing;
+  ImportHandoff? _handoff;
+
   static const _title = 'Import your Claude conversations';
 
   @override
   void dispose() {
     _job?.cancel();
+    _preparing?.cancel();
+    final handoff = _handoff;
+    if (handoff != null && handoff.state != HandoffState.done) {
+      handoff.cancel();
+    }
+    handoff?.dispose();
     super.dispose();
   }
 
@@ -101,6 +150,7 @@ class _ImportExportFormState extends State<ImportExportForm> {
     final job = exportReader(path);
     setState(() {
       _job = job;
+      _path = path;
       _error = null;
     });
     try {
@@ -128,12 +178,196 @@ class _ImportExportFormState extends State<ImportExportForm> {
     setState(() => _job = null);
   }
 
+  /// Makes the chosen conversations' files, then hands them to the agent.
+  Future<void> _give(ExportPreview preview) async {
+    final path = _path;
+    if (path == null || _agentId.isEmpty) return;
+    final ids = [
+      for (final i in _chosen.toList()..sort()) preview.conversations[i].id,
+    ];
+    final job = importPreparer(path, preview, ids);
+    setState(() {
+      _preparing = job;
+      _error = null;
+    });
+    final List<ImportArtifact> files;
+    try {
+      files = await job.result;
+    } on ExportCancelled {
+      return;
+    } on ExportFailure catch (failure) {
+      if (mounted && _preparing == job) {
+        setState(() {
+          _preparing = null;
+          _error = exportProblemText(failure.problem);
+        });
+      }
+      return;
+    }
+    if (!mounted || _preparing != job) return;
+    final handoff = ImportHandoff(AppScope.of(context), _agentId, files)
+      ..addListener(() {
+        if (mounted) setState(() {});
+      });
+    setState(() {
+      _preparing = null;
+      _handoff = handoff;
+    });
+    await handoff.run();
+  }
+
+  /// Back from handing over, cancelled or failed, to choosing where.
+  void _stopHandoff() {
+    final handoff = _handoff;
+    if (handoff != null && handoff.state != HandoffState.done) {
+      handoff.cancel();
+    }
+    handoff?.dispose();
+    setState(() => _handoff = null);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_job != null) return _reading(context);
     final preview = _preview;
-    if (preview != null) return _choosing(context, preview);
-    return _instructions(context);
+    if (preview == null) return _instructions(context);
+    final handoff = _handoff;
+    if (handoff != null) return _handing(context, handoff);
+    if (_destination) return _where(context, preview);
+    return _choosing(context, preview);
+  }
+
+  /// Where they go: an agent of this Claktory, none chosen at first, and
+  /// what that means: which Claktory gets them, which model reads them.
+  Widget _where(BuildContext context, ExportPreview preview) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final backend = AppScope.of(context);
+    final workspace = backend.workspace.workspace;
+    final agent = workspace.agents
+        .where((agent) => agent.id == _agentId)
+        .firstOrNull;
+    final count = _chosen.length;
+    final conversations = '$count conversation${count == 1 ? '' : 's'}';
+    return FormFrame(
+      title: _title,
+      body: 'Choose the agent to give them to.',
+      fields: [
+        Field(
+          label: 'Agent',
+          child: Select<String>(
+            title: 'Agent',
+            value: _agentId,
+            options: [
+              const SelectOption('', 'Choose an agent'),
+              for (final agent in workspace.agents)
+                SelectOption(
+                  agent.id,
+                  agent.role.isEmpty
+                      ? agent.name
+                      : '${agent.name} (${agent.role})',
+                ),
+            ],
+            onChanged: (id) => setState(() => _agentId = id),
+          ),
+        ),
+        if (agent != null)
+          Text(
+            destinationLine(
+              agent: agent,
+              claktory: claktoryName(backend),
+              conversations: conversations,
+              model: _modelOf(backend, agent),
+              provider: _providerOf(workspace, agent),
+            ),
+            style: type.body.copyWith(color: palette.textMuted),
+          ),
+        const SizedBox(height: Space.s),
+        Text(
+          'Nothing else in your export leaves this device.',
+          style: type.caption.copyWith(color: palette.textFaint),
+        ),
+        if (_preparing != null) ...[
+          const SizedBox(height: Space.m),
+          Text(
+            'Getting them ready…',
+            style: type.body.copyWith(color: palette.textMuted),
+          ),
+        ],
+        const SizedBox(height: Space.l),
+      ],
+      error: _error,
+      submitLabel: agent == null ? 'Give' : 'Give to ${agent.name}',
+      onSubmit: agent == null || _preparing != null
+          ? null
+          : () => _give(preview),
+      cancelLabel: 'Back',
+      onCancel: () {
+        _preparing?.cancel();
+        setState(() {
+          _preparing = null;
+          _destination = false;
+          _error = null;
+        });
+      },
+    );
+  }
+
+  /// Handing them over: how far it's got, Cancel; then where they went.
+  Widget _handing(BuildContext context, ImportHandoff handoff) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final backend = AppScope.of(context);
+    final name =
+        backend.workspace.workspace.agents
+            .where((agent) => agent.id == handoff.agentId)
+            .firstOrNull
+            ?.name ??
+        'the agent';
+    final count = _chosen.length;
+    final conversations = '$count conversation${count == 1 ? '' : 's'}';
+    final line = switch (handoff.state) {
+      HandoffState.uploading =>
+        'Uploading $conversations… ${(handoff.progress * 100).floor()}%',
+      HandoffState.sending => 'Sending them to $name…',
+      HandoffState.done =>
+        'Sent to $name. $name will suggest what to set up from them.',
+      HandoffState.failed || HandoffState.cancelled => '',
+    };
+    final done = handoff.state == HandoffState.done;
+    final failed = handoff.state == HandoffState.failed;
+    return FormFrame(
+      title: _title,
+      fields: [
+        if (line.isNotEmpty)
+          Text(line, style: type.body.copyWith(color: palette.text)),
+        const SizedBox(height: Space.l),
+      ],
+      error: failed ? handoff.failure : null,
+      submitLabel: done
+          ? 'Open $name'
+          : failed
+          ? 'Try again'
+          : 'Give to $name',
+      onSubmit: done
+          ? () {
+              final routes = PhoneRoutes.of(context);
+              final scope = AppScope.scope(context);
+              widget.close();
+              if (routes != null) {
+                routes.openConversation(handoff.agentId);
+              } else {
+                fireAndLog(scope.backend.selectAgent(handoff.agentId));
+                scope.history.clear();
+                scope.page.value = AppPage.agent;
+              }
+            }
+          : failed
+          ? () => unawaited(handoff.run())
+          : null,
+      cancelLabel: done ? 'Done' : 'Cancel',
+      onCancel: done ? widget.close : _stopHandoff,
+    );
   }
 
   Widget _instructions(BuildContext context) {
@@ -266,15 +500,51 @@ class _ImportExportFormState extends State<ImportExportForm> {
         const SizedBox(height: Space.l),
       ],
       error: null,
-      // B0b sends the chosen conversations; until then nothing goes.
       submitLabel: _chosen.isEmpty
           ? 'Import'
           : 'Import ${_chosen.length} conversation'
                 '${_chosen.length == 1 ? '' : 's'}',
-      onSubmit: null,
+      onSubmit: _chosen.isEmpty || !_own
+          ? null
+          : () => setState(() => _destination = true),
       onCancel: widget.close,
     );
   }
+}
+
+String _modelOf(Backend backend, Agent agent) {
+  if (!agent.modelAvailable) return '';
+  final model = backend.workspace.model(agent.model);
+  return model == null ? agent.model : modelLabel(model);
+}
+
+String _providerOf(Workspace workspace, Agent agent) {
+  final id = agent.model.split('/').first;
+  for (final provider in workspace.providers) {
+    if (provider.id == id) return provider.name;
+  }
+  return '';
+}
+
+/// What giving the conversations to [agent] means, before it happens:
+/// which Claktory gets them, and which model (and whose) reads them.
+String destinationLine({
+  required Agent agent,
+  required String claktory,
+  required String conversations,
+  required String model,
+  required String provider,
+}) {
+  final upload =
+      'Claktory uploads the $conversations to $claktory, where '
+      '${agent.name} can read them.';
+  if (model.isEmpty) {
+    return '$upload ${agent.name} has no model available right now, so '
+        "nothing reads them until it does.";
+  }
+  final whose = provider.isEmpty ? '' : ' from $provider';
+  return '$upload ${agent.name} runs on $model$whose, which sees what '
+      '${agent.name} reads.';
 }
 
 /// The export's conversations, newest first, each with its box: a list

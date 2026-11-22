@@ -2,13 +2,16 @@ import 'dart:io';
 
 import 'package:flutter_rust_bridge_hooks/flutter_rust_bridge_hooks.dart';
 
+import 'macho.dart';
+
 /// The oldest iOS the app runs on, as in ios/Runner.xcodeproj
 /// (IPHONEOS_DEPLOYMENT_TARGET; test/ios_build_test.dart keeps the two the
 /// same). Without it rustc links for iOS 10 (the Simulator 14), an older
 /// layout than the app's.
 const iosDeploymentTarget = '15.0';
 
-/// The iPhone and Simulator targets, which rustc leaves unstripped.
+/// The iPhone and Simulator targets, which rustc leaves unstripped, as
+/// it does the Mac's ([unstrippedTriples]).
 ///
 /// An iPhone's dyld refuses a library whose symbol strings don't start on
 /// 8 bytes ("mis-aligned LINKEDIT string pool"; the Simulator doesn't
@@ -20,15 +23,22 @@ const iosDeploymentTarget = '15.0';
 /// strip 4 off, unstripped or stripped by Xcode on 8; 348 at iOS 15, on 8
 /// only by luck. So rustc doesn't strip for iOS; Flutter strips a release
 /// app's library with Xcode's strip (-x -S), which aligns them, and writes
-/// its dSYM first. The Mac's library keeps rustc's strip.
+/// its dSYM first.
 const iosTriples = [
   'aarch64-apple-ios',
   'aarch64-apple-ios-sim',
   'x86_64-apple-ios',
 ];
 
-/// The Mac's targets: rustc strips them itself.
+/// The Mac's targets. macOS 27's dyld checks the string pool's alignment
+/// too, and the Mac's library hit it (Abbacchio, 2026-11-22: the arm64
+/// slice's strings 4 bytes off after rustc's strip, "mis-aligned LINKEDIT
+/// string pool", the app unable to load its tunnel), so rustc leaves them
+/// unstripped as well.
 const macTriples = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
+
+/// The Apple targets rustc doesn't strip: every one.
+const unstrippedTriples = [...iosTriples, ...macTriples];
 
 /// Android's targets: phones (arm64) and emulators (x86_64 off Apple
 /// silicon), 64-bit only (app/android/toolchain.properties). Flutter builds
@@ -50,7 +60,7 @@ const androidPageSizeFlag = '-C link-arg=-Wl,-z,max-page-size=16384';
 /// target's own flags only when RUSTFLAGS isn't set.
 String rustFlags(String triple, {required String home}) => [
   if (home.isNotEmpty) '--remap-path-prefix=$home=~',
-  if (iosTriples.contains(triple)) '-C strip=none',
+  if (unstrippedTriples.contains(triple)) '-C strip=none',
   if (androidTriples.contains(triple)) androidPageSizeFlag,
 ].join(' ');
 
@@ -71,5 +81,20 @@ void main(List<String> args) async {
               rustFlags(triple, home: Platform.environment['HOME'] ?? ''),
       },
     ).run(input: input, output: output);
+    // An Apple library dyld would refuse fails the build, not the app.
+    for (final asset in output.build().assets.encodedAssets) {
+      final file = asset.encoding['file'];
+      if (file is! String) continue;
+      final library = File.fromUri(Uri.parse(file));
+      if (!library.existsSync()) continue;
+      final problems = misalignedStringPools(library.readAsBytesSync());
+      if (problems.isNotEmpty) {
+        throw StateError(
+          '${library.path} would not load on an iPhone or a Mac '
+          '("mis-aligned LINKEDIT string pool"):\n${problems.join('\n')}\n'
+          'Leave it to Xcode to strip (-C strip=none, unstrippedTriples).',
+        );
+      }
+    }
   });
 }

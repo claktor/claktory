@@ -16,11 +16,13 @@ import 'package:factory_app/mobile/metrics.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/mobile/presentation.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart' show pumpFrames;
+import 'phone_sizes_test.dart' show loadGeist;
 
 /// An app around [child], with the words iOS's text toolbar needs, as
 /// main.dart gives it.
@@ -97,6 +99,9 @@ class _Routes implements PhoneRoutes {
 
   @override
   bool showFile(String agentId, String path) => false;
+
+  @override
+  bool showPane(String agentId, String paneId) => false;
 }
 
 class _Hold implements DrawerHold {
@@ -188,6 +193,40 @@ void main() {
   });
 
   group('controls on a phone', () {
+    testWidgets("a button's words grow only to 2×, so a long word stays "
+        'whole on a 320pt screen', (tester) async {
+      await tester.runAsync(loadGeist);
+      await _show(
+        tester,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Center(
+            child: SizedBox(
+              width: 288,
+              child: Button(
+                label: 'Send a test notification',
+                onPressed: () {},
+              ),
+            ),
+          ),
+        ),
+        textScale: 3.1,
+      );
+      final label = find.text('Send a test notification');
+      expect(MediaQuery.textScalerOf(tester.element(label)).scale(10), 20);
+      expect(tester.takeException(), isNull);
+      // "notification" on one line of its own, not broken.
+      final paragraph = tester.renderObject<RenderParagraph>(label);
+      const text = 'Send a test notification';
+      final boxes = paragraph.getBoxesForSelection(
+        TextSelection(
+          baseOffset: text.indexOf('notification'),
+          extentOffset: text.length,
+        ),
+      );
+      expect(boxes, hasLength(1));
+    });
+
     testWidgets('every button is a finger wide, every one labelled', (
       tester,
     ) async {
@@ -316,6 +355,35 @@ void main() {
       expect(header.height, greaterThan(44));
       expect(header.top, lessThanOrEqualTo(title.top));
       expect(header.bottom, greaterThanOrEqualTo(role.bottom));
+    });
+
+    testWidgets('its title grows only so far: a long word stays whole on a '
+        'small iPhone at the largest text', (tester) async {
+      await _show(
+        tester,
+        Align(
+          alignment: Alignment.topCenter,
+          child: SizedBox(
+            width: 320,
+            child: PhoneHeader(
+              leading: HeaderButton.back(onTap: () {}),
+              title: Builder(
+                builder: (context) =>
+                    Text('Notifications', style: TypeScale.of(context).label),
+              ),
+            ),
+          ),
+        ),
+        textScale: 3.1,
+      );
+      expect(tester.takeException(), isNull);
+      final title = find.text('Notifications');
+      // (The test font's square glyphs are wider than Geist's: with Geist
+      // the word is one line at 320 pt; here only the cap is checked.)
+      expect(
+        MediaQuery.textScalerOf(tester.element(title)).scale(1),
+        phoneTitleTextScale,
+      );
     });
   });
 

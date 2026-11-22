@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::common::{Client, home, start, temp_dir};
+use crate::common::{Client, home, last_workspace, start, temp_dir};
 use factory_protocol::v1::server_message::Body;
+use factory_protocol::v1::{self, UpdateCheckState};
 use factoryd::channel::{Channel, ChannelError, Checked};
 use sha2::{Digest, Sha256};
 
@@ -312,4 +313,85 @@ async fn only_a_channel_in_a_folder_is_taken_unsigned() {
     assert!(!factoryd::channel::requires_signature(&url));
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("a folder's"), Checked::Downloaded("v0.1.10".into()));
     assert!(factoryd::channel::requires_signature("https://github.com/claktor/claktory/releases/latest/download/latest.json"));
+}
+
+/// What the Workspaces say of Check for updates, until `done` likes one.
+async fn check_until(client: &mut Client, done: impl Fn(&v1::UpdateCheck) -> bool) -> (Vec<UpdateCheckState>, v1::UpdateCheck) {
+    let mut seen = Vec::new();
+    let last = client
+        .wait_for(|body| match body {
+            Body::Workspace(workspace) => {
+                let check = workspace.update_check.clone().unwrap_or_default();
+                if seen.last() != Some(&check.state()) {
+                    seen.push(check.state());
+                }
+                done(&check).then_some(check)
+            }
+            _ => None,
+        })
+        .await;
+    (seen, last)
+}
+
+#[tokio::test]
+async fn check_for_updates_downloads_a_newer_release_and_says_so() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(workspace.update_check.unwrap_or_default().state(), UpdateCheckState::None, "nobody asked yet");
+
+    // No channel (a build that wasn't published) and no release here.
+    let asked = client.ok(check()).await;
+    let checking = last_workspace(&asked).and_then(|workspace| workspace.update_check.clone()).unwrap_or_default();
+    assert_eq!(checking.state(), UpdateCheckState::Checking, "shown at once");
+    let (_, done) = check_until(&mut client, |check| check.state() == UpdateCheckState::UpToDate).await;
+    assert_eq!(done.version, "dev");
+    assert!(done.checked_ms > 0);
+
+    // Asked again at once: its answer stands, nothing is fetched.
+    let again = client.ok(check()).await;
+    assert!(last_workspace(&again).is_none_or(|workspace| workspace.update_check.as_ref() == Some(&done)), "{again:?}");
+
+    // A channel with a newer release: it downloads, then offers it.
+    drop(factory);
+    let other = temp_dir();
+    let url = publish(&other, "v0.1.10", &tarball(&other, "v0.1.10"), None);
+    let fresh = temp_dir();
+    let (addr, factory) = start(&fresh).await;
+    factory.use_channel(&url);
+    let (mut client, _, _) = Client::connect(addr).await;
+    client.ok(check()).await;
+    let (seen, done) =
+        check_until(&mut client, |check| matches!(check.state(), UpdateCheckState::Ready | UpdateCheckState::Failed)).await;
+    assert_eq!(done.state(), UpdateCheckState::Ready, "{done:?}");
+    assert_eq!(done.version, "v0.1.10");
+    assert!(seen.contains(&UpdateCheckState::Downloading), "{seen:?}");
+    assert_eq!(latest(&fresh), "v0.1.10");
+}
+
+#[tokio::test]
+async fn check_for_updates_says_why_it_couldnt() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.use_channel(&format!("file://{}", dir.join("nothing-here.json").display()));
+    let (mut client, _, _) = Client::connect(addr).await;
+    client.ok(check()).await;
+    let (_, done) = check_until(&mut client, |check| matches!(check.state(), UpdateCheckState::Failed | UpdateCheckState::UpToDate)).await;
+    assert_eq!(done.state(), UpdateCheckState::Failed, "{done:?}");
+    assert_eq!(done.error, "Claktory couldn't reach the update server. Check your internet connection, then try again.");
+
+    // The schedule's next check fails too: the answer stays, never "up to
+    // date". Then the channel is back with a newer release: it's offered.
+    factory.check_on_schedule().await;
+    let channel = temp_dir();
+    let url = publish(&channel, "v0.1.10", &tarball(&channel, "v0.1.10"), None);
+    std::fs::rename(url.trim_start_matches("file://"), dir.join("nothing-here.json")).expect("move the manifest");
+    factory.check_on_schedule().await;
+    let (seen, done) = check_until(&mut client, |check| check.state() == UpdateCheckState::Ready).await;
+    assert!(!seen.contains(&UpdateCheckState::UpToDate), "{seen:?}");
+    assert_eq!(done.version, "v0.1.10");
+}
+
+fn check() -> v1::client_message::Body {
+    v1::client_message::Body::CheckForUpdates(v1::CheckForUpdates {})
 }

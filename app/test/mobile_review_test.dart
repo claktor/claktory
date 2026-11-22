@@ -158,14 +158,24 @@ void main() {
     expect(find.text('Review'), findsWidgets);
   });
 
-  testWidgets('Dismiss answers at once', (tester) async {
+  testWidgets('Dismiss takes an optional comment too, sent with it', (
+    tester,
+  ) async {
     final harness = await phone(tester, layout: beside('text', _plan));
     _routes(tester).showFile('a1', _plan);
     await pumpFrames(tester);
     await tester.tap(find.text('Dismiss'));
     await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
+    expect(find.text('A comment for Builder, if you like'), findsOneWidget);
+    expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+    await tester.enterText(find.byType(EditableText).last, 'Not this week.');
+    await pumpFrames(tester);
+    await tester.tap(find.text('Dismiss').last);
+    await pumpFrames(tester);
     final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
     expect(answer.answerAsk.dismiss, isTrue);
+    expect(answer.answerAsk.text, 'Not this week.');
     expect(answer.answerAsk.seq, Int64(7));
   });
 

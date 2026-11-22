@@ -47,9 +47,12 @@ void main() {
   });
   tearDown(() => deviceRecorder = was);
 
-  /// An iPhone 16 with Mike's conversation open.
-  Future<Harness> conversation(WidgetTester tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+  /// An iPhone 16 (or [platform]) with Mike's conversation open.
+  Future<Harness> conversation(
+    WidgetTester tester, {
+    TargetPlatform platform = TargetPlatform.iOS,
+  }) async {
+    debugDefaultTargetPlatformOverride = platform;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(_workspace());
     harness.backend.transcript.load(Transcript(agentId: 'mike'));
@@ -263,5 +266,51 @@ void main() {
     );
     expect(find.text('Open Settings'), findsOneWidget);
     expect(find.byType(PhoneRecordingRow), findsNothing);
+  });
+
+  testWidgets('restrictions say so, with no Settings to open', (tester) async {
+    recorder.granted = MicAccess.restricted;
+    await conversation(tester);
+    await tester.tap(mic);
+    await io(tester);
+    expect(recorder.recordingInto, isNull);
+    expect(
+      find.text(
+        "This device's restrictions don't allow Claktory to use the "
+        'microphone.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Open Settings'), findsNothing);
+  });
+
+  testWidgets('on Android, a first no asks again on the next tap; a second '
+      'offers Settings', (tester) async {
+    recorder
+      ..granted = MicAccess.undetermined
+      ..allow = false
+      ..afterRefusal = MicAccess.undetermined;
+    await conversation(tester, platform: TargetPlatform.android);
+    await tester.tap(mic);
+    await io(tester);
+    expect(recorder.requests, [false]);
+    expect(
+      find.text(
+        'Claktory needs the microphone to record. Tap the microphone again '
+        'to allow it.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Open Settings'), findsNothing);
+
+    recorder.afterRefusal = MicAccess.denied;
+    await tester.tap(mic);
+    await io(tester);
+    expect(recorder.requests, [false, false]);
+    expect(
+      find.text('To record, allow Claktory to use the microphone in Settings.'),
+      findsOneWidget,
+    );
+    expect(find.text('Open Settings'), findsOneWidget);
   });
 }

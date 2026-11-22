@@ -1,7 +1,12 @@
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/devices.dart';
 import 'package:factory_app/links.dart';
+import 'package:factory_app/mobile/drawer.dart'
+    show PhoneDrawerHost, PhoneDrawerHostState;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -11,7 +16,10 @@ final _code = 'factory://?t=${'a' * 64}&name=box&e=${'c' * 64}';
 /// claktory://add?code=… adds the Claktory the code is for, once the
 /// person says so.
 void main() {
+  // The person's account lists this Claktory unless a test says not.
+  setUp(() => onAccountTest = (_, _) async => true);
   tearDown(() {
+    onAccountTest = null;
     while (appLinks.take() != null) {}
   });
 
@@ -48,22 +56,130 @@ void main() {
     await harness.show(tester);
     appLinks.receive(link(_code));
     await settle(tester);
-    expect(find.text('Connect to box?'), findsOneWidget);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    // The code's fingerprint first; its name only quoted, its own words.
     expect(
       find.text(
-        'A link asks to connect this Mac to the Claktory “box”. Connect '
-        "only if you or one of your agents opened it. You'll still need to "
-        'allow this Mac on box.',
+        'Its code: cccc cccc cccc cccc Check it matches the one shown there.',
+        findRichText: true,
       ),
       findsOneWidget,
     );
+    expect(
+      find.text(
+        "It calls itself “box”. You'll still need to allow this Mac on it.",
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining("isn't on your Claktory account"), findsNothing);
     // Nothing yet.
     expect(harness.connections.current, isNull);
     await tester.tap(find.text('Connect'));
     await settle(tester);
     expect(harness.connections.current?.code, _code);
-    expect(find.text('Connect to box?'), findsNothing);
+    expect(find.text('Connect to this Claktory?'), findsNothing);
   });
+
+  testWidgets('a pairing code itself, as the Camera opens it from a QR '
+      'code, asks the same; off the account it warns', (tester) async {
+    onAccountTest = (_, _) async => false;
+    final harness = Harness(Workspace());
+    await harness.show(tester);
+    appLinks.receive(_code);
+    await settle(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(
+      find.text(
+        "This Claktory isn't on your Claktory account. Connect only if "
+        "you're setting it up yourself, right now.",
+      ),
+      findsOneWidget,
+    );
+    expect(harness.connections.current, isNull);
+    await tester.tap(find.text('Cancel'));
+    await settle(tester);
+    expect(harness.connections.saved, isEmpty);
+  });
+
+  testWidgets('a name never stands as the title', (tester) async {
+    final harness = Harness(Workspace());
+    await harness.show(tester);
+    appLinks.receive(link(_code.replaceFirst('name=box', 'name=Your%20Mac')));
+    await settle(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(find.textContaining('Connect to Your Mac'), findsNothing);
+    expect(find.textContaining('“Your Mac”'), findsOneWidget);
+  });
+
+  testWidgets('the QR code shows the same code to compare', (tester) async {
+    await Harness(Workspace()).show(
+      tester,
+      home: SizedBox(
+        width: 400,
+        child: PairingInstructions(
+          code: _code,
+          device: 'iPhone',
+          way: PairingWay.scan,
+          qrSize: 120,
+        ),
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.text('Its code: cccc cccc cccc cccc', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  test('a link too long is refused before it is read', () {
+    appLinks.receive('factory://?t=${'a' * 64}&e=${'c' * 64}&x=${'y' * 5000}');
+    expect(appLinks.take(), isNull);
+    appLinks.receive(_code);
+    expect(appLinks.take(), isNotNull);
+  });
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    test(
+      '${platform.name} listens once: what waited, then what comes',
+      () async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        TestWidgetsFlutterBinding.ensureInitialized();
+        const channel = MethodChannel('factory/links');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        var listens = 0;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'listen') {
+            listens++;
+            return [_code];
+          }
+          return null;
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        final links = AppLinks();
+        await links.listen();
+        expect(listens, 1);
+        await messenger.handlePlatformMessage(
+          'factory/links',
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('opened', 'claktory://add?code=x'),
+          ),
+          (_) {},
+        );
+        await messenger.handlePlatformMessage(
+          'factory/links',
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('opened', 42),
+          ),
+          (_) {},
+        );
+        expect(links.take().toString(), _code);
+        expect(links.take().toString(), 'claktory://add?code=x');
+        expect(links.take(), isNull);
+      },
+    );
+  }
 
   testWidgets('Cancel leaves everything as it was', (tester) async {
     final harness = Harness(Workspace());
@@ -83,7 +199,7 @@ void main() {
     await harness.show(tester);
     appLinks.receive(link(_code));
     await settle(tester);
-    expect(find.text('Connect to box?'), findsNothing);
+    expect(find.text('Connect to this Claktory?'), findsNothing);
     expect(harness.connections.current?.code, _code);
   });
 
@@ -93,9 +209,62 @@ void main() {
     appLinks.receive('claktory://add?code=nonsense');
     await settle(tester);
     expect(find.text("Can't use this link"), findsOneWidget);
+    // Where a Mac pastes a code.
+    expect(
+      find.text(
+        'This link has no Claktory code in it. Paste the code in Connect '
+        'to another Claktory instead.',
+      ),
+      findsOneWidget,
+    );
     await tester.tap(find.text('OK'));
     await settle(tester);
     expect(find.text("Can't use this link"), findsNothing);
     expect(harness.connections.saved, isEmpty);
+  });
+
+  group('on a phone', () {
+    Future<void> phone(WidgetTester tester, Harness harness) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
+      addTearDown(tester.view.resetPadding);
+      await harness.show(tester, size: const Size(393, 852));
+      await pumpFrames(tester);
+    }
+
+    testWidgets("a link without a code names the phone's screen", (
+      tester,
+    ) async {
+      await phone(tester, Harness(Workspace()));
+      appLinks.receive('claktory://add?code=nonsense');
+      await settle(tester);
+      expect(
+        find.text(
+          'This link has no Claktory code in it. Paste the code in Connect '
+          'to your Claktory instead.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a link closes the menu, so its question is in front', (
+      tester,
+    ) async {
+      await phone(tester, Harness(Workspace()));
+      await tester.tap(find.bySemanticsLabel('Menu').last);
+      await pumpFrames(tester, const Duration(seconds: 1));
+      final host = tester.state<PhoneDrawerHostState>(
+        find.byType(PhoneDrawerHost),
+      );
+      expect(host.drawerOpen, isTrue);
+      appLinks.receive(link(_code));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(host.drawerOpen, isFalse);
+      final ask = find.text('Connect to this Claktory?');
+      expect(ask, findsOneWidget);
+      // In front: a tap on it reaches it, not the page under it.
+      expect(ask.hitTestable(), findsOneWidget);
+    });
   });
 }

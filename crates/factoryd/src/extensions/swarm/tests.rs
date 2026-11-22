@@ -63,6 +63,43 @@ fn signs(db: &Connection, team: &Team) -> (Vec<String>, Vec<String>) {
 }
 
 #[test]
+fn the_busiest_agent_on_a_tie_is_the_one_written_to() {
+    let records = records();
+    let db = records.store.db();
+    let team = team(&[("lea", "Backend"), ("solo", "Backend")]);
+    for i in 0..35 {
+        message(&db, "lea", "solo", END - 20 * 60 * MIN + i);
+    }
+    let traffic = super::metrics::traffic(&db, &team, super::metrics::Window::ending(END, 24.0)).expect("traffic");
+    assert_eq!((traffic.hub.as_str(), traffic.hub_sent, traffic.hub_received, traffic.hub_senders), ("solo", 0, 35, 1));
+}
+
+#[test]
+fn provenance_counts_only_what_senders_said() {
+    let records = records();
+    let db = records.store.db();
+    let team = team(&[("lea", "Backend"), ("bo", "Frontend")]);
+    message(&db, "lea", "bo", END - 3 * 60 * MIN);
+    for (to, reply_to, intent) in [("bo", "[]", "handoff"), ("lea", "[5]", "")] {
+        db.execute(
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, send_id, sender_run, reply_to, intent, taint)
+             VALUES (?1, 'agent', 'Lea', 'lea', '', '', ?2, 's1', 1, ?3, ?4, '{}')",
+            params![to, END - 60 * MIN, reply_to, intent],
+        )
+        .expect("message");
+    }
+    db.execute(
+        "INSERT INTO quiet_copies (agent, send_id, sender_id, sender, text, to_ids, reply_to, intent, taint, created)
+         VALUES ('bo', 's1', 'lea', 'Lea', '', '[]', '[]', '', '{}', ?1)",
+        [END - 60 * MIN],
+    )
+    .expect("copy");
+    let traffic = super::metrics::traffic(&db, &team, super::metrics::Window::ending(END, 6.0)).expect("traffic");
+    let known = traffic.provenance.expect("known");
+    assert_eq!((known.recorded, known.sends, known.answers, known.handoffs, known.quiet_copies), (2, 1, 1, 1, 1));
+}
+
+#[test]
 fn coordination_concentrated_at_a_hub_is_red_only_in_both_windows() {
     let records = records();
     let db = records.store.db();
@@ -157,6 +194,26 @@ fn the_person_over_asked_and_idle_agents_and_wake_ups() {
     .expect("usage");
     let (red, _) = signs(&db, &team);
     assert_eq!(red, ["over_asked", "wake_cost", "idle:idle"]);
+}
+
+#[test]
+fn questions_a_clear_closed_are_neither_decided_nor_dismissed() {
+    let records = records();
+    let db = records.store.db();
+    let team = team(&[("a", "")]);
+    let ask = |state: &str, decided: i64| {
+        db.execute(
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, decided) VALUES ('a', '', '', 0, ?1, ?2, '', ?3)",
+            params![END - HOUR_MS, state, decided],
+        )
+        .expect("ask");
+    };
+    ask("answered", END - HOUR_MS + 2 * MIN);
+    ask("dismissed", END - HOUR_MS + 4 * MIN);
+    ask("cleared", END - 1);
+    let cards = super::metrics::cards(&db, &team, super::metrics::Window::ending(END, 6.0), END).expect("cards");
+    assert_eq!((cards.raised, cards.decided, cards.dismissed), (3, 2, 1));
+    assert_eq!(cards.decided_p90_min, Some(4.0), "a /clear's close isn't a time to decide");
 }
 
 #[test]

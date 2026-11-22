@@ -170,8 +170,11 @@ class ClaktoryNotifications {
   }
 
   void _show(Claktory claktory, Notify notify) {
-    // In front, at this very Claktory: the window says it already.
-    if (system.using.value && identical(claktory, claktories.selected)) {
+    // In front, at this very Claktory: the window says it already. A test
+    // the person just sent from Settings shows all the same.
+    if (notify.kind != NotifyKind.NOTIFY_KIND_TEST &&
+        system.using.value &&
+        identical(claktory, claktories.selected)) {
       return;
     }
     final id = claktoryId(claktory);

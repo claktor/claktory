@@ -81,6 +81,7 @@ pub(crate) fn quarantine(factory: &Factory, config: &Config, agent: &str) -> Opt
 pub(crate) fn tools(factory: &Arc<Factory>, agent: &str, places: &Places) -> Vec<Tool> {
     let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, None);
     factory_agent::tools::read_only(&mut tools, &places.read_only);
+    factory_agent::tools::denied(&mut tools, &crate::ink::private(&factory.home));
     tools.retain(|tool| tool.kind != ToolKind::Bash);
     let roots: Vec<PathBuf> = std::iter::once(places.folder.clone()).chain(places.extra_dirs.iter().cloned()).collect();
     let mut tools: Vec<Tool> = tools

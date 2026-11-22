@@ -25,6 +25,10 @@
 #                              ~/.factory/releases: a rehearsal (of signing
 #                              and notarizing, say) that no running Claktory
 #                              sees, so it shows no Update banner.
+#   --rebuild                  the newest release again from its own source
+#                              commit (its `source`), replacing it: for a fix
+#                              in how releases are built, before anyone has
+#                              installed it.
 #   --adhoc                    with either of those: allows a real release
 #                              signed ad hoc. Without it, one that this Mac
 #                              can't sign with the Developer ID and notarize
@@ -36,8 +40,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
-usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc]]" >&2; exit 2; }
-RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false
+usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc] [--rebuild]]" >&2; exit 2; }
+RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false; REBUILD=false
 while (($#)); do
   case "$1" in
     --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true); shift ;;
@@ -50,12 +54,19 @@ while (($#)); do
       shift 2
       ;;
     --adhoc) ADHOC=true; shift ;;
+    --rebuild) REBUILD=true; shift ;;
     *) usage ;;
   esac
 done
-if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC; }; then usage; fi
+if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC || $REBUILD; }; then usage; fi
 if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && [[ "$(signing_mode)" == adhoc ]]; then
   echo "a real release is signed with the Developer ID and notarized, and this Mac can't now: it needs the \"Developer ID Application\" identity and the App Store Connect key (scripts/sign-release.sh says where). An ad hoc app is another app to macOS, and can't read what the person's app keeps in the Keychain. Build it ad hoc anyway only on purpose, with --adhoc." >&2
+  exit 1
+fi
+# The browser helper in a real release only as a rehearsal (--out DIR) until
+# browser control passes B6b (Fugo): a stray variable can't publish it.
+if [[ "${CLAKTORY_BROWSER_HOST:-}" == 1 && "$RELEASES" == "$HOME/.factory/releases" ]]; then
+  echo "CLAKTORY_BROWSER_HOST=1 is for rehearsals (--out DIR) until browser control passes B6b" >&2
   exit 1
 fi
 if [[ "$APP_NAME" == "Factory.app" ]]; then
@@ -67,18 +78,47 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
     git -C "$ROOT" status --short >&2
     exit 1
   }
-  if [[ "$RELEASES" == "$HOME/.factory/releases" && "$(git -C "$ROOT" rev-parse HEAD)" != "$(git -C "$ROOT" rev-parse main)" ]]; then
-    echo "a release is built from main's commit only; this checkout is at $(git -C "$ROOT" rev-parse --short HEAD), main at $(git -C "$ROOT" rev-parse --short main)" >&2
-    exit 1
+  if $REBUILD; then
+    # --rebuild: the newest release again, from its own source commit, with
+    # today's build (a fix in how releases are built, not in what they hold).
+    # It replaces that release; only one nobody has installed yet should be.
+    FACTORY_VERSION="$(cat "$RELEASES/latest" 2>/dev/null)" || { echo "no release in $RELEASES to rebuild" >&2; exit 1; }
+    SOURCE="$(cat "$RELEASES/$FACTORY_VERSION/source" 2>/dev/null)" || { echo "$RELEASES/$FACTORY_VERSION doesn't say what it was built from" >&2; exit 1; }
+    git -C "$ROOT" merge-base --is-ancestor "$SOURCE" main || { echo "$FACTORY_VERSION's source, $SOURCE, isn't on main" >&2; exit 1; }
+    # And on the channel it was built for, unless told otherwise.
+    if [[ -z "${FACTORY_UPDATE_URL:-}" ]]; then
+      FACTORY_UPDATE_URL="$(cat "$RELEASES/$FACTORY_VERSION/update-url" 2>/dev/null || true)"
+      if [[ -n "$FACTORY_UPDATE_URL" ]]; then export FACTORY_UPDATE_URL; else unset FACTORY_UPDATE_URL; fi
+    fi
+  else
+    SOURCE="$(git -C "$ROOT" rev-parse HEAD)"
+    if [[ "$RELEASES" == "$HOME/.factory/releases" && "$SOURCE" != "$(git -C "$ROOT" rev-parse main)" ]]; then
+      echo "a release is built from main's commit only; this checkout is at $(git -C "$ROOT" rev-parse --short HEAD), main at $(git -C "$ROOT" rev-parse --short main)" >&2
+      exit 1
+    fi
   fi
   # Publishing it pushes its source, which the secret check must pass: find
   # out now, at the freeze, not once it's built and tried.
-  "$ROOT/scripts/check-secrets.sh" HEAD
+  "$ROOT/scripts/check-secrets.sh" "$SOURCE"
+  # Built from an export of that commit in one fixed, private folder, so the
+  # binaries name only that folder, never this Mac's home or checkouts; Rust's
+  # registry and toolchain paths come out as ~ (scripts/lib.sh).
+  SRC_ROOT="$(release_tree "$ROOT" "$SOURCE")"
+  trap release_unlock EXIT
+  export SRC_ROOT
+  release_rustflags
+  release_pub_cache
+else
+  SRC_ROOT="$ROOT"
 fi
 mkdir -p "$RELEASES"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
-  # The version the changelog's newest entries are stamped with.
-  FACTORY_VERSION="$("$ROOT/scripts/changelog.sh" pending "$RELEASES")"
+  if $REBUILD; then
+    [[ "$("$SRC_ROOT/scripts/changelog.sh" pending /nonexistent 2>/dev/null)" == "$FACTORY_VERSION" ]] || { echo "$SOURCE's changelog isn't stamped $FACTORY_VERSION" >&2; exit 1; }
+  else
+    # The version the changelog's newest entries are stamped with.
+    FACTORY_VERSION="$("$SRC_ROOT/scripts/changelog.sh" pending "$RELEASES")"
+  fi
 else
   FACTORY_VERSION="$(stamp_version "$RELEASES")"
 fi
@@ -105,14 +145,14 @@ if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" 
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
 else
-  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech
-  BACKEND="$ROOT/target/release"
+  cargo build --manifest-path "$SRC_ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech
+  BACKEND="$SRC_ROOT/target/release"
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
 # Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
 BUNDLE_VERSION="$(sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"$FACTORY_VERSION")"
 BUNDLE_VERSION="${BUNDLE_VERSION:-0.0.0}"
-(cd "$ROOT/app" && flutter build macos --release --build-name "$BUNDLE_VERSION" --build-number "$BUNDLE_VERSION" --dart-define=FACTORY_VERSION="$FACTORY_VERSION" ${DEFINES[@]+"${DEFINES[@]}"})
+(cd "$SRC_ROOT/app" && flutter build macos --release --build-name "$BUNDLE_VERSION" --build-number "$BUNDLE_VERSION" --dart-define=FACTORY_VERSION="$FACTORY_VERSION" ${DEFINES[@]+"${DEFINES[@]}"})
 
 partial="$RELEASES/$FACTORY_VERSION.partial"
 rm -rf "$partial"
@@ -122,16 +162,18 @@ echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the
 # channel stamped into its backend (none unless FACTORY_UPDATE_URL was set).
-git -C "$ROOT" rev-parse HEAD >"$partial/source"
+git -C "$ROOT" rev-parse "${SOURCE:-HEAD}" >"$partial/source"
 echo "${FACTORY_UPDATE_URL:-}" >"$partial/update-url"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
   # What's unreleased stays out of a real release.
-  awk '/^## /{skip = ($0 == "## Unreleased")} !skip' "$ROOT/docs/CHANGELOG.md" >"$partial/CHANGELOG.md"
+  awk '/^## /{skip = ($0 == "## Unreleased")} !skip' "$SRC_ROOT/docs/CHANGELOG.md" >"$partial/CHANGELOG.md"
 else
   cp "$ROOT/docs/CHANGELOG.md" "$partial/CHANGELOG.md"
 fi
-take_build "$ROOT/app/build/macos/Build/Products/Release/Factory.app" "$partial/$APP_NAME"
+take_build "$SRC_ROOT/app/build/macos/Build/Products/Release/Factory.app" "$partial/$APP_NAME"
 if [[ "$APP_NAME" == "Factory Dev.app" ]]; then
+  # The browser helper, for trying browser control in Claktory Dev.
+  add_browser_host "$partial/$APP_NAME" dev release
   make_dev_app "$partial/$APP_NAME" Release.entitlements
 else
   # The supervisor as an app (Developer Tools needs one); installers put it
@@ -139,6 +181,19 @@ else
   make_supervisor_app "$partial"
   # And the helpers in the app, so it can set Claktory up from a .dmg.
   add_helpers "$partial" "$APP_NAME"
+  # The browser helper ships in the real app only once browser control has
+  # passed its release proof (B6b): until then CLAKTORY_BROWSER_HOST=1 puts it
+  # in a rehearsal (--out DIR), never in a release people get by default.
+  if [[ "${CLAKTORY_BROWSER_HOST:-}" == 1 ]]; then
+    add_browser_host "$partial/$APP_NAME" real release
+  fi
+  # Nothing in it may name this Mac (its home, user, host or checkouts).
+  check_no_traces "$partial"
+  # The app's libraries load the way dyld demands (scripts/check-macho.py):
+  # a misaligned string pool stops macOS loading the tunnel. The helpers
+  # beside it are executables, which macOS's dyld doesn't hold to that.
+  python3 "$ROOT/scripts/check-macho.py" "$partial/$APP_NAME/Contents/Frameworks" ||
+    { echo "the app's libraries wouldn't load (above); not releasing it" >&2; exit 1; }
   # Developer ID and notarized when this Mac has what that takes; ad hoc
   # otherwise, as dev releases always are.
   "$ROOT/scripts/sign-release.sh" "$partial"
@@ -146,7 +201,15 @@ else
     spctl --assess --type execute "$partial/$APP_NAME" || { echo "$partial/$APP_NAME isn't notarized after signing; not releasing it" >&2; exit 1; }
   fi
 fi
-mv "$partial" "$RELEASES/$FACTORY_VERSION"
+if $REBUILD; then
+  # The rebuilt one takes the old one's place under the same name.
+  rm -rf "$RELEASES/$FACTORY_VERSION.replaced"
+  mv "$RELEASES/$FACTORY_VERSION" "$RELEASES/$FACTORY_VERSION.replaced"
+  mv "$partial" "$RELEASES/$FACTORY_VERSION"
+  rm -rf "$RELEASES/$FACTORY_VERSION.replaced"
+else
+  mv "$partial" "$RELEASES/$FACTORY_VERSION"
+fi
 # Named only once complete; the rename makes the change atomic.
 echo "$FACTORY_VERSION" >"$RELEASES/latest.new"
 mv -f "$RELEASES/latest.new" "$RELEASES/latest"

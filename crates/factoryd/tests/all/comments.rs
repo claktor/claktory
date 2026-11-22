@@ -55,6 +55,7 @@ fn create(path: &str, kind: &str, version: &str, selectors: Vec<v1::Selector>, b
         body: body.into(),
         send_now: false,
         suggestion: None,
+        ink: None,
     })
 }
 
@@ -129,7 +130,7 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
     apply_request(
         &mut client,
         &mut view,
-        client_message::Body::SendComments(v1::SendComments { agent_id: "writer".into(), path: path.clone() }),
+        client_message::Body::SendComments(v1::SendComments { agent_id: "writer".into(), path: path.clone(), ..Default::default() }),
     )
     .await;
     view.follow(&mut client, |view| idle(view, "writer")).await;
@@ -148,7 +149,14 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
     }
     let sent = threads(&mut client, &path).await;
     assert!(sent.threads.iter().all(|thread| thread.comments.iter().all(|comment| !comment.draft)), "sent, they're drafts no more");
-    match client.request(client_message::Body::SendComments(v1::SendComments { agent_id: "writer".into(), path: path.clone() })).await.body
+    match client
+        .request(client_message::Body::SendComments(v1::SendComments {
+            agent_id: "writer".into(),
+            path: path.clone(),
+            ..Default::default()
+        }))
+        .await
+        .body
     {
         Body::Error(error) => assert_eq!(error.code(), ErrorCode::InvalidRequest),
         other => panic!("nothing left to send: {other:?}"),
@@ -234,7 +242,7 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
     let mine = find(&moved, "t-1").comments[0].id.clone();
     client.ok(client_message::Body::EditComment(v1::EditComment { comment_id: mine.clone(), body: "Still vague.".into() })).await;
     client
-        .ok(client_message::Body::ReplyThread(v1::ReplyThread { thread_id: "t-2".into(), body: "Thanks.".into(), send_now: false }))
+        .ok(client_message::Body::ReplyThread(v1::ReplyThread { thread_id: "t-2".into(), body: "Thanks.".into(), ..Default::default() }))
         .await;
     let now = threads(&mut client, &path).await;
     assert_eq!(find(&now, "t-1").comments[0].body, "Still vague.");
@@ -291,7 +299,7 @@ async fn agents_comment_on_files_for_the_person_and_send_now_goes_at_once() {
 
     // The person's reply, sent at once.
     let before = view.entries.len();
-    let reply = v1::ReplyThread { thread_id: "t-1".into(), body: "Why?".into(), send_now: true };
+    let reply = v1::ReplyThread { thread_id: "t-1".into(), body: "Why?".into(), send_now: true, ..Default::default() };
     assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::ReplyThread(reply)).await, Body::Ack(_)));
     view.follow(&mut client, |view| view.entries.len() >= before + 2 && idle(view, "writer")).await;
     let prompt = requests.lock().expect("lock").last().expect("a request").prompt.clone();
@@ -323,14 +331,14 @@ async fn the_persons_drafts_reach_no_agent_until_sent_not_even_through_claktorys
     for sql in ["SELECT body FROM thread_comments", "SELECT quote FROM threads", "SELECT text FROM thread_files"] {
         let query = serde_json::json!({ "sql": sql }).to_string();
         let refused = call(&mut client, &mut view, "writer", &format!("call db_query {query}")).await;
-        assert!(refused.contains("comments on files (threads, thread_) aren't readable"), "{sql}: {refused}");
+        assert!(refused.contains("comments on files (threads, thread_), quiet copies (quiet_copies) and ink (ink_, presentations) aren't readable"), "{sql}: {refused}");
         assert!(!refused.contains("Half-formed"), "{refused}");
     }
     let tables = call(&mut client, &mut view, "writer", "call db_schema {}").await;
     assert!(tables.contains("messages (") && !tables.contains("thread"), "{tables}");
 
     // Sent, it reaches the agent as before, and the Comments tools have it.
-    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone() };
+    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::SendComments(send)).await;
     view.follow(&mut client, |view| idle(view, "writer")).await;
     let listed = call(&mut client, &mut view, "writer", "call comments_list {}").await;
@@ -338,7 +346,7 @@ async fn the_persons_drafts_reach_no_agent_until_sent_not_even_through_claktorys
 }
 
 fn decide(thread: &str, accept: bool) -> client_message::Body {
-    client_message::Body::DecideSuggestion(v1::DecideSuggestion { thread_id: thread.into(), accept })
+    client_message::Body::DecideSuggestion(v1::DecideSuggestion { thread_id: thread.into(), accept, ..Default::default() })
 }
 
 /// The latest prompt `agent` was given once it's done with what came.
@@ -407,10 +415,13 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         other => panic!("expected an error, got {other:?}"),
     }
     let before = view.entries.len();
-    assert!(matches!(apply_request(&mut client, &mut view, decide("t-2", false)).await, Body::Ack(_)));
+    // With the person's comment, as theirs (#289).
+    let reject = v1::DecideSuggestion { thread_id: "t-2".into(), accept: false, comment: "Keep the words.".into() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::DecideSuggestion(reject)).await, Body::Ack(_)));
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "one\n2\nfour\n");
     let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
     assert!(prompt.contains("rejected your suggested change t-2"), "{prompt}");
+    assert!(prompt.contains("\n\nThe person's note: Keep the words."), "{prompt}");
 
     // The person's own suggestion: sent, then made by them.
     let mine = v1::CreateThread {
@@ -422,6 +433,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         body: String::new(),
         send_now: true,
         suggestion: Some("uno".into()),
+        ink: None,
     };
     let before = view.entries.len();
     let Body::Thread(made) = apply_request(&mut client, &mut view, client_message::Body::CreateThread(mine)).await else {
@@ -445,6 +457,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         body: String::new(),
         send_now: false,
         suggestion: Some("4".into()),
+        ink: None,
     };
     let Body::Thread(unsent) = apply_request(&mut client, &mut view, client_message::Body::CreateThread(unsent)).await else {
         panic!("expected the thread")
@@ -454,7 +467,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "uno\n2\n4\n");
     let decided = threads(&mut client, &path).await;
     assert!(!find(&decided, &unsent.id).comments[0].draft, "kept with the thread, not sent");
-    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone() };
+    let send = v1::SendComments { agent_id: "writer".into(), path: path.clone(), ..Default::default() };
     match client.request(client_message::Body::SendComments(send)).await.body {
         Body::Error(error) => assert_eq!(error.message, "There are no comments to send."),
         other => panic!("expected an error, got {other:?}"),

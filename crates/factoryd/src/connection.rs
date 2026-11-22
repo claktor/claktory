@@ -104,9 +104,17 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
     };
 
+    // How it reached this Claktory, for diagnostics.
+    let via = match &peer {
+        None => "port",
+        Some(peer) if peer.loopback => "this_computer",
+        Some(peer) if peer.address.is_some() => "direct",
+        Some(_) => "relay",
+    };
     let device;
     let kind;
     let workspace_patches;
+    let (platform, app_version);
     let hello_id = loop {
         let frame = socket.next().await;
         let message = match read(&mut socket, frame).await? {
@@ -123,6 +131,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
         kind = hello.device_kind();
         workspace_patches = hello.workspace_patches;
+        (platform, app_version) = (hello.platform.clone(), hello.client_version.clone());
         let knock = crate::remote::Knock {
             token: &hello.token,
             assertion: &hello.assertion,
@@ -152,10 +161,15 @@ pub(crate) async fn serve_stream<S: Stream>(
                     }
                 }
                 Authorized::Refused => {
+                    crate::diagnostics::turned_away(&factory, via, "unpaired");
                     let reason = "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                     return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
                 }
-                Authorized::Turned(code, reason) => return reject(socket, message.id, code, reason).await,
+                Authorized::Turned(code, reason) => {
+                    let why = code.as_str_name().trim_start_matches("ERROR_CODE_").to_lowercase();
+                    crate::diagnostics::turned_away(&factory, via, &why);
+                    return reject(socket, message.id, code, reason).await;
+                }
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
             device = connected;
@@ -168,6 +182,7 @@ pub(crate) async fn serve_stream<S: Stream>(
                 // Another user's program, or one of this user's without the
                 // token: an app build or test made without FACTORY_PORT, say.
                 tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
+                crate::diagnostics::turned_away(&factory, via, if hello.token.is_empty() { "no_token" } else { "wrong_token" });
                 let reason = format!(
                     "This port wants a token: connect with the pairing code in {}.",
                     factory.home.root().join("remote/local-pairing").display()
@@ -200,6 +215,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     let from = if remote { device.device.name.clone() } else { crate::remote::machine_name().to_owned() };
     let sent_from = crate::transcript::device(&from, kind);
     let files = crate::explorer::Watches::watch(&factory);
+    let version: String = app_version.chars().take(40).map(|c| if c.is_whitespace() || c == '=' { '_' } else { c }).collect();
     let connection = Connection {
         remote,
         device: device.device.name.clone(),
@@ -210,9 +226,25 @@ pub(crate) async fn serve_stream<S: Stream>(
         workspace_patches,
         files,
         views: crate::apps::Viewer::new(&factory),
+        browser: crate::browser::Port::new(&factory, &device.device.id),
         presence: factory.notify.connect(&device.device.id),
+        presentation: crate::presentation::Port::new(&factory, &device.device.id),
+        diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
     };
-    session(&mut socket, &factory, connection, device.closed.clone()).await?;
+    let (id, since) = (device.device.id.clone(), std::time::Instant::now());
+    crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "connected", &format!("device={id} via={via} app={version}"), 0);
+    let ended = session(&mut socket, &factory, connection, device.closed.clone()).await;
+    let how = match &ended {
+        Ok(()) => "closed".to_owned(),
+        Err(ConnectionError::Io(error) | ConnectionError::WebSocket(tungstenite::Error::Io(error))) => {
+            format!("io_{:?}", error.kind()).to_lowercase()
+        }
+        Err(ConnectionError::WebSocket(tungstenite::Error::Protocol(_))) => "protocol".to_owned(),
+        Err(ConnectionError::WebSocket(_)) => "websocket".to_owned(),
+    };
+    let stayed = i64::try_from(since.elapsed().as_millis()).unwrap_or(i64::MAX);
+    crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "disconnected", &format!("device={id} via={via} end={how}"), stayed);
+    ended?;
     tracing::info!("client disconnected");
     Ok(())
 }
@@ -240,6 +272,14 @@ struct Connection {
     views: crate::apps::Viewer,
     /// Whether the person is using its app now (SetActive).
     presence: crate::notify::Presence,
+    /// Browser control's commands for this connection's app alone, when it
+    /// brokers for its Chrome (`crate::browser`).
+    browser: crate::browser::Port,
+    /// Where this device was reading, whenever another of its connections
+    /// changes it (`crate::presentation`).
+    presentation: crate::presentation::Port,
+    /// Who sends its diagnostics (`crate::diagnostics`).
+    diagnostics: crate::diagnostics::Source,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is the
@@ -253,6 +293,10 @@ async fn session<S: Stream>(
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
     let mut sent = Workspaces::new(connection.workspace_patches);
     let mut events = sync(socket, &mut sent, factory).await?;
+    // Where this device was reading, for it alone, when it kept anything.
+    if let Some(presentation) = crate::presentation::welcome(factory, &connection.binding) {
+        send(socket, 0, Body::Presentation(presentation)).await?;
+    }
     factory.health.served();
     // A vault still locked after a restart tries the account service again.
     tokio::spawn({
@@ -280,6 +324,8 @@ async fn session<S: Stream>(
                 send(socket, message.id, reply).await?;
             }
             body = connection.views.next() => send(socket, 0, body).await?,
+            body = connection.browser.next() => send(socket, 0, body).await?,
+            body = connection.presentation.next() => send(socket, 0, body).await?,
             event = events.recv() => match event {
                 Ok(event) => forward(socket, &mut sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
@@ -431,6 +477,27 @@ async fn handle(
         Some(Request::SetZoom(request)) => factory.set_zoom(&connection.zoom_device, request.zoom).await,
         Some(Request::ConfirmDevice(request)) => factory.confirm_device(&connection.zoom_device, &connection.endpoint_id, &request).await,
         Some(Request::RestoreSettings(_)) => factory.restore_settings().await,
+        Some(Request::CheckForUpdates(_)) => factory.check_for_updates(),
+        Some(Request::SetDiagnostics(request)) => crate::diagnostics::set(factory, &request),
+        Some(Request::SendDiagnostics(request)) => crate::diagnostics::receive(factory, &connection.diagnostics, request),
+        // Direct messages end to end (dms-e2ee.md §2): this Claktory's leaf,
+        // given only to the person's own devices, which are all that connect
+        // here (a paired device, or this computer's app with its token).
+        Some(Request::DmLeafOffer(_) | Request::DmEnrollLeaf(_)) if !crate::user_apps::dms::preview() => {
+            return error(ErrorCode::InvalidRequest, "Direct messages aren't available in this Claktory yet.");
+        }
+        Some(Request::DmLeafOffer(_)) => {
+            return match crate::user_apps::dms::leaf::offer(factory) {
+                Ok(offer) => Body::DmLeafOffer(offer),
+                Err(why) => error(ErrorCode::InvalidRequest, why),
+            };
+        }
+        Some(Request::DmEnrollLeaf(request)) => {
+            return match crate::user_apps::dms::leaf::enroll(factory, &request) {
+                Ok(()) => Body::Ack(v1::Ack {}),
+                Err(why) => error(ErrorCode::InvalidRequest, why),
+            };
+        }
         // A remote device's app is on another machine: its path means nothing here.
         Some(Request::InstallUpdate(request)) => factory.install_update(if remote { "" } else { &request.app_path }).await,
         Some(Request::FocusProject(request)) => factory.focus_project(&request.project_id).await,
@@ -536,6 +603,12 @@ async fn handle(
         Some(Request::OpenAppView(request)) => return factory.open_app_view(&connection.views, &request),
         Some(Request::AppViewAction(request)) => return factory.app_view_action(&request),
         Some(Request::CloseAppView(request)) => return factory.close_app_view(&connection.views, &request.surface_id),
+        Some(Request::ListNeedsYouHistory(request)) => {
+            return match factory.needs_you_history(&request) {
+                Ok(history) => Body::NeedsYouHistory(history),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
         Some(Request::LoadUsage(request)) => {
             return match factory.load_usage(&request) {
                 Ok(report) => Body::UsageReport(report),
@@ -634,6 +707,26 @@ async fn handle(
         Some(Request::DecideSecretApproval(request)) => crate::pipes::agents::decide(factory, &request).await,
         Some(Request::AddPipeLiaison(request)) => crate::pipes::add_liaison(factory, &request).await,
         Some(Request::DismissPipeStart(request)) => crate::pipes::start::dismiss(factory, &request),
+        Some(Request::DecideAppGrant(request)) => crate::user_apps::decide(factory, &request).await,
+        // Browser control: each binds to this connection itself, never to
+        // anything the message says about who sent it.
+        Some(Request::BrowserCapability(request)) => connection.browser.capability(&request),
+        Some(Request::BrowserGrant(request)) => connection.browser.grant(&request),
+        Some(Request::BrowserResult(request)) => connection.browser.result(&request),
+        Some(Request::BrowserHeartbeat(request)) => connection.browser.heartbeat(&request),
+        Some(Request::BrowserStop(request)) => connection.browser.stop(&request),
+        Some(Request::ListBrowserLog(request)) => return answer(factory.browser_log(&request), Body::BrowserLog),
+        Some(Request::ClearBrowserLog(_)) => factory.clear_browser_log(),
+        // Ink (#209 phase 3): `crate::ink`.
+        Some(Request::ReadInkBlob(request)) => return answer(factory.read_ink_blob(&request), Body::InkBlobData),
+        Some(Request::ListInkLayers(request)) => return answer(factory.list_ink_layers(&request), Body::InkLayerList),
+        Some(Request::SaveInkLayer(request)) => {
+            let saver = crate::ink::layers::Saver { device_id: &connection.binding, device_kind: &connection.sent_from.kind };
+            return answer(factory.save_ink_layer(&request, &saver), Body::InkLayerSaved);
+        }
+        Some(Request::DeleteInkLayer(request)) => factory.delete_ink_layer(&request),
+        Some(Request::SetPresentation(request)) => crate::presentation::set(factory, &connection.binding, &request),
+        Some(Request::CreateSketch(request)) => return answer(crate::sketch::create(factory, request).await, Body::SketchCreated),
         // Chats (#213): `crate::chats`.
         Some(Request::CreateChat(request)) => {
             crate::chats::create(factory, &request.text, &request.client_id, Some(connection.sent_from.clone())).await
@@ -707,6 +800,12 @@ async fn handle(
         Some(Request::ListConnectChoices(request)) => {
             return match factory.connect_choices(&request.secret_id).await {
                 Ok(choices) => Body::ConnectChoices(choices),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::ListQuietCopies(request)) => {
+            return match crate::extensions::agents::provenance::list(factory, &request) {
+                Ok(copies) => Body::QuietCopies(copies),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }

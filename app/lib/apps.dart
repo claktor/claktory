@@ -1,4 +1,4 @@
-import 'dart:io' show File, Platform;
+import 'dart:io' show File;
 
 import 'package:flutter/widgets.dart';
 
@@ -9,6 +9,7 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart';
+import 'mobile/platform_policy.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -33,7 +34,11 @@ AppInfo? appOfGrantee(Workspace workspace, String agentId) {
 Future<List<int>?> pickAppFile() async {
   final pick = appFilePicker;
   if (pick != null) return pick();
-  final paths = Platform.isIOS ? await pickAttachments() : await pickFiles();
+  // A touch device's own picker (iPhone, iPad, Android), as the message
+  // box chooses; a Mac's open panel.
+  final paths = PhonePlatformPolicy.current.touch
+      ? await pickAttachments()
+      : await pickFiles();
   if (paths.isEmpty) return null;
   return File(paths.first).readAsBytes();
 }
@@ -191,7 +196,8 @@ class _AppInstallFormState extends State<AppInstallForm> {
         Text(
           [
             if (!update) 'Version ${permissions.version}',
-            if (permissions.publisher.isNotEmpty) 'By ${permissions.publisher}',
+            if (permissions.publisher.isNotEmpty)
+              publisherLine(permissions.tier, permissions.publisher),
             tierLine(permissions.tier, permissions.publisherKey),
           ].join(' · '),
           style: TypeScale.of(context).caption
@@ -220,6 +226,29 @@ class _AppInstallFormState extends State<AppInstallForm> {
                 )
               : _Lines(permissions.hosts, mono: true),
         ),
+        if (permissions.sources.isNotEmpty)
+          Field(
+            label: 'It asks to read',
+            note: 'Nothing is shared until you turn it on in Settings → Apps.',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final source in permissions.sources)
+                  _SourceLine(
+                    source: source,
+                    reach: sourceReach(
+                      permissions.name,
+                      source,
+                      AppScope.of(context).workspace.workspace,
+                    ),
+                  ),
+                if (permissions.hosts.isNotEmpty) ...[
+                  const SizedBox(height: Space.xs),
+                  _Warning(sendsTo(permissions.name, permissions.hosts)),
+                ],
+              ],
+            ),
+          ),
         if (permissions.scopes.isNotEmpty)
           Field(
             label: 'Agents you give it to can',
@@ -270,6 +299,14 @@ class _AppInstallFormState extends State<AppInstallForm> {
 
 bool _unreviewed(AppTier tier) =>
     tier == AppTier.APP_TIER_COMMUNITY || tier == AppTier.APP_TIER_LOCAL;
+
+/// Who made an app, by its own say: only Claktory and verified publishers
+/// are checked, so for any other app the name is only what it claims (an
+/// app can call its publisher "claktory").
+String publisherLine(AppTier tier, String publisher) => switch (tier) {
+  AppTier.APP_TIER_CLAKTORY || AppTier.APP_TIER_VERIFIED => 'By $publisher',
+  _ => "Says it's by $publisher",
+};
 
 /// Who vouches for an app: "Made by Claktory", "From a file, signed by its
 /// developer (ed25519:…)".
@@ -497,6 +534,36 @@ class _AppRowState extends State<AppRow> {
           Text('Setup', style: _heading(context, palette)),
           for (final item in app.setup) _SetupLine(app: app, item: item),
         ],
+        if (app.sources.isNotEmpty) ...[
+          const SizedBox(height: Space.m),
+          Text('It can read', style: _heading(context, palette)),
+          const SizedBox(height: Space.xs),
+          if (!app.sources.any((source) => source.granted))
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: Text(
+                'Turn on what ${app.name} can read. It can\'t read anything '
+                'else.',
+                style: caption,
+              ),
+            ),
+          // Each source on its own, none on until the person turns it on.
+          for (final source in app.sources)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: _SwitchLine(
+                label: source.label,
+                about: sourceReach(app.name, source, workspace),
+                note: source.reason,
+                value: source.granted,
+                onChanged: (on) => _run(
+                  () => backend.grantAppSource(app.id, source.id, granted: on),
+                ),
+              ),
+            ),
+          // Where what it reads can go.
+          if (app.hosts.isNotEmpty) _Warning(sendsTo(app.name, app.hosts)),
+        ],
         const SizedBox(height: Space.m),
         Text('Agents', style: _heading(context, palette)),
         const SizedBox(height: Space.xs),
@@ -531,7 +598,8 @@ class _AppRowState extends State<AppRow> {
         Text(
           [
             'Version ${app.version}',
-            if (app.publisher.isNotEmpty) 'By ${app.publisher}',
+            if (app.publisher.isNotEmpty)
+              publisherLine(app.tier, app.publisher),
             tierLine(app.tier, app.publisherKey),
             if (app.installedMs > 0)
               'Installed ${formatAge(app.installedMs.toInt(), DateTime.now())}',
@@ -828,6 +896,14 @@ class _AppAccessFormState extends State<AppAccessForm> {
           ? 'Give ${app.name} to an agent'
           : '${app.name} for ${agent.name}',
       fields: [
+        // Through the app, an agent reads what the app reads.
+        if (_read(app).isNotEmpty) ...[
+          _Warning(
+            'Through ${app.name}, ${name.isEmpty ? 'the agent' : name} can '
+            'also read ${_andList(_read(app))}.',
+          ),
+          const SizedBox(height: Space.l),
+        ],
         if (agent == null)
           Field(
             label: 'Agent',
@@ -940,10 +1016,14 @@ class _SwitchLine extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.note,
+    this.about,
     this.mono = false,
   });
 
   final String label;
+
+  /// What turning it on means, plainly, under the label, before [note].
+  final String? about;
   final String? note;
   final bool mono;
   final bool value;
@@ -974,6 +1054,12 @@ class _SwitchLine extends StatelessWidget {
                     color: onChanged == null ? palette.textMuted : palette.text,
                   ),
                 ),
+                if (about case final about? when about.isNotEmpty)
+                  Text(
+                    about,
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
                 if (note != null && note.isNotEmpty)
                   Text(
                     note,
@@ -1194,6 +1280,82 @@ class _Lines extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// The sources [app] may read now, by their labels.
+List<String> _read(AppInfo app) => [
+  for (final source in app.sources)
+    if (source.granted) source.label,
+];
+
+/// "A", "A and B", "A, B and C".
+String _andList(List<String> items) => items.length < 2
+    ? items.join()
+    : '${items.take(items.length - 1).join(', ')} and ${items.last}';
+
+/// What app [app] can read from [source], said plainly: Claktory's records
+/// hold every agent's conversations, the person's answers among them.
+String sourceReach(String app, AppDataSource source, Workspace workspace) {
+  if (source.kind == AppDataKind.APP_DATA_KIND_FACTORY_RECORDS ||
+      source.id == 'factory-records') {
+    return '$app can read all your agents\' conversations, including your '
+        'answers to their questions, and their tasks, checklists, monitors '
+        'and usage.';
+  }
+  if (source.agentId == '*') {
+    return '$app can read everything each agent you choose keeps in its '
+        'database.';
+  }
+  final agent =
+      [
+        for (final agent in workspace.agents)
+          if (agent.id == source.agentId) agent.name,
+      ].firstOrNull ??
+      source.agentId;
+  return '$app can read everything $agent keeps in its database.';
+}
+
+/// Where app [app] can send what it reads: its [hosts].
+String sendsTo(String app, List<String> hosts) =>
+    '$app can send anything it reads to ${_andList(hosts)}.';
+
+/// A source an app asks to read, in its install review: what it is, and
+/// the app's reason under it.
+class _SourceLine extends StatelessWidget {
+  const _SourceLine({required this.source, required this.reach});
+
+  final AppDataSource source;
+
+  /// What it holds, plainly ([sourceReach]).
+  final String reach;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            source.label,
+            style: TypeScale.of(context).body.copyWith(color: palette.text),
+          ),
+          Text(
+            reach,
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+          if (source.reason.isNotEmpty)
+            Text(
+              source.reason,
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
+            ),
+        ],
+      ),
     );
   }
 }

@@ -1,6 +1,8 @@
-import 'package:factory_app/controls.dart' show TextField;
+import 'package:factory_app/decision.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -37,15 +39,13 @@ void main() {
     await harness.show(tester);
     expect(find.text('Proposal to Rivet'), findsOneWidget);
     expect(find.text(_text), findsOneWidget);
-    await tester.tap(
-      find.ancestor(
-        of: find.text('A comment for Rivet, if you like'),
-        matching: find.byType(TextField),
-      ),
-    );
-    await tester.pump();
-    tester.testTextInput.enterText('Yes, do it ');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    // The comment is one tap away, under the buttons.
+    expect(find.text('A comment for Rivet, if you like'), findsNothing);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    expect(find.text('Rivet gets it with your answer.'), findsOneWidget);
+    await tester.enterText(_commentField, 'Yes, do it ');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await settle(tester);
     final decide = harness.last.decideProposal;
     expect(decide.agentId, 'a1');
@@ -54,7 +54,20 @@ void main() {
     expect(decide.comment, 'Yes, do it');
   });
 
-  testWidgets('Dismiss sends no comment', (tester) async {
+  testWidgets('Dismiss sends the comment too', (tester) async {
+    final harness = proposing();
+    await harness.show(tester);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(_commentField, 'Not now, next week');
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    final decide = harness.last.decideProposal;
+    expect(decide.approve, isFalse);
+    expect(decide.comment, 'Not now, next week');
+  });
+
+  testWidgets('Dismiss with nothing typed sends no comment', (tester) async {
     final harness = proposing();
     await harness.show(tester);
     await tester.tap(find.text('Dismiss'));
@@ -107,3 +120,9 @@ void main() {
     expect(find.textContaining('Dismissed'), findsOneWidget);
   });
 }
+
+/// The comment's field, once Add a comment is tapped.
+final _commentField = find.descendant(
+  of: find.byType(DecisionComment),
+  matching: find.byType(EditableText),
+);

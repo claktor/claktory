@@ -78,7 +78,8 @@ class ConversationPreview {
     required this.snippet,
   });
 
-  /// Its id in the export; empty when it had none.
+  /// Its id in the export; "#" and its place in the file when it had
+  /// none (or one another had).
   final String id;
 
   /// Its name, or empty.
@@ -95,6 +96,41 @@ class ConversationPreview {
   final String snippet;
 
   int get messages => fromYou + fromClaude;
+}
+
+/// One of a conversation's messages, whole: [role] "user" (the person)
+/// or "assistant" (Claude).
+class ImportedMessage {
+  const ImportedMessage({
+    required this.role,
+    required this.text,
+    required this.createdMs,
+  });
+
+  final String role;
+  final String text;
+
+  /// 0 when the export doesn't say.
+  final int createdMs;
+}
+
+/// A conversation the person chose, whole: its words, never its files.
+class ImportedConversation {
+  const ImportedConversation({
+    required this.id,
+    required this.title,
+    required this.createdMs,
+    required this.messages,
+    this.leftOutFiles = 0,
+  });
+
+  final String id;
+  final String title;
+  final int createdMs;
+  final List<ImportedMessage> messages;
+
+  /// Files attached to its messages, which don't come in.
+  final int leftOutFiles;
 }
 
 /// What an export holds, and what was left out of it.
@@ -132,16 +168,64 @@ ExportPreview readClaudeExport(
   ExportLimits limits = const ExportLimits(),
   void Function()? checkpoint,
 }) {
+  final (json, hash, account, voice, other) = _open(bytes, limits, checkpoint);
+  return ExportPreview(
+    conversations: [
+      for (final item in _items(json, limits, checkpoint)) item.preview,
+    ]..sort((a, b) => b.createdMs.compareTo(a.createdMs)),
+    sha256: hash,
+    account: account,
+    voice: voice,
+    other: other,
+  );
+}
+
+/// The conversations [ids] (ConversationPreview.id) of the export
+/// [bytes], whole, in the order of [ids]: what the person chose from its
+/// preview. Throws [ExportFailure]: [ExportProblem.unsupported] when the
+/// file isn't the one previewed ([sha256]) or holds none of them.
+List<ImportedConversation> readSelected(
+  Uint8List bytes, {
+  required String sha256,
+  required List<String> ids,
+  ExportLimits limits = const ExportLimits(),
+  void Function()? checkpoint,
+}) {
+  final (json, hash, _, _, _) = _open(bytes, limits, checkpoint);
+  if (hash != sha256) {
+    throw const ExportFailure(
+      ExportProblem.unsupported,
+      'not the file previewed',
+    );
+  }
+  final byId = {
+    for (final item in _items(json, limits, checkpoint))
+      item.preview.id: item.whole,
+  };
+  return [
+    for (final id in ids)
+      byId[id] ??
+          (throw ExportFailure(
+            ExportProblem.unsupported,
+            'no conversation $id',
+          )),
+  ];
+}
+
+/// [bytes]' conversations JSON, the file's SHA-256, and what else it
+/// held: account details, voice recordings, other files.
+(Uint8List, String, bool, int, int) _open(
+  Uint8List bytes,
+  ExportLimits limits,
+  void Function()? checkpoint,
+) {
   if (bytes.length > limits.maxInput) {
     throw const ExportFailure(ExportProblem.tooBig);
   }
   final hash = sha256.convert(bytes).toString();
   if (!BoundedZip.looksLikeZip(bytes)) {
     // The conversations' JSON on its own.
-    return ExportPreview(
-      conversations: _conversations(bytes, limits, checkpoint),
-      sha256: hash,
-    );
+    return (bytes, hash, false, 0, 0);
   }
   final BoundedZip zip;
   try {
@@ -179,16 +263,10 @@ ExportPreview readClaudeExport(
   } on FormatException catch (error) {
     throw ExportFailure(ExportProblem.unsafe, 'broken data: ${error.message}');
   }
-  return ExportPreview(
-    conversations: _conversations(json, limits, checkpoint),
-    sha256: hash,
-    account: account,
-    voice: voice,
-    other: other,
-  );
+  return (json, hash, account, voice, other);
 }
 
-List<ConversationPreview> _conversations(
+List<({ConversationPreview preview, ImportedConversation whole})> _items(
   Uint8List json,
   ExportLimits limits,
   void Function()? checkpoint,
@@ -208,7 +286,8 @@ List<ConversationPreview> _conversations(
     throw const ExportFailure(ExportProblem.tooBig, 'too many conversations');
   }
   final accounts = <String>{};
-  final previews = <ConversationPreview>[];
+  final ids = <String>{};
+  final items = <({ConversationPreview preview, ImportedConversation whole})>[];
   var messages = 0;
   for (final item in decoded) {
     checkpoint?.call();
@@ -229,30 +308,61 @@ List<ConversationPreview> _conversations(
     var you = 0;
     var claude = 0;
     var snippet = '';
+    var leftOut = 0;
+    final whole = <ImportedMessage>[];
     for (final message in list) {
       if (message is! Map) continue;
-      switch (message['sender']) {
-        case 'human':
-          you++;
-          if (snippet.isEmpty) snippet = _cut(_string(message['text']), 140);
-        case 'assistant':
-          claude++;
+      final text = _textOf(message);
+      final role = switch (message['sender']) {
+        'human' => 'user',
+        'assistant' => 'assistant',
+        _ => null,
+      };
+      if (role == null) continue;
+      if (role == 'user') {
+        you++;
+        if (snippet.isEmpty) snippet = _cut(text, 140);
+      } else {
+        claude++;
       }
+      // Files attached to it are left out: only its words come in.
+      for (final key in const ['attachments', 'files']) {
+        if (message[key] case final List files) leftOut += files.length;
+      }
+      whole.add(
+        ImportedMessage(
+          role: role,
+          text: text,
+          createdMs: _time(message['created_at']),
+        ),
+      );
     }
     messages += list.length;
     if (messages > limits.maxMessages) {
       throw const ExportFailure(ExportProblem.tooBig, 'too many messages');
     }
-    previews.add(
-      ConversationPreview(
-        id: _cut(_string(item['uuid']), 100),
-        title: _cut(_string(item['name']).trim(), 200),
-        createdMs: _time(item['created_at']),
-        fromYou: you,
-        fromClaude: claude,
-        snippet: snippet,
-      ),
+    // Its id, or where it is in the file when it has none (or one an
+    // earlier conversation has), so each can be chosen on its own.
+    final uuid = _cut(_string(item['uuid']), 100);
+    final id = uuid.isEmpty || !ids.add(uuid) ? '#${items.length}' : uuid;
+    final preview = ConversationPreview(
+      id: id,
+      title: _cut(_string(item['name']).trim(), 200),
+      createdMs: _time(item['created_at']),
+      fromYou: you,
+      fromClaude: claude,
+      snippet: snippet,
     );
+    items.add((
+      preview: preview,
+      whole: ImportedConversation(
+        id: preview.id,
+        title: preview.title,
+        createdMs: preview.createdMs,
+        messages: whole,
+        leftOutFiles: leftOut,
+      ),
+    ));
   }
   // Conversations from more than one account: an organization's export,
   // say. Not proof of whose they are, but reason enough to stop.
@@ -262,8 +372,18 @@ List<ConversationPreview> _conversations(
       '${accounts.length} accounts',
     );
   }
-  previews.sort((a, b) => b.createdMs.compareTo(a.createdMs));
-  return previews;
+  return items;
+}
+
+/// A message's words: its `text`, or (in newer exports) its `content`'s
+/// text parts.
+String _textOf(Map<Object?, Object?> message) {
+  final text = _string(message['text']);
+  if (text.isNotEmpty) return text;
+  return [
+    for (final part in message['content'] as List? ?? const [])
+      if (part is Map && part['type'] == 'text') _string(part['text']),
+  ].join('\n\n');
 }
 
 /// Throws when [json] nests deeper than [max], before it's decoded (the

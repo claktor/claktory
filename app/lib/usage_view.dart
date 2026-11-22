@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -511,7 +512,11 @@ class _UsageViewState extends State<UsageView> {
       ),
       if (report.series.isNotEmpty) ...[
         const SizedBox(height: Space.l),
-        UsageChart(series: report.series, hourly: _range == UsageRange.today),
+        UsageChart(
+          series: report.series,
+          hourly: _range == UsageRange.today,
+          agentsSinceMs: agentsCountedSince(report),
+        ),
       ],
       const SizedBox(height: Space.xl),
       const _Heading('By agent'),
@@ -571,6 +576,10 @@ const _weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 String _day(DateTime time) => '${_months[time.month - 1]} ${time.day}';
 
 String _hour(DateTime time) => '${time.hour.toString().padLeft(2, '0')}:00';
+
+String _minute(DateTime time) =>
+    '${time.hour.toString().padLeft(2, '0')}:'
+    '${time.minute.toString().padLeft(2, '0')}';
 
 /// A section's heading, in caption weight 500, faint.
 class _Heading extends StatelessWidget {
@@ -743,15 +752,68 @@ class _LineRow extends StatelessWidget {
   }
 }
 
-/// Tokens over time: a bar per hour or day, in `signal`, 72px tall at
-/// most, with the hovered (or touched) one's time and tokens above it.
+/// How many agents worked at once on average: one decimal under 10, ".0"
+/// dropped ("4.2", "1", "12"), "<0.1" for a sliver.
+String agentsAtOnce(double count) => count > 0 && count < 0.05
+    // A sliver, as a share's "<1%": never 0 beside agents that worked.
+    ? '<0.1'
+    : count < 10
+    ? count.toStringAsFixed(1).replaceFirst(RegExp(r'\.0$'), '')
+    : count.round().toString();
+
+/// A bucket's details, as the charts' caption says them while one is
+/// pointed at: "Tue Nov 18 · 4.2 agents at once on average · 9 worked ·
+/// 1.2M tokens" ([short], a phone's: "4.2 at once"). Agents are left out
+/// while the report has none ([agents] false: a backend that doesn't count
+/// them).
+String bucketDetails(
+  UsageBucket bucket,
+  String when, {
+  required bool agents,
+  bool short = false,
+}) {
+  final working = agentsAtOnce(bucket.workingAgents);
+  final one = working == '1';
+  return [
+    when,
+    if (agents) ...[
+      short
+          ? '$working at once'
+          : '$working ${one ? 'agent' : 'agents'} at once on average',
+      '${bucket.activeAgents} worked',
+    ],
+    '${formatTokens(totalTokens(bucket.tokens))} tokens',
+  ].join(' · ');
+}
+
+/// From when [report] counts agents working and worked: the later of when
+/// it began counting each (runs kept, calls counted by agent); 0 when it
+/// never began either.
+int agentsCountedSince(UsageReport report) =>
+    math.max(report.workingSinceMs.toInt(), report.agentsSinceMs.toInt());
+
+/// Agents working and tokens over time, on one time axis: a bar per hour
+/// or day. Agents working (how many at once on average) in `textMuted`,
+/// 40px tall at most, over tokens in `signal`, 72px; each under its label.
+/// Pointing at (or touching) a bar shows its details above both and
+/// lights the same bucket in each.
 class UsageChart extends StatefulWidget {
-  const UsageChart({super.key, required this.series, required this.hourly});
+  const UsageChart({
+    super.key,
+    required this.series,
+    required this.hourly,
+    this.agentsSinceMs = 0,
+  });
 
   final List<UsageBucket> series;
 
   /// Each bar is an hour (today) rather than a day.
   final bool hourly;
+
+  /// From when agents are counted ([agentsCountedSince]): buckets before it
+  /// have none because nothing was kept, so they say nothing of agents and
+  /// a line under the charts says from when.
+  final int agentsSinceMs;
 
   @override
   State<UsageChart> createState() => _UsageChartState();
@@ -778,44 +840,103 @@ class _UsageChartState extends State<UsageChart> {
     final palette = Palette.of(context);
     final series = widget.series;
     final hovered = _hovered;
+    // Counted at all: a backend that doesn't count agents has none in any
+    // bucket while tokens were used, and then shows only tokens.
+    final agents = series.any((b) => b.activeAgents > 0 || b.workingAgents > 0);
+    final since = widget.agentsSinceMs;
+    // Whether bucket [i] is counted: it ends after counting began.
+    bool counted(int i) {
+      if (since == 0) return true;
+      final next = i + 1 < series.length
+          ? series[i + 1].startMs.toInt()
+          : DateTime.now().millisecondsSinceEpoch;
+      return next > since;
+    }
+
     final caption = hovered == null
         ? '${_when(series.first)} – ${_when(series.last)}'
-        : '${_when(series[hovered])} · '
-              '${formatTokens(totalTokens(series[hovered].tokens))} tokens';
+        : bucketDetails(
+            series[hovered],
+            _when(series[hovered]),
+            agents: agents && counted(hovered),
+            short: isPhoneLayout(context),
+          );
+    final startsLate =
+        agents && since > 0 && series.first.startMs.toInt() < since;
+    final sinceTime = DateTime.fromMillisecondsSinceEpoch(since);
+    final label = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint);
+    Widget chart(List<double> values, double height, Color bar) => CustomPaint(
+      size: Size(double.infinity, height),
+      painter: _ChartPainter(
+        values: values,
+        hovered: hovered,
+        bar: bar,
+        track: palette.hairline,
+      ),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
           caption,
+          // VoiceOver reads a sliver as words.
+          semanticsLabel: caption.replaceAll('<0.1', 'under 0.1'),
           style: TypeScale.of(context).caption.copyWith(
             color: hovered == null ? palette.textFaint : palette.textMuted,
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
-        const SizedBox(height: Space.xs),
+        const SizedBox(height: Space.s),
         LayoutBuilder(
           builder: (context, constraints) => MouseRegion(
             onHover: (event) =>
                 _point(event.localPosition, constraints.maxWidth),
             onExit: (_) => setState(() => _hovered = null),
             child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onPanDown: (details) =>
                   _point(details.localPosition, constraints.maxWidth),
               onPanUpdate: (details) =>
                   _point(details.localPosition, constraints.maxWidth),
               onPanEnd: (_) => setState(() => _hovered = null),
-              child: CustomPaint(
-                size: Size(constraints.maxWidth, 72),
-                painter: _ChartPainter(
-                  values: [for (final b in series) totalTokens(b.tokens)],
-                  hovered: hovered,
-                  bar: palette.signal,
-                  track: palette.hairline,
-                ),
+              onPanCancel: () => setState(() => _hovered = null),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (agents) ...[
+                    Text('Agents working', style: label),
+                    const SizedBox(height: Space.xs),
+                    chart(
+                      [for (final b in series) b.workingAgents],
+                      40,
+                      palette.textMuted,
+                    ),
+                    const SizedBox(height: Space.m),
+                    Text('Tokens', style: label),
+                    const SizedBox(height: Space.xs),
+                  ],
+                  chart(
+                    [for (final b in series) totalTokens(b.tokens).toDouble()],
+                    72,
+                    palette.signal,
+                  ),
+                ],
               ),
             ),
           ),
         ),
+        // Earlier, nothing was kept: say so, rather than let empty bars
+        // pass for no agents working.
+        if (startsLate) ...[
+          const SizedBox(height: Space.xs),
+          Text(
+            widget.hourly
+                ? 'Agents working starts at ${_minute(sinceTime)}.'
+                : 'Agents working starts on ${_day(sinceTime)}.',
+            style: label,
+          ),
+        ],
       ],
     );
   }
@@ -829,7 +950,7 @@ class _ChartPainter extends CustomPainter {
     required this.track,
   });
 
-  final List<int> values;
+  final List<double> values;
   final int? hovered;
   final Color bar;
   final Color track;
@@ -841,12 +962,12 @@ class _ChartPainter extends CustomPainter {
       Offset(size.width, size.height - 0.5),
       Paint()..color = track,
     );
-    final most = values.fold(0, math.max);
+    final most = values.fold(0.0, math.max);
     if (most == 0 || values.isEmpty) return;
     final step = size.width / values.length;
     final gap = step > 6 ? 2.0 : (step > 3 ? 1.0 : 0.0);
     for (var i = 0; i < values.length; i++) {
-      if (values[i] == 0) continue;
+      if (values[i] <= 0) continue;
       final height = math.max(2.0, values[i] / most * (size.height - 1));
       final paint = Paint()
         ..color = hovered == null || hovered == i
@@ -872,15 +993,8 @@ class _ChartPainter extends CustomPainter {
   bool shouldRepaint(_ChartPainter old) =>
       old.hovered != hovered ||
       old.bar != bar ||
-      old.values.length != values.length ||
-      !_same(old.values, values);
-
-  static bool _same(List<int> a, List<int> b) {
-    for (var i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
-  }
+      old.track != track ||
+      !listEquals(old.values, values);
 }
 
 /// The ranges on a phone, as iOS's segmented control: a 44pt track in

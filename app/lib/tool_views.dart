@@ -743,6 +743,9 @@ class _SendLine extends StatelessWidget {
     final String result;
     if (!call.done || reached.isEmpty || reached.first.outcome.isEmpty) {
       result = '';
+    } else if (call.details['quiet'] == true) {
+      // Read whenever each next works: when doesn't matter, so one word.
+      result = 'Sent quietly';
     } else if (reached.every((r) => r.outcome == 'working')) {
       result = 'Queued';
     } else {
@@ -1156,6 +1159,7 @@ ChecklistStatus? _status(Object? name) => switch (name) {
   'blocked' => ChecklistStatus.CHECKLIST_STATUS_BLOCKED,
   'done' => ChecklistStatus.CHECKLIST_STATUS_DONE,
   'dropped' => ChecklistStatus.CHECKLIST_STATUS_DROPPED,
+  'parked' => ChecklistStatus.CHECKLIST_STATUS_PARKED,
   _ => null,
 };
 

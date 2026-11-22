@@ -655,6 +655,61 @@ pub(crate) fn default_map(place: &Place, target: &Target) -> Vec<(String, String
     map
 }
 
+/// The folder under the target's home where project folders from outside
+/// this computer's home folders go: named for this computer, with no spaces,
+/// since commands that name those paths are rewritten to the new ones.
+pub(crate) fn moved_from_dir(machine: &str) -> String {
+    let mut slug = String::new();
+    for c in machine.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if c == '\'' || c == '’' {
+            // "Matt's Mac" reads as matts-mac.
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() { "moved-from-another-computer".to_owned() } else { format!("moved-from-{slug}") }
+}
+
+/// Where each of `folders` outside this computer's home folders goes on the
+/// target, so a move never stops at one: under the target user's home, in
+/// `moved_from_dir`, keeping its whole path (/Volumes/Data/Assets becomes
+/// ~/moved-from-mac/Volumes/Data/Assets). One inside another goes with it.
+/// Empty when the target doesn't say where its home is.
+pub(crate) fn outside_map(place: &Place, target: &Target, folders: impl IntoIterator<Item = PathBuf>) -> Vec<(String, String)> {
+    let base = if target.user_home.is_empty() { &target.home } else { &target.user_home };
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let base = Path::new(base).join(moved_from_dir(crate::remote::machine_name()));
+    let mut outside: Vec<PathBuf> = folders
+        .into_iter()
+        .filter(|folder| folder.is_absolute() && folder.parent().is_some())
+        .filter(|folder| !folder.starts_with(place.home.root()) && !folder.starts_with(&place.user_home))
+        .collect();
+    outside.sort();
+    outside.dedup();
+    let mut map: Vec<(String, String)> = Vec::new();
+    for folder in outside {
+        if map.iter().any(|(from, _)| folder.starts_with(from)) {
+            continue;
+        }
+        let rest: PathBuf = folder.components().filter(|part| matches!(part, std::path::Component::Normal(_))).collect();
+        map.push((folder.display().to_string(), base.join(rest).display().to_string()));
+    }
+    map
+}
+
+/// The paths the move gives the target: `default_map`, then each of the
+/// tree's folders outside the home folders (`outside_map`).
+pub(crate) fn plan_map(place: &Place, target: &Target, tree: &Tree) -> Vec<(String, String)> {
+    let mut map = default_map(place, target);
+    map.extend(outside_map(place, target, tree.manifest.folders.iter().map(|folder| PathBuf::from(&folder.path))));
+    map
+}
+
 /// The commands the move's folders and agents' tasks need on the target.
 pub(crate) fn tools(tree: &Tree) -> Vec<String> {
     let mut tools = BTreeSet::new();
@@ -998,7 +1053,7 @@ async fn round(
                 person.redialing(&machine);
                 *link = mover.redial(REDIAL).await?;
                 person.redialed(&machine);
-                let map = default_map(place, &link.target);
+                let map = plan_map(place, &link.target, tree);
                 link.plan(tree, &map, &tools(tree)).await?;
             }
             done => return done,
@@ -1024,7 +1079,7 @@ pub(crate) async fn copy(
         person.round_started(n);
         let tree = prepare(place, options, export_id).await.map_err(Problem::Said)?;
         if n == first {
-            let checked = link.plan(&tree, &default_map(place, &link.target), &tools(&tree)).await?;
+            let checked = link.plan(&tree, &plan_map(place, &link.target, &tree), &tools(&tree)).await?;
             if !checked.problems.is_empty() {
                 return Err(Problem::Said(format!("{machine} can't take this Claktory: {}", checked.problems.join(" "))));
             }
@@ -1354,6 +1409,41 @@ mod tests {
 
     fn file(seen: &Seen, path: &str) -> Vec<u8> {
         seen.tree.get(path).cloned().flatten().unwrap_or_else(|| panic!("{path} wasn't moved"))
+    }
+
+    #[test]
+    fn folders_outside_the_home_folders_go_under_the_targets_home() {
+        assert_eq!(moved_from_dir("Matt’s MacBook Pro"), "moved-from-matts-macbook-pro");
+        assert_eq!(moved_from_dir("build-01.example.com"), "moved-from-build-01-example-com");
+        assert_eq!(moved_from_dir("…"), "moved-from-another-computer");
+        let place = Place {
+            home: Home::new(PathBuf::from("/Users/me/.factory")),
+            port: 0,
+            user_home: PathBuf::from("/Users/me"),
+            dev: true,
+            service: Service::None,
+        };
+        let target = Target { home: "/home/you/.factory".to_owned(), user_home: "/home/you".to_owned(), ..Target::default() };
+        let folders = [
+            "/Users/me/web",
+            "/Users/me/.factory/workspace/site",
+            "/Volumes/Data/Assets/sub",
+            "/Volumes/Data/Assets",
+            "/opt/site",
+            "/",
+            "relative",
+        ];
+        let map = outside_map(&place, &target, folders.map(PathBuf::from));
+        let under = format!("/home/you/{}", moved_from_dir(crate::remote::machine_name()));
+        assert_eq!(
+            map,
+            [
+                ("/Volumes/Data/Assets".to_owned(), format!("{under}/Volumes/Data/Assets")),
+                ("/opt/site".to_owned(), format!("{under}/opt/site")),
+            ]
+        );
+        // A target that doesn't say where its home is gets none.
+        assert!(outside_map(&place, &Target::default(), folders.map(PathBuf::from)).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

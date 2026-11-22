@@ -25,8 +25,15 @@ import 'scope.dart';
 import 'state.dart';
 import 'selection.dart';
 
-/// Width of the extension bar between the sidebar and the content.
+/// Width of the extension bar between the sidebar and the content, with
+/// a pointer (a Mac); [extensionBarWidthOf] is the width where it is.
 const extensionBarWidth = 40.0;
+
+/// The extension bar's width where [context] is: [extensionBarWidth] with
+/// a pointer, a finger's target where touch comes first (an iPad, an
+/// Android tablet's panes), so its glyph buttons fit it whole.
+double extensionBarWidthOf(BuildContext context) =>
+    touchFirst(context) ? Metrics.of(context).target : extensionBarWidth;
 
 /// Width of an extension's panel on the right by default; the person can
 /// drag it between [panelMinWidth] and [panelMaxWidth]
@@ -119,7 +126,7 @@ class ExtensionBar extends StatelessWidget {
         border: Border(right: BorderSide(color: palette.hairline)),
       ),
       child: SizedBox(
-        width: extensionBarWidth,
+        width: extensionBarWidthOf(context),
         child: Column(
           children: [
             const TitleSpace(),
@@ -338,10 +345,71 @@ class _ChecklistViewState extends State<ChecklistView> {
   final _finished = <int, bool>{};
   var _jumpScheduled = false;
 
+  /// Each item's place, to scroll to it when it's pointed at.
+  final _itemKeys = <int, GlobalKey>{};
+
+  /// What points at items (Needs you's Show in checklist, an agent's
+  /// highlight), and the last pointing this view went to.
+  ValueNotifier<({List<String> keys, DateTime at})?>? _pointedAt;
+  DateTime? _wentTo;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final pointedAt = AppScope.of(context).highlights.pointedAt;
+    if (pointedAt != _pointedAt) {
+      _pointedAt?.removeListener(_pointed);
+      _pointedAt = pointedAt..addListener(_pointed);
+    }
+  }
+
+  void _pointed() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _pointedAt?.removeListener(_pointed);
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// The item of this checklist pointed at in the last few seconds and not
+  /// gone to yet, if any: the view stops following its end for it.
+  int? _target(Set<int> ids) {
+    final pointed = _pointedAt?.value;
+    if (pointed == null || pointed.at == _wentTo) return null;
+    if (DateTime.now().difference(pointed.at) > const Duration(seconds: 10)) {
+      return null;
+    }
+    final prefix = 'checklist_item:${widget.agentId}#';
+    for (final key in pointed.keys) {
+      if (!key.startsWith(prefix)) continue;
+      final id = int.tryParse(key.substring(prefix.length));
+      if (id != null && ids.contains(id)) {
+        _wentTo = pointed.at;
+        return id;
+      }
+    }
+    return null;
+  }
+
+  /// Scrolls item [id] into view once this frame is laid out. One not
+  /// built yet (far down a long list) is near [fraction] of the way: the
+  /// view goes there first and looks again.
+  void _goTo(int id, double fraction, {int tries = 4}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final place = _itemKeys[id]?.currentContext;
+      if (place != null) {
+        Scrollable.ensureVisible(place, alignment: 0.2);
+        return;
+      }
+      if (tries == 0) return;
+      final position = _scroll.position;
+      position.jumpTo(position.maxScrollExtent * fraction.clamp(0.0, 1.0));
+      _goTo(id, fraction, tries: tries - 1);
+    });
   }
 
   /// Puts the view at the bottom once this frame is laid out.
@@ -433,11 +501,12 @@ class _ChecklistViewState extends State<ChecklistView> {
         if (days[day]!.any(finished))
           (day, days[day]!.where(finished).toList()..sort(byAdded)),
     ];
-    // Outstanding: in progress first, then blocked, then open, each oldest
-    // first.
+    // Outstanding: in progress first, then blocked, then open, then
+    // parked, each oldest first.
     int rank(ChecklistItem item) => switch (item.status) {
       ChecklistStatus.CHECKLIST_STATUS_IN_PROGRESS => 0,
       ChecklistStatus.CHECKLIST_STATUS_BLOCKED => 1,
+      ChecklistStatus.CHECKLIST_STATUS_PARKED => 3,
       _ => 2,
     };
     final outstanding =
@@ -467,16 +536,31 @@ class _ChecklistViewState extends State<ChecklistView> {
         store: highlights,
         matches: (key) => key == 'checklist_item:${widget.agentId}#${item.id}',
         side: AxisDirection.left,
-        child: _Item(
-          item: item,
-          store: store,
-          added: added,
-          agentId: widget.agentId,
-          now: now,
-          goal: goalText[item.goal],
+        child: KeyedSubtree(
+          key: _itemKeys.putIfAbsent(item.id, GlobalKey.new),
+          child: _Item(
+            item: item,
+            store: store,
+            added: added,
+            agentId: widget.agentId,
+            now: now,
+            goal: goalText[item.goal],
+          ),
         ),
       ),
     );
+    // An item pointed at (Show in checklist) is scrolled to, and the view
+    // stops following its end, so it stays in view.
+    final order = [
+      for (final (_, finishedThen) in history) ...finishedThen,
+      ...outstanding,
+    ];
+    _itemKeys.removeWhere((id, _) => !order.any((item) => item.id == id));
+    if (_target({for (final item in order) item.id}) case final id?) {
+      _pinned = false;
+      final index = order.indexWhere((item) => item.id == id);
+      _goTo(id, order.length < 2 ? 0 : index / (order.length - 1));
+    }
     if (_pinned) _followSoon();
     final caption = TypeScale.of(context).caption
         .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500);
@@ -604,8 +688,8 @@ String doneLabel(List<ChecklistItem> items) {
 }
 
 /// The whole checklist's progress, above the list: a thin meter and how
-/// many items are done, in progress, blocked and open. Dropped items don't
-/// count.
+/// many items are done, in progress, blocked, open and parked. Dropped
+/// items don't count.
 class _Progress extends StatelessWidget {
   const _Progress({required this.items});
 
@@ -619,9 +703,10 @@ class _Progress extends StatelessWidget {
     final done = count(ChecklistStatus.CHECKLIST_STATUS_DONE);
     final working = count(ChecklistStatus.CHECKLIST_STATUS_IN_PROGRESS);
     final blocked = count(ChecklistStatus.CHECKLIST_STATUS_BLOCKED);
+    final parked = count(ChecklistStatus.CHECKLIST_STATUS_PARKED);
     final dropped = count(ChecklistStatus.CHECKLIST_STATUS_DROPPED);
     final counted = items.length - dropped;
-    final open = counted - done - working - blocked;
+    final open = counted - done - working - blocked - parked;
     final style = TypeScale.of(context).caption
         .copyWith(color: palette.textMuted);
     return Container(
@@ -638,6 +723,7 @@ class _Progress extends StatelessWidget {
                 if (working > 0) '$working in progress',
                 if (blocked > 0) '$blocked blocked',
                 if (open > 0) '$open open',
+                if (parked > 0) '$parked parked',
               ].join(' · '),
               style: style,
             ),
@@ -1082,57 +1168,176 @@ String blockedFor(Duration duration) {
   return duration.inDays == 1 ? '1 day' : '${duration.inDays} days';
 }
 
-/// What a blocked item waits on (ChecklistItem.blocked_on): "Blocked on
-/// the CI queue"; on the person with no question filed by its owning
-/// agent, in signal, "Blocked on you for 2 days · not asked yet"; with one,
-/// "Blocked on you · See question", which opens [agentId]'s conversation at
-/// the card waiting there.
+/// "at 14:00", or "24 Nov at 14:00" on another day than [now]'s.
+String atTime(int ms, DateTime now) {
+  final time = DateTime.fromMillisecondsSinceEpoch(ms);
+  final clock = logTime(time, now: time);
+  final sameDay =
+      time.year == now.year && time.month == now.month && time.day == now.day;
+  return sameDay
+      ? 'at $clock'
+      : '${time.day} ${_months[time.month - 1]} at $clock';
+}
+
+/// When a parked item goes back to open on its own (its retry_at_ms), in
+/// words: "Resumes at 14:00"; '' when it has no time, or the time passed.
+String resumesWords(ChecklistItem item, DateTime now) {
+  final ms = item.retryAtMs.toInt();
+  if (item.status != ChecklistStatus.CHECKLIST_STATUS_PARKED ||
+      ms <= now.millisecondsSinceEpoch) {
+    return '';
+  }
+  return 'Resumes ${atTime(ms, now)}';
+}
+
+/// What a blocked item waits on, in words: [text], and whether it stands
+/// out (waiting on the person with nothing asked, or left with them), and
+/// whether "See question" follows (a card for it waits).
+typedef WaitingWords = ({String text, bool standsOut, bool seeQuestion});
+
+/// The words for an item blocked on [kind] ([blockedOn] for one from
+/// before kinds, "person" or the blocker's words). [ref] names the agent
+/// or "agent#item" it waits on; [agentId] is the agent whose item it is
+/// (its owner, or its checklist's agent).
+WaitingWords waitingWords({
+  required BlockedKind kind,
+  required String blockedOn,
+  required String ref,
+  required int sinceMs,
+  required int retryAtMs,
+  required int reaskAtMs,
+  required int dismissedMs,
+  required bool hasPendingAsk,
+  required String agentId,
+  required String checklistAgentId,
+  required Workspace workspace,
+  required DateTime now,
+}) {
+  String nameOf(String id) =>
+      workspace.agents.where((agent) => agent.id == id).firstOrNull?.name ?? id;
+  String at(int ms) => atTime(ms, now);
+
+  final person =
+      kind == BlockedKind.BLOCKED_KIND_PERSON_DECISION ||
+      kind == BlockedKind.BLOCKED_KIND_PERSON_ACTION ||
+      (kind == BlockedKind.BLOCKED_KIND_UNSPECIFIED && blockedOn == 'person');
+  if (!person) {
+    final text = switch (kind) {
+      // By the item's words (blocked_on), never its number.
+      BlockedKind.BLOCKED_KIND_ITEM => () {
+        final hash = ref.indexOf('#');
+        final agent = hash < 0 ? ref : ref.substring(0, hash);
+        final what = shortened(blockedOn, 32);
+        return agent.isEmpty || agent == checklistAgentId
+            ? 'Waiting for: $what'
+            : 'Waiting for ${nameOf(agent)}: $what';
+      }(),
+      BlockedKind.BLOCKED_KIND_AGENT => 'Waiting for ${nameOf(ref)}',
+      BlockedKind.BLOCKED_KIND_EXTERNAL =>
+        'Waiting for ${blockedOn.isEmpty ? 'something outside' : blockedOn}'
+            '${retryAtMs > now.millisecondsSinceEpoch ? ' · checks again ${at(retryAtMs)}' : ''}',
+      _ => 'Blocked on $blockedOn',
+    };
+    return (text: text, standsOut: false, seeQuestion: false);
+  }
+  // How long up front: "Waiting 2 days for your decision".
+  final waited = sinceMs == 0
+      ? ''
+      : blockedFor(
+          now.difference(DateTime.fromMillisecondsSinceEpoch(sinceMs)),
+        );
+  String leadFor(String duration) => switch (kind) {
+    BlockedKind.BLOCKED_KIND_PERSON_DECISION =>
+      duration.isEmpty
+          ? 'Waiting for your decision'
+          : 'Waiting $duration for your decision',
+    BlockedKind.BLOCKED_KIND_PERSON_ACTION =>
+      duration.isEmpty
+          ? 'Waiting for you to act'
+          : 'Waiting $duration for you to act',
+    _ => duration.isEmpty ? 'Blocked on you' : 'Blocked on you for $duration',
+  };
+  if (hasPendingAsk) {
+    return (text: leadFor(''), standsOut: false, seeQuestion: true);
+  }
+  final lead = leadFor(waited);
+  if (dismissedMs > 0) {
+    // Dismissed: the agent decides meanwhile, and asks again no sooner
+    // than a day later, when it still needs the person.
+    final left = 'you left it to ${nameOf(agentId)}';
+    return (
+      text: reaskAtMs > 0
+          ? '$lead · $left · asks again ${at(reaskAtMs)}'
+          : '$lead · $left',
+      standsOut: false,
+      seeQuestion: false,
+    );
+  }
+  if (reaskAtMs > 0) {
+    return (
+      text: '$lead · asks again ${at(reaskAtMs)}',
+      standsOut: false,
+      seeQuestion: false,
+    );
+  }
+  return (text: '$lead · not asked yet', standsOut: true, seeQuestion: false);
+}
+
+/// [text] cut at a word to at most [max] characters, with "…" when cut.
+String shortened(String text, int max) {
+  if (text.length <= max) return text;
+  final cut = text.lastIndexOf(' ', max);
+  return '${text.substring(0, cut > 0 ? cut : max).trimRight()}…';
+}
+
+/// What a blocked item waits on ([waitingWords]): in `textMuted`, or in
+/// signal when it stands out; with a question waiting, "· See question",
+/// which opens [agentId]'s conversation at the card waiting there.
 class _BlockedOn extends StatelessWidget {
   const _BlockedOn({
     required this.item,
     required this.agentId,
+    required this.checklistAgentId,
     required this.now,
   });
 
   final ChecklistItem item;
   final String agentId;
+  final String checklistAgentId;
   final DateTime now;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final caption = TypeScale.of(context).caption;
-    if (item.blockedOn != 'person') {
-      return Text(
-        'Blocked on ${item.blockedOn}',
-        style: caption.copyWith(color: palette.textMuted),
-      );
-    }
-    final since = item.blockedSinceMs.toInt();
-    final waited = since == 0
-        ? null
-        : blockedFor(
-            now.difference(DateTime.fromMillisecondsSinceEpoch(since)),
-          );
-    final lead = Text(
-      'Blocked on you',
-      style: caption.copyWith(color: palette.textMuted),
-    );
-    if (!item.hasPendingAsk) {
-      return Text(
-        waited == null
-            ? 'Blocked on you · not asked yet'
-            : 'Blocked on you for $waited · not asked yet',
-        style: caption.copyWith(color: palette.signal),
-      );
-    }
     final backend = AppScope.of(context);
+    final words = waitingWords(
+      kind: item.blockedKind,
+      blockedOn: item.blockedOn,
+      ref: item.blockedRef,
+      sinceMs: item.blockedSinceMs.toInt(),
+      retryAtMs: item.retryAtMs.toInt(),
+      reaskAtMs: item.reaskAtMs.toInt(),
+      dismissedMs: item.dismissedMs.toInt(),
+      hasPendingAsk: item.hasPendingAsk,
+      agentId: agentId,
+      checklistAgentId: checklistAgentId,
+      workspace: backend.workspace.workspace,
+      now: now,
+    );
+    final text = Text(
+      words.text,
+      style: caption.copyWith(
+        color: words.standsOut ? palette.signal : palette.textMuted,
+      ),
+    );
+    if (!words.seeQuestion) return text;
     final agent = backend.workspace.agent(agentId);
     final waiting = agent?.waitingSeqs.firstOrNull;
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        lead,
+        text,
         Text(' · ', style: caption.copyWith(color: palette.textMuted)),
         Semantics(
           link: true,
@@ -1278,7 +1483,9 @@ class _ItemState extends State<_Item> {
                     // long and whether they were asked; else the blocker.
                     if (item.status ==
                             ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
-                        item.blockedOn.isNotEmpty)
+                        (item.blockedOn.isNotEmpty ||
+                            item.blockedKind !=
+                                BlockedKind.BLOCKED_KIND_UNSPECIFIED))
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
                         child: _BlockedOn(
@@ -1286,11 +1493,24 @@ class _ItemState extends State<_Item> {
                           agentId: item.owner.isEmpty
                               ? widget.agentId
                               : item.owner,
+                          checklistAgentId: widget.agentId,
                           now: widget.now,
                         ),
                       ),
-                    if (item.status ==
-                            ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
+                    // A parked item's time to go back to open, if it has one.
+                    if (resumesWords(item, widget.now).isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          resumesWords(item, widget.now),
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textMuted),
+                        ),
+                      ),
+                    if ((item.status ==
+                                ChecklistStatus.CHECKLIST_STATUS_BLOCKED ||
+                            item.status ==
+                                ChecklistStatus.CHECKLIST_STATUS_PARKED) &&
                         item.note.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
@@ -1498,8 +1718,8 @@ class _LogLine extends StatelessWidget {
 }
 
 /// A 14px mark for an item's status: an empty ring when open, a half-filled
-/// signal ring while in progress, a paused ring while blocked, a check when
-/// done, a struck ring when dropped.
+/// signal ring while in progress, a paused ring while blocked, a faint ring
+/// with a dot while parked, a check when done, a struck ring when dropped.
 class StatusMark extends StatelessWidget {
   const StatusMark({super.key, required this.status});
 
@@ -1516,7 +1736,8 @@ class StatusMark extends StatelessWidget {
           status: status,
           color: switch (status) {
             ChecklistStatus.CHECKLIST_STATUS_IN_PROGRESS => palette.signal,
-            ChecklistStatus.CHECKLIST_STATUS_DROPPED => palette.textFaint,
+            ChecklistStatus.CHECKLIST_STATUS_DROPPED ||
+            ChecklistStatus.CHECKLIST_STATUS_PARKED => palette.textFaint,
             _ => palette.textMuted,
           },
         ),
@@ -1573,6 +1794,9 @@ class _StatusPainter extends CustomPainter {
           Offset(size.width * 0.7, size.height / 2),
           stroke,
         );
+      case ChecklistStatus.CHECKLIST_STATUS_PARKED:
+        // Set aside: a dot at its centre.
+        canvas.drawCircle(center, 1.75, Paint()..color = color);
       default:
         break;
     }
@@ -1586,6 +1810,7 @@ class _StatusPainter extends CustomPainter {
 String statusLabel(ChecklistStatus status) => switch (status) {
   ChecklistStatus.CHECKLIST_STATUS_IN_PROGRESS => 'In progress',
   ChecklistStatus.CHECKLIST_STATUS_BLOCKED => 'Blocked',
+  ChecklistStatus.CHECKLIST_STATUS_PARKED => 'Parked',
   ChecklistStatus.CHECKLIST_STATUS_DONE => 'Done',
   ChecklistStatus.CHECKLIST_STATUS_DROPPED => 'Dropped',
   _ => 'Open',

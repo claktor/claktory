@@ -257,8 +257,10 @@ fn text(report: &Report) -> String {
     if traffic.messages > 0 {
         let _ = writeln!(
             out,
-            "Busiest: {}, sent {} of them by {} agent{}; {} touch it, {} touch another lead, {} are between the rest.",
+            "Busiest: {}, in {} of them (it sent {}, and received {} from {} agent{}); {} touch it, {} touch another lead, {} are between the rest.",
             traffic.hub,
+            traffic.hub_sent + traffic.hub_received,
+            traffic.hub_sent,
             traffic.hub_received,
             traffic.hub_senders,
             if traffic.hub_senders == 1 { "" } else { "s" },
@@ -270,6 +272,13 @@ fn text(report: &Report) -> String {
         for share in traffic.agents.iter().take(15) {
             let _ = writeln!(out, "{} | {} | {} | {}", share.agent, share.sent, share.received, pct(share.share));
         }
+    }
+    if let Some(known) = traffic.provenance.as_ref().filter(|known| known.recorded > 0 || known.quiet_copies > 0) {
+        let _ = writeln!(
+            out,
+            "Provenance, for the {} recorded with it: {} sends; {} say which message they answer; {} sent as handoffs (as their senders said); {} quiet copies to leads. A message its sender's run read before sending is context, not a confirmed answer.",
+            known.recorded, known.sends, known.answers, known.handoffs, known.quiet_copies
+        );
     }
 
     out.push_str("\nQ4 By day: day | agent messages | person's | agents active | runs | short | items done | cards | agent messages per item done:\n");
@@ -321,7 +330,7 @@ fn text(report: &Report) -> String {
     let cards = &report.cards;
     let _ = writeln!(
         out,
-        "\nQ7 The person's cards: {} raised ({:.1} a day), {} decided, {} dismissed; decided in {} min (p50), {} min (p90).",
+        "\nQ7 The person's cards: {} raised ({:.1} a day), {} decided, {} dismissed (questions a /clear closed unseen count as neither); decided in {} min (p50), {} min (p90).",
         cards.raised,
         cards.per_day,
         cards.decided,

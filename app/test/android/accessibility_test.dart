@@ -447,6 +447,9 @@ void main() {
     expect(data.flagsCollection.isEnabled, Tristate.isTrue);
     _action(tester, 'Connect');
     await pumpFrames(tester);
+    // A code asks first (confirmPairing): its Connect, announced alone.
+    _action(tester, 'Connect');
+    await pumpFrames(tester);
     expect(harness.connections.current?.code, code);
   }, variant: android);
 
@@ -634,6 +637,9 @@ void main() {
         await tester.pump();
         await tester.ensureVisible(find.text('Connect'));
         await pumpFrames(tester);
+        _action(tester, 'Connect');
+        await pumpFrames(tester);
+        // A code asks first (confirmPairing): its Connect, announced alone.
         _action(tester, 'Connect');
         await pumpFrames(tester);
         expect(harness.connections.current?.code, code);

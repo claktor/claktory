@@ -7,6 +7,9 @@ use crate::protocol::{self, *};
 
 /// Sign-ins an IP may start a day.
 pub const SIGN_INS_PER_IP: u32 = 30;
+/// Signed requests a Claktory's backend key, or a signed-in device's
+/// account key, may make a minute, from any address.
+pub const KEY_PER_MINUTE: u32 = 240;
 
 /// What a sign-in may make of the limits: per email 5 an hour and 20 a day,
 /// per IP 30 a day (people behind one address, at a meetup or an office,
@@ -184,6 +187,7 @@ pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Claktor
     let claktory = db::claktory_by_token(&service.db(), token.trim())?.ok_or_else(ApiError::unauthorized)?;
     let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
     signed_by(service, call, &key, ApiError::unauthorized)?;
+    service.verified(call, &claktory.backend_key)?;
     if claktory.revoked_at.is_some() {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,

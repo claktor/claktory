@@ -19,6 +19,16 @@
 #     environment or ~/.appstoreconnect/claktory.env.
 # Without both, it leaves the release signed ad hoc, as built, and says so.
 #
+# With the app's Developer ID provisioning profile (CLAKTORY_MAC_PROFILE, or
+# ~/.appstoreconnect/claktory-mac.provisionprofile when it's there), the app
+# also gets Keychain Sharing: the profile goes in as embedded.provisionprofile
+# and the app's entitlements gain its application identifier, its team and
+# one keychain group, TEAM.<the app's bundle id>, which macOS honours only
+# with that profile (the data-protection keychain). The profile must be for
+# exactly this app and team, signed for this identity's certificate, and
+# unexpired. None of it changes the app's designated requirement, which
+# the Keychain items it already has trust.
+#
 # --dry-run signs with the Developer ID (only the identity is needed) and
 # checks the signatures, but sends nothing to Apple: it says what it would
 # send. Try it on a copy, never on a published release.
@@ -59,7 +69,11 @@ if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
   # The helpers went into the app after Flutter signed it: seal them in
   # again, inside out, so the app verifies (the online installer checks).
   for helper in "$APP/Contents/Helpers/"*; do
-    [[ -e "$helper" ]] && codesign --force --sign - "$helper"
+    [[ -e "$helper" ]] || continue
+    case "$(basename "$helper")" in
+      claktory-browser-host) codesign --force --sign - --identifier com.claktory.browser-host "$helper" ;;
+      *) codesign --force --sign - "$helper" ;;
+    esac
   done
   codesign --force --sign - --preserve-metadata=entitlements,requirements,flags "$APP"
   codesign --verify --deep --strict "$APP"
@@ -85,7 +99,7 @@ sign --identifier dev.factory.factoryd "$DIR/factoryd"
 # The apps host compiles apps to machine code as it loads them, which the
 # hardened runtime allows only with its entitlement (scripts/claktory-apps.entitlements).
 if [[ -n "$APPS_HOST" ]]; then
-  sign --identifier dev.factory.claktory-apps --entitlements "$ROOT/scripts/claktory-apps.entitlements" "$APPS_HOST"
+  sign --identifier dev.factory.claktory-apps --entitlements "${SRC_ROOT:-$ROOT}/scripts/claktory-apps.entitlements" "$APPS_HOST"
   codesign --verify --strict "$APPS_HOST"
 fi
 # The speech host: no entitlements (its Metal library is embedded; no JIT).
@@ -111,7 +125,49 @@ if [[ -d "$HELPERS" ]]; then
     ditto "$SUPERVISOR" "$HELPERS/Claktory Agents.app"
   fi
 fi
-sign --entitlements "$ROOT/app/macos/Runner/Release.entitlements" "$APP"
+# The browser helper (scripts/lib.sh add_browser_host), when the release
+# has it: its fixed identifier is what the app's requirement for it names
+# (with this team), and the helper checks the app the same way.
+if [[ -f "$HELPERS/claktory-browser-host" ]]; then
+  sign --identifier com.claktory.browser-host "$HELPERS/claktory-browser-host"
+  codesign --verify --strict "$HELPERS/claktory-browser-host"
+fi
+ENTITLEMENTS="${SRC_ROOT:-$ROOT}/app/macos/Runner/Release.entitlements"
+PROFILE="${CLAKTORY_MAC_PROFILE:-}"
+[[ -n "$PROFILE" || ! -f "$HOME/.appstoreconnect/claktory-mac.provisionprofile" ]] || PROFILE="$HOME/.appstoreconnect/claktory-mac.provisionprofile"
+if [[ -n "$PROFILE" ]]; then
+  PROFILE_WORK="$(mktemp -d)"
+  security cms -D -i "$PROFILE" >"$PROFILE_WORK/profile.plist" 2>/dev/null || { echo "$PROFILE isn't a provisioning profile" >&2; exit 1; }
+  BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+  TEAM="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_WORK/profile.plist")"
+  [[ "$IDENTITY" == *"($TEAM)" ]] || { echo "the Mac profile is for another team than $IDENTITY" >&2; exit 1; }
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$PROFILE_WORK/profile.plist")" == "$TEAM.$BUNDLE_ID" ]] ||
+    { echo "the Mac profile isn't for $BUNDLE_ID" >&2; exit 1; }
+  /usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' "$PROFILE_WORK/profile.plist" 2>/dev/null | grep -qx true ||
+    { echo "the Mac profile isn't a Developer ID one (it doesn't provision all devices)" >&2; exit 1; }
+  EXPIRES="$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' "$PROFILE_WORK/profile.plist")"
+  (( $(date -j -f '%a %b %d %T %Z %Y' "$EXPIRES" +%s) > $(date +%s) + 86400 )) || { echo "the Mac profile expires $EXPIRES: make a new one" >&2; exit 1; }
+  # Signed for this identity's certificate.
+  security find-certificate -c "${IDENTITY#Developer ID Application: }" -Z 2>/dev/null | sed -n 's/^SHA-1 hash: //p' | head -1 >"$PROFILE_WORK/ours"
+  found=false
+  for ((i = 0; ; i++)); do
+    /usr/libexec/PlistBuddy -c "Print :DeveloperCertificates:$i" "$PROFILE_WORK/profile.plist" >"$PROFILE_WORK/cert" 2>/dev/null || break
+    [[ "$(openssl x509 -inform DER -in "$PROFILE_WORK/cert" -noout -fingerprint -sha1 2>/dev/null | sed 's/.*=//; s/://g')" == "$(cat "$PROFILE_WORK/ours")" ]] && found=true
+  done
+  $found || { echo "the Mac profile isn't signed for $IDENTITY's certificate" >&2; exit 1; }
+  cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+  cp "$ENTITLEMENTS" "$PROFILE_WORK/app.entitlements"
+  /usr/libexec/PlistBuddy \
+    -c "Add :com.apple.application-identifier string $TEAM.$BUNDLE_ID" \
+    -c "Add :com.apple.developer.team-identifier string $TEAM" \
+    -c 'Add :keychain-access-groups array' \
+    -c "Add :keychain-access-groups: string $TEAM.$BUNDLE_ID" \
+    "$PROFILE_WORK/app.entitlements" >/dev/null
+  ENTITLEMENTS="$PROFILE_WORK/app.entitlements"
+  echo "with the Mac profile: Keychain Sharing for $BUNDLE_ID (expires $EXPIRES)"
+fi
+sign --entitlements "$ENTITLEMENTS" "$APP"
+[[ -z "${PROFILE_WORK:-}" ]] || rm -rf "$PROFILE_WORK"
 
 codesign --verify --strict --deep "$APP"
 codesign --verify --strict "$DIR/factoryd"

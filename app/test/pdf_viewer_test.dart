@@ -1,0 +1,356 @@
+// The Mac's PDF viewer (viewers/pdf.dart): a "pdf" pane on a Mac reads the
+// file in ranges from one version into the render cache, then shows it in
+// the native viewer (app/macos/Runner/PaperViewer.swift); the header says
+// which page, Find… finds, and a link asks before it opens.
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:factory_app/ipad/ink_bridge.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/viewers/pdf.dart';
+import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'harness.dart';
+import 'panes_test.dart' show beside, showPanes;
+
+const _path = '/w/paper.pdf';
+
+FileContent _pdf(String body) {
+  final bytes = utf8.encode('%PDF-1.7\n$body');
+  return FileContent(
+    path: _path,
+    mime: 'application/pdf',
+    size: Int64(bytes.length),
+    data: bytes,
+    sha256: sha256.convert(bytes).toString(),
+  );
+}
+
+/// The app's render cache channel: what it kept.
+class _Cache {
+  _Cache() {
+    InkRenderCache.channel = const MethodChannel('test/pdf-cache');
+    _messenger.setMockMethodCallHandler(InkRenderCache.channel, (call) async {
+      final args = (call.arguments as Map?)?.cast<String, Object?>() ?? {};
+      calls.add(call.method);
+      switch (call.method) {
+        case 'cacheLookup':
+          return <String, Object?>{'file': null};
+        case 'cacheBegin':
+          _writing = [];
+          _sha = args['sha256'] as String;
+          return {'token': 't'};
+        case 'cacheAppend':
+          _writing.addAll(args['bytes'] as Uint8List);
+          return null;
+        case 'cacheFinish':
+          if (sha256.convert(_writing).toString() != _sha) {
+            throw PlatformException(code: 'hash_mismatch');
+          }
+          kept = utf8.decode(_writing);
+          return {'file': '/cache/$_sha/paper.pdf'};
+      }
+      return null;
+    });
+    addTearDown(() {
+      _messenger.setMockMethodCallHandler(InkRenderCache.channel, null);
+      InkRenderCache.channel = const MethodChannel('claktory/ink');
+    });
+  }
+
+  final calls = <String>[];
+  var _writing = <int>[];
+  var _sha = '';
+  String? kept;
+}
+
+TestDefaultBinaryMessenger get _messenger =>
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+/// The native viewer: the views made, and what each was asked.
+class _Native {
+  _Native() {
+    _messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method != 'create') return null;
+      final args = call.arguments as Map<Object?, Object?>;
+      made.add(args);
+      final id = args['id'] as int;
+      _messenger.setMockMethodCallHandler(MethodChannel('claktory/ink/$id'), (
+        call,
+      ) async {
+        calls.add(call);
+        final a = (call.arguments as Map?)?.cast<String, Object?>() ?? {};
+        switch (call.method) {
+          case 'search':
+            final query = a['query'] as String;
+            return {
+              'query': query,
+              'matches': query.isEmpty
+                  ? []
+                  : [
+                      for (final page in [2, 5])
+                        {
+                          'page_1based': page,
+                          'region': {'x': 0.1, 'y': 0.2, 'w': 0.3, 'h': 0.04},
+                          'text': 'the $query here',
+                        },
+                    ],
+              'truncated': false,
+            };
+          case 'goToPage':
+            return {'page_1based': a['page_1based']};
+        }
+        return null;
+      });
+      addTearDown(
+        () => _messenger.setMockMethodCallHandler(
+          MethodChannel('claktory/ink/$id'),
+          null,
+        ),
+      );
+      return null;
+    });
+    addTearDown(
+      () => _messenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
+  }
+
+  final made = <Map<Object?, Object?>>[];
+  final calls = <MethodCall>[];
+
+  /// The params the last view was made with.
+  Map<Object?, Object?> get params =>
+      const StandardMessageCodec().decodeMessage(
+        ByteData.sublistView(made.last['params'] as Uint8List),
+      ) as Map<Object?, Object?>;
+
+  /// An event from the last view, as native sends it.
+  Future<void> send(String method, Object? arguments) async {
+    final id = made.last['id'] as int;
+    await _messenger.handlePlatformMessage(
+      'claktory/ink/$id',
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall(method, arguments),
+      ),
+      (_) {},
+    );
+  }
+}
+
+Future<Harness> _show(WidgetTester tester, FileContent file) async {
+  final harness = await showPanes(
+    tester,
+    beside('pdf', _path),
+    files: {_path: file},
+  );
+  tester.view.physicalSize = const Size(2000, 900);
+  await settle(tester);
+  return harness;
+}
+
+List<ReadFile> _reads(Harness harness) => [
+  for (final message in harness.backend.sent)
+    if (message.hasReadFile()) message.readFile,
+];
+
+void main() {
+  final mac = TargetPlatformVariant.only(TargetPlatform.macOS);
+
+  testWidgets(
+    'on a Mac a PDF pane brings the file in ranges into the render cache '
+    'and shows it in the native viewer, its page in the header',
+    (tester) async {
+      final cache = _Cache();
+      final native = _Native();
+      final chunk = pdfChunk;
+      pdfChunk = 16;
+      addTearDown(() => pdfChunk = chunk);
+      final file = _pdf('a paper long enough to come in several reads');
+      final harness = await _show(tester, file);
+
+      final reads = _reads(harness);
+      expect(reads.length, greaterThan(2));
+      expect(reads.first.expectedSha256, isEmpty);
+      for (final read in reads.skip(1)) {
+        expect(read.expectedSha256, file.sha256);
+      }
+      expect(cache.kept, utf8.decode(file.data));
+      expect(find.byType(PdfViewer), findsOneWidget);
+      expect(find.byType(AppKitView), findsOneWidget);
+      expect(
+        find.text('To see this PDF, open it on a Mac, iPhone or iPad.'),
+        findsNothing,
+      );
+      expect(native.made, hasLength(1));
+      expect(native.made.single['viewType'], 'claktory/ink');
+      final params = native.params;
+      expect(params['surface'], 'pdf');
+      expect(
+        (params['document'] as Map)['file'],
+        '/cache/${file.sha256}/paper.pdf',
+      );
+      expect((params['document'] as Map)['sha256'], file.sha256);
+      // No drawing tools on a Mac.
+      expect(find.text('Drawing tools'), findsNothing);
+
+      await native.send('ready', {
+        'surface': 'pdf',
+        'source_sha256': file.sha256,
+        'sha256_verified': true,
+        'page_count': 12,
+        'pages': [],
+        'drawing_space': 'none',
+      });
+      await native.send('pageChanged', {'page_1based': 3, 'page_count': 12});
+      await tester.pump();
+      expect(find.text('Page 3 of 12'), findsOneWidget);
+      expect(native.calls.first.method, 'attach');
+    },
+    variant: mac,
+  );
+
+  testWidgets(
+    'Search and ⌘F put a field in the header; Return and ⇧Return go from '
+    'match to match, Escape closes it',
+    (tester) async {
+      _Cache();
+      final native = _Native();
+      await _show(tester, _pdf('a paper'));
+      await native.send('pageChanged', {'page_1based': 1, 'page_count': 9});
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
+      await tester.tap(find.text('Search'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
+
+      await tester.enterText(find.byKey(const ValueKey('pdf-find')), 'river');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
+      final search = native.calls.lastWhere((c) => c.method == 'search');
+      expect(search.arguments, {'query': 'river', 'max_results': 200});
+      // The first match is shown.
+      var go = native.calls.lastWhere((c) => c.method == 'goToPage');
+      expect((go.arguments as Map)['page_1based'], 2);
+      expect((go.arguments as Map)['region'], isNotNull);
+      expect(find.text('1 of 2'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      go = native.calls.lastWhere((c) => c.method == 'goToPage');
+      expect((go.arguments as Map)['page_1based'], 5);
+      expect(find.text('2 of 2'), findsOneWidget);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(find.text('1 of 2'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
+      // The highlights go with it.
+      expect(native.calls.last.method, 'search');
+      expect((native.calls.last.arguments as Map)['query'], '');
+
+      // ⌘F pressed with the page focused: native sends it on.
+      await native.send('findRequested', {'forward': null});
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
+      // ⌘F in the pane itself.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
+      await tester.tap(find.text('Page 1 of 9'));
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
+    },
+    variant: mac,
+  );
+
+  testWidgets(
+    'a link in the PDF opens only when asked to; others are not offered',
+    (tester) async {
+      _Cache();
+      final native = _Native();
+      final opened = <Uri>[];
+      final open = openPdfLink;
+      openPdfLink = (url) async {
+        opened.add(url);
+        return true;
+      };
+      addTearDown(() => openPdfLink = open);
+      await _show(tester, _pdf('a paper'));
+
+      await native.send('linkTapped', {'url': 'file:///etc/passwd'});
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-link')), findsNothing);
+
+      await native.send('linkTapped', {'url': 'https://example.com/a'});
+      await tester.pump();
+      expect(find.text('Open example.com?'), findsOneWidget);
+      expect(opened, isEmpty);
+      await tester.tap(find.text('Not now'));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('pdf-link')), findsNothing);
+      expect(opened, isEmpty);
+
+      await native.send('linkTapped', {'url': 'mailto:ana@example.com'});
+      await tester.pump();
+      expect(find.text('Email ana@example.com?'), findsOneWidget);
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      expect(opened, [Uri.parse('mailto:ana@example.com')]);
+    },
+    variant: mac,
+  );
+
+  testWidgets('a PDF too long to open says how long', (tester) async {
+    _Cache();
+    final native = _Native();
+    await _show(tester, _pdf('a long paper'));
+    await native.send('error', {
+      'code': 'document_too_large',
+      'recoverable': false,
+      'page_count': 2400,
+      'max_pages': 2000,
+    });
+    await tester.pump();
+    expect(
+      find.text(
+        'This PDF has 2,400 pages, more than the 2,000 Claktory can open here.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(AppKitView), findsNothing);
+  }, variant: mac);
+
+  testWidgets('elsewhere than a Mac or an iPad the pane says where PDFs open', (
+    tester,
+  ) async {
+    final harness = await _show(tester, _pdf('a paper'));
+    expect(_reads(harness), isEmpty);
+    expect(find.byType(PdfViewer), findsNothing);
+    expect(
+      find.text('To see this PDF, open it on a Mac, iPhone or iPad.'),
+      findsOneWidget,
+    );
+  });
+}

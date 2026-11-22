@@ -799,6 +799,9 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
             }
             Some(Kind::AskPerson(ask)) => format!("ask {} ({:?}): {}", ask.id, ask.state(), ask.title),
             Some(Kind::PipeStart(start)) => format!("pipe start {} ({:?}): {}", start.id, start.state(), start.name),
+            Some(Kind::AppGrant(proposal)) => {
+                format!("app grant {} ({:?}): {} for {}", proposal.id, proposal.state(), proposal.app_id, proposal.agent_id)
+            }
             None => "empty".into(),
         });
     }

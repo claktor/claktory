@@ -207,6 +207,24 @@ void main() {
     expect(find.text('Confirm this iPhone is yours'), findsOneWidget);
   });
 
+  testWidgets("at the largest text the banner's words grow only to 2×", (
+    tester,
+  ) async {
+    final (harness, _) = await phone(tester);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=Home'),
+    );
+    harness.backend.confirmBy.value = DateTime.now().add(
+      const Duration(days: 30),
+    );
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await pumpFrames(tester);
+    final words = find.textContaining('Confirm this iPhone is yours by ');
+    expect(MediaQuery.textScalerOf(tester.element(words)).scale(10), 20);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('on a phone a device waiting to be allowed shows along the top, '
       'under the status bar, its buttons under the words', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

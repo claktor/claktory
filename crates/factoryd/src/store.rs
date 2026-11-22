@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 38] = [
+const MIGRATIONS: [&str; 53] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -186,6 +186,21 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::extensions::ask::DRAWINGS,
     crate::account::analytics::HEALTH,
     crate::apps::pins::SCHEMA,
+    crate::needs_you::SCHEMA,
+    crate::extensions::agents::provenance::SCHEMA,
+    crate::extensions::checklist::WAITS,
+    crate::needs_you::NOTES,
+    crate::user_apps::SCHEMA,
+    crate::browser::SCHEMA,
+    crate::user_apps::dms::SCHEMA,
+    crate::ink::layers::SCHEMA,
+    crate::annotations::ink::SCHEMA,
+    crate::presentation::SCHEMA,
+    crate::user_apps::dms::SENDS,
+    crate::extensions::agents::quiet::SCHEMA,
+    crate::diagnostics::CONNECTION,
+    crate::diagnostics::SCHEMA,
+    crate::user_apps::dms::sends::SEQUENCES,
 ];
 
 /// A background task as recorded.
@@ -252,6 +267,17 @@ pub(crate) fn migrate(db: &Connection, schema: &str, migrations: &[&str]) -> rus
     Ok(())
 }
 
+/// Prepares an uncached query and collects rows in order, stopping at the first error.
+pub(crate) fn query<T>(
+    db: &Connection,
+    sql: &str,
+    parameters: impl rusqlite::Params,
+    read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<Vec<T>> {
+    let mut statement = db.prepare(sql)?;
+    statement.query_map(parameters, read)?.collect()
+}
+
 /// Positional row readers: convert columns in order, returning the first error.
 pub(crate) fn row2<A: FromSql, B: FromSql>(row: &Row<'_>) -> rusqlite::Result<(A, B)> {
     Ok((row.get(0)?, row.get(1)?))
@@ -290,10 +316,36 @@ impl Store {
         let client_id = Some(queued.client_id.as_str()).filter(|id| !id.is_empty());
         let attachments = Some(&queued.attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
         let voice = queued.voice.as_ref().and_then(|voice| serde_json::to_string(voice).ok());
+        // An agent's message: where it stands (`extensions::agents::provenance`).
+        let provenance = queued.event.as_ref().and_then(|event| event.provenance.as_ref());
+        let sent = queued.sent.as_ref();
+        let reply_to = provenance.map(|provenance| serde_json::json!(provenance.reply_to).to_string());
+        let intent = provenance.map(|provenance| provenance.intent.as_str());
+        // Sent quietly (`extensions::agents::quiet`): NULL when not.
+        let quiet = provenance.is_some_and(|provenance| provenance.quiet).then_some(1);
         let db = self.db();
         db.execute(
-            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![agent, source, sender, sender_id, summary, queued.text, queued.created, sent_from, client_id, attachments, voice],
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, send_id, sender_run, reply_to, intent, taint, quiet)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                agent,
+                source,
+                sender,
+                sender_id,
+                summary,
+                queued.text,
+                queued.created,
+                sent_from,
+                client_id,
+                attachments,
+                voice,
+                sent.map(|sent| sent.send_id.as_str()),
+                sent.and_then(|sent| sent.sender_run),
+                reply_to,
+                intent,
+                sent.map(|sent| sent.taint.as_str()),
+                quiet,
+            ],
         )?;
         Ok(db.last_insert_rowid())
     }
@@ -325,12 +377,24 @@ impl Store {
     pub(crate) fn waiting(&self) -> Result<BTreeMap<String, Vec<Queued>>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
+            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, reply_to, intent, quiet FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
         )?;
         let mut rows = statement.query([])?;
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let source: String = row.get(2)?;
+            // An agent's message keeps where it stands (`provenance`).
+            let reply_to: Option<String> = row.get(12)?;
+            let provenance = match reply_to {
+                Some(reply_to) if source == "agent" => Some(factory_agent::Provenance {
+                    message: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                    reply_to: serde_json::from_str(&reply_to).unwrap_or_default(),
+                    intent: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                    quiet: row.get::<_, Option<i64>>(14)?.is_some(),
+                    quiet_note: String::new(),
+                }),
+                _ => None,
+            };
             let event = match source_named(&source) {
                 None => None,
                 Some(source) => Some(Event {
@@ -340,6 +404,7 @@ impl Store {
                     summary: row.get(5)?,
                     transient: false,
                     pipe_seqs: Vec::new(),
+                    provenance,
                 }),
             };
             let sent_from: Option<String> = row.get(8)?;
@@ -353,6 +418,8 @@ impl Store {
                 client_id: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
                 attachments: row.get::<_, Option<String>>(10)?.and_then(|list| serde_json::from_str(&list).ok()).unwrap_or_default(),
                 voice: row.get::<_, Option<String>>(11)?.and_then(|voice| serde_json::from_str(&voice).ok()),
+                sent: None,
+                held: false,
             });
         }
         Ok(waiting)
@@ -453,24 +520,26 @@ impl Store {
     /// with None) that are running, or ended since `ended_since`.
     pub(crate) fn tasks(&self, agent: Option<&str>, ended_since: i64) -> Result<Vec<TaskRow>, rusqlite::Error> {
         let db = self.db();
-        let mut statement = db.prepare(
+        query(
+            &db,
             "SELECT agent, task, command, pid, log, started, ended, status FROM tasks
              WHERE (?1 IS NULL OR agent = ?1) AND (ended IS NULL OR ended >= ?2) ORDER BY id DESC",
-        )?;
-        let rows = statement.query_map(params![agent, ended_since], TaskRow::read)?;
-        rows.collect()
+            params![agent, ended_since],
+            TaskRow::read,
+        )
     }
 
     /// Running background tasks that started before `before` and that admin
     /// agents weren't told of yet, oldest first.
     pub(crate) fn long_tasks(&self, before: i64) -> Result<Vec<TaskRow>, rusqlite::Error> {
         let db = self.db();
-        let mut statement = db.prepare(
+        query(
+            &db,
             "SELECT agent, task, command, pid, log, started, ended, status FROM tasks
              WHERE ended IS NULL AND alerted IS NULL AND started < ?1 ORDER BY id",
-        )?;
-        let rows = statement.query_map([before], TaskRow::read)?;
-        rows.collect()
+            [before],
+            TaskRow::read,
+        )
     }
 
     pub(crate) fn task_alerted(&self, agent: &str, task: &str) -> Result<(), rusqlite::Error> {

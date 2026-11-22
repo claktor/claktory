@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "exportLayer",
+  "arguments": {
+    "page_1based": 9,
+    "preview_max_long_edge": 2048,
+    "preview_max_bytes": 4194304
+  },
+  "result": null,
+  "error": {
+    "code": "nothing_drawn",
+    "details": null
+  }
+}

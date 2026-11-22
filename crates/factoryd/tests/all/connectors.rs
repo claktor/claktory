@@ -372,6 +372,7 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
             connector_id: "demo".into(),
             proposal_id: proposal.id.clone(),
             redirect_uri: redirect.into(),
+            comment: "Use the staging zone.".into(),
             ..Default::default()
         })
     };
@@ -432,6 +433,9 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
             == "event from Claktory: The person connected Demo (matt@example.com) for your proposal. You don't have it: an admin agent decides what you get.")
     })
     .await;
+    // With the person's comment, as theirs (#289).
+    let noted = |entry: &v1::Entry| matches!(&entry.kind, Some(v1::entry::Kind::Event(event)) if event.text.ends_with("\n\nThe person's note: Use the staging zone."));
+    assert!(view.entries.iter().any(noted), "{:?}", describe(&view.entries));
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     view.follow(&mut client, |view| describe(&view.entries).iter().any(|line| line.contains("for Builder (builder)'s proposal"))).await;
 

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "recognizeText",
+  "arguments": {
+    "page_1based": 3,
+    "scope": "all"
+  },
+  "result": {
+    "available": false,
+    "reason": "os_too_old",
+    "min_os": "27.0",
+    "os_version": "18.3",
+    "page_1based": 3,
+    "text": null
+  }
+}

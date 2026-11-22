@@ -20,13 +20,16 @@
 // reports for PASS_MINUTES (default 30) and ends.
 import 'dart:io';
 
+import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/explorer.dart' show openFile;
+import 'package:factory_app/ipad/ink_surface.dart' show InkSurface;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/message_box.dart' show MessageBox;
 import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/main.dart' as app;
 import 'package:factory_app/pane_chrome.dart' show PaneChrome;
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/viewers/registry.dart' show ViewerProblem;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +43,17 @@ const _dir = String.fromEnvironment(
   defaultValue: '/tmp/sorbet-pass',
 );
 const _minutes = int.fromEnvironment('PASS_MINUTES', defaultValue: 30);
+
+/// "document": the PDF pass instead (phase 3): the agent's layout already
+/// holds a "pdf" pane; the steps wait for it, have the driver draw on it,
+/// and take the shots.
+const _only = String.fromEnvironment('PASS_ONLY');
+
+/// With PASS_ONLY=document: "link" taps link.pdf's link (page 1, PDF
+/// space x 72–400, y 600–624 on a 612×792 page) with a finger, drawing
+/// off; "open" only shows the document (the 2001-page refusal); anything
+/// else draws, then answers a review.
+const _case = String.fromEnvironment('PASS_CASE');
 
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -280,9 +294,133 @@ void main() {
       await settle();
     });
 
+    // Strokes by the driver, real touches through UIKit to PencilKit:
+    // from and to as fractions of the window, in PASS_DIR/drag.
+    Future<void> drag(Offset from, Offset to) async {
+      final size = binding.renderViews.first.size;
+      final file = File('$_dir/drag');
+      file.writeAsStringSync(
+        [
+          from.dx / size.width,
+          from.dy / size.height,
+          to.dx / size.width,
+          to.dy / size.height,
+        ].map((v) => v.toStringAsFixed(4)).join(','),
+      );
+      final end = DateTime.now().add(const Duration(seconds: 60));
+      while (file.existsSync()) {
+        if (DateTime.now().isAfter(end)) {
+          note('  nobody drew');
+          file.deleteSync();
+          return;
+        }
+        await settle(200);
+      }
+      await settle(800);
+    }
+
+    // A finger tap by the driver, a real touch through UIKit.
+    Future<void> tap(Offset at) async {
+      final size = binding.renderViews.first.size;
+      final file = File('$_dir/tap');
+      file.writeAsStringSync(
+        '${(at.dx / size.width).toStringAsFixed(4)},'
+        '${(at.dy / size.height).toStringAsFixed(4)}',
+      );
+      final end = DateTime.now().add(const Duration(seconds: 60));
+      while (file.existsSync()) {
+        if (DateTime.now().isAfter(end)) {
+          note('  nobody tapped');
+          file.deleteSync();
+          return;
+        }
+        await settle(200);
+      }
+      await settle(1500);
+    }
+
+    Future<void> document(String prefix) async {
+      // The driver's touches are real: let them through to the app (and
+      // so to PencilKit), which a test binding doesn't by default.
+      binding.shouldPropagateDevicePointerEvents = true;
+      final surface = find.byType(InkSurface);
+      // The focused tier shows one pane: the document's, by its name.
+      final named = find.textContaining('.pdf');
+      if (surface.evaluate().isEmpty && named.evaluate().isNotEmpty) {
+        await tester.tap(named.first);
+        await settle();
+      }
+      final end = DateTime.now().add(const Duration(seconds: 60));
+      while (surface.evaluate().isEmpty &&
+          find.byType(ViewerProblem).evaluate().isEmpty &&
+          DateTime.now().isBefore(end)) {
+        await settle(300);
+      }
+      await settle(2500);
+      await shot('$prefix-1-document');
+      if (surface.evaluate().isEmpty) {
+        note('  $prefix: no surface');
+        return;
+      }
+      final rect = tester.getRect(surface.first);
+      note('  $prefix: surface $rect');
+      if (_case == 'open') return;
+      if (_case == 'link') {
+        // PDFKit fits the page's width, a few points in from each side.
+        const inset = 6.0;
+        final scale = (rect.width - 2 * inset) / 612;
+        final at =
+            rect.topLeft +
+            Offset(inset + 236 * scale, inset + 180 * scale); // its middle
+        await tap(at);
+        await shot('$prefix-2-link');
+        return;
+      }
+      // A finger scrolls a PDF until Draw with finger is on (the
+      // simulator has no Pencil).
+      await tester.tap(keyed('ink-finger'));
+      await settle();
+      await shot('$prefix-2-finger');
+      await drag(
+        rect.topLeft + Offset(rect.width * .2, rect.height * .3),
+        rect.topLeft + Offset(rect.width * .7, rect.height * .35),
+      );
+      await drag(
+        rect.topLeft + Offset(rect.width * .25, rect.height * .45),
+        rect.topLeft + Offset(rect.width * .6, rect.height * .55),
+      );
+      await shot('$prefix-3-drawn');
+      // A review the agent asked of the file (the runner has it ask):
+      // the bar at the pane's foot, a comment, then Approve.
+      final review = keyed('document-review');
+      final waitUntil = DateTime.now().add(const Duration(seconds: 30));
+      while (review.evaluate().isEmpty && DateTime.now().isBefore(waitUntil)) {
+        await settle(300);
+      }
+      if (review.evaluate().isEmpty) {
+        note('  $prefix: no review asked');
+        return;
+      }
+      await shot('$prefix-4-review');
+      await tester.tap(find.text('Add a comment'));
+      await settle();
+      await tester.enterText(
+        find.descendant(of: review, matching: find.byType(EditableText)),
+        'The lapwing count looks low; see my marks.',
+      );
+      await shot('$prefix-5-comment');
+      unfocus();
+      await tester.tap(
+        find.descendant(of: review, matching: find.text('Approve')),
+      );
+      await settle(4000);
+      await shot('$prefix-6-answered');
+    }
+
     Future<void> steps(String prefix) async {
       unfocus();
       await settle();
+      if (_only == 'document') return document(prefix);
       await shot('$prefix-1-window');
       if (find.byType(Workbench).evaluate().isEmpty) {
         // Compact: the phone's routes, the drawer and the file.
@@ -341,6 +479,43 @@ void main() {
         await press('control+command+s');
         await shot('$prefix-6-sidebar-keys');
         await press('control+command+s');
+      });
+      await step('$prefix expand', () async {
+        var expand = find.byWidgetPredicate(
+          (w) => w is GlyphButton && w.label.startsWith('Expand '),
+        );
+        if (expand.evaluate().isEmpty) {
+          // The focused tier shows one pane: the document first.
+          final document = find.text('field-guide.md');
+          if (document.evaluate().isNotEmpty) {
+            await tester.tap(document.first);
+            await settle();
+          }
+          expand = find.byWidgetPredicate(
+            (w) => w is GlyphButton && w.label.startsWith('Expand '),
+          );
+        }
+        if (expand.evaluate().isEmpty) {
+          note('  $prefix: no Expand');
+          return;
+        }
+        await tester.tap(expand.first);
+        await settle();
+        await shot('$prefix-8-expanded');
+        await press('escape');
+        final back = find.textContaining('Back to ');
+        if (back.evaluate().isNotEmpty) {
+          note('  $prefix: Esc left the pane expanded; Back by a tap');
+          await tester.tap(back.first);
+          await settle();
+        }
+        await shot('$prefix-9-collapsed');
+        final conversation = find.text('Conversation');
+        if (find.byType(Workbench).evaluate().isNotEmpty &&
+            conversation.evaluate().isNotEmpty) {
+          await tester.tap(conversation.first);
+          await settle();
+        }
       });
       await step('$prefix more', () async {
         final more = find.bySemanticsLabel(RegExp(r'^More'));

@@ -172,6 +172,11 @@ Future<void> _loadFonts() async {
   ]);
 }
 
+/// A subscription's detail, opened under its row.
+final _details = find.byWidgetPredicate(
+  (widget) => widget.runtimeType.toString() == '_LimitDetail',
+);
+
 void main() {
   setUpAll(_loadFonts);
 
@@ -310,10 +315,25 @@ void main() {
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Use this one'), findsOneWidget);
-    // A provider with one subscription has no order to choose.
-    await tester.tap(find.text('matt@openai.test'));
+    // A provider with one subscription has no order to choose. The others
+    // closed first, so what shows is only its own; a tap that misses fails.
+    WidgetController.hitTestWarningShouldBeFatal = true;
+    addTearDown(() => WidgetController.hitTestWarningShouldBeFatal = false);
+    await tester.tap(find.text('matt@claktory.com'));
+    await tester.tap(find.text('matt@home.test'));
     await pumpFrames(tester);
-    expect(find.textContaining('Used first'), findsOneWidget);
+    expect(_details, findsNothing);
+    expect(find.textContaining('Used first'), findsNothing);
+    final openai = find.text('matt@openai.test');
+    await tester.ensureVisible(openai);
+    await pumpFrames(tester);
+    await tester.tap(openai);
+    await pumpFrames(tester);
+    // Its detail opened: the only one open.
+    expect(_details, findsOneWidget);
+    expect(find.textContaining('Used first'), findsNothing);
+    expect(find.bySemanticsLabel('Use this one'), findsNothing);
+    expect(find.textContaining('uses it first'), findsNothing);
   });
 
   testWidgets("a Mac's cards have Use this one too", (tester) async {

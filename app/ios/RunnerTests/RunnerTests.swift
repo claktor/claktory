@@ -359,13 +359,14 @@ struct CommandMenuTests {
     #expect(rebuilds() == 1)
 
     let keys = menu.keyCommands(action: #selector(AppDelegate.runWorkbenchCommand(_:)))
-    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…"])
-    #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes"])
-    #expect(keys.map(\.input) == ["s", "\t", "\t", "p"])
+    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…", "Find…"])
+    #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes", "find"])
+    #expect(keys.map(\.input) == ["s", "\t", "\t", "p", "f"])
     #expect(keys[0].modifierFlags == [.command, .control])
     #expect(keys[1].modifierFlags == [.control])
     #expect(keys[2].modifierFlags == [.control, .shift])
     #expect(keys[3].modifierFlags == [.command, .alternate])
+    #expect(keys[4].modifierFlags == [.command])
     #expect(keys.filter { !$0.wantsPriorityOverSystemBehavior }.isEmpty)
     #expect(menu.isEnabled("sidebar"))
     #expect(!menu.isEnabled("nonsense"))
@@ -441,7 +442,7 @@ struct CommandMenuTests {
       #expect(answer as? Bool == false)
     }
     // What it showed stays.
-    #expect(menu.commands.count == 4)
+    #expect(menu.commands.count == 5)
     #expect(rebuilds() == 1)
     // None at all is fine: the menu goes.
     let none = await messenger.call(
@@ -450,6 +451,40 @@ struct CommandMenuTests {
     #expect(menu.commands.isEmpty)
     #expect(rebuilds() == 2)
     let unknown = await messenger.call(CommandMenu.channelName, "nonsense")
+    #expect(unknown as? NSObject === FlutterMethodNotImplemented)
+  }
+}
+
+/// Links that open the app (AppDelegate.swift's Links): ours wait until the
+/// app listens, then come as they open; anything else, or a link longer
+/// than any pairing code, never reaches it.
+@MainActor
+struct LinksTests {
+  private func opened(_ messenger: FakeMessenger) -> [String] {
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    return (messenger.sent["factory/links"] ?? []).compactMap {
+      let call = codec.decodeMethodCall($0)
+      return call.method == "opened" ? call.arguments as? String : nil
+    }
+  }
+
+  @Test func ourLinksWaitThenCome() async throws {
+    let links = Links()
+    let messenger = FakeMessenger()
+    links.register(with: messenger)
+    let code = "factory://?t=\(String(repeating: "0", count: 64))&e=\(String(repeating: "a", count: 64))&name=mac"
+    #expect(links.open([URL(string: code)!, URL(string: "claktory-dev://add?code=x")!]))
+    // Not ours: dropped.
+    #expect(!links.open([URL(string: "https://example.com")!, URL(string: "mailto:a@b.c")!]))
+    let long = "factory://?t=" + String(repeating: "0", count: Links.maxLength)
+    #expect(!links.open([URL(string: long)!]))
+    #expect(opened(messenger).isEmpty)
+    let waiting = await messenger.call("factory/links", "listen") as? [String]
+    #expect(waiting == [code, "claktory-dev://add?code=x"])
+    // Listening: each as it comes.
+    links.open([URL(string: "claktory://add?code=y")!])
+    #expect(opened(messenger) == ["claktory://add?code=y"])
+    let unknown = await messenger.call("factory/links", "nonsense")
     #expect(unknown as? NSObject === FlutterMethodNotImplemented)
   }
 }

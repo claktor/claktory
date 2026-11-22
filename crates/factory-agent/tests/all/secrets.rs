@@ -94,6 +94,7 @@ fn watched(dir: &Path) -> Watched {
     let (sender, finished) = tokio::sync::mpsc::unbounded_channel();
     let background = factory_agent::Background {
         dir: dir.join("tasks"),
+        environment: Vec::new(),
         started: Arc::new(|_| {}),
         finished: Arc::new(move |done| {
             let _ = sender.send(done);

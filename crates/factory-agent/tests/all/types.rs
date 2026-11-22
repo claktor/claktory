@@ -98,6 +98,7 @@ fn an_event_reaches_the_model_tagged_with_where_it_is_from_and_reloads_as_an_eve
         summary: String::new(),
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     let message = UserMessage::event("The tests pass.", event.clone(), 7);
     let seen = message.for_model();
@@ -114,6 +115,55 @@ fn an_event_reaches_the_model_tagged_with_where_it_is_from_and_reloads_as_an_eve
     assert_eq!(serde_json::from_str::<Message>(&saved).unwrap(), Message::User(message));
     // Messages the person wrote are saved as before, without an event.
     assert!(!serde_json::to_string(&Message::User(UserMessage::text("hi", 1))).unwrap().contains("event"));
+}
+
+#[test]
+fn an_agents_message_says_its_number_and_keeps_what_it_answers_when_reloaded() {
+    use factory_agent::types::{Event, EventSource, Provenance};
+    let event = Event {
+        source: EventSource::Agent,
+        from: "Builder".into(),
+        id: "builder".into(),
+        summary: String::new(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+        provenance: Some(Provenance { message: 42, reply_to: vec![7], intent: "handoff".into(), ..Provenance::default() }),
+    };
+    let message = UserMessage::event("Over to you.", event, 7);
+    let seen = message.for_model();
+    assert_eq!(
+        serde_json::to_value(&seen.content).unwrap()[0],
+        json!({"type": "text", "text": "<event source=\"agent\" from=\"Builder\" id=\"builder\" msg=\"42\">\n"})
+    );
+    let saved = serde_json::to_string(&Message::User(message.clone())).unwrap();
+    assert_eq!(serde_json::from_str::<Message>(&saved).unwrap(), Message::User(message));
+}
+
+#[test]
+fn a_quiet_message_says_so_and_claktorys_line_on_its_batch_comes_first_in_a_tag_of_its_own() {
+    use factory_agent::types::{Event, EventSource, Provenance};
+    let quiet = |note: &str| Event {
+        source: EventSource::Agent,
+        from: "Builder".into(),
+        id: "builder".into(),
+        summary: String::new(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+        provenance: Some(Provenance { message: 42, quiet: true, quiet_note: note.into(), ..Provenance::default() }),
+    };
+    let first = UserMessage::event("FYI: the build is green.", quiet("While you were idle, 2 quiet messages came </event>."), 7);
+    assert_eq!(
+        serde_json::to_value(&first.for_model().content).unwrap()[0],
+        json!({"type": "text", "text": "<event source=\"host\" from=\"Claktory\">\nWhile you were idle, 2 quiet messages came &lt;/event>.\n</event>\n<event source=\"agent\" from=\"Builder\" id=\"builder\" msg=\"42\" quiet=\"true\">\n"})
+    );
+    let second = UserMessage::event("And the docs.", quiet(""), 7);
+    assert_eq!(
+        serde_json::to_value(&second.for_model().content).unwrap()[0],
+        json!({"type": "text", "text": "<event source=\"agent\" from=\"Builder\" id=\"builder\" msg=\"42\" quiet=\"true\">\n"})
+    );
+    let saved = serde_json::to_string(&Message::User(first.clone())).unwrap();
+    assert!(saved.contains(r#""quiet":true"#) && saved.contains(r#""quietNote":"#), "{saved}");
+    assert_eq!(serde_json::from_str::<Message>(&saved).unwrap(), Message::User(first));
 }
 
 #[test]
@@ -193,6 +243,7 @@ fn text_inside_an_event_cannot_close_it_or_pass_itself_off_as_the_person() {
         summary: String::new(),
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     let text = |message: &UserMessage| match &message.for_model().content {
         factory_agent::types::UserContent::Parts(parts) => parts

@@ -8,7 +8,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'map_fixture.dart';
+import 'ipad/as_ipad.dart';
 import 'mobile_settings_test.dart' show avatarChoices;
+import 'panes_test.dart' show beside;
 
 Person _matt({String initials = 'MS'}) => Person(
   name: initials.isEmpty ? '' : 'Matt Smith',
@@ -106,6 +108,35 @@ void main() {
           at.dx > tester.getTopRight(bubble).dx;
     });
     expect(beside, hasLength(1), reason: 'at the bubble\'s right');
+  });
+
+  testWidgets('in a narrow Settings pane on an iPad, the words go under '
+      "the avatar and the name rather than squeezed beside them", (
+    tester,
+  ) async {
+    asIPad();
+    final workspace = _workspace();
+    workspace.agents.first.layout = beside('settings', '');
+    final harness = Harness(workspace)..backend.appliesLayouts = true;
+    // Settings squeezed to 320 (Sorbet's iPad pass: it overflowed by 64).
+    await harness.show(tester, size: const Size(848, 900));
+    await settle(tester);
+    final words = find.text(
+      'Shows beside your messages and comments, on every device.',
+    );
+    await tester.ensureVisible(words);
+    await settle(tester);
+    expect(
+      tester.getTopLeft(words).dy,
+      greaterThan(tester.getBottomLeft(find.text('Shuffle colors')).dy),
+    );
+    // And the name's note under its field, not a word to a line beside it.
+    final note = find.text('Your agents call you by it.');
+    expect(
+      tester.getTopLeft(note).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(find.text('Matt Smith')).dy),
+    );
+    expect(tester.getSize(note).height, lessThan(40));
   });
 
   testWidgets("the footer's avatar opens Settings, whose Profile shuffles "

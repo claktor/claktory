@@ -37,7 +37,7 @@ fn approvals(view: &View) -> Vec<(u64, v1::SecretApproval)> {
 }
 
 async fn allow(client: &mut Client, view: &mut View, seq: u64) {
-    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq, allow: true };
+    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq, allow: true, ..Default::default() };
     apply_request(client, view, client_message::Body::DecideSecretApproval(allow)).await;
     view.follow(client, |view| {
         view.entries.iter().any(|entry| {
@@ -94,4 +94,16 @@ async fn the_person_turns_it_off_and_on() {
     apply_request(&mut client, &mut view, client_message::Body::SetSecretAskEachTime(on)).await;
     view.follow(&mut client, |view| view.workspace.vault.as_ref().is_some_and(|vault| vault.secrets[0].ask_each_time)).await;
     assert!(call(&mut client, &mut view, "bo", "bash", command).await.starts_with("Not run"));
+}
+
+#[tokio::test]
+async fn the_persons_comment_reaches_the_agent_with_the_decision() {
+    let (_dir, mut client, mut view, _id) = setup().await;
+    call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deployed", "secrets": ["AWS"]}"#).await;
+    let (seq, _) = approvals(&view).pop().expect("a card");
+    let deny = v1::DecideSecretApproval { agent_id: "bo".into(), seq, allow: false, comment: " Use staging first. ".into() };
+    apply_request(&mut client, &mut view, client_message::Body::DecideSecretApproval(deny)).await;
+    let told = "The person didn't allow you to use AWS.\n\nThe person's note: Use staging first.";
+    view.follow(&mut client, |view| view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text == told)))
+        .await;
 }

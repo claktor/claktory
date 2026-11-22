@@ -1,9 +1,15 @@
 // Links that open Claktory: `claktory://add?code=<pairing code>` adds the
 // Claktory the code is for (after asking), so an agent setting one up on a
-// server can hand this Mac its code with `open "claktory://add?code=…"`.
-// The Mac's app takes them (AppDelegate.swift); Claktory Dev's scheme is
-// claktory-dev, and debug builds' claktory-debug, so claktory:// always
-// opens the real Claktory.
+// server can hand this Mac its code with `open "claktory://add?code=…"`;
+// and a pairing code itself (`factory://?t=…&e=…`), which the iPhone's
+// Camera opens from a Mac's QR code. The Mac's app takes them
+// (AppDelegate.swift), the iPhone's (SceneDelegate) and Android's
+// (MainActivity) too; Claktory Dev's scheme is claktory-dev, and debug
+// builds' claktory-debug, so claktory:// always opens the real Claktory.
+// Nothing connects without the person's Connect in [confirmPairing], the
+// one confirmation every way in uses (a link, the scanner, a paste).
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -12,10 +18,15 @@ import 'connections.dart';
 import 'controls.dart' show showModal;
 import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
+import 'identity.dart';
+import 'mobile/drawer.dart' show PhoneDrawerHost;
 import 'scope.dart';
 
 /// The schemes this app's builds open links with.
 const linkSchemes = {'claktory', 'claktory-dev', 'claktory-debug'};
+
+/// The longest link taken: anything longer is refused before it's parsed.
+const linkMaxLength = 4096;
 
 /// What a link asks for: to add the Claktory its code is for ([target]),
 /// or nothing this app can do ([target] null).
@@ -27,6 +38,10 @@ class AddLink {
 
 /// What [link] asks for; null when it isn't a link to add a Claktory.
 AddLink? parseLink(Uri link) {
+  // A pairing code itself, as a Mac's QR code holds it.
+  if (link.scheme == 'factory') {
+    return AddLink(parsePairingCode(link.toString()));
+  }
   if (!linkSchemes.contains(link.scheme) || link.host != 'add') return null;
   // The code is URL-encoded in `code`; one pasted in as it is runs on into
   // the link's own query, so everything after `code=` is tried too.
@@ -61,10 +76,10 @@ class AppLinks extends ChangeNotifier {
 
   static const _channel = MethodChannel('factory/links');
 
-  /// Takes links from the app (macOS): those that came before, then each
-  /// as it comes.
+  /// Takes links from the app (a Mac, an iPhone, Android): those that
+  /// came before, then each as it comes.
   Future<void> listen() async {
-    if (defaultTargetPlatform != TargetPlatform.macOS) return;
+    if (!_takesLinks.contains(defaultTargetPlatform)) return;
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'opened' && call.arguments is String) {
         receive(call.arguments as String);
@@ -82,8 +97,15 @@ class AppLinks extends ChangeNotifier {
     }
   }
 
-  /// [link] opened the app.
+  static const _takesLinks = {
+    TargetPlatform.macOS,
+    TargetPlatform.iOS,
+    TargetPlatform.android,
+  };
+
+  /// [link] opened the app. One too long is refused unread.
   void receive(String link) {
+    if (link.length > linkMaxLength) return;
     final uri = Uri.tryParse(link.trim());
     if (uri == null) return;
     _waiting.add(uri);
@@ -96,6 +118,106 @@ class AppLinks extends ChangeNotifier {
 
 /// The app's links.
 final appLinks = AppLinks();
+
+/// The first 16 characters of what identifies [target]'s Claktory (its
+/// tunnel's endpoint id, else its certificate's fingerprint), in fours:
+/// "a1b2 c3d4 e5f6 7890".
+String pairingFingerprint(RemoteFactory target) {
+  final id = target.endpointId.isNotEmpty
+      ? target.endpointId
+      : target.fingerprint;
+  final short = id.length > 16 ? id.substring(0, 16) : id;
+  return [
+    for (var i = 0; i < short.length; i += 4)
+      short.substring(i, i + 4 > short.length ? short.length : i + 4),
+  ].join(' ');
+}
+
+/// Whether [target] is one of the Claktories on the person's account, by
+/// the endpoint the app would dial; null when that can't be known (signed
+/// out, or the list unreadable).
+Future<bool?> Function(BuildContext context, RemoteFactory target)?
+onAccountTest;
+
+Future<bool?> _onAccount(BuildContext context, RemoteFactory target) async {
+  final test = onAccountTest;
+  if (test != null) return test(context, target);
+  final account = AppScope.scope(context).connections.account;
+  if (!account.signedIn || target.endpointId.isEmpty) return null;
+  try {
+    final listed = await account.claktories();
+    return listed.any(
+      (claktory) => claktory.endpointId == target.endpointId.toLowerCase(),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Asks before this device connects to [target], however its code came
+/// (a link, a QR code, a paste): true only for the person's Connect. It
+/// leads with the code's fingerprint; the name is the other side's own
+/// words, so it shows only quoted, never as the title; and it warns when
+/// the Claktory isn't on the person's account (Fugo's rules).
+Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
+  final onAccount = await _onAccount(context, target);
+  if (!context.mounted) return false;
+  var connect = false;
+  await showModal(context, (dialog, close) {
+    final palette = Palette.of(dialog);
+    return FormFrame(
+      title: 'Connect to this Claktory?',
+      fields: [
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'Its code: ',
+                style: TextStyle(color: palette.textMuted),
+              ),
+              TextSpan(
+                text: pairingFingerprint(target),
+                style: TextStyle(
+                  fontFamily: TextStyles.mono,
+                  color: palette.text,
+                ),
+              ),
+              TextSpan(
+                text: ' Check it matches the one shown there.',
+                style: TextStyle(color: palette.textMuted),
+              ),
+            ],
+          ),
+          style: TextStyles.body,
+        ),
+        const SizedBox(height: Space.xs),
+        Text(
+          [
+            if (target.name.isNotEmpty) 'It calls itself “${target.name}”.',
+            "You'll still need to allow this $thisDeviceKind on it.",
+          ].join(' '),
+          style: TextStyles.body.copyWith(color: palette.textMuted),
+        ),
+        if (onAccount != true) ...[
+          const SizedBox(height: Space.m),
+          Text(
+            "This Claktory isn't on your Claktory account. Connect only "
+            "if you're setting it up yourself, right now.",
+            style: TextStyles.body.copyWith(color: palette.danger),
+          ),
+        ],
+      ],
+      error: null,
+      submitLabel: 'Connect',
+      onSubmit: () {
+        connect = true;
+        close();
+      },
+      onCancel: close,
+    );
+  });
+  return connect;
+}
 
 /// Takes what [links] brings, in the window: asks before adding a
 /// Claktory a link names, and shows one already added. A page can open a
@@ -136,6 +258,10 @@ class _LinkOpenerState extends State<LinkOpener> {
     if (link == null) return;
     final asked = parseLink(link);
     if (asked == null) return;
+    // A link takes the person out of the phone's menu, as a deep link
+    // dismisses what's open; what it asks in a sheet would otherwise open
+    // behind the menu.
+    PhoneDrawerHost.closeAll();
     final target = asked.target;
     final connections = AppScope.scope(context).connections;
     if (target == null) {
@@ -143,9 +269,11 @@ class _LinkOpenerState extends State<LinkOpener> {
         context,
         (context, close) => FormFrame(
           title: "Can't use this link",
+          // The screen it's pasted on, by its name on this device.
           body:
               'This link has no Claktory code in it. Paste the code in '
-              'Connect to another Claktory instead.',
+              '${isPhoneLayout(context) ? 'Connect to your Claktory' : 'Connect to another Claktory'} '
+              'instead.',
           fields: const [],
           error: null,
           submitLabel: 'OK',
@@ -160,25 +288,11 @@ class _LinkOpenerState extends State<LinkOpener> {
       AppScope.switchFactory(context, target);
       return;
     }
-    final name = target.label;
-    showModal(
-      context,
-      (dialog, close) => FormFrame(
-        title: 'Connect to $name?',
-        body:
-            'A link asks to connect this $thisDeviceKind to the Claktory '
-            '“$name”. Connect only if you or one of your agents opened it. '
-            "You'll still need to allow this $thisDeviceKind on $name.",
-        fields: const [],
-        error: null,
-        submitLabel: 'Connect',
-        onSubmit: () {
-          close();
-          if (mounted) AppScope.switchFactory(context, target);
-        },
-        onCancel: close,
-      ),
-    );
+    unawaited(() async {
+      if (await confirmPairing(context, target) && mounted) {
+        AppScope.switchFactory(context, target);
+      }
+    }());
   }
 
   @override

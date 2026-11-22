@@ -3,6 +3,7 @@
 #[cfg(any(target_os = "android", test))]
 mod android;
 pub mod api;
+pub mod dm;
 pub mod forward;
 mod frb_generated;
 pub mod tunnel;

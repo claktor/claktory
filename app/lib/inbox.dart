@@ -12,20 +12,27 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'app_grant_card.dart' show AppGrantCard, appGrantSummary;
 import 'ask_card.dart';
 import 'backend.dart';
+import 'browser/browser_view.dart'
+    show BrowserScope, BrowserSessionCard, browserAssists;
+import 'browser/session.dart' show browserHost;
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'connectors.dart' show ConnectProposalCard, serviceName;
 import 'controls.dart';
+import 'extensions.dart' show WaitingWords, waitingWords;
 import 'forms.dart' show archivedProjectOf, rivetIn;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
+import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
 import 'pairing_card.dart' show DevicePairingCard;
 import 'pipe_start.dart' show PipeStartCard, pipeStartSummary;
 import 'pane_chrome.dart' show InPane;
+import 'people/chat_view.dart' show openDmChat;
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -73,6 +80,19 @@ enum NeedsYouKind {
   /// (VaultState.recovery_key_unconfirmed): the person shows it, saves it
   /// and types back one group of it.
   recoveryKey,
+
+  /// A checklist item waiting on the person's decision or action with no
+  /// card asking (Agent.waiting_items).
+  waitingItem,
+
+  /// An agent's browser session waiting for the person to choose a tab on
+  /// their Mac, or decline (Workspace.browser_sessions, pending).
+  browser,
+
+  /// Messages an agent proposed sending to a friend, waiting for the
+  /// person to review them in that chat (Workspace.dm_sends), one item per
+  /// agent and conversation.
+  dmSend,
 }
 
 /// One thing that waits for the person's answer.
@@ -82,27 +102,44 @@ class NeedsYouItem {
       chatId = '',
       pipeId = '',
       providerId = '',
-      accountId = '';
+      accountId = '',
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.chat(this.chatId, this.seq)
     : kind = NeedsYouKind.chat,
       agentId = '',
       pipeId = '',
       providerId = '',
-      accountId = '';
+      accountId = '',
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.pipe(this.kind, this.pipeId, {this.seq = 0})
     : agentId = '',
       chatId = '',
       providerId = '',
-      accountId = '';
+      accountId = '',
+      sessionId = '',
+      conversationId = '';
+
+  const NeedsYouItem.waitingItem(this.agentId, this.seq)
+    : kind = NeedsYouKind.waitingItem,
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.signIn(this.providerId, this.accountId)
     : kind = NeedsYouKind.signIn,
       agentId = '',
       chatId = '',
       pipeId = '',
-      seq = 0;
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.move()
     : kind = NeedsYouKind.move,
@@ -111,7 +148,9 @@ class NeedsYouItem {
       pipeId = '',
       providerId = '',
       accountId = '',
-      seq = 0;
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.vault()
     : kind = NeedsYouKind.vault,
@@ -120,7 +159,9 @@ class NeedsYouItem {
       pipeId = '',
       providerId = '',
       accountId = '',
-      seq = 0;
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
 
   const NeedsYouItem.recoveryKey()
     : kind = NeedsYouKind.recoveryKey,
@@ -129,7 +170,27 @@ class NeedsYouItem {
       pipeId = '',
       providerId = '',
       accountId = '',
-      seq = 0;
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
+  const NeedsYouItem.browser(this.agentId, this.sessionId)
+    : kind = NeedsYouKind.browser,
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      conversationId = '';
+
+  const NeedsYouItem.dmSend(this.agentId, this.conversationId)
+    : kind = NeedsYouKind.dmSend,
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '';
 
   final NeedsYouKind kind;
   final String agentId;
@@ -140,8 +201,14 @@ class NeedsYouItem {
   final String providerId;
   final String accountId;
 
-  /// The entry's seq in the agent's or chat's conversation, or the held
-  /// message's in the pipe's.
+  /// The browser session waiting.
+  final String sessionId;
+
+  /// The direct-message conversation an agent's messages wait to go to.
+  final String conversationId;
+
+  /// The entry's seq in the agent's or chat's conversation, the held
+  /// message's in the pipe's, or the checklist item's number.
   final int seq;
 
   /// Whether it's a card in a conversation, an agent's or a chat's.
@@ -158,6 +225,9 @@ class NeedsYouItem {
     NeedsYouKind.vault => 'vault',
     NeedsYouKind.move => 'move',
     NeedsYouKind.recoveryKey => 'recoveryKey',
+    NeedsYouKind.waitingItem => 'item:$agentId/$seq',
+    NeedsYouKind.browser => 'browser:$sessionId',
+    NeedsYouKind.dmSend => 'dm:$agentId/$conversationId',
   };
 
   /// Done in a click, with no card to open: signing in again, unlocking
@@ -179,9 +249,15 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
   };
   return [
     for (final agent in workspace.agents)
-      if (archivedProjectOf(workspace, agent) == null)
+      if (archivedProjectOf(workspace, agent) == null) ...[
         for (final seq in agent.waitingSeqs)
           NeedsYouItem.entry(agent.id, seq.toInt()),
+        // Waiting on the person with no card asking: the card stands
+        // for it while there is one.
+        for (final waiting in agent.waitingItems)
+          if (!waiting.hasPendingAsk)
+            NeedsYouItem.waitingItem(agent.id, waiting.item),
+      ],
     for (final chat in workspace.chats)
       for (final seq in chat.waitingSeqs)
         NeedsYouItem.chat(chat.id, seq.toInt()),
@@ -204,8 +280,113 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
+    // Only while it waits for the person's choice on their Mac; running,
+    // it shows in its agent's conversation.
+    for (final session in workspace.browserSessions)
+      if (session.state == 'pending' &&
+          workspace.agents.any(
+            (agent) =>
+                agent.id == session.agentId &&
+                archivedProjectOf(workspace, agent) == null,
+          ))
+        NeedsYouItem.browser(session.agentId, session.id),
+    // An agent's messages to a friend, one item per agent and friend.
+    for (final send in {
+      for (final send in workspace.dmSends)
+        if (workspace.agents.any(
+          (agent) =>
+              agent.id == send.agentId &&
+              archivedProjectOf(workspace, agent) == null,
+        ))
+          (send.agentId, send.conversationId),
+    })
+      NeedsYouItem.dmSend(send.$1, send.$2),
   ];
 }
+
+/// The messages [item] stands for, oldest first, while the backend lists
+/// them: never their text, only whom they go to.
+List<DmSendWaiting> dmSendsOf(Workspace workspace, NeedsYouItem item) => [
+  for (final send in workspace.dmSends)
+    if (send.agentId == item.agentId &&
+        send.conversationId == item.conversationId)
+      send,
+];
+
+/// What a waiting agent message asks (Trish's words): "Send June's message
+/// to Ana?", "Send 3 messages from June to Ana?"; the friend by their tag
+/// when they have no name.
+String dmSendSummary(Workspace workspace, NeedsYouItem item) {
+  final sends = dmSendsOf(workspace, item);
+  if (sends.isEmpty) return 'No longer needs you';
+  final agent = workspace.agents
+      .where((agent) => agent.id == item.agentId)
+      .firstOrNull;
+  // With their tag, which they can't choose, as the chat's header: a
+  // name alone could be anyone's (Fugo).
+  final send = sends.first;
+  final named = send.friendName.trim();
+  final friend = named.isNotEmpty && send.friendTag.isNotEmpty
+      ? '$named · ${send.friendTag}'
+      : named.isNotEmpty
+      ? named
+      : send.friendTag.isNotEmpty
+      ? send.friendTag
+      : 'your friend';
+  final name = agent?.name ?? '';
+  if (sends.length > 1) {
+    return 'Send ${sends.length} messages from '
+        '${name.isEmpty ? 'your agent' : name} to $friend?';
+  }
+  return "Send ${name.isEmpty ? 'your agent' : "$name's"} message to "
+      '$friend?';
+}
+
+/// The checklist item [item] stands for, while it still waits on the
+/// person.
+WaitingItem? waitingItemOf(Workspace workspace, NeedsYouItem item) {
+  for (final agent in workspace.agents) {
+    if (agent.id != item.agentId) continue;
+    for (final waiting in agent.waitingItems) {
+      if (waiting.item == item.seq) return waiting;
+    }
+  }
+  return null;
+}
+
+/// The browser session [item] waits on, while the backend lists it.
+BrowserSession? browserSessionOf(Workspace workspace, NeedsYouItem item) {
+  for (final session in workspace.browserSessions) {
+    if (session.id == item.sessionId) return session;
+  }
+  return null;
+}
+
+/// What a waiting item waits for, leading its line in Needs you.
+String waitingItemLead(BlockedKind kind) => switch (kind) {
+  BlockedKind.BLOCKED_KIND_PERSON_ACTION => 'Waiting for you to act',
+  _ => 'Waiting for your decision',
+};
+
+/// The words under a waiting item in Needs you, as its checklist says them.
+WaitingWords waitingItemWords(
+  Workspace workspace,
+  String agentId,
+  WaitingItem waiting,
+) => waitingWords(
+  kind: waiting.kind,
+  blockedOn: 'person',
+  ref: '',
+  sinceMs: waiting.sinceMs.toInt(),
+  retryAtMs: 0,
+  reaskAtMs: waiting.reaskAtMs.toInt(),
+  dismissedMs: waiting.dismissedMs.toInt(),
+  hasPendingAsk: waiting.hasPendingAsk,
+  agentId: waiting.owner.isEmpty ? agentId : waiting.owner,
+  checklistAgentId: agentId,
+  workspace: workspace,
+  now: DateTime.now(),
+);
 
 /// The provider and account [item] asks to sign in to again, while it
 /// still does.
@@ -254,8 +435,17 @@ String needsYouLabel(int count) => count == 1
 
 /// The Needs you page: on a Mac a pane beside the conversation (or the
 /// agent view's place, with no agent), on a phone a page of its own.
-class InboxView extends StatelessWidget {
+class InboxView extends StatefulWidget {
   const InboxView({super.key});
+
+  @override
+  State<InboxView> createState() => _InboxViewState();
+}
+
+class _InboxViewState extends State<InboxView> {
+  /// Whether it shows History, what the person already decided, in place
+  /// of what waits. Each opening starts at what waits.
+  var _history = false;
 
   @override
   Widget build(BuildContext context) {
@@ -305,7 +495,30 @@ class InboxView extends StatelessWidget {
                         ),
                       ),
                     ),
-            const Expanded(child: NeedsYouList()),
+            // What waits, or what was already decided.
+            Padding(
+              padding: isPhoneLayout(context)
+                  ? const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, 0)
+                  : const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, 0),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: NeedsYouTabs(
+                      history: _history,
+                      choose: (history) => setState(() => _history = history),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: _history
+                  ? const NeedsYouHistoryList()
+                  : const NeedsYouList(),
+            ),
           ],
         ),
       ),
@@ -400,6 +613,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
     final key = item.key;
     if (item.kind == NeedsYouKind.pipeApproval ||
         item.kind == NeedsYouKind.pipeLoop ||
+        item.kind == NeedsYouKind.browser ||
+        item.kind == NeedsYouKind.dmSend ||
         !_fetching.add(key)) {
       return;
     }
@@ -466,6 +681,12 @@ class _NeedsYouListState extends State<NeedsYouList> {
     NeedsYouKind.entry ||
     NeedsYouKind.chat => _entryOf(item)?.timestampMs.toInt() ?? 0,
     NeedsYouKind.pipeHeld => _messageOf(item)?.timestampMs.toInt() ?? 0,
+    NeedsYouKind.waitingItem =>
+      waitingItemOf(workspace, item)?.sinceMs.toInt() ?? 0,
+    NeedsYouKind.browser =>
+      browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
+    NeedsYouKind.dmSend =>
+      dmSendsOf(workspace, item).firstOrNull?.createdMs.toInt() ?? 0,
     _ => 0,
   };
 
@@ -579,13 +800,17 @@ class _NeedsYouListState extends State<NeedsYouList> {
   /// Whether what [item] was about still exists: its agent, chat or pipe.
   static bool _stillThere(NeedsYouItem item, Workspace workspace) =>
       switch (item.kind) {
-        NeedsYouKind.entry => workspace.agents.any(
+        NeedsYouKind.entry || NeedsYouKind.waitingItem => workspace.agents.any(
           (agent) => agent.id == item.agentId,
         ),
         NeedsYouKind.chat => workspace.chats.any(
           (chat) => chat.id == item.chatId,
         ),
         NeedsYouKind.move => workspace.hasMove(),
+        NeedsYouKind.browser => browserSessionOf(workspace, item) != null,
+        NeedsYouKind.dmSend => workspace.agents.any(
+          (agent) => agent.id == item.agentId,
+        ),
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
@@ -671,6 +896,12 @@ class _Bubble extends StatelessWidget {
       NeedsYouKind.entry ||
       NeedsYouKind.chat => entry?.timestampMs.toInt() ?? 0,
       NeedsYouKind.pipeHeld => message?.timestampMs.toInt() ?? 0,
+      NeedsYouKind.waitingItem =>
+        waitingItemOf(workspace, item)?.sinceMs.toInt() ?? 0,
+      NeedsYouKind.browser =>
+        browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
+      NeedsYouKind.dmSend =>
+        dmSendsOf(workspace, item).firstOrNull?.createdMs.toInt() ?? 0,
       _ => 0,
     };
     final header = Semantics(
@@ -838,7 +1069,10 @@ class _Bubble extends StatelessWidget {
                           label: switch (item.kind) {
                             NeedsYouKind.entry when liaisonOf != null =>
                               'Open pipe',
-                            NeedsYouKind.entry => 'Open conversation',
+                            NeedsYouKind.entry ||
+                            NeedsYouKind.browser => 'Open conversation',
+                            NeedsYouKind.dmSend => 'Open chat',
+                            NeedsYouKind.waitingItem => 'Show in checklist',
                             NeedsYouKind.chat => 'Open chat',
                             _ => 'Open pipe',
                           },
@@ -908,6 +1142,41 @@ class _Bubble extends StatelessWidget {
           actions: BackendMove(AppScope.of(context)),
           agentName: _agent?.name ?? '',
         );
+      case NeedsYouKind.dmSend:
+        final sends = dmSendsOf(workspace, item);
+        if (sends.isEmpty) return line('No longer needs you.');
+        // Never its text here: it's read and sent only in the chat.
+        return line(
+          sends.length > 1
+              ? 'Read them in the chat, then send them there.'
+              : 'Read it in the chat, then send it there.',
+          color: palette.textMuted,
+        );
+      case NeedsYouKind.browser:
+        final session = browserSessionOf(workspace, item);
+        if (session == null) return line('No longer needs you.');
+        return BrowserSessionCard(
+          session: session,
+          local: BrowserScope.localOf(context),
+        );
+      case NeedsYouKind.waitingItem:
+        final waiting = waitingItemOf(workspace, item);
+        if (waiting == null) return line('No longer needs you.');
+        final words = waitingItemWords(workspace, item.agentId, waiting);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              waiting.text,
+              style: TextStyles.body.copyWith(color: palette.text),
+            ),
+            const SizedBox(height: Space.xs),
+            line(
+              words.text,
+              color: words.standsOut ? palette.signal : palette.textMuted,
+            ),
+          ],
+        );
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
         if (item.kind == NeedsYouKind.chat && _chat == null) {
@@ -959,8 +1228,21 @@ class _Bubble extends StatelessWidget {
         final why = workspace.vault.lockedWhy;
         return why.isEmpty ? 'Agents are waiting for your secrets.' : why;
       case NeedsYouKind.recoveryKey:
-        return "It unlocks your secrets if claktory.com can't. Save it, "
-            'then confirm you have it.';
+        return 'Your way back into your secrets if you ever lose access. '
+            'Save it in a password manager, then confirm you have it.';
+      case NeedsYouKind.dmSend:
+        return dmSendSummary(workspace, item);
+      case NeedsYouKind.browser:
+        final session = browserSessionOf(workspace, item);
+        if (session == null) return 'No longer needs you';
+        final host = browserHost(session.origin);
+        return browserAssists(session)
+            ? 'Allow reading and using $host in Chrome?'
+            : 'Allow reading $host in Chrome?';
+      case NeedsYouKind.waitingItem:
+        final waiting = waitingItemOf(workspace, item);
+        if (waiting == null) return 'No longer needs you';
+        return '${waitingItemLead(waiting.kind)}: ${waiting.text}';
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
         if (entry == null) return 'Waiting for your answer';
@@ -970,12 +1252,21 @@ class _Bubble extends StatelessWidget {
 
   /// Opens the conversation at the card, the chat, or the pipe.
   void _openWhere(BuildContext context) {
+    if (item.kind == NeedsYouKind.dmSend) {
+      // The chat over Needs you, from the person's own conversations; its
+      // review card sends it.
+      fireAndLog(openDmChat(context, item.conversationId));
+      return;
+    }
     final backend = AppScope.of(context);
     final chat = _chat;
     AppScope.closePage(context);
     final agent = _agent;
     final pipe = _pipe;
-    if (item.kind == NeedsYouKind.entry) {
+    if (item.kind == NeedsYouKind.browser) {
+      // Its card shows in the agent's conversation the whole time.
+      fireAndLog(backend.selectAgent(item.agentId));
+    } else if (item.kind == NeedsYouKind.entry) {
       fireAndLog(() async {
         // A pipe's liaison's conversation shows in its pipe.
         if (agent != null && agent.pipeId.isNotEmpty) {
@@ -984,6 +1275,16 @@ class _Bubble extends StatelessWidget {
           await backend.selectAgent(item.agentId);
         }
         backend.reveal.reachSeq(item.agentId, item.seq);
+      }());
+    } else if (item.kind == NeedsYouKind.waitingItem) {
+      // Its checklist beside the conversation, the item glowing.
+      fireAndLog(() async {
+        await backend.selectAgent(item.agentId);
+        await backend.openPanel(item.agentId, 'checklist');
+        final key = 'checklist_item:${item.agentId}#${item.seq}';
+        // Pointed at, so the checklist scrolls to it, glow or not.
+        backend.highlights.pointedAt.value = (keys: [key], at: DateTime.now());
+        backend.highlights.glow(key, [agentColor(agent?.color ?? 'slate')]);
       }());
     } else if (item.kind == NeedsYouKind.chat) {
       if (chat != null) openChat(context, chat);
@@ -994,8 +1295,11 @@ class _Bubble extends StatelessWidget {
       fireAndLog(() async {
         await backend.selectPipe(item.pipeId);
         // Among its liaison's conversation, at the message's card.
-        if (liaison != null && item.kind == NeedsYouKind.pipeHeld) {
-          backend.reveal.reachExtra(liaison.id, pipeItemKey(item.seq));
+        if (item.kind == NeedsYouKind.pipeHeld) {
+          backend.reveal.reachExtra(
+            liaison?.id ?? pipeChatRevealId(item.pipeId),
+            pipeItemKey(item.seq),
+          );
         }
       }());
     }
@@ -1053,6 +1357,10 @@ String waitingSummary(Entry entry, Backend backend, {String? agentId}) =>
         'Wants to use ${entry.secretApproval.secretNames.join(', ')}',
       Entry_Kind.askPerson => entry.askPerson.title,
       Entry_Kind.pipeStart => pipeStartSummary(entry.pipeStart),
+      Entry_Kind.appGrant => appGrantSummary(
+        entry.appGrant,
+        backend.workspace.workspace,
+      ),
       _ => 'Waiting for your answer',
     };
 
@@ -1098,6 +1406,12 @@ Widget? waitingCard(
   Entry_Kind.pipeStart => PipeStartCard(
     key: ValueKey(entry.pipeStart.id),
     entry.pipeStart,
+  ),
+  Entry_Kind.appGrant => AppGrantCard(
+    key: ValueKey(entry.appGrant.id),
+    entry.appGrant,
+    agentId: agentId,
+    seq: entry.seq.toInt(),
   ),
   _ => null,
 };

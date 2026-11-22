@@ -5,6 +5,7 @@ import 'characters/character.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'quiet_copies.dart';
 import 'scope.dart';
 import 'state.dart';
 import 'usage_wait.dart';
@@ -39,6 +40,9 @@ class MessagingView extends StatelessWidget {
             Space.l,
           ),
           children: [
+            // What its team handed each other, copied to it quietly;
+            // nothing while it has none.
+            QuietCopiesSection(agentId: agentId),
             const _Heading('Can message'),
             if (messaging.reaches.isEmpty)
               const _Empty("It can't message any agent.")

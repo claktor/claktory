@@ -80,8 +80,20 @@ $Q watch qa1 --secs 20 --path 'pipes[0].state'   # what the sandbox sends, as it
 $Q cli qa1 status --json               # factoryd's own commands, against the sandbox
 $Q transcript qa1 Lea --last 20        # an agent's entries, oldest first
 $Q restart qa1 --kill                  # kill -9 its factoryd and start it again
-$Q down qa1                            # or: down --all
+$Q down qa1                            # or: down --all (only yours)
 ```
+
+- **Whose sandboxes:** the QA root is shared by every agent on this computer,
+  so each sandbox records who made it (`owner`, with `created_ms`), and `list`
+  shows both.
+  - The owner is `CLAKTORY_QA_OWNER` if set, else `FACTORY_AGENT_ID`, else
+    the agent whose checkout `scripts/qa.sh` ran from (`…/trees/<id>/…`),
+    else that checkout's path.
+  - `down --all` ends only your own. Its answer names what it `ended` and what
+    it `left` (someone else's, or a sandbox from before owners were recorded),
+    with each one's owner in `owners`.
+  - `down --all-agents` ends everyone's. Use it only when you mean it.
+  - `down NAME` ends that one, whoever made it.
 
 - **Requests:** `send` takes any request of `proto/factory/v1/factory.proto`
   by its message name, with its fields as JSON under the proto's names
@@ -127,6 +139,25 @@ $Q down qa1                            # or: down --all
 - **Logs:** each sandbox's folder has `factoryd.log` and `account.log`.
 - **Without an account service:** `up --no-account` starts a Claktory with
   signing in off.
+- **Speech recognition:** `up --speech MODEL` starts a Claktory whose voice
+  messages transcribe, with `speech_model` READY in its Workspace.
+  - **MODEL** is the speech model as a Claktory keeps it: a `.gguf` with its
+    `.receipt` beside it. The dev Claktory's will do (it's only read):
+
+    ```sh
+    scripts/qa.sh up --speech ~/.factory-dev/models/speech/parakeet-tdt-0.6b-v3-Q8_0.gguf
+    ```
+
+  - **The model is copied** into the sandbox's `home/models/speech`, as an
+    APFS clone where it can be, with its modified time kept, since the receipt
+    names it. Nothing is downloaded.
+  - **claktory-speech:** the first `--speech` run for a commit builds it from
+    that commit, with the same check as the other binaries. That build
+    compiles transcribe.cpp (ggml) from source and needs CMake; the very first
+    one takes several minutes. Later runs reuse it from `bin/<commit>`.
+  - **The environment:** the sandbox's factoryd runs it through
+    `FACTORY_SPEECH`, kept by `restart` and printed by `env`.
+  - **Not in the container:** `--container` refuses `--speech`.
 
 ## A feature's paths, end to end
 

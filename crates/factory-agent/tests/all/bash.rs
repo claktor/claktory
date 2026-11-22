@@ -238,6 +238,7 @@ async fn a_background_task_outlives_whoever_started_it_and_can_be_picked_up_agai
     let started: Arc<Mutex<Vec<factory_agent::Task>>> = Arc::default();
     let background = factory_agent::Background {
         dir: dir.path().join("tasks"),
+        environment: Vec::new(),
         started: {
             let started = started.clone();
             Arc::new(move |task: &factory_agent::Task| started.lock().push(task.clone()))
@@ -314,6 +315,7 @@ fn watched(dir: &Path) -> Watched {
     let started: Arc<Mutex<Vec<factory_agent::Task>>> = Arc::default();
     let background = factory_agent::Background {
         dir: dir.join("tasks"),
+        environment: Vec::new(),
         started: {
             let started = started.clone();
             Arc::new(move |task: &factory_agent::Task| started.lock().push(task.clone()))

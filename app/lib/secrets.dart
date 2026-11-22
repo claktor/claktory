@@ -10,6 +10,7 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'connectors.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
@@ -2193,8 +2194,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   /// a values form or the admin agent.
   bool get _generates => request.generate.isNotEmpty;
 
-  /// A generated key asks each time it's used, unless the person says not.
-  var _askEach = true;
+  /// A generated key doesn't ask each time it's used, unless the person
+  /// turns it on (Matt's call).
+  var _askEach = false;
 
   /// The admin agent's add-secret card for the request it collects.
   bool get _collect =>
@@ -2620,14 +2622,13 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     ];
   }
 
-  /// A note for the agent, sent with whatever the person decides, and
-  /// Dismiss. Enter sends nothing: the note may be for giving.
+  /// A comment for the agent, sent with whatever the person decides, and
+  /// Dismiss. Enter sends nothing: the comment may be for giving.
   Widget _noteAndDismiss(String agent) => ActionLine(
-    lead: TextField(
+    lead: DecisionComment(
       controller: _comment,
-      placeholder: 'Note for $agent (optional)',
-      semanticsLabel: 'Note for $agent (optional)',
-      kind: InputKind.text,
+      agent: agent,
+      enabled: !_deciding,
     ),
     action: Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
   );
@@ -2739,19 +2740,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           ),
         ),
       const SizedBox(height: Space.m),
-      ActionLine(
-        lead: TextField(
-          controller: _comment,
-          placeholder: 'Tell $agent why (optional)',
-          semanticsLabel: 'Tell $agent why (optional)',
-          kind: InputKind.text,
-          onSubmitted: (_) => _dismiss(),
-        ),
-        action: Button(
-          label: 'Dismiss',
-          onPressed: _deciding ? null : _dismiss,
-        ),
-      ),
+      _noteAndDismiss(agent),
       const SizedBox(height: Space.s),
       Align(
         alignment: AlignmentDirectional.centerStart,
@@ -2769,6 +2758,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       request.id,
       approve: true,
       approveOnly: true,
+      comment: _comment.text.trim(),
     ),
   );
 

@@ -7,10 +7,12 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/diagnostics_record.dart' show PushStep;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/mobile/push.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -38,6 +40,9 @@ class _Device implements PushDevice {
   final saved = <String, PushRegistration>{};
   final tokenChanges = StreamController<PushState>.broadcast(sync: true);
   var keys = 0;
+
+  /// What the keychain says instead of keeping a key, as v0.1.16's did.
+  PlatformException? refuse;
 
   PushState get _state =>
       PushState(permission: permission, token: token, platform: 'apns');
@@ -68,6 +73,7 @@ class _Device implements PushDevice {
     required String relay,
     required String platform,
   }) async {
+    if (refuse case final refused?) throw refused;
     final key =
         saved[claktory]?.key ?? Uint8List.fromList(List.filled(32, ++keys));
     saved[claktory] = PushRegistration(
@@ -186,6 +192,43 @@ void main() {
     expect(studio().registered, isEmpty);
   });
 
+  testWidgets('Turn on in Settings asks, once, and a yes registers at once; '
+      'asking in context after it asks nothing more', (tester) async {
+    final registrar = await start(tester);
+    await connect(tester, studio());
+    expect(registrar.state?.permission, 'not_determined');
+    final state = await registrar.ask();
+    await tester.pump();
+    expect(state?.permission, 'allowed');
+    expect(device.asked, 1);
+    expect(studio().registered.single.handle, 'handle1');
+    await registrar.askInContext();
+    await registrar.ask();
+    expect(device.asked, 1, reason: 'the system asks only once');
+  });
+
+  testWidgets('turned off in the system: nothing asks or registers; turned '
+      'on there, back in the app it registers', (tester) async {
+    final registrar = await start(tester);
+    device.permission = 'denied';
+    await connect(tester, studio());
+    expect((await registrar.ask())?.permission, 'denied');
+    expect(device.asked, 0);
+    expect(studio().registered, isEmpty);
+
+    // The person turns them on in Settings, and comes back.
+    device
+      ..permission = 'allowed'
+      ..token = 'feed';
+    expect((await registrar.refresh())?.permission, 'allowed');
+    await tester.pump();
+    expect(studio().registered.single.handle, 'handle1');
+    // Already allowed: reading again registers nothing more.
+    await registrar.refresh();
+    await tester.pump();
+    expect(studio().registered, hasLength(1));
+  });
+
   testWidgets('every connect hands the same registration over again; the '
       'relay is asked only when what it was asked with changed', (
     tester,
@@ -279,5 +322,51 @@ void main() {
     await tester.pump();
     expect(device.saved.keys, ['c' * 64]);
     expect(relay.unregistered, ['$defaultPushRelay h']);
+  });
+
+  testWidgets("a keychain that won't keep the key (v0.1.16 on Matt's "
+      'iPhone): the Claktory never hears, so it says so; Try again, and the '
+      'next connect, register once it can', (tester) async {
+    final registrar = await start(tester);
+    device
+      ..permission = 'allowed'
+      ..token = 'feed'
+      ..refuse = PlatformException(
+        code: 'keychain',
+        details: {'step': 'key', 'status': -34018},
+      );
+    device.tokenChanges.add(
+      const PushState(permission: 'allowed', token: 'feed', platform: 'apns'),
+    );
+    await connect(tester, studio());
+    expect(relay.asked, hasLength(1));
+    expect(studio().registered, isEmpty);
+    expect(registrar.failures.value, {studio(): PushStep.key});
+
+    // Asked again on the next try: no key was kept.
+    device.refuse = null;
+    registrar.retry(studio());
+    await tester.pump();
+    await tester.pump();
+    expect(relay.asked, hasLength(2));
+    expect(studio().registered.single.key, hasLength(32));
+    expect(registrar.failures.value, isEmpty);
+  });
+
+  testWidgets('a keychain that keeps the key but not the registration says '
+      'which', (tester) async {
+    final registrar = await start(tester);
+    device
+      ..permission = 'allowed'
+      ..token = 'feed'
+      ..refuse = PlatformException(
+        code: 'keychain',
+        details: {'step': 'registration', 'status': -25300},
+      );
+    device.tokenChanges.add(
+      const PushState(permission: 'allowed', token: 'feed', platform: 'apns'),
+    );
+    await connect(tester, studio());
+    expect(registrar.failures.value, {studio(): PushStep.registration});
   });
 }

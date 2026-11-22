@@ -175,6 +175,14 @@ CREATE TABLE IF NOT EXISTS health (
     crashes INTEGER NOT NULL,
     PRIMARY KEY (claktory_id, day, version)
 );
+-- Deleted accounts the user-apps worker hasn't yet said it forgot: asked
+-- again, with a growing wait, until it does.
+CREATE TABLE IF NOT EXISTS apps_purges (
+    account_id TEXT PRIMARY KEY,
+    queued INTEGER NOT NULL,
+    tries INTEGER NOT NULL,
+    next_try INTEGER NOT NULL
+);
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
@@ -283,6 +291,18 @@ pub fn email_key(kind: &str, email: &str) -> String {
 /// `period` seconds, when all have room; otherwise the seconds until the
 /// fullest has room again, counting nothing.
 pub fn take(conn: &Connection, limits: &[(&str, i64, u32)], now: i64) -> rusqlite::Result<Result<(), i64>> {
+    if let Some(wait) = spent(conn, limits, now)? {
+        return Ok(Err(wait));
+    }
+    for (key, period, _) in limits {
+        bump(conn, key, now - now.rem_euclid(*period))?;
+    }
+    Ok(Ok(()))
+}
+
+/// The seconds until the fullest of `limits` has room again, if one is
+/// full; counting nothing.
+pub fn spent(conn: &Connection, limits: &[(&str, i64, u32)], now: i64) -> rusqlite::Result<Option<i64>> {
     let mut wait = 0;
     for (key, period, most) in limits {
         let window = now - now.rem_euclid(*period);
@@ -290,13 +310,7 @@ pub fn take(conn: &Connection, limits: &[(&str, i64, u32)], now: i64) -> rusqlit
             wait = wait.max(window + period - now);
         }
     }
-    if wait > 0 {
-        return Ok(Err(wait));
-    }
-    for (key, period, _) in limits {
-        bump(conn, key, now - now.rem_euclid(*period))?;
-    }
-    Ok(Ok(()))
+    Ok((wait > 0).then_some(wait))
 }
 
 /// Counts one use of `key` in today's window (UTC), and returns the count.
@@ -956,8 +970,10 @@ pub fn revoke(conn: &Connection, account_id: &str, id: &str, now: i64) -> rusqli
     Ok(changed > 0)
 }
 
-/// Deletes an account and everything about it.
-pub fn delete_account(conn: &mut Connection, account: &Account) -> rusqlite::Result<()> {
+/// Deletes an account and everything linked to it. With `apps` (the service
+/// runs user-level apps), it's queued for the worker to forget too, in the
+/// same transaction, so a deletion is never left half done.
+pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now: i64) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     for claktory in claktories(&tx, &account.id)? {
         anonymize(&tx, &claktory.id)?;
@@ -977,8 +993,33 @@ pub fn delete_account(conn: &mut Connection, account: &Account) -> rusqlite::Res
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
+    if apps {
+        tx.execute(
+            "INSERT INTO apps_purges (account_id, queued, tries, next_try) VALUES (?1, ?2, 0, ?2) ON CONFLICT (account_id) DO NOTHING",
+            params![account.id, now],
+        )?;
+    }
     bump_allowlist(&tx)?;
     tx.commit()
+}
+
+/// Deleted accounts due to be purged from the user-apps worker at `now`
+/// (at most `limit`), with how often it was asked already.
+pub fn apps_purges_due(conn: &Connection, now: i64, limit: u32) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut statement = conn.prepare("SELECT account_id, tries FROM apps_purges WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2")?;
+    statement.query_map(params![now, limit], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
+}
+
+/// The worker purged it: done.
+pub fn apps_purged(conn: &Connection, account_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM apps_purges WHERE account_id = ?1", params![account_id])?;
+    Ok(())
+}
+
+/// The worker didn't purge it: asked again at `next_try`.
+pub fn apps_purge_failed(conn: &Connection, account_id: &str, next_try: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE apps_purges SET tries = tries + 1, next_try = ?2 WHERE account_id = ?1", params![account_id, next_try])?;
+    Ok(())
 }
 
 /// Everything kept about an account, for Download My Data.

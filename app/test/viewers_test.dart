@@ -73,11 +73,12 @@ Finder get picture => find.byType(InteractiveViewer);
 
 void main() {
   group('registry', () {
-    test('knows text and images, and nothing else yet', () {
+    test('knows text, images and PDFs, and nothing else yet', () {
       expect(viewerFor('text')?.label, 'Text');
       expect(viewerFor('image')?.label, 'Image');
+      expect(viewerFor('pdf')?.label, 'PDF');
       expect(viewerFor('chat'), isNull, reason: 'not a viewer');
-      expect(viewerFor('pdf'), isNull);
+      expect(viewerFor('dashboard'), isNull);
     });
 
     test('a pane is called by its title, else its file name', () {

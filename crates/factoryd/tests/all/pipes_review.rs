@@ -56,7 +56,7 @@ async fn review_incoming_holds_every_message_until_it_is_let_in() {
 
     // Let in, the later one first: the lead hears each, the earlier one too.
     for seq in [second_seq, first_seq] {
-        let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true };
+        let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
         apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(allow)).await;
     }
     view.follow(&mut client, |view| {

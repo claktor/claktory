@@ -4,6 +4,13 @@
     <!-- iroh reads the active network's DNS servers, and factory/network
          watches the network (DESIGN.md §2, §4). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Voice messages (factory/recorder), asked for when the person first
+         records, never at launch. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Scanning a pairing code's QR code, asked for on the pairing screen,
+         never at launch. A phone without a camera pairs by pasting. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:name=".ClaktoryApplication"
@@ -30,6 +37,34 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Links reach the app through LinkActivity, never as Flutter routes. -->
+            <meta-data android:name="flutter_deeplinking_enabled" android:value="false" />
+        </activity>
+        <!-- Links that open Claktory (factory/links): claktory://add?code=…,
+             claktory-dev:// for Claktory Dev, claktory-debug:// for debug
+             builds; and where a service's sign-in page sends the browser
+             back (factory/device webAuth): the app's own scheme, its
+             application id, as the iPhone's is its bundle id. It shows
+             nothing, and hands each to the app's one screen. -->
+        <activity
+            android:name=".LinkActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="${linkScheme}"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="${applicationId}"/>
             </intent-filter>
         </activity>
         <!-- Flutter generates GeneratedPluginRegistrant.java from this. -->

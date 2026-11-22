@@ -11,7 +11,7 @@
 #   scripts/build-linux.sh ARCH OUT [PACKAGE]
 #       ARCH: x86_64 or aarch64; OUT: the binary to write; PACKAGE: factoryd
 #       (the default), claktory-apps (the apps host), claktory-account,
-#       claktory-speech or claktory-qa
+#       claktory-speech, claktory-qa or claktory-push (the push relay)
 #
 #   FACTORY_LINUX_SRC=DIR      build this source tree instead of the checkout
 #       (scripts/qa.sh --container builds a commit's `git archive` this way)
@@ -25,14 +25,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="${1:-}" OUT="${2:-}" PACKAGE="${3:-factoryd}"
-usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account|claktory-speech|claktory-qa]" >&2; exit 2; }
+usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account|claktory-speech|claktory-qa|claktory-push]" >&2; exit 2; }
 case "$ARCH" in
   x86_64 | aarch64) ;;
   *) usage ;;
 esac
 [[ -n "$OUT" ]] || usage
 case "$PACKAGE" in
-  factoryd | claktory-apps | claktory-account | claktory-speech | claktory-qa) ;;
+  factoryd | claktory-apps | claktory-account | claktory-speech | claktory-qa | claktory-push) ;;
   *) usage ;;
 esac
 SRC_ROOT="${FACTORY_LINUX_SRC:-$ROOT}"

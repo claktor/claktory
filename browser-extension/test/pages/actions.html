@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Actions</title></head>
+<body>
+<h1>Actions</h1>
+<p id="log"></p>
+<form action="/next.html" method="get" onsubmit="event.preventDefault(); effect('submitted')">
+  <label>Name <input id="name" name="name"></label>
+  <label>Notes <textarea id="notes"></textarea></label>
+  <label>Password <input type="password" id="pw"></label>
+  <label>Colour <select id="colour"><option>Red</option><option>Blue</option></select></label>
+  <button type="submit">Send it</button>
+</form>
+<button id="save">Save</button>
+<button id="changing">Keep project</button>
+<button id="ask">Ask first</button>
+<!-- Abbacchio's five, with handlers added from script, so only their words tell. -->
+<button id="notify">Turn on notifications</button>
+<button id="geo">Use my location</button>
+<button id="qr">Scan a QR code</button>
+<button id="clip">Paste from clipboard</button>
+<button id="help">Open help window</button>
+<button id="quiet" onclick="window.open('/next.html')">More</button>
+<a href="/next.html">Next page</a>
+<a href="mailto:someone@example.com">Write to us</a>
+<script>
+  window.effects = [];
+  function effect(what) { window.effects.push(what); document.getElementById('log').textContent = window.effects.join(' '); }
+  document.getElementById('save').addEventListener('click', () => effect('saved'));
+  document.getElementById('changing').addEventListener('click', () => effect('kept'));
+  document.getElementById('ask').addEventListener('click', () => { if (confirm('Sure?')) effect('confirmed'); else effect('declined'); });
+  document.getElementById('notify').addEventListener('click', () => { effect('notify'); Notification.requestPermission(); });
+  document.getElementById('geo').addEventListener('click', () => { effect('geo'); navigator.geolocation.getCurrentPosition(() => {}, () => {}); });
+  document.getElementById('qr').addEventListener('click', () => { effect('camera'); navigator.mediaDevices && navigator.mediaDevices.getUserMedia({video: true}).catch(() => {}); });
+  document.getElementById('clip').addEventListener('click', () => { effect('clipboard'); navigator.clipboard.readText().catch(() => {}); });
+  document.getElementById('help').addEventListener('click', () => { effect('popup'); window.open('/next.html', 'help', 'width=400'); });
+  document.getElementById('name').addEventListener('input', (e) => effect('typed:' + e.target.value));
+</script>
+</body></html>

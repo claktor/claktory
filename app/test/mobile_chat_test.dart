@@ -353,7 +353,7 @@ void main() {
         expect(asked, 1);
         expect(desktop, isNot(contains('pickFiles')));
         expect(
-          find.text("Couldn't open Photos or Files. Try again."),
+          find.text("Couldn't open your photos or files. Try again."),
           findsNothing,
         );
         expect(
@@ -369,7 +369,7 @@ void main() {
           answer: () async => throw PlatformException(code: 'failed'),
         );
         expect(
-          find.text("Couldn't open Photos or Files. Try again."),
+          find.text("Couldn't open your photos or files. Try again."),
           findsOneWidget,
         );
       });

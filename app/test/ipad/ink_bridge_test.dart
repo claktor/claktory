@@ -6,6 +6,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:factory_app/connections.dart';
 import 'package:factory_app/ipad/ink_bridge.dart';
 import 'package:factory_app/ipad/ink_surface.dart';
 import 'package:flutter/foundation.dart';
@@ -29,7 +30,9 @@ class _Native {
   _Native(this.name) {
     messenger.setMockMethodCallHandler(MethodChannel(name), (call) async {
       calls.add(call);
-      return results[call.method];
+      final answer = results[call.method];
+      if (answer is PlatformException) throw answer;
+      return answer;
     });
   }
 
@@ -57,7 +60,13 @@ class _Native {
 
   void answerAsFixture(String path) {
     final f = _read(path);
-    results[f['method'] as String] = f['result'];
+    final error = f['error'] as Map<String, Object?>?;
+    results[f['method'] as String] = error == null
+        ? f['result']
+        : PlatformException(
+            code: error['code'] as String,
+            details: error['details'],
+          );
   }
 
   void dispose() => messenger.setMockMethodCallHandler(channel, null);
@@ -116,6 +125,20 @@ void main() {
       'ev_error_document_changed.json': InkError,
       'ev_error_drawing_unreadable.json': InkError,
       'ev_error_os_too_old.json': InkError,
+      // Phase 3: PDFs.
+      'ev_ready_outline.json': InkReady,
+      'ev_error_document_too_large.json': InkError,
+      'ev_link_tapped.json': InkLinkTapped,
+      // Phase 4/6's (Gelato's fixtures; the host's use of them comes later).
+      'ev_ready_handwriting.json': InkReady,
+      'ev_ready_handwriting_unavailable.json': InkReady,
+      'ev_stroke_interrupted_background.json': InkStrokeInterrupted,
+      'ev_stroke_selection_changed.json': InkStrokeSelectionChanged,
+      // A PDF changing while open (Gelato's reload fixtures).
+      'ev_stroke_interrupted_reload.json': InkStrokeInterrupted,
+      // Pencil gestures (Gelato's; Sorbet's type for pencilAction to come).
+      'ev_tool_changed_squeeze.json': InkToolChanged,
+      'ev_pencil_action.json': InkUnknownEvent,
     };
 
     test('every event fixture has its kind', () {
@@ -136,6 +159,30 @@ void main() {
       final f = _read('bridge/$name');
       return InkEvent.parse(f['method'] as String, f['arguments']);
     }
+
+    test('ready: whether this iPad reads handwriting', () {
+      final reads = parse('ev_ready_handwriting.json') as InkReady;
+      expect(reads.handwriting.available, isTrue);
+      expect(reads.handwriting.supportedLanguages, contains('hi-Latn'));
+      expect(reads.handwriting.recognitionVersion, 9);
+      final not = parse('ev_ready_handwriting_unavailable.json') as InkReady;
+      expect(not.handwriting.available, isFalse);
+      expect(not.handwriting.minOs, '27.0');
+      // An older native says nothing: it can't.
+      expect(
+        (parse('ev_ready.json') as InkReady).handwriting.available,
+        isFalse,
+      );
+    });
+
+    test('strokeSelectionChanged: how many strokes, and where', () {
+      final selection = parse(
+        'ev_stroke_selection_changed.json',
+      ) as InkStrokeSelectionChanged;
+      expect(selection.page1based, 3);
+      expect(selection.strokeCount, 14);
+      expect(selection.bounds, const Rect.fromLTWH(0.15, 0.8, 0.3, 0.07));
+    });
 
     test('ready: pages with their boxes and turn', () {
       final ready = parse('ev_ready.json') as InkReady;
@@ -182,6 +229,19 @@ void main() {
       expect(error.recoverable, isFalse);
       expect(error.details['max_content_version'], 2);
       expect(error.details.containsKey('code'), isFalse);
+    });
+
+    test('a PDF\'s contents, a link tapped, and one too long to open', () {
+      final ready = parse('ev_ready_outline.json') as InkReady;
+      expect(ready.outline, isNotEmpty);
+      expect(ready.outline.first.page1based, greaterThanOrEqualTo(1));
+      expect(ready.outline.map((e) => e.depth), everyElement(isNonNegative));
+      expect((parse('ev_ready.json') as InkReady).outline, isEmpty);
+      final link = parse('ev_link_tapped.json') as InkLinkTapped;
+      expect(link.url, 'https://arxiv.org/abs/1211.5063');
+      final big = parse('ev_error_document_too_large.json') as InkError;
+      expect(big.code, 'document_too_large');
+      expect((big.pageCount, big.maxPages), (2400, 2000));
     });
 
     test('an event a newer native side sends is kept, not lost', () {
@@ -242,6 +302,11 @@ void main() {
         (r) => expect(r, InkDrawingPolicy.pencilOnly),
       );
       await check(
+        'cmd_set_drawing_policy_none.json',
+        () => controller.setDrawingPolicy(InkDrawingPolicy.none),
+        (r) => expect(r, InkDrawingPolicy.none),
+      );
+      await check(
         'cmd_undo.json',
         controller.undo,
         (r) => expect(((r as InkUndoState).canUndo, r.canRedo), (false, true)),
@@ -291,6 +356,28 @@ void main() {
         (r) => expect(r, 3),
       );
       await check(
+        'cmd_go_to_page_region.json',
+        () => controller.goToPage(
+          5,
+          region: const Rect.fromLTWH(0.12, 0.18, 0.21, 0.016),
+        ),
+        (r) => expect(r, 5),
+      );
+      await check(
+        'cmd_search.json',
+        () => controller.search('vanishing gradient'),
+        (r) {
+          final found = r as InkSearchResult;
+          expect(found.query, 'vanishing gradient');
+          expect(found.superseded, isFalse);
+          expect(found.matches.map((m) => m.page1based), [3, 5]);
+          expect(
+            found.matches.last.region,
+            const Rect.fromLTWH(0.12, 0.18, 0.21, 0.016),
+          );
+        },
+      );
+      await check(
         'cmd_export_composite.json',
         () => controller.exportComposite(
           const InkExportRequest(
@@ -305,6 +392,139 @@ void main() {
           expect(c.pixelWidth, 2048);
           expect(c.cropToDocumentTransform, hasLength(6));
           expect(c.region, const Rect.fromLTWH(0.08, 0.27, 0.58, 0.26));
+        },
+      );
+      // A new version of the PDF, shown in place.
+      final reload = _args('bridge/cmd_reload_document.json');
+      final source = InkSource.fromJson(
+        reload['source'] as Map<String, Object?>,
+      );
+      final document = InkDocument.fromJson(
+        reload['document'] as Map<String, Object?>,
+      );
+      await check(
+        'cmd_reload_document.json',
+        () => controller.reloadDocument(source, document),
+        (r) {
+          final again = r as InkReload;
+          expect(again.reloaded, isTrue);
+          expect(again.pageCount, 13);
+          expect(again.pages, hasLength(13));
+          expect(again.page1based, 5);
+          expect(again.pagesChanged, [5]);
+          expect(again.pagesAdded, [13]);
+          expect(again.pagesRemoved, isEmpty);
+          expect(
+            again.keptLayers.map(
+              (l) => (l.page1based, l.inkLayerId, l.revision),
+            ),
+            [(3, 'layer-paper-p3', 2), (7, 'layer-paper-p7', 3)],
+          );
+          expect(again.outdatedLayers.single.inkLayerId, 'layer-paper-p5');
+          expect(again.previousSha256, startsWith('2633caf4'));
+        },
+      );
+      native.answerAsFixture('bridge/cmd_reload_document_mismatch.json');
+      final mismatch = _args('bridge/cmd_reload_document_mismatch.json');
+      await expectLater(
+        controller.reloadDocument(
+          InkSource.fromJson(mismatch['source'] as Map<String, Object?>),
+          InkDocument.fromJson(mismatch['document'] as Map<String, Object?>),
+        ),
+        throwsA(
+          isA<PlatformException>().having(
+            (e) => e.code,
+            'code',
+            'document_hash_mismatch',
+          ),
+        ),
+      );
+      expect(native.calls.last.arguments, mismatch);
+      // Keeping drawings: a page's drawing and preview as files, with
+      // where they lie, for its layer's next revision.
+      await check(
+        'cmd_export_layer.json',
+        () => controller.exportLayer(page1based: 3),
+        (r) {
+          final e = r as InkLayerExport;
+          expect(
+            (e.page1based, e.inkLayerId, e.baseRevision, e.localSeq),
+            (3, 'layer-paper-p3', 1, 6),
+          );
+          expect(e.drawingSpace, 'page_overlay');
+          expect(e.drawingToDocument, [1, 0, 0, -1, 0, 792]);
+          expect(e.coordinateSpace['kind'], 'pdf_page');
+          expect(e.drawingFile, endsWith('.pkdrawing'));
+          expect(e.previewFile, endsWith('.png'));
+          expect((e.previewWidth, e.previewHeight), (1224, 1584));
+          expect(e.drawingSha256, hasLength(64));
+          expect(e.strokeCount, 4);
+        },
+      );
+      native.answerAsFixture('bridge/cmd_export_layer_nothing.json');
+      await expectLater(
+        controller.exportLayer(page1based: 9),
+        throwsA(
+          isA<PlatformException>().having(
+            (e) => e.code,
+            'code',
+            'nothing_drawn',
+          ),
+        ),
+      );
+      expect(
+        native.calls.last.arguments,
+        _args('bridge/cmd_export_layer_nothing.json'),
+      );
+      // Handwriting (phase 4): a candidate naming the drawing it read;
+      // stale and below-27 answers carry no text to offer.
+      await check(
+        'cmd_recognize_text.json',
+        () => controller.recognizeText(
+          3,
+          scope: InkRecognitionScope.selection,
+          languages: const ['en-US'],
+        ),
+        (r) {
+          final read = r as InkRecognition;
+          expect(read.candidate, 'why does this step follow?');
+          expect(
+            (read.inkLayerId, read.baseRevision, read.localSeq),
+            ('layer-paper-p3', 2, 7),
+          );
+          expect(read.strokeCount, 14);
+        },
+      );
+      await check(
+        'cmd_recognize_text_region.json',
+        () => controller.recognizeText(
+          3,
+          scope: InkRecognitionScope.region,
+          region: const Rect.fromLTWH(0.15, 0.8, 0.3, 0.07),
+        ),
+        (r) {
+          final read = r as InkRecognition;
+          expect(read.candidate, 'LSTM?');
+          expect(read.localSeq, isNull);
+        },
+      );
+      await check(
+        'cmd_recognize_text_stale.json',
+        () => controller.recognizeText(3, scope: InkRecognitionScope.all),
+        (r) {
+          final read = r as InkRecognition;
+          expect(read.stale, isTrue);
+          expect(read.candidate, isNull);
+        },
+      );
+      await check(
+        'cmd_recognize_text_unavailable.json',
+        () => controller.recognizeText(3, scope: InkRecognitionScope.all),
+        (r) {
+          final read = r as InkRecognition;
+          expect(read.available, isFalse);
+          expect((read.reason, read.minOs), ('os_too_old', '27.0'));
+          expect(read.candidate, isNull);
         },
       );
     });
@@ -405,6 +625,118 @@ void main() {
         ),
         isNull,
       );
+    });
+  });
+
+  group('journal', () {
+    late _Native native;
+    setUp(() {
+      native = _Native('claktory/ink');
+      InkJournal.channel = native.channel;
+    });
+    tearDown(() => native.dispose());
+
+    test('keeps a page by hashes, and reads it back', () async {
+      const journal = InkJournal();
+      final claktory = InkJournal.claktoryKey('e-1234');
+      final document = InkJournal.documentKey('/home/june/paper.pdf');
+      expect(claktory, matches(RegExp(r'^[0-9a-f]{64}$')));
+      expect(document, isNot(contains('paper')));
+      expect(InkJournal.claktoryKey(null), InkJournal.claktoryKey(''));
+      final drawing = InkDrawingData.bytes(
+        Uint8List.fromList([1, 2, 3]),
+        sha256: 'd' * 64,
+      );
+      await journal.put(
+        claktory: claktory,
+        document: document,
+        entry: InkJournalEntry(
+          page1based: 3,
+          seq: 7,
+          sourceSha256: 'a' * 64,
+          inkLayerId: 'layer-1',
+          baseRevision: 2,
+          drawing: drawing,
+        ),
+      );
+      expect(native.calls.single.method, 'journalPut');
+      final put = (native.calls.single.arguments as Map)
+          .cast<String, Object?>();
+      expect(put['claktory'], claktory);
+      expect(put['document'], document);
+      expect(
+        (
+          put['page_1based'],
+          put['seq'],
+          put['ink_layer_id'],
+          put['base_revision'],
+        ),
+        (3, 7, 'layer-1', 2),
+      );
+      expect((put['drawing'] as Map)['bytes_base64'], drawing.bytesBase64);
+
+      native.results['journalList'] = {
+        'entries': [
+          {...put}
+            ..remove('claktory')
+            ..remove('document'),
+        ],
+      };
+      final entries = await journal.list(
+        claktory: claktory,
+        document: document,
+      );
+      final back = entries.single;
+      expect(
+        (back.page1based, back.seq, back.inkLayerId, back.baseRevision),
+        (3, 7, 'layer-1', 2),
+      );
+      expect(back.drawing.bytes, [1, 2, 3]);
+
+      await journal.remove(
+        claktory: claktory,
+        document: document,
+        page1based: 3,
+      );
+      expect(native.calls.last.method, 'journalRemove');
+      expect((native.calls.last.arguments as Map)['page_1based'], 3);
+      expect(
+        (native.calls.last.arguments as Map).containsKey('upto_seq'),
+        isFalse,
+      );
+    });
+
+    test('clearing never throws', () async {
+      native.results['journalClear'] = PlatformException(code: 'io');
+      await const InkJournal().clear();
+      expect(native.calls.single.method, 'journalClear');
+      native.dispose();
+      // No journal at all (anything but iOS).
+      InkJournal.channel = const MethodChannel('claktory/ink-nothing');
+      await const InkJournal().clear(claktory: 'x');
+    });
+
+    test('a forgotten Claktory takes its drawings with it, and starting '
+        'over takes all', () async {
+      final endpoint = 'c' * 64;
+      final code = 'factory://?t=${'a' * 64}&e=$endpoint&name=mac-mini';
+      final storage = MemoryConnectionStorage()
+        ..kept = StoredConnections(current: code, saved: [code]);
+      final connections = await Connections.load(storage);
+      connections.forget(connections.current!);
+      await pumpEventQueue();
+      final cleared = native.calls.where((c) => c.method == 'journalClear');
+      expect(cleared.single.arguments, {
+        'claktory': InkJournal.claktoryKey(endpoint),
+      });
+      native.calls.clear();
+      await connections.startOver();
+      await pumpEventQueue();
+      expect(
+        native.calls.where((c) => c.method == 'journalClear').single.arguments,
+        {'claktory': null},
+      );
+      connections.dispose();
     });
   });
 

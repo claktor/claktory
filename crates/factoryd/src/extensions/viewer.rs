@@ -503,6 +503,8 @@ fn store_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>, focu
             None => layouts.remove(agent),
         };
     }
+    // Panes it no longer has leave where each device was reading.
+    crate::presentation::layout_changed(factory, agent);
     factory.broadcast_workspace(&factory.lock());
     Ok(())
 }

@@ -180,6 +180,12 @@ pub enum RequestError {
     /// An avatar pair that can't be picked, and why.
     #[error("{0}")]
     Avatar(String),
+    /// Ink, a sketch or a reading place that can't be saved so, and why
+    /// (`crate::ink`, `crate::sketch`, `crate::presentation`).
+    #[error("{0}")]
+    Ink(String),
+    #[error("{what} is too long: {most} characters at most.")]
+    TooLong { what: &'static str, most: usize },
 }
 
 impl RequestError {
@@ -230,7 +236,9 @@ impl RequestError {
             | RequestError::Usage(_)
             | RequestError::Reset(_)
             | RequestError::Pipe(_)
-            | RequestError::Avatar(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Avatar(_)
+            | RequestError::Ink(_)
+            | RequestError::TooLong { .. } => v1::ErrorCode::InvalidRequest,
             RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
@@ -308,6 +316,8 @@ pub struct Factory {
     /// The projects connections show the files of (`crate::explorer`).
     pub(crate) file_watches: crate::explorer::Watches,
     pub(crate) health: crate::update::Health,
+    /// The release channel and Check for updates (`crate::update`).
+    pub(crate) updates: crate::update::Updates,
     /// The selected agent's queue as last sent to clients.
     queued_sent: Mutex<Option<v1::QueuedMessages>>,
     /// How long an agent sits idle with work outstanding before it's reminded, in ms.
@@ -351,6 +361,9 @@ pub struct Factory {
     /// Told whenever the vault changes, so the sign-ins in it are taken up
     /// when it opens (`vault::signins::monitor`).
     pub(crate) vault_moved: Arc<tokio::sync::Notify>,
+    /// This Claktory's direct-message leaf: its sealed store, one writer at
+    /// a time (`user_apps::dms::leaf`).
+    pub(crate) dm_leaf: crate::user_apps::dms::leaf::State,
     /// The apps installed, as they run (`crate::apps`).
     pub(crate) apps: crate::apps::Apps,
     /// Hides the vault's values in what agents and the app are shown.
@@ -376,6 +389,15 @@ pub struct Factory {
     /// Notifications: who's using Claktory where, and what was seen
     /// (`crate::notify`).
     pub(crate) notify: crate::notify::State,
+    /// Browser control's sessions and the connections brokering them
+    /// (`crate::browser`).
+    pub(crate) browser: crate::browser::Browser,
+    /// Each device's connections, waiting for where it was reading
+    /// (`crate::presentation`).
+    pub(crate) presentations: crate::presentation::Hub,
+    /// The backend's own diagnostic events, on their way to factory.db
+    /// (`crate::diagnostics`).
+    pub(crate) diagnostics: crate::diagnostics::Recorder,
     /// Notified when a project is unarchived: its agents read what waited.
     unarchived: tokio::sync::Notify,
 }
@@ -397,6 +419,8 @@ pub(crate) struct Inner {
     pub(crate) latest_release: crate::update::Release,
     /// Why the last update was undone; "" when it wasn't.
     pub(crate) update_error: String,
+    /// What the last Check for updates found (Workspace.update_check).
+    pub(crate) update_check: v1::UpdateCheck,
     /// The explorers of the projects whose files are open, by project id,
     /// as last sent.
     pub(crate) explorers: BTreeMap<String, v1::Explorer>,
@@ -426,6 +450,13 @@ pub(crate) struct Queued {
     /// The person's voice message (`crate::speech::voice`): its
     /// transcription; `text` is empty until it's done.
     pub(crate) voice: Option<crate::speech::voice::Voice>,
+    /// An agent's message: what Claktory records of its send, with it.
+    #[serde(skip)]
+    pub(crate) sent: Option<crate::extensions::agents::provenance::Sent>,
+    /// Quiet, past a batch's cap: it waits for the agent's next wake, or
+    /// for agents_quiet (`crate::extensions::agents::quiet`).
+    #[serde(skip)]
+    pub(crate) held: bool,
 }
 
 /// A lasting event from Claktory, with no sender id.
@@ -437,6 +468,7 @@ pub(crate) fn host_event(summary: String) -> factory_agent::Event {
         summary,
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     }
 }
 
@@ -451,7 +483,14 @@ impl Queued {
             client_id: String::new(),
             attachments: Vec::new(),
             voice: None,
+            sent: None,
+            held: false,
         }
+    }
+
+    /// Sent quietly: it never wakes the agent (`crate::extensions::agents::quiet`).
+    pub(crate) fn quiet(&self) -> bool {
+        self.event.as_ref().and_then(|event| event.provenance.as_ref()).is_some_and(|provenance| provenance.quiet)
     }
 
     pub(crate) fn event(text: String, event: factory_agent::Event) -> Queued {
@@ -536,17 +575,27 @@ pub(crate) struct Runtime {
 impl Runtime {
     /// Something queued can go to the agent now (a voice message being
     /// transcribed, and the person's after it, can't: `crate::speech::voice`).
+    /// Quiet messages never count: they wait for something else to wake it.
     pub(crate) fn has_ready(&self) -> bool {
-        crate::speech::voice::deliverable(&self.queue).contains(&true)
+        self.queue.iter().zip(crate::speech::voice::deliverable(&self.queue)).any(|(queued, ready)| ready && !queued.quiet())
     }
 
-    /// Takes what's queued that can go to the agent now, oldest first; the
-    /// rest stays.
+    /// Takes what's queued that can go to the agent now, oldest first, but
+    /// quiet messages (`crate::extensions::agents::quiet::take` gives those);
+    /// the rest stays.
     pub(crate) fn take_ready(&mut self) -> Vec<Queued> {
         let ready = crate::speech::voice::deliverable(&self.queue);
-        let (taken, kept) = std::mem::take(&mut self.queue).into_iter().zip(ready).partition::<Vec<_>, _>(|(_, ready)| *ready);
+        let (taken, kept) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .zip(ready)
+            .partition::<Vec<_>, _>(|(queued, ready)| *ready && !queued.quiet());
         self.queue = kept.into_iter().map(|(queued, _)| queued).collect();
         taken.into_iter().map(|(queued, _)| queued).collect()
+    }
+
+    /// How many quiet messages wait for it.
+    pub(crate) fn quiet_waiting(&self) -> usize {
+        self.queue.iter().filter(|queued| queued.quiet()).count()
     }
 
     /// Messages wait for a busy agent: a bash command it's running moves to
@@ -560,7 +609,7 @@ impl Runtime {
             .queue
             .iter()
             .zip(crate::speech::voice::deliverable(&self.queue))
-            .filter(|(_, ready)| *ready)
+            .filter(|(queued, ready)| *ready && !queued.quiet())
             .map(|(queued, _)| queued)
             .collect();
         let person = ready.iter().any(|queued| queued.event.is_none());
@@ -663,6 +712,7 @@ impl Factory {
             login_generation: 0,
             latest_release: crate::update::latest(&home).await,
             update_error: crate::update::failure_message(&home),
+            update_check: v1::UpdateCheck::default(),
             explorers: BTreeMap::new(),
             view: None,
             stopping: HashMap::new(),
@@ -689,6 +739,7 @@ impl Factory {
             explorer_lock: tokio::sync::Mutex::new(()),
             file_watches: crate::explorer::Watches::default(),
             health: crate::update::Health::default(),
+            updates: crate::update::Updates::default(),
             queued_sent: Mutex::new(None),
             nudge_after: std::sync::atomic::AtomicU64::new(30_000),
             nudge_minute: std::sync::atomic::AtomicU64::new(60_000),
@@ -710,6 +761,7 @@ impl Factory {
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
             vault_moved: Arc::default(),
+            dm_leaf: crate::user_apps::dms::leaf::State::default(),
             apps: crate::apps::Apps::default(),
             account,
             onboarding,
@@ -719,6 +771,9 @@ impl Factory {
             voices: crate::speech::voice::Voices::new(),
             chats,
             notify: crate::notify::State::default(),
+            browser: crate::browser::Browser::default(),
+            presentations: crate::presentation::Hub::default(),
+            diagnostics: crate::diagnostics::Recorder::default(),
             unarchived: tokio::sync::Notify::new(),
             key_color,
             key_seed,
@@ -760,6 +815,7 @@ impl Factory {
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::vault::requests::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::user_apps::dms::watch::monitor(Arc::downgrade(&factory)));
         if let Some(sign_ins) = sign_ins {
             tokio::spawn(crate::vault::signins::monitor(Arc::downgrade(&factory), sign_ins));
         }
@@ -769,6 +825,7 @@ impl Factory {
         tokio::spawn(crate::speech::model::check(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
         tokio::spawn(crate::notify::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::browser::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -1042,6 +1099,7 @@ impl Factory {
     }
 
     async fn delete_agent_data(&self, id: &str) -> Result<(), RequestError> {
+        self.browser_forget(id, "agent_changed");
         crate::vault::requests::forget_admin(self, id);
         crate::extensions::checklist::forget(&self.store, id)?;
         crate::extensions::memory::forget(&self.store, id)?;
@@ -1050,7 +1108,10 @@ impl Factory {
         crate::extensions::ask::forget(&self.store, id)?;
         crate::extensions::devices::forget(self, id).await?;
         crate::extensions::viewer::forget(self, id)?;
+        crate::presentation::forget_agent(self, id)?;
         crate::pipes::start::forget(&self.store, id)?;
+        crate::extensions::agents::provenance::forget(&self.store, id)?;
+        crate::user_apps::forget(self, id)?;
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -1114,6 +1175,8 @@ impl Factory {
             chats_collapsed,
             max_open_panes,
             notifications,
+            checklist,
+            notification_change,
         } = request;
         // The sidebar's sections, folded or open: the workspace's UI state
         // (#249), not settings, so a fold alone leaves config.json alone.
@@ -1127,11 +1190,20 @@ impl Factory {
             self.set_max_open_panes(panes)?;
         }
         // And the notification settings (`crate::notify`).
-        let notified = notifications.is_some();
+        let notified = notifications.is_some() || notification_change.is_some();
         if let Some(notifications) = &notifications {
             crate::notify::update(self, notifications)?;
         }
-        let only_folds = (folds || max_open_panes.is_some() || notified)
+        if let Some(change) = &notification_change {
+            crate::notify::change(self, change)?;
+        }
+        // And the checklist's intervals (#282).
+        if let Some(times) = &checklist
+            && crate::extensions::checklist::Times::set(&self.store, times).map_err(RequestError::Checklist)?
+        {
+            self.broadcast_workspace(&self.lock());
+        }
+        let only_folds = (folds || max_open_panes.is_some() || notified || checklist.is_some())
             && model.is_none()
             && effort.is_none()
             && compact_at.is_none()
@@ -1455,14 +1527,34 @@ impl Factory {
 
     /// Gives an agent an event, waking it if it's idle. Gone agents miss it.
     pub(crate) fn deliver_event(self: &Arc<Self>, id: &str, text: String, event: factory_agent::Event) {
+        self.deliver_queued(id, Queued::event(text, event));
+    }
+
+    /// An agent's message (`crate::extensions::agents`), with what Claktory
+    /// records of its send; whether it was recorded.
+    pub(crate) fn deliver_sent(
+        self: &Arc<Self>,
+        id: &str,
+        text: String,
+        event: factory_agent::Event,
+        sent: crate::extensions::agents::provenance::Sent,
+    ) -> bool {
+        self.deliver_queued(id, Queued { sent: Some(sent), ..Queued::event(text, event) })
+    }
+
+    fn deliver_queued(self: &Arc<Self>, id: &str, queued: Queued) -> bool {
         let mut inner = self.lock();
+        let from = queued.event.as_ref().map(|event| event.from.clone()).unwrap_or_default();
         if inner.config.agent(id).is_none() && !crate::chats::kept(self, id) {
-            tracing::info!(agent = %id, from = %event.from, "event for an agent that's gone");
-            return;
+            tracing::info!(agent = %id, %from, "event for an agent that's gone");
+            return false;
         }
-        let from = event.from.clone();
-        if let Err(error) = self.enqueue(&mut inner, id, Queued::event(text, event)) {
-            tracing::error!(agent = %id, %from, %error, "could not record an event, so it's lost");
+        match self.enqueue(&mut inner, id, queued) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(agent = %id, %from, %error, "could not record an event, so it's lost");
+                false
+            }
         }
     }
 
@@ -1479,6 +1571,10 @@ impl Factory {
             }
         }
         queued.id = self.store.add_message(id, &queued)?;
+        // An agent's message: its number, which the agent reads.
+        if let Some(provenance) = queued.event.as_mut().and_then(|event| event.provenance.as_mut()) {
+            provenance.message = u64::try_from(queued.id).unwrap_or_default();
+        }
         let person = queued.event.is_none();
         inner.agents.entry(id.to_owned()).or_default().queue.push(queued);
         // The person's message to an agent waiting out a usage limit doesn't
@@ -1562,6 +1658,9 @@ impl Factory {
         if let Err(error) = crate::pipes::start::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read its cards for starting pipes; they show as waiting");
         }
+        if let Err(error) = crate::user_apps::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read its proposals of app access; decided ones show as waiting");
+        }
         match self.vault.requests_of(id) {
             Ok(requests) => {
                 for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
@@ -1622,6 +1721,8 @@ impl Factory {
             || crate::extensions::ask::pending_of(&self.store, id)
             || crate::extensions::devices::waiting_of(&self.store, id)
             || crate::pipes::start::waiting_of(&self.store, id)
+            || crate::extensions::checklist::waits_unasked(&self.store, id)
+            || crate::user_apps::pending_of(&self.store, id)
     }
 
     /// Changes the config in memory and on disk, or changes nothing.
@@ -1826,6 +1927,8 @@ impl Factory {
         if unfocused {
             inner.state.focused_project = None;
         }
+        // Browser control just turned on turns itself off again later.
+        crate::browser::activation::observe(self, &inner.config, &config);
         inner.config = config;
         if unarchived {
             self.unarchived.notify_one();
@@ -2171,6 +2274,12 @@ impl Factory {
         }
         let mut agents = Vec::new();
         let now = crate::transcript::now_ms();
+        let unread_copies = crate::extensions::agents::provenance::unread(&self.store);
+        // Checklist items waiting on the person (#279), by agent.
+        let mut waiting_items = crate::extensions::checklist::waiting_items(&self.store).unwrap_or_else(|error| {
+            tracing::error!(%error, "could not read the checklist items waiting on the person");
+            Default::default()
+        });
         for agent in &inner.config.agents {
             let runtime = inner.agents.get(&agent.id);
             let character = self.character(inner, agent, now);
@@ -2185,7 +2294,8 @@ impl Factory {
                 status: status.into(),
                 context_tokens: runtime.and_then(|runtime| runtime.transcript.as_ref()).map_or(0, Transcript::context_tokens),
                 compact_at_tokens: inner.config.compact_at_tokens,
-                queued_messages: runtime.map_or(0, |runtime| runtime.queue.len() as u32),
+                queued_messages: runtime.map_or(0, |runtime| (runtime.queue.len() - runtime.quiet_waiting()) as u32),
+                quiet_waiting: runtime.map_or(0, |runtime| runtime.quiet_waiting() as u32),
                 model_available: inner.models.iter().any(|model| model.id == agent.model),
                 color: agent.color.clone(),
                 unseen: inner.state.unseen.contains(&agent.id),
@@ -2208,6 +2318,7 @@ impl Factory {
                 role: agent.role.clone(),
                 layout: self.viewer.layout(&agent.id),
                 layout_focus: self.viewer.focus(&agent.id),
+                waiting_items: waiting_items.remove(&agent.id).unwrap_or_default(),
                 default_prompt: Config::default_prompt(agent).unwrap_or_default().to_owned(),
                 waiting_seqs: runtime.and_then(|runtime| runtime.transcript.as_ref()).map(Transcript::waiting_seqs).unwrap_or_default(),
                 lead_id: inner.config.lead(agent).map(|lead| lead.id.clone()).unwrap_or_default(),
@@ -2218,6 +2329,7 @@ impl Factory {
                 pipe_id: self.pipes.bound_pipe(&agent.id),
                 fallback_model: agent.fallback_model.clone(),
                 notify: crate::notify::settings(self).mode(&agent.id).to_proto().into(),
+                unread_copies: unread_copies.get(&agent.id).copied().unwrap_or_default(),
             });
         }
         let config = &inner.config;
@@ -2249,6 +2361,8 @@ impl Factory {
             apps,
             apps_available: self.apps.available(),
             pinned_apps: crate::apps::pins::view(self, config),
+            browser_sessions: self.browser.view(),
+            dm_sends: crate::user_apps::dms::sends::waiting(self),
             pipes,
             speech_model: Some(self.speech.view()),
             chats,
@@ -2270,6 +2384,8 @@ impl Factory {
             vault: Some(vault),
             account: self.account.view(&config.account),
             update_error: inner.update_error.clone(),
+            update_check: Some(inner.update_check.clone()),
+            diagnostics: Some(crate::diagnostics::view(self)),
             next_agent_color: inner.config.next_color().to_owned(),
             extensions: crate::extensions::catalog(),
             open_panel: inner.state.selected_agent.as_deref().and_then(|agent| open_panel(inner, agent)).unwrap_or_default().to_owned(),
@@ -2339,6 +2455,7 @@ impl Factory {
                 default_fallback_model: config.default_fallback_model.clone(),
                 max_open_panes: config::open_panes(inner.state.max_open_panes),
                 notifications: Some(crate::notify::settings(self).to_proto()),
+                checklist: Some(crate::extensions::checklist::Times::read(&self.store).proto()),
             }),
         }
     }
@@ -2416,6 +2533,7 @@ pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
         client_id: queued.client_id.clone(),
         attachments: queued.attachments.iter().map(crate::transcript::attachment).collect(),
         transcription: queued.voice.as_ref().map(crate::speech::voice::Voice::view),
+        quiet: queued.quiet(),
     }
 }
 

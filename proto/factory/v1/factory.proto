@@ -214,6 +214,62 @@ message ClientMessage {
     GrantAppSource grant_app_source = 151;
     // The app dock: pin, unpin or move an app (Workspace.pinned_apps).
     PinApp pin_app = 152;
+    // Needs you's history: the cards the person decided lately.
+    ListNeedsYouHistory list_needs_you_history = 155;
+    // The quiet copies an agent was sent (see QuietCopy), newest first;
+    // answered with QuietCopies.
+    ListQuietCopies list_quiet_copies = 156;
+    // The person's decision on Rivet's proposal to give an agent access to
+    // an app (AppGrantProposal).
+    DecideAppGrant decide_app_grant = 157;
+    // Browser control (see BrowserSession): what a Mac app says as the
+    // broker of its Chrome.
+    BrowserCapability browser_capability = 158;
+    BrowserGrant browser_grant = 159;
+    BrowserResult browser_result = 160;
+    BrowserHeartbeat browser_heartbeat = 161;
+    // From the Mac a session is bound to: it ended there. From any other
+    // device: the person asks to stop it.
+    BrowserStop browser_stop = 162;
+    // Browser control's log of the last 7 days (BrowserLogEntry), answered
+    // with BrowserLog, to the asker only.
+    ListBrowserLog list_browser_log = 163;
+    // Empties that log. Answered with Ack.
+    ClearBrowserLog clear_browser_log = 164;
+    // Part of an ink blob (an iPad drawing, its preview, a review item's
+    // context image), answered with InkBlobData to the asker only.
+    ReadInkBlob read_ink_blob = 165;
+    // iPad ink layers (InkLayer): the layers drawn on a file, answered with
+    // InkLayerList; a layer's next revision, answered with InkLayerSaved,
+    // to the asker only; a layer deleted, answered with Ack.
+    ListInkLayers list_ink_layers = 166;
+    SaveInkLayer save_ink_layer = 167;
+    DeleteInkLayer delete_ink_layer = 168;
+    // Where this device is reading an agent's panes, kept for this device
+    // alone (Presentation); answered with Ack.
+    SetPresentation set_presentation = 169;
+    // A blank white PNG to draw on, in a project's folder; answered with
+    // SketchCreated.
+    CreateSketch create_sketch = 170;
+    // Checks for a newer release now (Settings' Check for updates); what it
+    // finds is Workspace.update_check. Answered with Ack at once.
+    CheckForUpdates check_for_updates = 171;
+    // Direct messages end to end: this Claktory's leaf key, for one of the
+    // person's own devices to certify (only over a device's own connection,
+    // never claktory.com). Answered with DmLeafOffer, to the asker only.
+    DmLeafOfferRequest dm_leaf_offer = 172;
+    // The certificate the device signed for that key, with its pins.
+    // Answered with Ack, or Error saying why it isn't taken.
+    DmEnrollLeaf dm_enroll_leaf = 173;
+    // Turns advanced diagnostics on or off for this Claktory
+    // (Workspace.diagnostics), or deletes what's kept. Off deletes
+    // everything kept. Answered with Ack.
+    SetDiagnostics set_diagnostics = 174;
+    // What this device recorded since it last sent it (DiagnosticEvent),
+    // kept here for this Claktory's agents to read (database:factory).
+    // Answered with Ack once kept; refused (INVALID_REQUEST) while
+    // diagnostics are off, when the app drops what it buffered.
+    SendDiagnostics send_diagnostics = 175;
   }
 }
 
@@ -308,6 +364,31 @@ message ServerMessage {
     Notify notify = 50;
     // The answer to CheckRecoveryKey, to the asker only.
     RecoveryKeyCheck recovery_key_check = 53;
+    // The answer to ListNeedsYouHistory, to the asker only.
+    NeedsYouHistory needs_you_history = 54;
+    // The answer to ListQuietCopies, to the asker only.
+    QuietCopies quiet_copies = 55;
+    // Browser control, only to the connection a session is bound to (never
+    // to every client): a command for its Chrome, and the session's end.
+    BrowserCommand browser_command = 56;
+    BrowserEnded browser_ended = 57;
+    // The answer to ListBrowserLog, to the asker only.
+    BrowserLog browser_log = 58;
+    // The answer to ReadInkBlob, to the asker only.
+    InkBlobData ink_blob_data = 59;
+    // The ink layers on a file: the answer to ListInkLayers, and to every
+    // client again whenever one of them changes.
+    InkLayerList ink_layer_list = 60;
+    // The answer to SaveInkLayer, to the asker only.
+    InkLayerSaved ink_layer_saved = 61;
+    // Where this device was reading: after Welcome when it keeps anything
+    // (none means nothing), and to every connection of this device whenever
+    // it changes. Never another device's.
+    Presentation presentation = 62;
+    // The answer to CreateSketch, to the asker only.
+    SketchCreated sketch_created = 63;
+    // The answer to DmLeafOfferRequest, to the asker only.
+    DmLeafOffer dm_leaf_offer = 64;
   }
 }
 
@@ -765,8 +846,24 @@ message StartUpload {
   string name = 3;
   // Its whole size in bytes.
   uint64 size = 4;
-  // Its type, such as "image/png"; optional.
+  // Its type, such as "image/png"; optional (required for ink).
   string mime = 5;
+  // What it's for: a file for an agent (the default), or an ink blob.
+  UploadPurpose purpose = 6;
+}
+
+// What an upload is for.
+enum UploadPurpose {
+  // A file attached to a message for `agent_id`, stored in its uploads.
+  UPLOAD_PURPOSE_AGENT = 0;
+  // An ink blob: an iPad drawing ("drawing.pkdrawing",
+  // "application/x-pencilkit", at most 8 MiB) or a PNG ("image/png": a
+  // preview, at most 4 MiB, or a review item's context image, at most
+  // 3 MiB and 2048 px on its long edge, checked when a thread names it).
+  // `agent_id` is empty. Kept privately, by its SHA-256, where no agent's
+  // tools reach, until the person sends it; FinishUpload must carry the
+  // hash, and answers UploadedFile.blob_sha256.
+  UPLOAD_PURPOSE_INK = 1;
 }
 
 // Part of an upload's file, from `offset`, which must be how much the backend
@@ -892,6 +989,14 @@ message UpdateSettings {
   // Replaces the notification settings (see Settings.notifications) when
   // set. A relay that isn't an https URL is refused.
   NotificationSettings notifications = 34;
+  // Settings → Checklist's intervals (#282): each field 0 leaves that one as
+  // it is; any other value is 15 to 10080 minutes, else the whole request is
+  // refused.
+  optional ChecklistSettings checklist = 35;
+  // Changes only the notification settings that are set, checked as
+  // `notifications` is (B4): what the app sends for one switch, so two
+  // devices changing different ones don't undo each other.
+  optional NotificationSettingsChange notification_change = 36;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -1245,7 +1350,7 @@ message Thread {
   string path = 3;
   // The space its selectors were made in: "text" (the file's own text, in a
   // plain view or a file that isn't Markdown), "markdown" (a Markdown file's
-  // formatted view) or "image".
+  // formatted view), "image", "video" or "pdf".
   string kind = 4;
   // The file's SHA-256 (hex) that `selectors`, `source` and `rendered` refer
   // to: ThreadList.version_sha256 while the file exists.
@@ -1254,8 +1359,13 @@ message Thread {
   // "type"): TextQuoteSelector {exact, prefix, suffix} and
   // TextPositionSelector {start, end} (UTF-16 code units) in its kind's text
   // for text files, FragmentSelector {conformsTo: "media-frags", value:
-  // "xywh=percent:x,y,w,h"} for images. Kept up to date as the file changes,
-  // for text files.
+  // "xywh=percent:x,y,w,h"} for images, and for PDFs a FragmentSelector
+  // {conformsTo: "http://tools.ietf.org/rfc/rfc8118", value: "page=N"}
+  // refinedBy a ClaktoryPageRegion {version: 1, box: "crop", rotation (0, 90,
+  // 180 or 270), units: "normalized", origin: "top_left_unrotated", x, y, w,
+  // h}, all four in 0..1 with x+w and y+h at most 1, and N from 1 to 2000.
+  // Kept up to date as the file changes, for text files; an image's, a
+  // video's or a PDF's stay as made, OUTDATED while the file is another.
   repeated Selector selectors = 6;
   ThreadStatus status = 7;
   AnchorState anchor = 8;
@@ -1348,6 +1458,66 @@ message ThreadComment {
   // The person's comment, not sent to the agent yet (SendComments sends it).
   // Agents never see drafts.
   bool draft = 6;
+  // The person's ink this comment carries (a review item from the iPad);
+  // unset for none. Shown to the person's devices only: agents never see it
+  // or a draft, and get only the copies Send makes (InkItem.published_*).
+  InkItem ink = 7;
+}
+
+// A review item: ink the person drew on a file, carried by one of their
+// comments (the comment's body is the question). It refers to an ink layer
+// at a frozen revision, with the context image the iPad made of it.
+message InkItem {
+  // The ink layer (InkLayer.id) and the revision it was drawn on, which must
+  // be on the thread's file at the thread's version_sha256.
+  string ink_layer_id = 1;
+  uint32 layer_revision = 2;
+  // Where on the layer's surface, normalized (0..1 from the top left of the
+  // page as stored, unrotated, or of the image); unset for an excerpt.
+  NormalizedRect region = 3;
+  // The context image: required.
+  InkComposite context = 4;
+  // The excerpt's text, for ink on an excerpt of a text or Markdown file.
+  string excerpt_text = 5;
+  // The person's handwriting as the iPad read it; unset when not read.
+  RecognizedText recognized = 6;
+  // Set by the backend when the comment is sent (and only then): the copy
+  // of the context image in the agent's uploads, and the JSON beside it
+  // describing the item. Empty until sent; ignored in requests.
+  string published_context_path = 7;
+  string published_manifest_path = 8;
+}
+
+// A review item's context image: an ink blob (a PNG of at most 3 MiB and
+// 2048 px on its long edge), uploaded with UPLOAD_PURPOSE_INK.
+message InkComposite {
+  string sha256 = 1;
+  // As the blob is: checked against it.
+  uint64 bytes = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+  // What part of the surface it shows, normalized as InkItem.region.
+  NormalizedRect region = 5;
+  // Six numbers: from the image's pixels to the document's space.
+  repeated double crop_to_document_transform = 6;
+}
+
+// A rectangle in 0..1 from the top left: x+w and y+h at most 1.
+message NormalizedRect {
+  double x = 1;
+  double y = 2;
+  double w = 3;
+  double h = 4;
+}
+
+// Handwriting read on the iPad.
+message RecognizedText {
+  string text = 1;
+  // The layer revision it was read from.
+  uint32 layer_revision = 2;
+  // Such as "en-US".
+  repeated string languages = 3;
+  string recognizer_version = 4;
 }
 
 // Asks for every thread on a file, open and resolved: answered with
@@ -1384,7 +1554,7 @@ message CreateThread {
   // The agent it's addressed to.
   string agent_id = 1;
   string path = 2;
-  // "text", "markdown" or "image" (see Thread.kind).
+  // "text", "markdown", "image", "video" or "pdf" (see Thread.kind).
   string kind = 3;
   // FileContent.sha256 of the content the selection was made on. When the
   // file changed since, the thread is put on the same text in the file as it
@@ -1392,7 +1562,8 @@ message CreateThread {
   string version_sha256 = 4;
   // "text": TextQuoteSelector and TextPositionSelector in the file's text.
   // "markdown": TextQuoteSelector (and TextPositionSelector, if known) in the
-  // formatted view's plain text. "image": a FragmentSelector.
+  // formatted view's plain text. "image": a FragmentSelector. "pdf": a page
+  // FragmentSelector refined by a ClaktoryPageRegion (see Thread.selectors).
   repeated Selector selectors = 5;
   // The first comment, Markdown; not empty, unless it suggests a change
   // (then a comment with an empty body carries it until it's sent).
@@ -1402,6 +1573,12 @@ message CreateThread {
   // A replacement the person suggests for the text (text and Markdown only;
   // see Suggestion).
   optional string suggestion = 8;
+  // Ink this first comment carries: a review item. Refused, with an Error
+  // whose message can be shown as it is, unless its layer exists at that
+  // revision on this file at version_sha256, its regions are in range and
+  // its context image is uploaded and within its limits. With ink, `body`
+  // may be empty.
+  InkItem ink = 9;
 }
 
 // The person replies on a thread, answered with Ack: a draft until sent,
@@ -1410,6 +1587,9 @@ message ReplyThread {
   string thread_id = 1;
   string body = 2;
   bool send_now = 3;
+  // A second review item on the thread, checked as CreateThread.ink is
+  // against the thread's version_sha256. With ink, `body` may be empty.
+  InkItem ink = 4;
 }
 
 // Changes one of the person's comments, answered with Ack. One already sent
@@ -1449,11 +1629,20 @@ message ReattachThread {
 }
 
 // Sends the person's drafts on a file to the agent they're addressed to, as
-// one message it reads as an event; answered with Ack.
+// one message it reads as an event; answered with Ack. Sending is what
+// publishes ink: each review item's context image, and a JSON describing
+// it, are copied into the agent's uploads (InkItem.published_*), never
+// before.
 message SendComments {
   string agent_id = 1;
   // Absolute; empty for every file.
   string path = 2;
+  // Only these threads' drafts ("t-41"); empty for all of them. Each must be
+  // addressed to `agent_id`.
+  repeated string thread_ids = 3;
+  // Made up by the app, unique per send: sending again with the same id
+  // answers Ack and delivers nothing twice.
+  string client_batch_id = 4;
 }
 
 // Accepts a thread's suggestion (Claktory replaces the text with it in the
@@ -1464,6 +1653,10 @@ message SendComments {
 message DecideSuggestion {
   string thread_id = 1;
   bool accept = 2;
+  // The person's comment, told as theirs ("Matt's note: …") to the agent
+  // that suggested it, or, for the person's own suggestion, to the agent
+  // the thread is for. May be empty; 2,000 characters at most.
+  string comment = 3;
 }
 
 // ---- Sign-in ----
@@ -1751,6 +1944,172 @@ message Workspace {
   // (PinApp). The same on every device. Empty while `apps_available` is
   // false.
   repeated string pinned_apps = 35;
+  // Browser control's sessions, pending, active and lately ended: a status
+  // with no page data. The same on every device.
+  repeated BrowserSession browser_sessions = 36;
+  // Messages this Claktory's agents proposed to the person's friends,
+  // waiting for the person's review (D4b), oldest first: for Needs you.
+  // Empty outside the direct-messages preview.
+  repeated DmSendWaiting dm_sends = 37;
+  // What the last Check for updates found, kept current by the backend's own
+  // checks afterwards. The same on every device.
+  UpdateCheck update_check = 38;
+  // Advanced diagnostics: whether they're on (SetDiagnostics), off by
+  // default, and what's kept.
+  Diagnostics diagnostics = 39;
+}
+
+// Checks for a newer release now, as Claktory does on its own every half
+// hour: the online channel, when this build was published with one
+// (downloading a newer release the usual way), and the releases on this
+// computer. Asking again while a check or its download runs joins it; within
+// 10 seconds of the last check, its answer stands.
+message CheckForUpdates {}
+
+// Advanced diagnostics: while on, the person's devices record what
+// happens in areas Claktory knows trouble in (the first: "connection") and
+// send it to this Claktory (SendDiagnostics), and the backend records its
+// own side; this Claktory's agents read it (database:factory) to find out
+// what went wrong. Off by default.
+message Diagnostics {
+  // On: devices and the backend record and keep diagnostics. Off, nothing
+  // is recorded or kept.
+  bool share = 1;
+  // What's kept, a source each, the one heard from last first. Empty while
+  // off.
+  repeated DiagnosticsSource sources = 2;
+  // How long events are kept, in days (14), and the most a source keeps
+  // here, in bytes (4 MB): past either, its oldest go first.
+  uint32 keep_days = 3;
+  int64 source_limit_bytes = 4;
+}
+
+// What's kept from one source: a device of the person's, or this
+// Claktory's backend.
+message DiagnosticsSource {
+  // "device:" and the paired device's id ("device:local" for this
+  // computer's own app), or "backend" for this Claktory itself.
+  string id = 1;
+  // A device's name as it last sent; empty for the backend.
+  string name = 2;
+  // A device's kind; unspecified for the backend.
+  DeviceKind kind = 3;
+  // Its system and version as it last sent ("ios", "1.2.3"); the
+  // backend's own.
+  string platform = 4;
+  string app_version = 5;
+  uint32 events = 6;
+  int64 bytes = 7;
+  // Its oldest and newest event, by the source's clock, in ms since 1970.
+  int64 oldest_ms = 8;
+  int64 newest_ms = 9;
+  // When it last added some, by this Claktory's clock.
+  int64 received_ms = 10;
+  // The same, by area ("connection"…), in name order.
+  repeated DiagnosticsArea areas = 11;
+}
+
+message DiagnosticsArea {
+  string area = 1;
+  uint32 events = 2;
+  int64 bytes = 3;
+  int64 oldest_ms = 4;
+  int64 newest_ms = 5;
+}
+
+message SetDiagnostics {
+  // Turns diagnostics on or off; unset leaves them as they are. Turning
+  // them off deletes everything kept.
+  optional bool share = 1;
+  // Deletes what's kept: of one source (source_id, a DiagnosticsSource's
+  // id) or of every source when empty, and of one area or of every area
+  // when empty. Whether they're on stays as it is.
+  bool clear = 2;
+  string source_id = 3;
+  string area = 4;
+}
+
+message SendDiagnostics {
+  // Oldest first, at most 2000 a request (send more in several). Events
+  // older than 14 days are dropped.
+  repeated DiagnosticEvent events = 1;
+}
+
+// One thing that happened, in one area. Never message content, names,
+// addresses or codes. The backend adds the device, its kind, platform and
+// app version (from its Hello) and when it arrived.
+message DiagnosticEvent {
+  // When, by the device's clock, in ms since 1970.
+  int64 at_ms = 1;
+  // Unique to the event within the app's install and increasing, not
+  // necessarily by one: an event sent again (after a lost Ack) is kept
+  // once, by device, area, seq and at_ms.
+  uint64 seq = 2;
+  // A short token, a-z 0-9 _ . (up to 40). For "connection": lifecycle,
+  // network, connect, connected, welcome, disconnected, relay, error…
+  string kind = 3;
+  // One line, up to 500 characters, of key=value tokens such as
+  // "path=relay ms=812 err=timeout net=wifi".
+  string detail = 4;
+  // How long it took (a connect attempt, a handshake); 0 when it doesn't
+  // apply.
+  int64 duration_ms = 5;
+  // Goes up every time the app's process starts: a new session after a
+  // force-quit or relaunch.
+  uint64 session = 6;
+  // What it's about: a short token, a-z 0-9 _ (up to 32). The first is
+  // "connection"; empty is "general".
+  string area = 7;
+}
+
+enum UpdateCheckState {
+  // Nobody has checked since the backend started: show only the button.
+  UPDATE_CHECK_STATE_NONE = 0;
+  UPDATE_CHECK_STATE_CHECKING = 1;
+  // Nothing newer than this backend is here, and the channel offers
+  // nothing newer either. `version`: this backend's (Workspace.version).
+  UPDATE_CHECK_STATE_UP_TO_DATE = 2;
+  // A newer release, `version`, is downloading.
+  UPDATE_CHECK_STATE_DOWNLOADING = 3;
+  // A release newer than this backend, `version`, is here:
+  // Workspace.latest_release. For UP_TO_DATE and READY alike, word the
+  // answer by the app's own version, as the Update banner decides: an
+  // app-only release this app already runs is "up to date" for it.
+  UPDATE_CHECK_STATE_READY = 4;
+  // The check couldn't finish; `error` says why, for the person.
+  UPDATE_CHECK_STATE_FAILED = 5;
+}
+
+message UpdateCheck {
+  UpdateCheckState state = 1;
+  string version = 2;
+  // Why it failed (FAILED only), such as "Claktory couldn't reach the
+  // update server.".
+  string error = 3;
+  // When it started (CHECKING, DOWNLOADING) or finished, in ms since 1970.
+  int64 checked_ms = 4;
+}
+
+// A message an agent proposed in one of the person's direct-message
+// conversations (dm_send), waiting for the person to approve it on their
+// device or decline it, in the chat's review card. Never its text: the
+// device loads the proposal from the account service, and only the device
+// approves. It leaves Workspace.dm_sends once the person decides, the agent
+// takes it back, it expires or it can't be sent any more.
+message DmSendWaiting {
+  // The account service's proposal id, which the review card loads.
+  string proposal_id = 1;
+  // The agent that proposed it.
+  string agent_id = 2;
+  // The conversation it would be sent in, for the app to open the chat.
+  string conversation_id = 3;
+  // The friend it would go to: the name they chose (it may be empty) and
+  // the tag the service gave them, each on one line.
+  string friend_name = 4;
+  string friend_tag = 5;
+  int64 created_ms = 6;
+  // When it expires unless decided (3 days after it was proposed).
+  int64 expires_ms = 7;
 }
 
 // The person a Claktory belongs to, as every device shows them.
@@ -2188,6 +2547,41 @@ message ChecklistItem {
   bool has_pending_ask = 11;
   // The goal it serves (Goal.id on the same checklist); 0 for none.
   uint32 goal = 12;
+  // While it's blocked (#279): what kind of thing it waits on;
+  // UNSPECIFIED for an untyped block (blocked_on's words alone). blocked_on
+  // stays filled for older apps: "person" for the person's kinds, and for
+  // BLOCKED_KIND_ITEM the waited-on item's text as it is now.
+  BlockedKind blocked_kind = 13;
+  // Whom or what: an agent id (AGENT), or "agent#12" (ITEM: item 12 on that
+  // agent's checklist). Empty otherwise.
+  string blocked_ref = 14;
+  // BLOCKED_KIND_EXTERNAL: when its owner is next told to check again, ms
+  // (always set while it waits). CHECKLIST_STATUS_PARKED: when it resumes
+  // (goes back to open, its owner told), ms; 0 for no set time.
+  int64 retry_at_ms = 15;
+  // The person's kinds: when Claktory has it asked again after the person
+  // dismissed its question, ms (as long as it still waits on them); 0
+  // while nothing was dismissed.
+  int64 reask_at_ms = 16;
+  // When the person last dismissed a question about it, ms; 0 if never.
+  int64 dismissed_ms = 17;
+}
+
+// What a blocked checklist item waits on (#279).
+enum BlockedKind {
+  BLOCKED_KIND_UNSPECIFIED = 0;
+  // A decision only the person can make.
+  BLOCKED_KIND_PERSON_DECISION = 1;
+  // Something only the person can do (sign in, pay, plug in).
+  BLOCKED_KIND_PERSON_ACTION = 2;
+  // Another checklist item (blocked_ref): it opens again by itself when
+  // that one is done or dropped, and its owner is told.
+  BLOCKED_KIND_ITEM = 3;
+  // Another agent (blocked_ref).
+  BLOCKED_KIND_AGENT = 4;
+  // Something outside: its owner is told to check again at retry_at_ms,
+  // then each time twice as long after.
+  BLOCKED_KIND_EXTERNAL = 5;
 }
 
 message ChecklistUpdate {
@@ -2207,6 +2601,10 @@ enum ChecklistStatus {
   CHECKLIST_STATUS_DROPPED = 4;
   // Waiting on the person or something outside; still outstanding.
   CHECKLIST_STATUS_BLOCKED = 5;
+  // Ongoing or waiting its turn, with nothing to wait on (#279): still
+  // outstanding, never nudged or asked whether it's still blocked; shown
+  // apart from Blocked. It can resume at a set time (retry_at_ms).
+  CHECKLIST_STATUS_PARKED = 6;
 }
 
 // An agent's own memory: the person's preferences it learned and its
@@ -2430,6 +2828,31 @@ message Settings {
   uint32 max_open_panes = 31;
   // When Claktory notifies the person (Settings → Notifications).
   NotificationSettings notifications = 32;
+  // How Claktory follows up on blocked checklist items (#282), as set:
+  // each its default until changed. Kept in factory.db, not config.json.
+  ChecklistSettings checklist = 33;
+}
+
+// Settings → Checklist (#282): how Claktory follows up on blocked checklist
+// items, in minutes, each from 15 to 10080 (a week).
+message ChecklistSettings {
+  // A block on another agent or item, or an untyped one: its owner is
+  // asked whether it's still blocked this long after it blocked, and as
+  // often again while it stays so. 240 until changed.
+  uint32 agent_blocked_minutes = 1;
+  // The same for a wait on the person. 1440 until changed.
+  uint32 person_blocked_minutes = 2;
+  // A wait on something outside given no retry time: its owner is told to
+  // check again this long after, then each time twice as long, at most a
+  // day (or this, if longer). 120 until changed.
+  uint32 external_retry_minutes = 3;
+  // After the person dismisses a question about an item that still waits
+  // on them, its owner asks again this long after, and as often, with no
+  // limit on how many times. 1440 until changed.
+  uint32 reask_minutes = 4;
+  // A block this old is told to its owner's lead, once (never to the
+  // person). 1440 until changed.
+  uint32 overdue_minutes = 5;
 }
 
 // Where a new Claktory's first run stands. A Claktory from before it, or
@@ -2696,7 +3119,8 @@ message Agent {
   uint64 context_tokens = 8;
   // The context is compacted when it reaches this many tokens.
   uint64 compact_at_tokens = 9;
-  // Messages waiting for the current run to finish.
+  // Messages waiting for the current run to finish (quiet ones aside: see
+  // quiet_waiting).
   uint32 queued_messages = 10;
   // `model` can run now: its provider is signed in. When false the agent has
   // no model, and the app says so instead of showing `model`.
@@ -2800,7 +3224,8 @@ message Agent {
   // The pipes whose messages it has read in its current context (as events,
   // or with pipe_read), by Pipe.id: it's "tainted" until /clear, and using a
   // secret needs the person's approval each time (SecretApproval). Empty when
-  // it has read none.
+  // it has read none. Other things it read count the same, with a prefix:
+  // a web page read through browser control as "browser:<origin>".
   repeated string tainted_by_pipes = 36;
   // "<provider>/<model id>" a step this agent's model refused is retried on,
   // once per refused turn, the next step back on its own model; empty uses
@@ -2826,6 +3251,35 @@ message Agent {
   string layout_focus = 40;
   // Whether it notifies the person ("Notify me" in its settings).
   NotifyMode notify = 41;
+  // Quiet copies it was sent that it hasn't read yet (see QuietCopy).
+  uint32 unread_copies = 43;
+  // Quiet messages waiting for its next wake (agents_send's `quiet`): they
+  // don't wake it, and nothing else does on their account. They're in
+  // QueuedMessages too, with `quiet`; queued_messages doesn't count them.
+  uint32 quiet_waiting = 44;
+  // Its checklist's items blocked on the person (BLOCKED_KIND_PERSON_DECISION
+  // or _ACTION, #279), oldest first: Needs you lists those not covered by a
+  // pending question (has_pending_ask false) without a card.
+  repeated WaitingItem waiting_items = 42;
+}
+
+// A checklist item that waits on the person (Agent.waiting_items).
+message WaitingItem {
+  // ChecklistItem.id on this agent's checklist.
+  uint32 item = 1;
+  string text = 2;
+  BlockedKind kind = 3;
+  // When it became blocked, ms since 1970.
+  int64 since_ms = 4;
+  // When Claktory has it asked again after the person dismissed its
+  // question; 0 while nothing was dismissed.
+  int64 reask_at_ms = 5;
+  // A question about it is waiting for the person (its card shows instead).
+  bool has_pending_ask = 6;
+  // The agent on it (ChecklistItem.owner); empty for this agent itself.
+  string owner = 7;
+  // When the person last dismissed a question about it, ms; 0 if never.
+  int64 dismissed_ms = 8;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -2954,6 +3408,9 @@ message QueuedMessage {
   // failed; unset for any other. `text` is empty until it's DONE, and
   // attachments[0] is the recording.
   Transcription transcription = 11;
+  // An agent's message sent quietly: it waits for the agent's next wake
+  // and doesn't cause one (see Agent.quiet_waiting).
+  bool quiet = 12;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -2999,6 +3456,10 @@ message Entry {
     // An agent opens a card for the person to start a pipe (its
     // pipes_invite or pipes_accept tool): see PipeStart.
     PipeStart pipe_start = 18;
+    // Rivet proposes giving an agent access to an app at the person's
+    // account, such as their direct messages (its apps_propose_grant
+    // tool): see AppGrantProposal.
+    AppGrantProposal app_grant = 19;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -3035,6 +3496,54 @@ message Event {
   // PIPE: the pipe's messages it brings (PipeMessage.seq), so a view showing
   // the pipe's messages can leave this event out. Empty for other sources.
   repeated uint64 pipe_seqs = 6;
+  // AGENT: the message's number in Claktory's records, the one the agent
+  // reads (msg="…") and answers with; 0 for messages from before it (#285).
+  uint64 message_id = 7;
+  // AGENT: the messages to the sender it answers, by their numbers, as the
+  // sender said and Claktory checked (each was sent to it).
+  repeated uint64 reply_to_ids = 8;
+  // AGENT: why it was sent, as the sender said: "handoff",
+  // "decision_request", "decision" or "status"; empty when it didn't say.
+  string intent = 9;
+  // AGENT: sent quietly (agents_send's `quiet`): it didn't wake the agent,
+  // and waited for its next wake, or its next step if it was working.
+  bool quiet = 10;
+}
+
+// Asks for the quiet copies `agent_id` was sent, newest first: `limit` of
+// them (20 when 0, 100 at most), older than the copy `before_id` when set.
+// Listing them doesn't mark them read; only the agent reading them does.
+message ListQuietCopies {
+  string agent_id = 1;
+  uint64 before_id = 2;
+  uint32 limit = 3;
+}
+
+message QuietCopies {
+  string agent_id = 1;
+  repeated QuietCopy copies = 2;
+  // Older ones remain.
+  bool more = 3;
+}
+
+// A quiet copy (#285): an agent sent a message and asked Claktory to keep a
+// copy for its lead (agents_send's copy_lead). The lead isn't woken by it:
+// it hears how many came at its next step, and reads them with
+// agents_copies. Never in the lead's conversation itself.
+message QuietCopy {
+  uint64 id = 1;
+  // The sender's signature, as the lead would read it ("Mista (Backend)").
+  string from = 2;
+  string from_id = 3;
+  string text = 4;
+  int64 created_ms = 5;
+  // The lead has read it (agents_copies).
+  bool read = 6;
+  // What the message answers, by the numbers of messages to the sender.
+  repeated uint64 reply_to_ids = 7;
+  // To whom the message itself went, by agent id.
+  repeated string to_ids = 8;
+  string intent = 9;
 }
 
 // A message the agent proposed for Rivet, the admin agent, which only the
@@ -3117,6 +3626,101 @@ enum PipeStartState {
 message DismissPipeStart {
   string agent_id = 1;
   string start_id = 2;
+  // The person's comment, told to the card's agent as
+  // theirs ("Matt's note: …"); may be empty. 2,000 characters at most.
+  string comment = 3;
+}
+
+// Rivet's proposal to give an agent access to an app kept at the person's
+// account (claktory.com), such as their direct messages: shown in Rivet's
+// conversation after the call (app_grants_propose), and while PENDING its
+// seq is in Rivet's Agent.waiting_seqs, so it shows in Needs you. Nothing
+// is given until the person approves it (DecideAppGrant); then the account
+// service makes the grant, and the entry is sent again with its state.
+// Only Rivet proposes, never one that has read a pipe, and only for an
+// agent of this Claktory, which is named by id and by the incarnation it
+// had when proposed: deleted and made again, it's another agent, and the
+// proposal fails.
+message AppGrantProposal {
+  // Unique in this Claktory.
+  string id = 1;
+  // The app, as the account service names it: "dms".
+  string app_id = 2;
+  // What the card calls it: "Direct messages".
+  string app_name = 3;
+  // The agent it would let use the app.
+  string agent_id = 4;
+  // What it would let the agent do, in Claktory's words.
+  repeated AppGrantScope scopes = 5;
+  // What in the app it would reach, such as conversations; empty for an
+  // app whose grants name nothing.
+  repeated AppGrantResource resources = 6;
+  // When the access would end, in ms since 1970; 0 for when the person
+  // takes it back.
+  int64 expires_ms = 7;
+  // Why, in Rivet's words.
+  string reason = 8;
+  AppGrantState state = 9;
+  int64 created_ms = 10;
+  // When it was decided; 0 while PENDING.
+  int64 decided_ms = 11;
+  // The person's comment on deciding it, either way; may be empty.
+  string comment = 12;
+  // FAILED: why, in plain words (the agent was deleted since, the account
+  // service refused it).
+  string error = 13;
+  // GRANTED: the account service's id for the grant, which revoking it
+  // names.
+  string grant_id = 14;
+  // The agent it would give access has read a pipe: messages from another
+  // Claktory, which may hold someone else's instructions. Set when proposed
+  // and again when decided. The card says so, loudest for dm.send.
+  bool grantee_read_pipes = 15;
+}
+
+// Something a grant lets an agent do in an app.
+message AppGrantScope {
+  // As the account service names it: "dm.read".
+  string id = 1;
+  // What it means, for the card: "Read these conversations".
+  string label = 2;
+}
+
+// Something in an app a grant reaches.
+message AppGrantResource {
+  // "conversation".
+  string kind = 1;
+  // The app's id for it.
+  string id = 2;
+  // What the card shows for it: its id while Claktory has no better name.
+  string label = 3;
+}
+
+enum AppGrantState {
+  APP_GRANT_STATE_UNSPECIFIED = 0;
+  APP_GRANT_STATE_PENDING = 1;
+  // The person approved it and the account service made the grant.
+  APP_GRANT_STATE_GRANTED = 2;
+  // The person declined it, or cleared Rivet's conversation while it
+  // waited.
+  APP_GRANT_STATE_DECLINED = 3;
+  // Approved, but it couldn't be made: AppGrantProposal.error says why.
+  APP_GRANT_STATE_FAILED = 4;
+}
+
+// The person's decision on an AppGrantProposal in Rivet's conversation.
+// Answered with Ack once it's decided. Approved, the account service makes
+// the grant first: while it can't be reached the request is refused and the
+// card keeps waiting, to approve again later.
+message DecideAppGrant {
+  // Whose conversation shows it: Rivet's.
+  string agent_id = 1;
+  // The entry's seq.
+  uint64 seq = 2;
+  bool approve = 3;
+  // The person's comment, told to Rivet as theirs ("Matt's note: …"),
+  // with either answer; may be empty. 2,000 characters at most.
+  string comment = 4;
 }
 
 message DevicePairing {
@@ -3295,7 +3899,29 @@ message UploadProgress {
 // An upload finished and stored: attach it to a message (SendMessage).
 message UploadedFile {
   string upload_id = 1;
+  // For a file for an agent.
   Attachment attachment = 2;
+  // For an ink blob: its SHA-256 (lowercase hex), which names it from now
+  // on. It's stored once this arrives; finishing one already stored answers
+  // the same at once.
+  string blob_sha256 = 3;
+}
+
+// Reads an ink blob a drawing or review item refers to, from `offset`.
+message ReadInkBlob {
+  string sha256 = 1;
+  uint64 offset = 2;
+}
+
+// Part of an ink blob, at most 1 MiB.
+message InkBlobData {
+  string sha256 = 1;
+  uint64 offset = 2;
+  // The whole blob's size.
+  uint64 size = 3;
+  bytes data = 4;
+  // Empty, or "unknown": no drawing or review item refers to that blob.
+  string error = 5;
 }
 
 message AssistantText {
@@ -3691,7 +4317,8 @@ message DecideSecretRequest {
   bool approve_only = 12;
   // A generate request (SecretRequest.generate), approved: whether the new
   // key asks the person each time it's used (SecretInfo.ask_each_time).
-  // Unset is on: no one has ever seen a generated key, so it starts asking.
+  // Unset is off (the card's default, by the person's decision); on, it
+  // starts asking.
   // `name` renames it (also the key's comment); `comment` reaches the agent.
   optional bool ask_each_time = 13;
 }
@@ -4271,6 +4898,10 @@ message StartConnect {
   // A connection to connect again in place (it needs reconnecting, say);
   // empty for a new one. The account must be the same.
   string secret_id = 6;
+  // With proposal_id: the person's comment, told as theirs ("Matt's note:
+  // …") to the agent that proposed it once it's connected. May be empty;
+  // 2,000 characters at most.
+  string comment = 7;
 }
 
 message ConnectStarted {
@@ -4472,6 +5103,9 @@ message UsageReport {
   // When counting by agent (and account) began: earlier use has agent_id and
   // account_id ""; 0 if nothing's been counted by agent yet.
   int64 agents_since_ms = 5;
+  // When the runs UsageBucket.working_agents comes from begin: the first
+  // run's start; 0 if there's been none.
+  int64 working_since_ms = 6;
 }
 
 message UsageRow {
@@ -4505,6 +5139,14 @@ message UsageBucket {
   int64 start_ms = 1;
   // All providers together.
   UsageTokens tokens = 2;
+  // How many different agents made a model call in the bucket (chats
+  // aren't agents). 0 before agents were counted (UsageReport.agents_since_ms).
+  uint32 active_agents = 3;
+  // How many agents were working at once, on average over the bucket: the
+  // time their runs took in it (start to end), over the bucket's length,
+  // or the length so far for the bucket now in progress. 0 before runs
+  // were kept (UsageReport.working_since_ms).
+  double working_agents = 4;
 }
 
 // ---- Apps ----
@@ -5146,6 +5788,11 @@ message ApprovePipe {
   // pipe).
   optional bool review_incoming = 7;
   optional bool review_outgoing = 8;
+  // The person's comment, told as theirs ("Matt's note: …") to the lead
+  // when approved, or, turned down, to the agent whose card started the
+  // pipe (else the admin agent with Pipes); never to the other side. May
+  // be empty; 2,000 characters at most.
+  string comment = 9;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -5206,6 +5853,11 @@ message DecidePipeMessage {
   string pipe_id = 1;
   uint64 seq = 2;
   bool allow = 3;
+  // The person's comment, told as theirs ("Matt's note: …") to the agent
+  // that wrote a held outgoing message, or to the pipe's lead for a held
+  // incoming one; never to the other side. May be empty; 2,000 characters
+  // at most.
+  string comment = 4;
 }
 
 // A pipe's latest messages, sent when it's selected: at most 200.
@@ -5284,6 +5936,11 @@ message PipeTaint {
   repeated string via_names = 2;
   // The pipe's Pipe.id, to find who's at its other end; it may be gone.
   string pipe_id = 3;
+  // What was read, when it isn't a pipe: "browser", a web page read through
+  // browser control, pipe_name then being its site ("https://host[:port]",
+  // ASCII). Empty for a pipe. More kinds may come: show pipe_name as the
+  // kind names itself.
+  string kind = 4;
 }
 
 enum SecretApprovalState {
@@ -5301,6 +5958,9 @@ message DecideSecretApproval {
   // The entry's seq.
   uint64 seq = 2;
   bool allow = 3;
+  // The person's comment, told to the agent that asked as
+  // theirs ("Matt's note: …"); may be empty. 2,000 characters at most.
+  string comment = 4;
 }
 
 // An agent's question for the person (its ask_person tool, the Ask
@@ -5727,6 +6387,26 @@ message NotificationSettings {
   // The push relay devices register with (RegisterNotifications): an https
   // URL; empty for Claktory's own.
   string relay = 10;
+  // The time zone quiet hours are in: the Claktory's computer's, as an IANA
+  // name ("Europe/Rome"; empty when unknown), and its offset from UTC now,
+  // in minutes east. Filled in by the backend; ignored in updates.
+  string time_zone = 11;
+  int32 utc_offset_minutes = 12;
+}
+
+// UpdateSettings.notification_change: each field set replaces that one
+// setting (see NotificationSettings); unset fields stay as they are.
+message NotificationSettingsChange {
+  optional bool needs_you = 1;
+  optional bool alerts = 2;
+  optional bool replies = 3;
+  optional bool desktop_replies = 4;
+  optional NotifyPreview preview = 5;
+  optional bool quiet_hours = 6;
+  optional uint32 quiet_start = 7;
+  optional uint32 quiet_end = 8;
+  optional bool urgent_breaks_quiet = 9;
+  optional string relay = 10;
 }
 
 // This connection's app is in front and the person is using it (true), or
@@ -5763,3 +6443,519 @@ enum PushPlatform {
 // every registered device, whether or not anyone is using Claktory and in
 // quiet hours too. Answered with Ack.
 message SendTestNotification {}
+
+// ---- Needs you's history ----
+
+// The cards the person decided in the last 30 days (answered, dismissed,
+// approved or denied), newest first, a page at a time. Answered with
+// NeedsYouHistory. Expired, withdrawn and waiting cards aren't listed.
+message ListNeedsYouHistory {
+  // Only cards whose agent's name (as it is now), title, text or the
+  // person's reply has it, case aside; "" for all. Past 200 characters
+  // it's cut.
+  string query = 1;
+  // Only cards decided before this, in ms since 1970 (the last page's
+  // oldest decided_ms); 0 for the newest.
+  int64 before_ms = 2;
+  // How many; 0 for 50, at most 200. A page never parts cards decided
+  // in the same millisecond, so it may hold a few more.
+  uint32 limit = 3;
+}
+
+message NeedsYouHistory {
+  repeated NeedsYouRecord records = 1;
+  // There are more, decided before the last of these.
+  bool more = 2;
+}
+
+// A card the person decided.
+message NeedsYouRecord {
+  NeedsYouRecordKind kind = 1;
+  // The agent that asked; empty for a chat's card.
+  string agent_id = 2;
+  // Its name now, or its id once it's deleted.
+  string agent_name = 3;
+  // The chat whose card it was, for a chat's.
+  string chat_id = 4;
+  // PIPE_START: the pipe it made, if it made one. PIPE_HELD and PIPE_LOOP:
+  // their pipe, to name as the app names pipes (never by a name the other
+  // side chose).
+  string pipe_id = 5;
+  // The card's entry in the agent's (or chat's) conversation, to open it
+  // there; 0 when it's no longer in the conversation as loaded (after
+  // /clear, say): open the conversation at its end then. PIPE_HELD: the
+  // message's seq in its pipe (PipeMessage.seq); PIPE_LOOP: 0.
+  uint64 seq = 6;
+  // Claktory's own words for it, never what another Claktory wrote: the
+  // question's title, the secret's name, the secrets it used, the
+  // proposal's first line, what it asked to connect, "Start a pipe".
+  string title = 7;
+  // PIPE_HELD: the start of the held message (at most 200 characters),
+  // which the other side or an agent that read it may have written: show it
+  // only inside "from the other Claktory" framing, never as a title. Empty
+  // for every other kind.
+  string excerpt = 8;
+  NeedsYouOutcome outcome = 9;
+  // The person's answer or comment, at most 300 characters; never a
+  // secret's value.
+  string reply = 10;
+  int64 asked_ms = 11;
+  int64 decided_ms = 12;
+  // As on the card: the pipes the agent had read when it asked.
+  repeated PipeTaint taint = 13;
+}
+
+enum NeedsYouRecordKind {
+  NEEDS_YOU_RECORD_KIND_UNSPECIFIED = 0;
+  // An agent's question (ask_person).
+  NEEDS_YOU_RECORD_KIND_QUESTION = 1;
+  // A review ask: a file to review.
+  NEEDS_YOU_RECORD_KIND_REVIEW = 2;
+  // A request for a secret.
+  NEEDS_YOU_RECORD_KIND_SECRET_REQUEST = 3;
+  // A command using secrets, asked for once (SecretApproval).
+  NEEDS_YOU_RECORD_KIND_SECRET_USE = 4;
+  // A proposal to Rivet.
+  NEEDS_YOU_RECORD_KIND_PROPOSAL = 5;
+  // A proposal to connect a service.
+  NEEDS_YOU_RECORD_KIND_CONNECT = 6;
+  // An agent's card for starting or accepting a pipe.
+  NEEDS_YOU_RECORD_KIND_PIPE_START = 7;
+  // A pipe's held message, let through (APPROVED) or discarded (DENIED):
+  // an agent's to the other side (agent_id set), or the other side's.
+  NEEDS_YOU_RECORD_KIND_PIPE_HELD = 8;
+  // A pipe's loop pause the person let carry on (APPROVED).
+  NEEDS_YOU_RECORD_KIND_PIPE_LOOP = 9;
+  // Rivet's proposal to give an agent access to an app at the person's
+  // account (AppGrantProposal): APPROVED when the grant was made, DENIED
+  // when the person declined it, FAILED when they approved it but it
+  // couldn't be made. agent_id is Rivet, whose conversation shows the card;
+  // the title names the agent it was for and the app, as it says now.
+  NEEDS_YOU_RECORD_KIND_APP_GRANT = 10;
+}
+
+enum NeedsYouOutcome {
+  NEEDS_YOU_OUTCOME_UNSPECIFIED = 0;
+  NEEDS_YOU_OUTCOME_ANSWERED = 1;
+  NEEDS_YOU_OUTCOME_DISMISSED = 2;
+  NEEDS_YOU_OUTCOME_APPROVED = 3;
+  NEEDS_YOU_OUTCOME_DENIED = 4;
+  // Approved, but what it asked couldn't be done (APP_GRANT: the account
+  // service refused the grant, or the agent was deleted since).
+  NEEDS_YOU_OUTCOME_FAILED = 5;
+}
+
+// ---- Browser control ----
+//
+// An agent with the browser extension asks to read a site (a pending
+// BrowserSession). The person opens it in Chrome on one of their Macs and
+// confirms there; that Mac's app grants it, and from then on the backend
+// sends that one connection BrowserCommands and takes only its
+// BrowserResults. The Mac relays each command to Claktory's Chrome extension
+// through its signed helper. Nothing outlives the connection: when it closes,
+// stops its heartbeat, or the backend restarts, the session ends and never
+// resumes.
+
+// A Mac app can broker for its Chrome. Sent on every connection, and again
+// whenever helper_ready changes; it lasts as long as the connection, which
+// brokers as one instance only. Answered with Ack.
+message BrowserCapability {
+  // The JSON schema of commands and results it speaks: 1.
+  uint32 version = 1;
+  // The operations it supports: "read", "scroll", and for assist sessions
+  // "click", "fill", "navigate".
+  repeated string operations = 2;
+  // Claktory's helper is connected to the app now (Chrome is running with
+  // the extension).
+  bool helper_ready = 3;
+  // Random, one per launch of the app: a grant names it.
+  string broker_instance = 4;
+}
+
+// The person confirmed a pending session on this Mac, in Chrome on
+// `origin`. Accepted once, while the session is pending, only from a
+// connection whose capability carries `broker_instance`, and only for the
+// session's own origin. Answered with Ack, or an error saying why.
+message BrowserGrant {
+  string session_id = 1;
+  string broker_instance = 2;
+  // The exact origin the extension found the tab on: "https://host[:port]".
+  string origin = 3;
+  // Random (16 bytes, base64url), made by the app for this grant; every
+  // command and heartbeat carries it.
+  string lease = 4;
+}
+
+// The answer to a BrowserCommand, from the connection it was sent to.
+message BrowserResult {
+  string session_id = 1;
+  uint64 command_id = 2;
+  // What the extension answered, as JSON (version 1's schema), at most
+  // 64 KiB. Empty with a failure.
+  string result_json = 3;
+  // Empty, or why there's no result: "no_helper", "outcome_unknown",
+  // "paused", "origin_changed", "stale_document", "unsupported_page",
+  // "denied" (the person said no to a click, fill or navigation)…
+  string failure = 4;
+  // How long it took on the Mac, in ms.
+  uint32 mac_ms = 5;
+}
+
+// The bound Mac is still there: every 5 s while a session is active. A
+// session that hears none for 15 s ends as "interrupted".
+message BrowserHeartbeat {
+  string session_id = 1;
+  string lease = 2;
+}
+
+// A session should end (see ClientMessage.browser_stop).
+message BrowserStop {
+  string session_id = 1;
+  // Why, in a word, from the bound Mac: "stopped" (the person),
+  // "declined", "tab_closed", "origin_changed", "chrome_closed",
+  // "helper_gone", "app_quit", "time_limit" or "interrupted"; anything else,
+  // and anything from another device, reads "stopped" ("declined" while
+  // pending).
+  string reason = 2;
+}
+
+// A command for the extension, to the bound connection only. One at a time
+// per session; the Mac answers with BrowserResult.
+message BrowserCommand {
+  string session_id = 1;
+  // The grant's lease: a command for another grant is refused.
+  string lease = 2;
+  uint64 command_id = 3;
+  // Strictly increasing within a session.
+  uint64 sequence = 4;
+  // How long the backend waits for the result, in ms from now.
+  uint32 deadline_ms = 5;
+  // The operation, as JSON (version 1's schema), at most 16 KiB. A click,
+  // fill or navigation is shown to the person on the Mac first, bound to
+  // its exact JSON, session and sequence, and done only if they allow it
+  // there: the backend never sees or sends that decision. One the backend
+  // stops waiting for may still have happened (outcome_unknown): it's
+  // never sent again.
+  string op_json = 6;
+}
+
+// The backend ended a session the Mac is bound to: it tears it down.
+message BrowserEnded {
+  string session_id = 1;
+  string reason = 2;
+}
+
+// A browser session's status, for every device. Never page data.
+message BrowserSession {
+  string id = 1;
+  // The agent that asked for it.
+  string agent_id = 2;
+  // What the agent said it's for, at most 500 characters.
+  string purpose = 3;
+  // The site: "https://host[:port]".
+  string origin = 4;
+  // "read" (read and scroll), or "assist": the agent may also click, fill
+  // and go to another page of the site, each only once the person allows
+  // it on the Mac.
+  string mode = 5;
+  // "pending" (waiting for the person to open the site and confirm on a
+  // Mac), "active", or "ended".
+  string state = 6;
+  // Why it ended: "stopped", "declined", "expired", "time_limit",
+  // "idle", "command_limit", "data_limit", "interrupted",
+  // "origin_changed", "tab_closed", "agent_changed", "ended" (the agent
+  // ended it)…
+  string reason = 7;
+  // The paired device it's bound to; empty while pending.
+  string device_id = 8;
+  int64 created_ms = 9;
+  // The hard deadline (15 minutes after it started; 5 minutes for a
+  // pending one), in ms since 1970.
+  int64 deadline_ms = 10;
+  // When it ends if no command comes (5 minutes after the last); 0 while
+  // pending.
+  int64 idle_deadline_ms = 11;
+  uint32 commands_used = 12;
+  uint32 commands_limit = 13;
+  uint64 bytes_returned = 14;
+  uint64 bytes_limit = 15;
+  int64 ended_ms = 16;
+  // The action waiting for the person's review on the Mac, or being done:
+  // "click", "fill" or "navigate"; empty when none is.
+  string action = 17;
+}
+
+// Asks for browser control's log, newest first.
+message ListBrowserLog {
+  // Only this agent's; empty for every agent's.
+  string agent_id = 1;
+  // Only entries before this time (ms since 1970), for the next page; 0 for
+  // the newest.
+  int64 before_ms = 2;
+  // The most entries; 0 for 100, at most 500.
+  uint32 limit = 3;
+  // With before_ms, the last page's oldest entry's id: only entries before
+  // it in the log's order (newest first, then the larger id first), so
+  // entries sharing a millisecond aren't skipped. 0 for before_ms alone.
+  int64 before_id = 4;
+}
+
+// Empties browser control's log.
+message ClearBrowserLog {}
+
+message BrowserLog {
+  repeated BrowserLogEntry entries = 1;
+  // There are older entries than these.
+  bool more = 2;
+}
+
+// What happened in a browser session, kept 7 days: who, where and the
+// outcome, never what was typed, which element, a path or page data.
+message BrowserLogEntry {
+  int64 at_ms = 1;
+  string session_id = 2;
+  string agent_id = 3;
+  // The paired device the session was bound to; empty before it was.
+  string device_id = 4;
+  // The site: "https://host[:port]".
+  string origin = 5;
+  // "request" (the agent asked), "grant" (the person agreed on a Mac),
+  // "end", or a command: "read", "scroll", "click", "fill", "navigate".
+  string op = 6;
+  // A command's sequence in its session; 0 for the others.
+  uint64 sequence = 7;
+  // A request's mode ("read", "assist"); "granted"; why it ended
+  // (BrowserSession.reason); a command's "done" or error word ("denied",
+  // "expired", "outcome_unknown"…).
+  string outcome = 8;
+  // Unique in the log, larger for a later entry in the same millisecond:
+  // ListBrowserLog.before_id.
+  int64 id = 9;
+}
+
+// ---- iPad ink layers (docs/ipad-phase3-contract.md §4) ----
+
+// A drawing on one surface of a file, at its latest revision: a PDF's page,
+// an image, an excerpt of a text file, or a sketch (an image). One layer per
+// surface of each version of the file (`source_sha256`): ink on a new
+// version is a new layer, and the old one stays, `outdated`. Its drawing
+// and preview are blobs (ReadInkBlob), named by their SHA-256.
+message InkLayer {
+  // "layer-12", made by the backend.
+  string id = 1;
+  // The file drawn on, absolute.
+  string path = 2;
+  // The version of the file it was drawn on.
+  string source_sha256 = 3;
+  string source_mime = 4;
+  uint64 source_size = 5;
+  InkSpace space = 6;
+  // 1 for the first; the latest kept.
+  uint32 revision = 7;
+  // The revision this one was saved over; 0 for the first.
+  uint32 parent_revision = 8;
+  // The PencilKit drawing: format "pencilkit", content_version, sha256, bytes.
+  InkBlobRef drawing = 9;
+  // Its PNG preview: sha256, bytes, pixel_width, pixel_height.
+  InkBlobRef preview = 10;
+  // "page_overlay", "oriented_image", "excerpt_rendition" or "blank_canvas".
+  string drawing_space = 11;
+  // Six numbers: the affine transform from the drawing's space to the
+  // document's (a, b, c, d, tx, ty).
+  repeated double drawing_to_document = 12;
+  // The layer this one was kept beside after a conflict; empty otherwise.
+  string conflict_of = 13;
+  // Who saved this revision: the device's id (Welcome.device_id) and kind
+  // ("tablet", "phone", "desktop"…), and its system's version.
+  string device_id = 14;
+  string device_kind = 15;
+  string os_version = 16;
+  int64 updated_ms = 17;
+  // The file is now another version than `source_sha256`.
+  bool outdated = 18;
+}
+
+// The surface a layer is drawn on (the fixtures' `coordinate_space`).
+message InkSpace {
+  // "pdf_page", "image" or "excerpt_rendition".
+  string kind = 1;
+  // A PDF's page: 1 to 2000, its box ("crop"), the crop and media boxes
+  // (4 numbers each) and its rotation (0, 90, 180 or 270).
+  uint32 page_1based = 2;
+  string box = 3;
+  repeated double crop_box = 4;
+  repeated double media_box = 5;
+  uint32 rotation = 6;
+  // An image: its size as shown (oriented) and as stored, and its EXIF
+  // orientation (1 to 8).
+  uint32 oriented_width = 7;
+  uint32 oriented_height = 8;
+  uint32 stored_width = 9;
+  uint32 stored_height = 10;
+  uint32 exif_orientation = 11;
+  // An excerpt: its text, and how it was set.
+  string text = 12;
+  ExcerptRendition rendition = 13;
+  // Every kind: the surface's size, in `units` ("pt" or "px").
+  double width = 14;
+  double height = 15;
+  string units = 16;
+}
+
+// How an excerpt's text was set to be drawn on.
+message ExcerptRendition {
+  string font = 1;
+  double font_size = 2;
+  double line_height = 3;
+  double padding = 4;
+}
+
+// A blob a layer refers to.
+message InkBlobRef {
+  // The drawing's: "pencilkit", and the version of its content.
+  string format = 1;
+  uint32 content_version = 2;
+  string sha256 = 3;
+  uint64 bytes = 4;
+  // The preview's size, in pixels.
+  uint32 pixel_width = 5;
+  uint32 pixel_height = 6;
+}
+
+message ListInkLayers {
+  // Absolute, or from the home folder.
+  string path = 1;
+}
+
+message InkLayerList {
+  string path = 1;
+  // The file's SHA-256 now; empty when it can't be read.
+  string current_sha256 = 2;
+  // Every version's layers, each at its latest revision, newest first.
+  repeated InkLayer layers = 3;
+}
+
+// A layer's next revision, or a new layer (empty `ink_layer_id`,
+// `base_revision` 0). Its blobs are uploaded first (StartUpload with
+// UPLOAD_PURPOSE_INK). A new layer needs `source_sha256` to be the file's
+// SHA-256 now; a revision keeps its layer's, even once outdated.
+message SaveInkLayer {
+  string ink_layer_id = 1;
+  // The revision this was drawn over: the latest, or it's a conflict.
+  uint32 base_revision = 2;
+  string path = 3;
+  string source_sha256 = 4;
+  InkSpace space = 5;
+  string drawing_space = 6;
+  repeated double drawing_to_document = 7;
+  string drawing_sha256 = 8;
+  string preview_sha256 = 9;
+  uint32 content_version = 10;
+  // Made up by the app, one per save: the same again answers the same,
+  // and saves nothing twice.
+  string client_save_id = 11;
+  // Keep this beside that layer, after a conflict: a new layer.
+  string conflict_of = 12;
+  // The device's system version ("27.2").
+  string os_version = 13;
+}
+
+// Saved: `revision` is set, and the layer's row and blobs are durable.
+// A conflict: `revision` is 0 and `conflict` is the layer as it is now;
+// nothing was overwritten.
+message InkLayerSaved {
+  string client_save_id = 1;
+  string ink_layer_id = 2;
+  uint32 revision = 3;
+  InkLayer conflict = 4;
+}
+
+// Deletes a layer, at the revision the app saw. Refused while a review
+// item refers to it.
+message DeleteInkLayer {
+  string ink_layer_id = 1;
+  uint32 base_revision = 2;
+}
+
+// ---- Where each device was reading (docs/ipad-phase3-contract.md §1) ----
+
+// Replaces this device's record for an agent: the pane in focus and each
+// pane's place. Panes the agent's layout doesn't have are left out. With
+// `sidebar_hidden` set, it also replaces whether this device hides the
+// pinned sidebar; with it set, `agent_id` may be empty to change only that.
+message SetPresentation {
+  string agent_id = 1;
+  // A ViewNode id in the agent's layout; empty for none.
+  string focused_leaf_id = 2;
+  repeated LeafPlace places = 3;
+  optional bool sidebar_hidden = 4;
+}
+
+// Where a pane was: for now the page a PDF was on.
+message LeafPlace {
+  string leaf_id = 1;
+  // 1-based; 0 for none.
+  uint32 page_1based = 2;
+}
+
+// This device's own record: each agent's, and whether it hides the pinned
+// sidebar.
+message Presentation {
+  repeated AgentPresentation agents = 1;
+  bool sidebar_hidden = 2;
+}
+
+message AgentPresentation {
+  string agent_id = 1;
+  string focused_leaf_id = 2;
+  repeated LeafPlace places = 3;
+}
+
+// ---- Sketches (docs/ipad-phase3-contract.md §6) ----
+
+// A blank white PNG, `width` by `height` pixels (1 to 8192 each), at
+// `<directory>/<name>.png`, with " 2", " 3"… before the extension when the
+// name is taken. `directory` is in one of the person's projects' folders.
+message CreateSketch {
+  string directory = 1;
+  string name = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+// The sketch made: where, and its SHA-256 (an ink layer's source_sha256).
+message SketchCreated {
+  string path = 1;
+  string sha256 = 2;
+}
+
+// Asks for this Claktory's direct-message leaf (dms-e2ee.md §2, Claktories).
+message DmLeafOfferRequest {}
+
+// This Claktory's direct-message leaf, for the person's device to certify:
+// a LeafCertificate of kind Claktory naming leaf_id and leaf_signature_key,
+// signed with the person's identity key (claktory-dm-crypto's certificate).
+// The key is made on the first ask and kept until the Claktory signs in
+// again or moves (a new registration epoch, so a new leaf).
+message DmLeafOffer {
+  // The leaf's Ed25519 signature key, 32 bytes.
+  bytes leaf_signature_key = 1;
+  // This Claktory at the account service, and its registration's epoch.
+  string claktory_id = 2;
+  uint64 registration_epoch = 3;
+  // "<claktory_id>#<registration_epoch>": what the certificate names.
+  string leaf_id = 4;
+  // This Claktory's name, for the certificate (one line, 64 at most).
+  string name = 5;
+  // A certificate for this key is taken already.
+  bool enrolled = 6;
+}
+
+// The person's device enrolls this Claktory's leaf.
+message DmEnrollLeaf {
+  // The TLS-encoded LeafCertificate the device signed for the offered key.
+  bytes certificate = 1;
+  // The device's pins (claktory-dm-crypto's Pins, as JSON), the person's
+  // own account's included: what this Claktory trusts about each account.
+  bytes pins = 2;
+}

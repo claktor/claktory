@@ -49,6 +49,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Device tests run on debug builds; -PclaktoryTestBuildType=release runs
+    // them on the shrunk release instead (with -PclaktoryDebugSignedRelease
+    // locally), to catch what R8 breaks before a person does (DESIGN.md §10).
+    testBuildType = providers.gradleProperty("claktoryTestBuildType").getOrElse("debug")
+
     // Claktory and Claktory Dev, side by side, as on the iPhone; scripts
     // pass --flavor dev together with --dart-define=FACTORY_DEV=true.
     flavorDimensions += "channel"
@@ -84,6 +89,11 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Device tests on the release build reach into the app's classes.
+            if (testBuildType == "release") {
+                proguardFiles("proguard-test-hooks.pro")
+                testProguardFiles("proguard-test-apk.pro")
+            }
         }
     }
 
@@ -92,10 +102,33 @@ android {
         jniLibs { useLegacyPackaging = false }
     }
 
+    // AGP's dependency list, encrypted to Google, goes into the APK's
+    // signing block afresh (and differently) on every build, so no two
+    // APKs of one commit would match (DESIGN.md §6). An APK installed from
+    // a link has no use for it; Play reads it from the bundle, which keeps it.
+    dependenciesInfo { includeInApk = false }
+
     buildFeatures { resValues = true }
+
+    // Fatal, so every release build stops on them (AGP runs lint's vital
+    // checks before packaging): a call older Androids don't have (a launch
+    // crash on Android 7 once) and a receiver other apps can reach. The
+    // whole lint, errors and all, is tools/lint.sh, run before landing.
+    lint {
+        fatal += setOf("NewApi", "UnspecifiedRegisterReceiverFlag")
+        abortOnError = true
+        checkTestSources = true
+    }
 }
 
 dependencies {
+    // QR codes: reading the pairing code from the camera's frames and
+    // drawing this device's own (QrScanner.kt). ZXing, Apache-2.0, pure
+    // Java, no transitive dependencies; licence checked by Fugo. Exact
+    // version, from Maven Central only (../build.gradle.kts).
+    // core-3.5.3.jar SHA-256 8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82
+    // (its SHA-1, ca1349214a356cd7958651b2d5a0e1f3811a9c4b, is Maven Central's published one).
+    implementation("com.google.zxing:core:3.5.3")
     testImplementation("junit:junit:4.13.2")
     // Android's org.json is a stub in local unit tests; the stores' tests
     // run against the reference implementation of the same API.
@@ -114,4 +147,23 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+// The scheme links open the app with (factory/links, WebLinks.kt), as on
+// the Mac: claktory for Claktory, claktory-dev for Claktory Dev, and
+// claktory-debug for a debug build, so claktory:// always opens the real
+// Claktory.
+androidComponents {
+    onVariants { variant ->
+        val scheme = when {
+            variant.flavorName == "dev" -> "claktory-dev"
+            variant.buildType == "debug" -> "claktory-debug"
+            else -> "claktory"
+        }
+        variant.manifestPlaceholders.put("linkScheme", scheme)
+        variant.resValues.put(
+            variant.makeResValueKey("string", "link_scheme"),
+            com.android.build.api.variant.ResValue(scheme),
+        )
+    }
 }

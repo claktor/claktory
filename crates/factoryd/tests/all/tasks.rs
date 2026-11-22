@@ -127,3 +127,30 @@ async fn the_tasks_panel_shows_tasks_with_their_output_and_the_person_stops_one(
     let reply = client.request(client_message::Body::StopTask(again)).await;
     assert!(matches!(reply.body, v1::server_message::Body::Error(error) if error.message.contains("no running task")));
 }
+
+#[tokio::test]
+async fn an_agents_commands_and_background_tasks_know_its_id() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+
+    let shown = call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo \"id=$FACTORY_AGENT_ID\""}"#).await;
+    assert!(shown.starts_with("id=builder\n"), "{shown}");
+    let shown = call(&mut client, &mut view, "writer", "bash", r#"{"command":"echo \"id=$FACTORY_AGENT_ID\""}"#).await;
+    assert!(shown.starts_with("id=writer\n"), "{shown}");
+
+    let started = call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo $FACTORY_AGENT_ID > background-id","run_in_background":true}"#).await;
+    assert!(started.starts_with("Started task-"), "{started}");
+    let file = dir.join("site/background-id");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&file).is_ok_and(|text| text.ends_with('\n')) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&file).expect("the task wrote its id"), "builder\n");
+}

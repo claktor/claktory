@@ -4,7 +4,8 @@
 //!
 //! It runs the factoryd and claktory-account built beside claktory-qa, as
 //! `cargo test --workspace` builds them; alone (`cargo test -p claktory-qa`)
-//! build them first: `cargo build -p factoryd -p claktory-account`.
+//! build them first: `cargo build -p factoryd -p claktory-account`. Without
+//! them the tests fail, never pass unseen, unless CLAKTORY_QA_SKIP_E2E=1.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,16 +38,31 @@ struct Root(PathBuf);
 
 impl Drop for Root {
     fn drop(&mut self) {
-        let _ = Command::new(QA).args(["down", "--all"]).env("CLAKTORY_QA_ROOT", &self.0).output();
+        let _ = Command::new(QA).args(["down", "--all-agents"]).env("CLAKTORY_QA_ROOT", &self.0).output();
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// Whether the factoryd and claktory-account it runs are built beside
+/// claktory-qa. Missing, the test fails rather than passing unseen, unless
+/// CLAKTORY_QA_SKIP_E2E=1 says to skip it.
+fn built() -> bool {
+    let bin = Path::new(QA).parent().expect("bin");
+    if bin.join("factoryd").is_file() && bin.join("claktory-account").is_file() {
+        return true;
+    }
+    if std::env::var("CLAKTORY_QA_SKIP_E2E").is_ok_and(|skip| skip == "1") {
+        eprintln!("skipped (CLAKTORY_QA_SKIP_E2E=1): factoryd and claktory-account aren't built");
+        return false;
+    }
+    panic!(
+        "build factoryd and claktory-account first (cargo build -p factoryd -p claktory-account), or set CLAKTORY_QA_SKIP_E2E=1 to skip this test"
+    );
+}
+
 #[test]
 fn a_sandbox_comes_up_is_driven_and_goes() {
-    let bin = Path::new(QA).parent().expect("bin");
-    if !bin.join("factoryd").is_file() || !bin.join("claktory-account").is_file() {
-        eprintln!("skipped: build factoryd and claktory-account first (cargo build -p factoryd -p claktory-account)");
+    if !built() {
         return;
     }
     let root = Root(std::env::temp_dir().join(format!("claktory-qa-test-{}", std::process::id())));
@@ -110,9 +126,7 @@ fn a_sandbox_comes_up_is_driven_and_goes() {
 
 #[test]
 fn agents_in_a_sandbox_run_on_the_scripted_model() {
-    let bin = Path::new(QA).parent().expect("bin");
-    if !bin.join("factoryd").is_file() || !bin.join("claktory-account").is_file() {
-        eprintln!("skipped: build factoryd and claktory-account first (cargo build -p factoryd -p claktory-account)");
+    if !built() {
         return;
     }
     let root = Root(std::env::temp_dir().join(format!("claktory-qa-model-{}", std::process::id())));

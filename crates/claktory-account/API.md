@@ -13,6 +13,17 @@ never change what a field means.
 - Errors: an HTTP status and `{"error": "<code>", "message": "<for people>", …}`.
   Codes below; a client acts on `error`, never on `message`.
 - `429 rate_limited` carries `retry_after` (seconds) and a `Retry-After` header.
+- Limits a minute: a signed request from a Claktory or a signed-in device
+  counts against its key (240 a minute, from any address), never its
+  address, since a person's Claktory and devices, or a household, often
+  share one. Everything else (sign-in, codes, web pages, public answers)
+  counts against the address, 30 a minute; so do signed requests that
+  don't verify (no key, an unknown one, a bad signature), and once an
+  address has 30 of those in a minute its signed requests are refused
+  unchecked until the next, except those naming a Claktory (its token) or
+  a signed-in device (its account key) the service knows: they're checked
+  and limited by their key as ever, so others' bad requests on a shared
+  address (a carrier's NAT, an office) don't lock out a person's devices.
 - The service's address is configurable (`account.service` in a Claktory's
   settings); `https://account.claktory.com` is Claktory's own.
 
@@ -62,7 +73,7 @@ never change what a field means.
   JSON `{"v": 1, "account_id", "account_key", "device_key": "<64 hex>",
   "iat", "exp"}` (exp = iat + 3600) and sig the service key's signature over
   `"claktory device assertion v1\n" ‖ payload`. It says that whoever holds
-  the tunnel key `device_key` (an iroh endpoint id) is signed in to the
+  the endpoint key `device_key` (an iroh endpoint id) is signed in to the
   account, through the device with `account_key`. A Claktory checks it
   offline with its pinned service key, that the account is its own and that
   `device_key` is the key the device connected with, with 60 s of leeway on
@@ -303,8 +314,10 @@ its pairing codes give (`e=`, `r=`), empty if it never registered.
 
 #### `POST /v1/devices/assertion` (device signed)
 `{"device_key": "<64 hex>"}` → `200 {"assertion", "expires_in": 3600}`, for
-the tunnel key the device connects to one Claktory with (a device may use
-one per Claktory). 60 an hour per account key. Its `device_key` goes on the
+any endpoint key the signed-in device uses: the tunnel key it connects to
+one Claktory with (a device may use one per Claktory), or the one it uses
+for a transfer, such as a DM history transfer's (a fresh one each time).
+60 an hour per account key. Its `device_key` goes on the
 relay allowlist for a day after its last assertion. Errors: `400
 invalid_request`, `401 unauthorized`, `429 rate_limited`.
 
@@ -349,6 +362,87 @@ signing out or being removed ends it. Refusals: `400 invalid_request`,
 `403 not_granted`, `404 not_found`, `429 rate_limited`. `GET
 /v1/apps/whoami` answers with the caller as the worker got it.
 
+A person's own DM identity (device signed only; anyone else `403
+device_only`), whose shapes and limits are in the worker's README:
+- `GET /v1/apps/dms/me` → profile (name, avatar, revision), privacy
+  (`requests_on`, revision) and the friend ID's generation, never the code;
+- `POST /v1/apps/dms/me/friend-id/reveal` → `{"code", "generation"}`;
+- `POST /v1/apps/dms/me/friend-id/reset` `{"generation"}` → the new code;
+- `PUT /v1/apps/dms/me/profile` `{"name"?, "new_avatar"?, "revision"}` and
+  `PUT /v1/apps/dms/me/privacy` `{"requests_on", "revision"}` → as `GET me`.
+A revision or generation another device changed meanwhile is `409 stale`.
+
+Requests, friends and blocks, device signed only too:
+- `POST /v1/apps/dms/requests` `{"code", "action_id"}` → `202` and a
+  receipt, the same for every well-formed code, whoever's it is or isn't;
+- `GET /v1/apps/dms/requests` → incoming (who asked) and outgoing (receipts,
+  `pending` or `accepted`);
+- `POST /v1/apps/dms/requests/<id>/accept`, `/decline`, `/cancel`;
+- `GET /v1/apps/dms/contacts` (each friend with their `account_id`, whose
+  keys the person's devices fetch; requests and blocks never show it),
+  `DELETE /v1/apps/dms/contacts/<id>`;
+- `POST /v1/apps/dms/blocks` `{"request_id"}` or `{"contact_id"}`, `GET
+  /v1/apps/dms/blocks`, `DELETE /v1/apps/dms/blocks/<id>`;
+- `GET /v1/apps/dms/declines` (whom the person declined in the last 30
+  days), `DELETE /v1/apps/dms/declines/<id>` (reopen: their requests reach
+  the person again, and the declined one waits again if it still could);
+- `POST /v1/apps/dms/reports` `{"action_id", "request_id"|"contact_id"|"block_id",
+  "reason", "note"?, "include_profile"?}` and `GET /v1/apps/dms/reports`:
+  reports to Claktory's operators, keeping only what the person chose;
+- `GET /v1/apps/dms/conversations` (the friend in `with`, with their
+  `account_id`); `POST /v1/apps/dms/conversations/<id>/messages`
+  `{"client_message_id", "contact_generation", "envelope"}`: an MLS
+  application message (`{"format": 2, "bytes"}`) in the conversation's
+  current group, at most 5 epochs old → `{"message_id", "seq",
+  "accepted_ms"}` once stored (a retry answers the same); `409 epoch`
+  (`{"epoch"}`, the group's now) for an older one, `409 not_set_up` before
+  the group exists; `GET
+  /v1/apps/dms/conversations/<id>/messages?after=|before=&limit=` → a page
+  of history, each message's `envelope` and `epoch`;
+- end to end (MLS, the worker a delivery service that can't read what it
+  relays): the account's keys and device list (`GET /v1/apps/dms/keys/<account>`,
+  `PUT /v1/apps/dms/me/keys`, `POST /v1/apps/dms/me/keys/rotate`),
+  KeyPackages (`POST`/`GET /v1/apps/dms/key-packages`, `POST
+  /v1/apps/dms/key-packages/claim`), groups and their mailboxes (`POST`/`GET
+  /v1/apps/dms/groups`, `GET /v1/apps/dms/groups/<id>/messages`, `POST …/commits`,
+  `…/proposals`, `…/messages`, `GET …/group-info`), Welcomes (`GET
+  /v1/apps/dms/welcomes`, `DELETE …/<id>`), a Claktory's feed of them (`GET
+  /v1/apps/dms/claktory/events?since=&wait=`, signed) and hand-offs between
+  the person's devices (`POST`/`GET /v1/apps/dms/me/handoffs`, `DELETE …/<id>`);
+  shapes in the worker's README, "End to end";
+- `GET /v1/apps/dms/sync` → a snapshot and a cursor; `GET
+  /v1/apps/dms/sync?since=<cursor>&wait=` → what happened after it, waiting
+  up to 25 seconds for something (`410 resync_required`: start again);
+  `POST /v1/apps/dms/conversations/<id>/delete`: what the person keeps of
+  a conversation, on all their devices (read positions and drafts travel
+  end to end, in the person's own group);
+- an agent's message is sent only once the person approves exactly it:
+  its Claktory proposes it for the agent (`POST
+  /v1/apps/dms/conversations/<id>/proposals` `{"client_message_id",
+  "contact_generation", "envelope", "agent_name"?}`, signed, with a `dm.send`
+  grant, the envelope sealed in the Claktory's own channel group), and only
+  the person's device approves (`POST /v1/apps/dms/proposals/<id>/approve`
+  `{"revision", "proposal_digest", "envelope"}`: the digest it was shown,
+  SHA-256 of the proposal's bytes, and what it showed sealed again in the
+  conversation's group; `409 epoch` or `409 not_set_up` as for a message)
+  or declines; the backend never can;
+- `GET /v1/apps/dms/conversations/<id>/agent-drafts` and `DELETE …/<id>`:
+  the drafts agents left the person, and closing one.
+
+A Claktory for one of its agents, within the agent's grant (signed, with
+`?agent=&incarnation=`), and only these:
+- `GET /v1/apps/dms/agent/conversations` (with each one's `group_id` and the
+  friend's `account_id`) and `GET
+  /v1/apps/dms/agent/conversations/<id>/messages?after=|before=&limit=`
+  (`dm.read`): the conversations the grant names, history from the grant on;
+- `PUT /v1/apps/dms/conversations/<id>/agent-drafts/<client id>`
+  `{"contact_generation", "envelope", "agent_name"?}` (`dm.draft`, the
+  envelope sealed in the Claktory's channel): a draft for the person, never
+  a send;
+- `PUT`/`DELETE /v1/apps/dms/agent/subscriptions/<id>` (`dm.subscribe`).
+And for itself, `GET /v1/apps/dms/agent/events?since=<cursor>&wait=`: which of
+its agents a new message from the other person should wake (ids only).
+
 ### Web: `/account`
 Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, recent unlocks with their IP, and what their
@@ -359,7 +453,7 @@ model in the last 30); **Remove** a Claktory (what `revoked` means above); the d
 apps (agent, Claktory, app, what it may do, how many conversations, since
 when), each with **Remove**, asked of the user-apps worker, so it works with
 every Claktory off;
-**Delete account** (its Claktories' usage and backend versions' health stay only in anonymous totals; their devices are deleted; `GET /account/delete` opens its confirm step directly, after the emailed-code sign-in if need be, for apps to link to);
+**Delete account** (its Claktories' usage and backend versions' health stay only in anonymous totals; their devices are deleted; its user-level apps' data is purged by the user-apps worker, retried until it answers if it's down; `GET /account/delete` opens its confirm step directly, after the emailed-code sign-in if need be, for apps to link to);
 **Download my data** (JSON, everything kept about the account). Whoever runs
 the service (`--admin-email`) also gets **Usage counts** at `/account/admin`,
 the same report as `claktory-account stats` (daily and monthly active

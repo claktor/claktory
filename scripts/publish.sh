@@ -35,9 +35,13 @@
 #               ~/.factory/releases, or ~/.factory-dev's with --dev) instead
 #               of building one: so a release can be built and signed first,
 #               tried on this Mac, and then published exactly as tried. Build
-#               it from this commit with the channel's address stamped in:
+#               it from main with the channel's address stamped in:
 #                 FACTORY_UPDATE_URL=https://github.com/claktor/claktory/releases/latest/download/latest.json scripts/release.sh
-#               It refuses a release built from another commit or for
+#               It publishes exactly the release's own source, the commit
+#               it was built from (its `source`), even once main has moved
+#               on: the Linux builds, the install scripts and the source
+#               pushed public all come from that commit. It refuses a
+#               release built from a commit that isn't on main, or for
 #               another channel.
 #   --adhoc     allows a Mac app that isn't notarized (signed ad hoc): building
 #               one (scripts/release.sh --adhoc) and publishing it to GitHub;
@@ -47,6 +51,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib.sh"
 REPO="" LOCAL="" DEV=() NOTES="" LINUX=(x86_64 aarch64) BUILT=false ADHOC=false
 DEFAULT_REPO="claktor/claktory"
 usage() {
@@ -75,8 +80,11 @@ if [[ -n "$REPO" ]]; then
   gh repo view "$REPO" --json name >/dev/null
   # Before building: the source to push is main, clean, without secrets. The
   # dry run checks all of it (and what the repository holds) and pushes nothing.
-  SOURCE="$(git -C "$ROOT" rev-parse HEAD)"
-  "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --expect "$SOURCE" --dry-run
+  # A release built before (--built) is checked below, with its own source.
+  if ! $BUILT; then
+    SOURCE="$(git -C "$ROOT" rev-parse HEAD)"
+    "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --source "$SOURCE" --dry-run
+  fi
   BASE="https://github.com/$REPO/releases"
   MANIFEST_URL="$BASE/latest/download/latest.json"
 else
@@ -109,23 +117,29 @@ require_notarized() {
   }
 }
 
+# Browser control's helper goes public only once it has passed its release
+# proof (B6b): until then a release that carries it is a rehearsal's.
+require_no_browser_host() {
+  [[ ! -e "$1/Contents/Helpers/claktory-browser-host" ]] || {
+    echo "$1 carries the browser helper, which isn't published before browser control passes B6b" >&2
+    exit 1
+  }
+}
+
 if $BUILT; then
   VERSION="$(cat "$HOME_DIR/releases/latest" 2>/dev/null)" || { echo "no release in $HOME_DIR/releases to publish" >&2; exit 1; }
   RELEASE="$HOME_DIR/releases/$VERSION"
-  HEAD="$(git -C "$ROOT" rev-parse HEAD)"
-  BUILT_FROM="$(cat "$RELEASE/source" 2>/dev/null || true)"
-  if [[ "$BUILT_FROM" != "$HEAD" ]]; then
-    # Only files that neither build nor ship in a release may have changed
-    # since (a secret-check exception, say): then what was built is still
-    # this commit's release, and the source pushed with it is HEAD.
-    NOT_SHIPPED='^(\.gitleaks\.toml|AGENTS\.md|scripts/(publish|check-secrets|push-source|testflight|qa)\.sh|crates/claktory-qa/README\.md)$'
-    CHANGED="$(git -C "$ROOT" diff --name-only "$BUILT_FROM" "$HEAD" 2>/dev/null)" &&
-      git -C "$ROOT" merge-base --is-ancestor "$BUILT_FROM" "$HEAD" &&
-      { [[ -z "$CHANGED" ]] || ! grep -Eqv "$NOT_SHIPPED" <<<"$CHANGED"; } || {
-      echo "$VERSION was built from ${BUILT_FROM:-an unrecorded commit}, and this checkout ($HEAD) changed what goes into a release since; build it again from here" >&2
-      exit 1
-    }
-    echo "$VERSION was built from ${BUILT_FROM:0:7}; since then only $(tr '\n' ' ' <<<"$CHANGED")changed, which a release doesn't contain"
+  # The release is exactly its own source: the commit it was built from,
+  # which must be on main (this checkout's HEAD, which push-source.sh
+  # requires to be main).
+  SOURCE="$(cat "$RELEASE/source" 2>/dev/null || true)"
+  [[ -n "$SOURCE" ]] && git -C "$ROOT" merge-base --is-ancestor "$SOURCE" HEAD 2>/dev/null || {
+    echo "$VERSION was built from ${SOURCE:-an unrecorded commit}, which isn't in this checkout's history; publish it from main" >&2
+    exit 1
+  }
+  [[ "$SOURCE" == "$(git -C "$ROOT" rev-parse HEAD)" ]] || echo "$VERSION was built from ${SOURCE:0:10}; publishing that commit's source, Linux builds and install scripts"
+  if [[ -n "$REPO" ]]; then
+    "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --source "$SOURCE" --dry-run
   fi
   [[ "$(cat "$RELEASE/update-url" 2>/dev/null)" == "$MANIFEST_URL" ]] || {
     echo "$VERSION's backend checks \"$(cat "$RELEASE/update-url" 2>/dev/null || true)\" for updates, not this channel; build it with:" >&2
@@ -137,11 +151,11 @@ if $BUILT; then
     exit 1
   fi
   require_notarized "$RELEASE/$APP_NAME"
+  require_no_browser_host "$RELEASE/$APP_NAME"
   echo "publishing $VERSION as built ($RELEASE)"
 else
   # Before building: would it be notarized?
   if [[ -n "$REPO" ]] && ! $ADHOC; then
-    source "$ROOT/scripts/lib.sh"
     [[ "$(signing_mode)" != adhoc ]] || {
       echo "this release would be signed ad hoc, not notarized: it needs the Developer ID identity and the App Store Connect key (see scripts/sign-release.sh); publish it anyway with --adhoc" >&2
       exit 1
@@ -152,20 +166,34 @@ else
   FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/release.sh" ${RELEASE_ARGS[@]+"${RELEASE_ARGS[@]}"}
   VERSION="$(cat "$HOME_DIR/releases/latest")"
   RELEASE="$HOME_DIR/releases/$VERSION"
+  SOURCE="$(cat "$RELEASE/source")"
   require_notarized "$RELEASE/$APP_NAME"
+  require_no_browser_host "$RELEASE/$APP_NAME"
 fi
 NAME="factory-$VERSION-macos.tar.gz"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
+# What ships beside the app (the license, the install scripts, the Linux
+# builds) comes from the release's source commit, exported into the private
+# build folder (scripts/lib.sh release_tree); a dev release's from this
+# checkout, as it was built.
+if [[ ${#DEV[@]} -eq 0 ]]; then
+  SRC="$(release_tree "$ROOT" "${SOURCE:-HEAD}")"
+  trap 'rm -rf "$STAGE"; release_unlock' EXIT
+  # The real path: the container engine's VM shares /private, not /tmp.
+  SRC="$(cd "$SRC" && pwd -P)"
+else
+  SRC="$ROOT"
+fi
 # The license travels with every copy (PolyForm Shield).
 # The supervisor's app, in releases that have one (scripts/lib.sh make_supervisor_app).
 SUPERVISOR_DIR=()
 [[ -d "$RELEASE/supervisor" ]] && SUPERVISOR_DIR=(supervisor)
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
   -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
-  -C "$ROOT" LICENSE.md \
-  -C "$ROOT/scripts" install-release.sh
+  -C "$SRC" LICENSE.md \
+  -C "$SRC/scripts" install-release.sh
 
 ARCHS="$(lipo -archs "$RELEASE/factoryd" | sed 's/[^ ][^ ]*/"&"/g; s/ /, /g')"
 MIN_MACOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$RELEASE/$APP_NAME/Contents/Info.plist" 2>/dev/null || echo 12.0)"
@@ -183,15 +211,15 @@ LINUX_JSON=""
 for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   build="$STAGE/linux-$arch"
   mkdir -p "$build"
-  FACTORY_VERSION="$BACKEND_VERSION" FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/build-linux.sh" "$arch" "$build/factoryd"
-  "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
-  "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-speech" claktory-speech
+  FACTORY_LINUX_SRC="$SRC" FACTORY_VERSION="$BACKEND_VERSION" FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/build-linux.sh" "$arch" "$build/factoryd"
+  FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
+  FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-speech" claktory-speech
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$linux_name" \
     -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md \
-    -C "$ROOT" LICENSE.md \
-    -C "$ROOT/scripts" install-linux.sh
+    -C "$SRC" LICENSE.md \
+    -C "$SRC/scripts" install-linux.sh
   FILES+=("$STAGE/$linux_name")
   # One line per build: the online installer reads it with sed, on machines without jq.
   [[ -n "$LINUX_JSON" ]] && LINUX_JSON+=$',\n'
@@ -212,6 +240,12 @@ if [[ ${#DEV[@]} -eq 0 ]]; then
   FILES+=("$DMG" "$STAGE/Claktory.dmg")
   DMG_JSON="  \"dmg\": {\"url\": \"$(url_of "$(basename "$DMG")")\", \"sha256\": \"$(shasum -a 256 "$DMG" | cut -d' ' -f1)\", \"size\": $(stat -f %z "$DMG")},"
 fi
+
+# The last gate before anything is signed or uploaded: no binary going
+# public, the Mac's or Linux's, carries this Mac's home folder, user or
+# host name (check_no_traces in lib.sh; release.sh checks the same before
+# signing).
+check_no_traces "$RELEASE" "$STAGE"
 
 # The top-level url is the Mac's, as every backend so far reads it; Linux
 # backends read theirs under "linux".
@@ -258,12 +292,12 @@ elif [[ -n "$REPO" ]]; then
   exit 1
 fi
 
-sed "s|^MANIFEST_URL=\"\"\$|MANIFEST_URL=\"$MANIFEST_URL\"|" "$ROOT/scripts/install-online.sh" >"$STAGE/install.sh"
+sed "s|^MANIFEST_URL=\"\"\$|MANIFEST_URL=\"$MANIFEST_URL\"|" "$SRC/scripts/install-online.sh" >"$STAGE/install.sh"
 grep -q "^MANIFEST_URL=\"$MANIFEST_URL\"\$" "$STAGE/install.sh" || { echo "couldn't fill in install.sh" >&2; exit 1; }
 
 if [[ -n "$REPO" ]]; then
   # The source first: a release is never public without its source.
-  "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --version "$VERSION" --expect "$SOURCE"
+  "$ROOT/scripts/push-source.sh" "https://github.com/$REPO.git" --version "$VERSION" --source "$SOURCE"
   # Its tag is the release's public commit, which push-source.sh left as the branch public.
   PUBLIC_COMMIT="$(git -C "$ROOT" rev-parse refs/heads/public)"
   # The release page says what the version brings: the changelog section,

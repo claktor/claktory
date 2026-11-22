@@ -4,6 +4,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
 import 'layout.dart';
+import 'mobile/navigation.dart' show PhoneRoutes;
 import 'pane_chrome.dart';
 import 'panes.dart' show filesPane, withFiles;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -382,12 +383,17 @@ String _join(String base, String path) =>
 
 /// Opens [path] in a viewer beside the selected agent's conversation, as an
 /// agent's `show` does, or makes its pane glow when it's open already. From
-/// a Files pane ([beside]), the first viewer goes right of it.
+/// a Files pane ([beside]), the first viewer goes right of it. On a phone,
+/// a page over the conversation.
 void openFile(BuildContext context, String path, {String? beside}) {
   final scope = AppScope.scope(context);
   final backend = scope.backend;
   final agent = backend.workspace.selectedAgent;
   if (agent == null) return;
+  if (beside == null &&
+      (PhoneRoutes.of(context)?.showFile(agent.id, path) ?? false)) {
+    return;
+  }
   // From Settings or the Marketplace, back to the agent.
   if (scope.page.value != AppPage.agent) AppScope.closePage(context);
   final root = layoutOf(agent);

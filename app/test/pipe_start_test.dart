@@ -1,3 +1,4 @@
+import 'package:factory_app/decision.dart';
 import 'package:factory_app/pipe_start.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
@@ -247,6 +248,23 @@ void main() {
     await settle(tester);
     expect(harness.last.dismissPipeStart.agentId, 'rivet');
     expect(harness.last.dismissPipeStart.startId, 'start1');
+  });
+
+  testWidgets('Dismiss takes a comment for the agent', (tester) async {
+    final harness = await show(tester, _start());
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    expect(find.text('Rivet gets it if you dismiss this.'), findsOneWidget);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+      'Not with Acme',
+    );
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    expect(harness.last.dismissPipeStart.comment, 'Not with Acme');
   });
 
   testWidgets('a closed card says how it ended, and Open pipe opens what it '

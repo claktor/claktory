@@ -172,7 +172,7 @@ pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value)
 
 /// A SecretRequest from a result's details, as `details` wrote them.
 fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
-    let text = |key: &str| details.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(details);
     let id = details.get("request")?.as_str()?.to_owned();
     let new_secret =
         details.get("new_secret").and_then(|wanted| serde_json::from_value::<Wanted>(wanted.clone()).ok()).map(|wanted| v1::NewSecret {
@@ -203,10 +203,12 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
 /// The requests waiting for the person, oldest first, each with when it
 /// was made or the agent last changed it (ms since 1970).
 fn pending(db: &Connection) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
-    let mut statement =
-        db.prepare(&format!("SELECT {COLUMNS}, MAX(created, updated) FROM requests WHERE state = 'pending' ORDER BY created, id"))?;
-    let requests = statement.query_map([], |found| Ok((row(found)?, found.get(15)?)))?.collect::<Result<Vec<_>, _>>()?;
-    Ok(requests)
+    Ok(crate::store::query(
+        db,
+        &format!("SELECT {COLUMNS}, MAX(created, updated) FROM requests WHERE state = 'pending' ORDER BY created, id"),
+        [],
+        |found| Ok((row(found)?, found.get(15)?)),
+    )?)
 }
 
 /// A reason as an agent gives it, checked.
@@ -408,10 +410,10 @@ impl Vault {
     pub(crate) fn forget_admin(&self, admin: &str) -> Result<Vec<v1::SecretRequest>, VaultError> {
         let mut inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let ids: Vec<String> = {
-            let mut statement = db.prepare("SELECT id FROM requests WHERE admin = ?1 AND state IN ('pending', 'approved')")?;
-            statement.query_map([admin], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?
-        };
+        let ids: Vec<String> =
+            crate::store::query(db, "SELECT id FROM requests WHERE admin = ?1 AND state IN ('pending', 'approved')", [admin], |row| {
+                row.get(0)
+            })?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -429,9 +431,7 @@ impl Vault {
     pub(crate) fn requests_with_admin(&self, admin: &str) -> Result<Vec<v1::SecretRequest>, VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM requests WHERE admin = ?1 ORDER BY created, id"))?;
-        let requests = statement.query_map([admin], row)?.collect::<Result<Vec<_>, _>>()?;
-        Ok(requests)
+        Ok(crate::store::query(db, &format!("SELECT {COLUMNS} FROM requests WHERE admin = ?1 ORDER BY created, id"), [admin], row)?)
     }
 
     /// Marks the request given (the secret `given`: its id and name) or
@@ -598,20 +598,21 @@ impl Vault {
     pub(crate) fn recent_requests(&self, agent: &str, decided: u32) -> Result<Vec<v1::SecretRequest>, VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let mut statement = db.prepare(&format!(
-            "SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND state = 'pending'
+        Ok(crate::store::query(
+            db,
+            &format!(
+                "SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND state = 'pending'
              UNION ALL SELECT * FROM (SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND state != 'pending' ORDER BY decided DESC LIMIT ?2)"
-        ))?;
-        let requests = statement.query_map(params![agent, decided], row)?.collect::<Result<Vec<_>, _>>()?;
-        Ok(requests)
+            ),
+            params![agent, decided],
+            row,
+        )?)
     }
 
     /// Every request of `agent`'s, to show its conversation as it is.
     pub(crate) fn requests_of(&self, agent: &str) -> Result<Vec<v1::SecretRequest>, VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM requests WHERE agent = ?1 ORDER BY created"))?;
-        let requests = statement.query_map([agent], row)?.collect::<Result<Vec<_>, _>>()?;
-        Ok(requests)
+        Ok(crate::store::query(db, &format!("SELECT {COLUMNS} FROM requests WHERE agent = ?1 ORDER BY created"), [agent], row)?)
     }
 }

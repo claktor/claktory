@@ -1,6 +1,20 @@
-//! The search engines Factory queries the way a browser does: how each one's
-//! request looks, which browser it's made as, and how its page is read,
-//! blocks included.
+//! The search engines Claktory queries the way a browser does: how each
+//! one's request looks, which browser it's made as, and how its page is
+//! read, blocks included. Each engine's page reader is in `engines/`.
+//!
+//! Only free sources that answer a plain page request, with no key and no
+//! JavaScript, are here. Tried from a Mac in November 2026 and left out:
+//! Google (its results need JavaScript), Startpage (a JavaScript proof of
+//! work), Qwant (its API refuses outside requests), Yandex (a CAPTCHA at
+//! once), Mojeek (a JavaScript check before any results), Dogpile (results
+//! load by script), AOL and Ask (no results page).
+
+mod bing;
+mod brave;
+mod duckduckgo;
+mod ecosia;
+mod marginalia;
+mod yahoo;
 
 use primp::{Impersonate, ImpersonateOS, StatusCode};
 use scraper::{ElementRef, Html, Selector};
@@ -10,14 +24,28 @@ use super::search::{Block, Hit, Options, Outcome, Recency};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Engine {
     DuckDuckGo,
+    DuckDuckGoLite,
+    Bing,
+    Yahoo,
+    Ecosia,
     Brave,
+    Marginalia,
 }
 
-/// The order queries try them in.
-pub(crate) const ORDER: [Engine; 2] = [Engine::DuckDuckGo, Engine::Brave];
+/// Every engine, in the order they're preferred when all are equally
+/// healthy: the largest indexes first, Marginalia's small one last.
+pub(crate) const ORDER: [Engine; 7] = [
+    Engine::DuckDuckGo,
+    Engine::Bing,
+    Engine::Yahoo,
+    Engine::DuckDuckGoLite,
+    Engine::Ecosia,
+    Engine::Brave,
+    Engine::Marginalia,
+];
 
 /// How often an engine may be asked, and how long it's left alone after a
-/// block. Every agent shares one IP, so this is for the whole Factory.
+/// block. Every agent shares one IP, so this is for the whole Claktory.
 pub(crate) struct Policy {
     /// The least time between two requests, in ms…
     pub(crate) gap_ms: i64,
@@ -55,38 +83,55 @@ impl Engine {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Engine::DuckDuckGo => "DuckDuckGo",
+            Engine::DuckDuckGoLite => "DuckDuckGo Lite",
+            Engine::Bing => "Bing",
+            Engine::Yahoo => "Yahoo",
+            Engine::Ecosia => "Ecosia",
             Engine::Brave => "Brave",
+            Engine::Marginalia => "Marginalia",
         }
     }
 
-    /// DuckDuckGo challenges Chrome's handshake, so it gets Firefox; Brave
-    /// is Chromium, so it gets Chrome.
+    /// Each engine's own browser, pinned: DuckDuckGo challenges Chrome's
+    /// handshake, so it and the small independents get Firefox; Bing gets
+    /// Edge, Microsoft's own; Brave, Yahoo and Ecosia get Chrome.
     pub(crate) fn profile(self) -> Profile {
         let browser = match self {
-            Engine::DuckDuckGo => Impersonate::FirefoxV151,
-            Engine::Brave => Impersonate::ChromeV153,
+            Engine::DuckDuckGo | Engine::DuckDuckGoLite | Engine::Marginalia => Impersonate::FirefoxV151,
+            Engine::Bing => Impersonate::EdgeV153,
+            Engine::Yahoo | Engine::Ecosia | Engine::Brave => Impersonate::ChromeV153,
         };
         Profile { browser, os: host_os() }
     }
 
     pub(crate) fn policy(self) -> Policy {
-        match self {
-            Engine::DuckDuckGo => {
-                Policy { gap_ms: 3_000, jitter_ms: 2_000, per_hour: 60, challenge_max_ms: 24 * HOUR, limited_max_ms: HOUR }
-            }
-            Engine::Brave => {
-                Policy { gap_ms: 20_000, jitter_ms: 5_000, per_hour: 15, challenge_max_ms: 24 * HOUR, limited_max_ms: 6 * HOUR }
-            }
-        }
+        let (gap_ms, jitter_ms, per_hour, limited_max_ms) = match self {
+            Engine::DuckDuckGo | Engine::DuckDuckGoLite => (3_000, 2_000, 60, HOUR),
+            Engine::Bing | Engine::Yahoo => (4_000, 3_000, 60, 6 * HOUR),
+            Engine::Ecosia => (5_000, 3_000, 40, 6 * HOUR),
+            Engine::Brave => (20_000, 5_000, 15, 6 * HOUR),
+            // A one-person project: asked least.
+            Engine::Marginalia => (10_000, 5_000, 20, 6 * HOUR),
+        };
+        Policy { gap_ms, jitter_ms, per_hour, challenge_max_ms: 24 * HOUR, limited_max_ms }
     }
 
-    /// Cookies a browser that had used the site would carry, by URL.
+    /// Whether it can answer `options` as asked: an engine with no date
+    /// filter isn't asked for recent results.
+    pub(crate) fn supports(self, options: &Options) -> bool {
+        options.recency.is_none() || !matches!(self, Engine::Ecosia | Engine::Marginalia)
+    }
+
+    /// Cookies a browser that had used the site would carry, by URL. Each
+    /// engine's client has its own jar: nothing is shared between engines.
     pub(crate) fn cookies(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Engine::DuckDuckGo => ("https://html.duckduckgo.com/", &["kl=wt-wt"]),
+            Engine::DuckDuckGoLite => ("https://lite.duckduckgo.com/", &["kl=wt-wt"]),
             Engine::Brave => {
                 ("https://search.brave.com/", &["country=all", "useLocation=0", "summarizer=0", "safesearch=moderate", "ui_lang=en-us"])
             }
+            _ => ("", &[]),
         }
     }
 
@@ -94,71 +139,102 @@ impl Engine {
     pub(crate) fn request(self, client: &primp::Client, query: &str, options: &Options) -> primp::RequestBuilder {
         let query = with_domains(query, &options.domains);
         match self {
-            // The results form, submitted: a same-origin POST.
-            Engine::DuckDuckGo => {
-                let mut form = vec![("q", cut(&query, 499)), ("b", String::new()), ("kl", "wt-wt".to_owned())];
-                if let Some(recency) = options.recency {
-                    form.push(("df", recency.letter().to_owned()));
-                }
-                client
-                    .post("https://html.duckduckgo.com/html/")
-                    .header("Origin", "https://html.duckduckgo.com")
-                    .header("Referer", "https://html.duckduckgo.com/")
-                    .header("Sec-Fetch-Site", "same-origin")
-                    .header("Cache-Control", "max-age=0")
-                    // Sets the form's Content-Type itself; a second one gets blocked.
-                    .form(&form)
-            }
-            // Typed into the address bar: a navigation, with the profile's headers as they are.
-            Engine::Brave => {
-                let mut params = vec![("q", query), ("source", "web".to_owned())];
-                if let Some(recency) = options.recency {
-                    params.push(("tf", format!("p{}", recency.letter())));
-                }
-                client.get("https://search.brave.com/search").query(&params)
-            }
+            Engine::DuckDuckGo | Engine::DuckDuckGoLite => duckduckgo::request(self == Engine::DuckDuckGoLite, client, query, options),
+            Engine::Bing => bing::request(client, query, options),
+            Engine::Yahoo => yahoo::request(client, query, options),
+            Engine::Ecosia => client.get("https://www.ecosia.org/search").query(&[("method", "index"), ("q", query.as_str())]),
+            Engine::Brave => brave::request(client, query, options),
+            Engine::Marginalia => client.get("https://marginalia-search.com/search").query(&[("query", query.as_str())]),
         }
     }
 
     /// What the engine's answer says.
     pub(crate) fn parse(self, status: StatusCode, final_url: &str, body: &str) -> Outcome {
-        if final_url.contains("challenges.cloudflare.com") || final_url.contains("/sorry/") {
+        if final_url.contains("challenges.cloudflare.com") || final_url.contains("/sorry/") || final_url.contains("showcaptcha") {
             return Outcome::Blocked(Block::Challenge);
         }
         match status.as_u16() {
-            429 => return Outcome::Blocked(Block::RateLimited),
-            402 | 403 => return Outcome::Blocked(Block::Denied),
+            // Yahoo's "999 Unable to process request": too many from here.
+            429 | 999 => return Outcome::Blocked(Block::RateLimited),
+            402 | 403 => {
+                return Outcome::Blocked(if challenge_page(&body.to_lowercase()) { Block::Challenge } else { Block::Denied });
+            }
             // DuckDuckGo answers a suspected bot with 202 and a challenge.
-            202 if self == Engine::DuckDuckGo => return Outcome::Blocked(Block::Challenge),
+            202 if matches!(self, Engine::DuckDuckGo | Engine::DuckDuckGoLite) => return Outcome::Blocked(Block::Challenge),
             _ => {}
         }
         if !status.is_success() {
             return Outcome::Broken(format!("HTTP {status}"));
         }
         let page = Html::parse_document(body);
-        let hits = match self {
-            Engine::DuckDuckGo => duckduckgo(&page),
-            Engine::Brave => brave(&page),
-        };
+        if self == Engine::Marginalia && marginalia::wait(&page).is_some() {
+            return Outcome::Blocked(Block::Challenge);
+        }
+        let hits: Vec<Hit> = match self {
+            Engine::DuckDuckGo => duckduckgo::html(&page),
+            Engine::DuckDuckGoLite => duckduckgo::lite(&page),
+            Engine::Bing => bing::hits(&page),
+            Engine::Yahoo => yahoo::hits(&page),
+            Engine::Ecosia => ecosia::hits(&page),
+            Engine::Brave => brave::hits(&page),
+            Engine::Marginalia => marginalia::hits(&page),
+        }
+        .into_iter()
+        .filter(|hit| hit.url.starts_with("http") && !hit.title.is_empty())
+        .collect();
         if !hits.is_empty() {
             return Outcome::Results(hits);
         }
         let lower = body.to_lowercase();
-        let challenged = match self {
-            Engine::DuckDuckGo => {
-                lower.contains("challenge-form") || lower.contains("anomaly") || lower.contains("bots use duckduckgo too")
-            }
-            Engine::Brave => lower.contains("captcha") || title(&page).trim() == "Brave Search",
-        };
+        let challenged = challenge_page(&lower)
+            || match self {
+                Engine::DuckDuckGo | Engine::DuckDuckGoLite => duckduckgo::challenged(&lower),
+                Engine::Brave => lower.contains("captcha") || title(&page).trim() == "Brave Search",
+                _ => false,
+            };
         if challenged {
             return Outcome::Blocked(Block::Challenge);
         }
         let none = match self {
-            Engine::DuckDuckGo => page.select(&selector(".no-results")).next().is_some(),
+            Engine::DuckDuckGo | Engine::DuckDuckGoLite => duckduckgo::none(&page, &lower),
+            Engine::Bing => lower.contains("class=\"b_no\"") || lower.contains("there are no results for"),
+            Engine::Yahoo => lower.contains("we did not find results for"),
+            Engine::Ecosia => lower.contains("no results found"),
             Engine::Brave => lower.contains("no results found") || lower.contains("not many great matches"),
+            Engine::Marginalia => lower.contains("no search results found") || lower.contains("no results"),
         };
         if none { Outcome::NoResults } else { Outcome::Broken(body.chars().take(300).collect()) }
     }
+}
+
+/// For an engine that asks a browser to wait before it goes on: how long,
+/// and where to go then. Only Marginalia does.
+pub(crate) fn follow(engine: Engine, body: &str) -> Option<(std::time::Duration, String)> {
+    if engine != Engine::Marginalia || !body.contains("countdown") {
+        return None;
+    }
+    let (seconds, url) = marginalia::wait(&Html::parse_document(body))?;
+    // Never longer than a few seconds: past that, it's a block.
+    (seconds <= 5).then(|| (std::time::Duration::from_millis(seconds * 1000 + 300), url))
+}
+
+/// A bot check any site may put up: Cloudflare's, Anubis's proof of work,
+/// a CAPTCHA, or a page that needs JavaScript to go on.
+fn challenge_page(lower: &str) -> bool {
+    [
+        "cf-chl-",
+        "challenge-platform",
+        "<title>just a moment",
+        "anubis",
+        "verifying your request",
+        "captcha",
+        "unusual traffic",
+        "javascript is required to complete this challenge",
+        "please enable javascript",
+        "are you a robot",
+    ]
+    .iter()
+    .any(|sign| lower.contains(sign))
 }
 
 impl Recency {
@@ -212,40 +288,9 @@ fn title(page: &Html) -> String {
     page.select(&selector("title")).next().map(text).unwrap_or_default()
 }
 
-/// Results of DuckDuckGo's HTML page, ads left out. Links go through
-/// DuckDuckGo; the real address is their `uddg` parameter.
-fn duckduckgo(page: &Html) -> Vec<Hit> {
-    let (item, link, snippet) = (selector("div.result:not(.result--ad)"), selector("a.result__a"), selector(".result__snippet"));
-    page.select(&item)
-        .filter_map(|result| {
-            let anchor = result.select(&link).next()?;
-            let href = anchor.value().attr("href")?;
-            let url = query_param(href, "uddg").unwrap_or_else(|| href.to_owned());
-            if url.starts_with("https://duckduckgo.com/y.js") || !url.starts_with("http") {
-                return None;
-            }
-            let snippet = result.select(&snippet).next().map(text).unwrap_or_default();
-            Some(Hit { title: text(anchor), url, snippet })
-        })
-        .collect()
-}
-
-/// Results of Brave's page: its web snippets only.
-fn brave(page: &Html) -> Vec<Hit> {
-    let (item, link, title, snippet) = (
-        selector("div.snippet[data-type=web]"),
-        selector("a[href^=http]"),
-        selector(".title"),
-        selector(".generic-snippet .content, .snippet-description"),
-    );
-    page.select(&item)
-        .filter_map(|result| {
-            let url = result.select(&link).next()?.value().attr("href")?.to_owned();
-            let title = result.select(&title).next().map(text).unwrap_or_default();
-            let snippet = result.select(&snippet).next().map(text).unwrap_or_default();
-            Some(Hit { title, url, snippet })
-        })
-        .collect()
+/// The text of the first `css` inside `element`; empty when there's none.
+fn first_text(element: ElementRef, css: &Selector) -> String {
+    element.select(css).next().map(text).unwrap_or_default()
 }
 
 fn query_param(href: &str, key: &str) -> Option<String> {
@@ -254,54 +299,67 @@ fn query_param(href: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> String {
+    pub(crate) fn fixture(name: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/web").join(name);
         std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     }
 
-    fn hits(outcome: Outcome) -> Vec<Hit> {
+    pub(crate) fn hits(outcome: Outcome) -> Vec<Hit> {
         match outcome {
             Outcome::Results(hits) => hits,
             other => panic!("not results: {other:?}"),
         }
     }
 
-    #[test]
-    fn duckduckgo_results_have_their_real_addresses() {
-        let found = hits(Engine::DuckDuckGo.parse(StatusCode::OK, "https://html.duckduckgo.com/html/", &fixture("ddg-results.html")));
-        assert_eq!(found.len(), 10);
-        assert!(found.iter().all(|hit| hit.url.starts_with("http") && !hit.url.contains("duckduckgo.com/l/")), "{found:?}");
-        assert!(found.iter().all(|hit| !hit.title.is_empty() && !hit.snippet.is_empty()), "{found:?}");
-    }
-
-    #[test]
-    fn a_duckduckgo_challenge_is_a_block() {
-        let page = fixture("ddg-challenge-202.html");
-        let url = "https://html.duckduckgo.com/html/";
-        assert_eq!(Engine::DuckDuckGo.parse(StatusCode::ACCEPTED, url, &page), Outcome::Blocked(Block::Challenge));
-        assert_eq!(Engine::DuckDuckGo.parse(StatusCode::OK, url, &page), Outcome::Blocked(Block::Challenge), "even with 200");
-    }
-
-    #[test]
-    fn brave_results_and_its_rate_limit() {
-        let found = hits(Engine::Brave.parse(StatusCode::OK, "https://search.brave.com/search", &fixture("brave-results.html")));
-        assert!(found.len() >= 15, "{}", found.len());
-        assert!(found.iter().all(|hit| hit.url.starts_with("http") && !hit.title.is_empty()), "{found:?}");
-        let page = fixture("brave-429-captcha.html");
-        let url = "https://search.brave.com/search";
-        assert_eq!(Engine::Brave.parse(StatusCode::TOO_MANY_REQUESTS, url, &page), Outcome::Blocked(Block::RateLimited));
-        assert_eq!(Engine::Brave.parse(StatusCode::OK, url, &page), Outcome::Blocked(Block::Challenge), "the CAPTCHA page itself");
+    /// Results read from `page` as `engine` serves it: at least `least`,
+    /// each with a real address and a title, none of them the engine's own.
+    pub(crate) fn read(engine: Engine, page: &str, least: usize) -> Vec<Hit> {
+        let found = hits(engine.parse(StatusCode::OK, "https://example.com/search", &fixture(page)));
+        assert!(found.len() >= least, "{}: {} results: {found:#?}", engine.name(), found.len());
+        for hit in &found {
+            assert!(hit.url.starts_with("https://") || hit.url.starts_with("http://"), "{hit:?}");
+            assert!(!hit.title.is_empty(), "{hit:?}");
+            for own in ["duckduckgo.com/l/", "bing.com/ck/", "search.yahoo.com/", "ecosia.org/", "search.brave.com"] {
+                assert!(!hit.url.contains(own), "{}: a link through the engine: {hit:?}", engine.name());
+            }
+        }
+        found
     }
 
     #[test]
     fn an_empty_page_is_broken_and_a_challenge_host_is_a_block() {
-        assert!(matches!(Engine::Brave.parse(StatusCode::OK, "https://search.brave.com/search", ""), Outcome::Broken(_)));
-        let outcome = Engine::DuckDuckGo.parse(StatusCode::OK, "https://challenges.cloudflare.com/x", "<html></html>");
-        assert_eq!(outcome, Outcome::Blocked(Block::Challenge));
-        assert_eq!(Engine::Brave.parse(StatusCode::FORBIDDEN, "https://search.brave.com/search", ""), Outcome::Blocked(Block::Denied));
+        for engine in ORDER {
+            assert!(matches!(engine.parse(StatusCode::OK, "https://example.com/search", ""), Outcome::Broken(_)), "{}", engine.name());
+            let outcome = engine.parse(StatusCode::OK, "https://challenges.cloudflare.com/x", "<html></html>");
+            assert_eq!(outcome, Outcome::Blocked(Block::Challenge), "{}", engine.name());
+            assert_eq!(engine.parse(StatusCode::FORBIDDEN, "https://example.com/", ""), Outcome::Blocked(Block::Denied));
+            assert_eq!(engine.parse(StatusCode::TOO_MANY_REQUESTS, "https://example.com/", ""), Outcome::Blocked(Block::RateLimited));
+            assert!(matches!(engine.parse(StatusCode::INTERNAL_SERVER_ERROR, "https://example.com/", ""), Outcome::Broken(_)));
+        }
+    }
+
+    #[test]
+    fn bot_checks_of_any_kind_are_blocks() {
+        for (page, status) in [
+            ("startpage-anubis.html", StatusCode::OK),
+            ("mojeek-captcha.html", StatusCode::OK),
+            ("google-javascript.html", StatusCode::OK),
+        ] {
+            for engine in ORDER {
+                let outcome = engine.parse(status, "https://example.com/search", &fixture(page));
+                assert!(
+                    matches!(outcome, Outcome::Blocked(Block::Challenge)) || (page == "google-javascript.html" && matches!(outcome, Outcome::Broken(_))),
+                    "{} on {page}: {outcome:?}",
+                    engine.name()
+                );
+            }
+        }
+        // A 403 behind Cloudflare is its challenge, not a plain refusal.
+        let cloudflare = "<html><title>Just a moment...</title><script src=\"/cdn-cgi/challenge-platform/x\"></script></html>";
+        assert_eq!(Engine::Ecosia.parse(StatusCode::FORBIDDEN, "https://www.ecosia.org/search", cloudflare), Outcome::Blocked(Block::Challenge));
     }
 
     #[test]
@@ -320,8 +378,65 @@ mod tests {
         let os = if cfg!(target_os = "macos") { ImpersonateOS::MacOS } else { ImpersonateOS::Linux };
         for profile in ORDER.map(Engine::profile).into_iter().chain([fetch_profile()]) {
             assert_eq!(profile.os, os, "never Random: primp picks a random OS when none is set");
-            assert!(!matches!(profile.browser, Impersonate::Random | Impersonate::Chrome | Impersonate::Firefox));
+            assert!(!matches!(
+                profile.browser,
+                Impersonate::Random | Impersonate::Chrome | Impersonate::Firefox | Impersonate::Edge | Impersonate::Safari
+            ));
         }
         assert_eq!(Engine::DuckDuckGo.profile().browser, Impersonate::FirefoxV151, "DuckDuckGo challenges Chrome");
+    }
+
+    /// The pages here are real ones, served to this computer, and go public
+    /// with the source: none may say where it is or who it is. Pages saved
+    /// later get the same scrub: this Mac's address as 203.0.113.1, places
+    /// as US placeholders, session ids as zeros of the same length.
+    #[test]
+    fn saved_pages_say_nothing_of_this_computer() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/web");
+        let quad = regex::Regex::new(r"(^|[^\w./-])(\d{1,3}(?:\.\d{1,3}){3})($|[^\w.])").expect("regex");
+        let allowed = |ip: std::net::Ipv4Addr| {
+            let [first, second, third, _] = ip.octets();
+            first == 127 || first == 0 || matches!((first, second, third), (192, 0, 2) | (198, 51, 100) | (203, 0, 113))
+        };
+        let country = regex::Regex::new(r#"(RevIpCC:"|"yIpc":")([a-z]*)""#).expect("regex");
+        // Any 32-hex token in a query string (its & escaped in JSON too):
+        // a session, nonce or challenge id.
+        let token = regex::Regex::new(r"(?:[?&;]|\\u0026)[A-Za-z_]+=([0-9A-Fa-f]{32})\b").expect("regex");
+        let session = regex::Regex::new(r#"(?:^|[^A-Za-z])(?:IG|CID|sid|fclid)[=:]"?([A-Za-z0-9-]{8,})|clientId":"([A-Za-z0-9]+)""#).expect("regex");
+        for entry in std::fs::read_dir(&dir).expect("fixtures") {
+            let path = entry.expect("entry").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let page = String::from_utf8_lossy(&std::fs::read(&path).expect("read")).into_owned();
+            for found in quad.captures_iter(&page) {
+                let text = &found[2];
+                // Versions such as Chrome/131.0.0.0 aren't addresses.
+                if text.ends_with(".0.0") {
+                    continue;
+                }
+                if let Ok(ip) = text.parse::<std::net::Ipv4Addr>() {
+                    assert!(allowed(ip), "{name}: an IP address, {ip}");
+                }
+            }
+            assert!(!page.contains("\"ll\":\"") || page.contains("\"ll\":\"0,0\""), "{name}: a position (\"ll\")");
+            assert!(page.match_indices("geoid\":").all(|(at, _)| page[at + 7..].starts_with('0')), "{name}: a geoid");
+            for found in country.captures_iter(&page) {
+                assert_eq!(&found[2], "us", "{name}: a country, {}", &found[0]);
+            }
+            for found in token.captures_iter(&page) {
+                assert!(found[1].chars().all(|c| c == '0'), "{name}: a token, {}", &found[0]);
+            }
+            for found in session.captures_iter(&page) {
+                let id = found.get(1).or_else(|| found.get(2)).map_or("", |id| id.as_str());
+                assert!(id.chars().all(|c| c == '0' || c == '-'), "{name}: a session id, {}", &found[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn engines_without_a_date_filter_arent_asked_for_recent_results() {
+        let recent = Options { recency: Some(Recency::Week), ..Options::default() };
+        let supported: Vec<&str> = ORDER.iter().filter(|engine| engine.supports(&recent)).map(|engine| engine.name()).collect();
+        assert_eq!(supported, ["DuckDuckGo", "Bing", "Yahoo", "DuckDuckGo Lite", "Brave"]);
+        assert!(ORDER.iter().all(|engine| engine.supports(&Options::default())));
     }
 }

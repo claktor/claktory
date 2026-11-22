@@ -20,12 +20,17 @@ Every command prints one JSON line: {\"ok\":true,…} or {\"ok\":false,\"error\"
 Exit 0 done, 1 failed, 2 usage, 3 refused (by the sandbox, or as unsafe), 4 the sandbox isn't running.
 
 Sandboxes
-  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME]
+  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME] [--speech MODEL]
                                            start one: a fresh Claktory on a free port (7500 up), with its
                                            own account service whose emails land in its mail folder; with
                                            --model (or --script), its agents run on qa-model, a scripted model;
-                                           it shows the machine name qa-NAME (or --machine-name's), never this computer's
-  down NAME… | --all [--keep]              end them and delete their folders (--keep keeps the folders)
+                                           it shows the machine name qa-NAME (or --machine-name's), never this computer's;
+                                           with --speech, it recognizes speech: the commit's claktory-speech on
+                                           MODEL (a .gguf with its .receipt beside it), copied in
+  down NAME… | --all | --all-agents [--keep]
+                                           end them and delete their folders (--keep keeps the folders); --all
+                                           ends only yours (the root is every agent's: each sandbox records who
+                                           made it), --all-agents everyone's; the answer names what ended
   list                                     the sandboxes, and whether each is running
   restart NAME [--kill]                    end its factoryd and start it again, environment and all (--kill:
                                            kill -9 first, as in a crash); its data, account service and qa-model stay
@@ -173,7 +178,7 @@ async fn run(args: &[String]) -> Outcome {
     let Some((command, args)) = args.split_first() else { return Err(Failure::usage(USAGE)) };
     match command.as_str() {
         "up" => {
-            let args = Args::parse(args, &["--port", "--script", "--machine-name"], &["--no-account", "--model"])?;
+            let args = Args::parse(args, &["--port", "--script", "--machine-name", "--speech"], &["--no-account", "--model"])?;
             let port = match args.value("--port") {
                 Some(port) => Some(port.parse().map_err(|_| Failure::usage("--port takes a port number"))?),
                 None => None,
@@ -188,25 +193,37 @@ async fn run(args: &[String]) -> Outcome {
                 account: !args.flag("--no-account"),
                 model,
                 machine_name: args.value("--machine-name").map(str::to_owned),
+                speech: args.value("--speech").map(std::path::PathBuf::from),
             };
             let sandbox = sandbox::up(up)?;
             Ok(sandbox.to_json())
         }
         "down" => {
-            let args = Args::parse(args, &[], &["--all", "--keep"])?;
-            let sandboxes = if args.flag("--all") {
-                sandbox::all()?
+            let args = Args::parse(args, &[], &["--all", "--all-agents", "--keep"])?;
+            // The QA root is every agent's: --all is only the caller's own.
+            let me = sandbox::caller();
+            let (sandboxes, left): (Vec<Sandbox>, Vec<Sandbox>) = if args.flag("--all-agents") {
+                (sandbox::all()?, Vec::new())
+            } else if args.flag("--all") {
+                sandbox::all()?.into_iter().partition(|sandbox| sandbox.owner == me)
             } else if args.rest.is_empty() {
-                return Err(Failure::usage("Which sandbox? Name it, or --all."));
+                return Err(Failure::usage("Which sandbox? Name it, or --all for your own (--all-agents for everyone's)."));
             } else {
-                args.rest.iter().map(|name| sandbox::find(name)).collect::<Result<Vec<_>, _>>()?
+                (args.rest.iter().map(|name| sandbox::find(name)).collect::<Result<Vec<_>, _>>()?, Vec::new())
             };
-            let mut ended = Vec::new();
+            // `ended` stays a list of names, as scripts read it; who made
+            // each, ended or left, is in `owners`.
+            let names = |sandboxes: &[Sandbox]| -> Vec<String> { sandboxes.iter().map(|sandbox| sandbox.name.clone()).collect() };
+            let owners: serde_json::Map<String, Value> =
+                sandboxes.iter().chain(&left).map(|sandbox| (sandbox.name.clone(), Value::from(sandbox.owner.clone()))).collect();
             for sandbox in &sandboxes {
                 sandbox::down(sandbox, args.flag("--keep"))?;
-                ended.push(sandbox.name.clone());
             }
-            Ok(json!({ "ended": ended }))
+            let mut answer = json!({ "ended": names(&sandboxes), "owners": owners, "you": me });
+            if !left.is_empty() {
+                answer["left"] = Value::from(names(&left));
+            }
+            Ok(answer)
         }
         "list" => Ok(json!({ "sandboxes": sandbox::all()?.iter().map(Sandbox::to_json).collect::<Vec<_>>() })),
         "restart" => {

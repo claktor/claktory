@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'extensions.dart' show logTime;
 import 'identity.dart';
 import 'mobile/share.dart' show canShare, globalRectOf, shareText;
@@ -48,6 +49,9 @@ class _PipeStartCardState extends State<PipeStartCard> {
   late final _purpose = TextEditingController(text: start.purpose);
   final _code = TextEditingController();
 
+  /// A comment for the agent, sent with Dismiss.
+  final _comment = TextEditingController();
+
   /// What the pasted code says, once read.
   PipeInvitePreview? _preview;
 
@@ -63,6 +67,7 @@ class _PipeStartCardState extends State<PipeStartCard> {
     _name.dispose();
     _purpose.dispose();
     _code.dispose();
+    _comment.dispose();
     super.dispose();
   }
 
@@ -110,8 +115,13 @@ class _PipeStartCardState extends State<PipeStartCard> {
     );
   });
 
-  void _dismiss() =>
-      _run((backend) => backend.dismissPipeStart(start.agentId, start.id));
+  void _dismiss() => _run(
+    (backend) => backend.dismissPipeStart(
+      start.agentId,
+      start.id,
+      comment: _comment.text.trim(),
+    ),
+  );
 
   Future<void> _copy(String code) async {
     await Clipboard.setData(ClipboardData(text: code));
@@ -196,6 +206,7 @@ class _PipeStartCardState extends State<PipeStartCard> {
             ),
           ),
         ]),
+        _dismissComment(store),
       ];
     }
     final preview = _preview;
@@ -223,6 +234,7 @@ class _PipeStartCardState extends State<PipeStartCard> {
             ),
           ),
         ]),
+        _dismissComment(store),
       ];
     }
     return [
@@ -294,6 +306,17 @@ class _PipeStartCardState extends State<PipeStartCard> {
         child: TextField(controller: _purpose),
       ),
     ];
+  }
+
+  /// A comment for the card's agent, sent with Dismiss.
+  Widget _dismissComment(WorkspaceStore store) {
+    final name = store.agent(start.agentId)?.name ?? start.agentId;
+    return DecisionComment(
+      controller: _comment,
+      agent: name,
+      note: '$name gets it if you dismiss this.',
+      enabled: !_busy,
+    );
   }
 
   Widget _dismissButton() =>

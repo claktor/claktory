@@ -325,9 +325,22 @@ impl UserMessage {
         let (open, close) = match (&self.event, &self.sent_from) {
             (Some(event), _) => {
                 // An agent's id too, when its name doesn't say it, so a reply reaches it.
-                let id =
+                let mut id =
                     if event.id.is_empty() || event.id == event.from { String::new() } else { format!(" id=\"{}\"", attribute(&event.id)) };
-                (format!("<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), attribute(&event.from)), "\n</event>")
+                // An agent's message's number, so a reply can say it answers it.
+                if let Some(provenance) = event.provenance.as_ref().filter(|provenance| provenance.message != 0) {
+                    id.push_str(&format!(" msg=\"{}\"", provenance.message));
+                }
+                // Sent quietly: it waited rather than wake the agent, and
+                // Claktory's line on the batch it came in goes first.
+                let mut before = String::new();
+                if let Some(provenance) = event.provenance.as_ref().filter(|provenance| provenance.quiet) {
+                    id.push_str(" quiet=\"true\"");
+                    if !provenance.quiet_note.is_empty() {
+                        before = format!("<event source=\"host\" from=\"Claktory\">\n{}\n</event>\n", defuse(&provenance.quiet_note));
+                    }
+                }
+                (format!("{before}<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), attribute(&event.from)), "\n</event>")
             }
             (None, sent_from) if sent_from.is_some() || self.voice.is_some() => {
                 (sent_tag(sent_from.as_ref(), self.voice.as_ref()), "\n</sent>")
@@ -395,6 +408,36 @@ pub struct Event {
     /// Pipe: the pipe's messages it brings, by their number in the pipe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipe_seqs: Vec<u64>,
+    /// Agent: where the message stands among the others (#285); None for
+    /// other sources and messages from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
+}
+
+/// An agent's message, as Claktory recorded it: its number, which the
+/// agent reads (`msg="…"`) and can answer, what it answers and why it was
+/// sent, as the sender said.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Provenance {
+    /// Its number in Claktory's records (this recipient's copy of it).
+    pub message: u64,
+    /// The messages to the sender it answers, by their numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reply_to: Vec<u64>,
+    /// handoff, decision_request, decision or status, as the sender said;
+    /// empty when it didn't.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub intent: String,
+    /// Sent quietly: it didn't wake the agent, and waited for its next wake
+    /// (or its next step, if it was working).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
+    /// Claktory's line on the quiet messages that came with this one ("While
+    /// you were idle, 4 quiet messages came…"), on the first of them only; the
+    /// model reads it just before it, in a tag of Claktory's own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quiet_note: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

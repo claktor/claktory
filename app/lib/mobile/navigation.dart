@@ -53,6 +53,13 @@ abstract class PhoneRoutes {
   /// these routes can't show it, for the caller to open it its own way.
   bool showFile(String agentId, String path);
 
+  /// Shows [agentId]'s pane [paneId] (a file, an app's view) in a viewer
+  /// over its conversation, as a page: the agent is chosen, and the viewer
+  /// pushed once the pane is in its layout (the caller puts it there, as
+  /// an app's dock does). True when it's done here; false where these
+  /// routes can't show it, for the caller to show it its own way.
+  bool showPane(String agentId, String paneId);
+
   /// Keeps the drawer's edge swipe from starting while something else owns
   /// the finger: a recording's hold and slide, a code block or a picture
   /// panned sideways, a selection's handles. Release the hold to give it

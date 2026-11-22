@@ -23,6 +23,23 @@ anyhow = "1"
 # claktory/2: the tunnel's streams compressed (zstd), as the backend's (crates/factoryd).
 async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 hex = "0.4"
+# Direct messages end to end (dms-e2ee.md, E4): MLS, certificates and the
+# sealed store's schema, shared with the worker and factoryd. Its rusqlite
+# is bundled SQLite, so every platform keeps the same database.
+claktory-dm-crypto = { path = "../../crates/claktory-dm-crypto" }
+# dm.rs's own rows and values (pins, the retry cache), at the versions
+# claktory-dm-crypto uses.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+zeroize = "1.9"
+# Group ids in the self group's contents, as the worker writes them.
+base64 = "0.23"
+# The store's own connection (dm/store.rs): the same rusqlite as
+# claktory-dm-crypto, so one bundled SQLite in the app.
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+# Only for OpenMLS's group id (dm.rs, forgetting a group): the same version
+# claktory-dm-crypto pins.
+openmls = "=0.9.2"
 
 # Android: the raw JNI calls of the bootstrap (src/android.rs), the version
 # iroh's own DNS resolver already brings.

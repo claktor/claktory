@@ -75,6 +75,35 @@ class DevicePath extends $pb.ProtobufEnum {
   const DevicePath._(super.value, super.name);
 }
 
+/// What an upload is for.
+class UploadPurpose extends $pb.ProtobufEnum {
+  /// A file attached to a message for `agent_id`, stored in its uploads.
+  static const UploadPurpose UPLOAD_PURPOSE_AGENT =
+      UploadPurpose._(0, _omitEnumNames ? '' : 'UPLOAD_PURPOSE_AGENT');
+
+  /// An ink blob: an iPad drawing ("drawing.pkdrawing",
+  /// "application/x-pencilkit", at most 8 MiB) or a PNG ("image/png": a
+  /// preview, at most 4 MiB, or a review item's context image, at most
+  /// 3 MiB and 2048 px on its long edge, checked when a thread names it).
+  /// `agent_id` is empty. Kept privately, by its SHA-256, where no agent's
+  /// tools reach, until the person sends it; FinishUpload must carry the
+  /// hash, and answers UploadedFile.blob_sha256.
+  static const UploadPurpose UPLOAD_PURPOSE_INK =
+      UploadPurpose._(1, _omitEnumNames ? '' : 'UPLOAD_PURPOSE_INK');
+
+  static const $core.List<UploadPurpose> values = <UploadPurpose>[
+    UPLOAD_PURPOSE_AGENT,
+    UPLOAD_PURPOSE_INK,
+  ];
+
+  static final $core.List<UploadPurpose?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 1);
+  static UploadPurpose? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const UploadPurpose._(super.value, super.name);
+}
+
 class MonitorAction extends $pb.ProtobufEnum {
   static const MonitorAction MONITOR_ACTION_UNSPECIFIED =
       MonitorAction._(0, _omitEnumNames ? '' : 'MONITOR_ACTION_UNSPECIFIED');
@@ -314,6 +343,53 @@ class ErrorCode extends $pb.ProtobufEnum {
   const ErrorCode._(super.value, super.name);
 }
 
+class UpdateCheckState extends $pb.ProtobufEnum {
+  /// Nobody has checked since the backend started: show only the button.
+  static const UpdateCheckState UPDATE_CHECK_STATE_NONE =
+      UpdateCheckState._(0, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_NONE');
+  static const UpdateCheckState UPDATE_CHECK_STATE_CHECKING =
+      UpdateCheckState._(
+          1, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_CHECKING');
+
+  /// Nothing newer than this backend is here, and the channel offers
+  /// nothing newer either. `version`: this backend's (Workspace.version).
+  static const UpdateCheckState UPDATE_CHECK_STATE_UP_TO_DATE =
+      UpdateCheckState._(
+          2, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_UP_TO_DATE');
+
+  /// A newer release, `version`, is downloading.
+  static const UpdateCheckState UPDATE_CHECK_STATE_DOWNLOADING =
+      UpdateCheckState._(
+          3, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_DOWNLOADING');
+
+  /// A release newer than this backend, `version`, is here:
+  /// Workspace.latest_release. For UP_TO_DATE and READY alike, word the
+  /// answer by the app's own version, as the Update banner decides: an
+  /// app-only release this app already runs is "up to date" for it.
+  static const UpdateCheckState UPDATE_CHECK_STATE_READY =
+      UpdateCheckState._(4, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_READY');
+
+  /// The check couldn't finish; `error` says why, for the person.
+  static const UpdateCheckState UPDATE_CHECK_STATE_FAILED =
+      UpdateCheckState._(5, _omitEnumNames ? '' : 'UPDATE_CHECK_STATE_FAILED');
+
+  static const $core.List<UpdateCheckState> values = <UpdateCheckState>[
+    UPDATE_CHECK_STATE_NONE,
+    UPDATE_CHECK_STATE_CHECKING,
+    UPDATE_CHECK_STATE_UP_TO_DATE,
+    UPDATE_CHECK_STATE_DOWNLOADING,
+    UPDATE_CHECK_STATE_READY,
+    UPDATE_CHECK_STATE_FAILED,
+  ];
+
+  static final $core.List<UpdateCheckState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static UpdateCheckState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const UpdateCheckState._(super.value, super.name);
+}
+
 class ChangelogKind extends $pb.ProtobufEnum {
   /// A line with none of the prefixes.
   static const ChangelogKind CHANGELOG_KIND_OTHER =
@@ -402,6 +478,50 @@ class ExtensionOptionKind extends $pb.ProtobufEnum {
   const ExtensionOptionKind._(super.value, super.name);
 }
 
+/// What a blocked checklist item waits on (#279).
+class BlockedKind extends $pb.ProtobufEnum {
+  static const BlockedKind BLOCKED_KIND_UNSPECIFIED =
+      BlockedKind._(0, _omitEnumNames ? '' : 'BLOCKED_KIND_UNSPECIFIED');
+
+  /// A decision only the person can make.
+  static const BlockedKind BLOCKED_KIND_PERSON_DECISION =
+      BlockedKind._(1, _omitEnumNames ? '' : 'BLOCKED_KIND_PERSON_DECISION');
+
+  /// Something only the person can do (sign in, pay, plug in).
+  static const BlockedKind BLOCKED_KIND_PERSON_ACTION =
+      BlockedKind._(2, _omitEnumNames ? '' : 'BLOCKED_KIND_PERSON_ACTION');
+
+  /// Another checklist item (blocked_ref): it opens again by itself when
+  /// that one is done or dropped, and its owner is told.
+  static const BlockedKind BLOCKED_KIND_ITEM =
+      BlockedKind._(3, _omitEnumNames ? '' : 'BLOCKED_KIND_ITEM');
+
+  /// Another agent (blocked_ref).
+  static const BlockedKind BLOCKED_KIND_AGENT =
+      BlockedKind._(4, _omitEnumNames ? '' : 'BLOCKED_KIND_AGENT');
+
+  /// Something outside: its owner is told to check again at retry_at_ms,
+  /// then each time twice as long after.
+  static const BlockedKind BLOCKED_KIND_EXTERNAL =
+      BlockedKind._(5, _omitEnumNames ? '' : 'BLOCKED_KIND_EXTERNAL');
+
+  static const $core.List<BlockedKind> values = <BlockedKind>[
+    BLOCKED_KIND_UNSPECIFIED,
+    BLOCKED_KIND_PERSON_DECISION,
+    BLOCKED_KIND_PERSON_ACTION,
+    BLOCKED_KIND_ITEM,
+    BLOCKED_KIND_AGENT,
+    BLOCKED_KIND_EXTERNAL,
+  ];
+
+  static final $core.List<BlockedKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static BlockedKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const BlockedKind._(super.value, super.name);
+}
+
 class ChecklistStatus extends $pb.ProtobufEnum {
   static const ChecklistStatus CHECKLIST_STATUS_UNSPECIFIED = ChecklistStatus._(
       0, _omitEnumNames ? '' : 'CHECKLIST_STATUS_UNSPECIFIED');
@@ -418,6 +538,12 @@ class ChecklistStatus extends $pb.ProtobufEnum {
   static const ChecklistStatus CHECKLIST_STATUS_BLOCKED =
       ChecklistStatus._(5, _omitEnumNames ? '' : 'CHECKLIST_STATUS_BLOCKED');
 
+  /// Ongoing or waiting its turn, with nothing to wait on (#279): still
+  /// outstanding, never nudged or asked whether it's still blocked; shown
+  /// apart from Blocked. It can resume at a set time (retry_at_ms).
+  static const ChecklistStatus CHECKLIST_STATUS_PARKED =
+      ChecklistStatus._(6, _omitEnumNames ? '' : 'CHECKLIST_STATUS_PARKED');
+
   static const $core.List<ChecklistStatus> values = <ChecklistStatus>[
     CHECKLIST_STATUS_UNSPECIFIED,
     CHECKLIST_STATUS_OPEN,
@@ -425,10 +551,11 @@ class ChecklistStatus extends $pb.ProtobufEnum {
     CHECKLIST_STATUS_DONE,
     CHECKLIST_STATUS_DROPPED,
     CHECKLIST_STATUS_BLOCKED,
+    CHECKLIST_STATUS_PARKED,
   ];
 
   static final $core.List<ChecklistStatus?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static ChecklistStatus? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -709,6 +836,41 @@ class PipeStartState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const PipeStartState._(super.value, super.name);
+}
+
+class AppGrantState extends $pb.ProtobufEnum {
+  static const AppGrantState APP_GRANT_STATE_UNSPECIFIED =
+      AppGrantState._(0, _omitEnumNames ? '' : 'APP_GRANT_STATE_UNSPECIFIED');
+  static const AppGrantState APP_GRANT_STATE_PENDING =
+      AppGrantState._(1, _omitEnumNames ? '' : 'APP_GRANT_STATE_PENDING');
+
+  /// The person approved it and the account service made the grant.
+  static const AppGrantState APP_GRANT_STATE_GRANTED =
+      AppGrantState._(2, _omitEnumNames ? '' : 'APP_GRANT_STATE_GRANTED');
+
+  /// The person declined it, or cleared Rivet's conversation while it
+  /// waited.
+  static const AppGrantState APP_GRANT_STATE_DECLINED =
+      AppGrantState._(3, _omitEnumNames ? '' : 'APP_GRANT_STATE_DECLINED');
+
+  /// Approved, but it couldn't be made: AppGrantProposal.error says why.
+  static const AppGrantState APP_GRANT_STATE_FAILED =
+      AppGrantState._(4, _omitEnumNames ? '' : 'APP_GRANT_STATE_FAILED');
+
+  static const $core.List<AppGrantState> values = <AppGrantState>[
+    APP_GRANT_STATE_UNSPECIFIED,
+    APP_GRANT_STATE_PENDING,
+    APP_GRANT_STATE_GRANTED,
+    APP_GRANT_STATE_DECLINED,
+    APP_GRANT_STATE_FAILED,
+  ];
+
+  static final $core.List<AppGrantState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static AppGrantState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppGrantState._(super.value, super.name);
 }
 
 class DevicePairingState extends $pb.ProtobufEnum {
@@ -1961,6 +2123,123 @@ class PushPlatform extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const PushPlatform._(super.value, super.name);
+}
+
+class NeedsYouRecordKind extends $pb.ProtobufEnum {
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_UNSPECIFIED =
+      NeedsYouRecordKind._(
+          0, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_UNSPECIFIED');
+
+  /// An agent's question (ask_person).
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_QUESTION =
+      NeedsYouRecordKind._(
+          1, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_QUESTION');
+
+  /// A review ask: a file to review.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_REVIEW =
+      NeedsYouRecordKind._(
+          2, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_REVIEW');
+
+  /// A request for a secret.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_SECRET_REQUEST =
+      NeedsYouRecordKind._(
+          3, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SECRET_REQUEST');
+
+  /// A command using secrets, asked for once (SecretApproval).
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_SECRET_USE =
+      NeedsYouRecordKind._(
+          4, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SECRET_USE');
+
+  /// A proposal to Rivet.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PROPOSAL =
+      NeedsYouRecordKind._(
+          5, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PROPOSAL');
+
+  /// A proposal to connect a service.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_CONNECT =
+      NeedsYouRecordKind._(
+          6, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_CONNECT');
+
+  /// An agent's card for starting or accepting a pipe.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PIPE_START =
+      NeedsYouRecordKind._(
+          7, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_START');
+
+  /// A pipe's held message, let through (APPROVED) or discarded (DENIED):
+  /// an agent's to the other side (agent_id set), or the other side's.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PIPE_HELD =
+      NeedsYouRecordKind._(
+          8, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_HELD');
+
+  /// A pipe's loop pause the person let carry on (APPROVED).
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PIPE_LOOP =
+      NeedsYouRecordKind._(
+          9, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_LOOP');
+
+  /// Rivet's proposal to give an agent access to an app at the person's
+  /// account (AppGrantProposal): APPROVED when the grant was made, DENIED
+  /// when the person declined it, FAILED when they approved it but it
+  /// couldn't be made. agent_id is Rivet, whose conversation shows the card;
+  /// the title names the agent it was for and the app, as it says now.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_APP_GRANT =
+      NeedsYouRecordKind._(
+          10, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_APP_GRANT');
+
+  static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
+    NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
+    NEEDS_YOU_RECORD_KIND_QUESTION,
+    NEEDS_YOU_RECORD_KIND_REVIEW,
+    NEEDS_YOU_RECORD_KIND_SECRET_REQUEST,
+    NEEDS_YOU_RECORD_KIND_SECRET_USE,
+    NEEDS_YOU_RECORD_KIND_PROPOSAL,
+    NEEDS_YOU_RECORD_KIND_CONNECT,
+    NEEDS_YOU_RECORD_KIND_PIPE_START,
+    NEEDS_YOU_RECORD_KIND_PIPE_HELD,
+    NEEDS_YOU_RECORD_KIND_PIPE_LOOP,
+    NEEDS_YOU_RECORD_KIND_APP_GRANT,
+  ];
+
+  static final $core.List<NeedsYouRecordKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 10);
+  static NeedsYouRecordKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NeedsYouRecordKind._(super.value, super.name);
+}
+
+class NeedsYouOutcome extends $pb.ProtobufEnum {
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_UNSPECIFIED =
+      NeedsYouOutcome._(
+          0, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_UNSPECIFIED');
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_ANSWERED =
+      NeedsYouOutcome._(1, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_ANSWERED');
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_DISMISSED =
+      NeedsYouOutcome._(2, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_DISMISSED');
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_APPROVED =
+      NeedsYouOutcome._(3, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_APPROVED');
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_DENIED =
+      NeedsYouOutcome._(4, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_DENIED');
+
+  /// Approved, but what it asked couldn't be done (APP_GRANT: the account
+  /// service refused the grant, or the agent was deleted since).
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_FAILED =
+      NeedsYouOutcome._(5, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_FAILED');
+
+  static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
+    NEEDS_YOU_OUTCOME_UNSPECIFIED,
+    NEEDS_YOU_OUTCOME_ANSWERED,
+    NEEDS_YOU_OUTCOME_DISMISSED,
+    NEEDS_YOU_OUTCOME_APPROVED,
+    NEEDS_YOU_OUTCOME_DENIED,
+    NEEDS_YOU_OUTCOME_FAILED,
+  ];
+
+  static final $core.List<NeedsYouOutcome?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static NeedsYouOutcome? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NeedsYouOutcome._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

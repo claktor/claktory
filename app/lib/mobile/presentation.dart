@@ -11,6 +11,7 @@ import 'back.dart';
 import 'haptics.dart';
 import 'header.dart';
 import 'metrics.dart';
+import 'navigation.dart' show PhoneRoutesScope;
 import 'popover.dart';
 
 /// How the app presents something over what shows, the one place that
@@ -271,6 +272,9 @@ Future<T?> presentSheet<T>(
   final overlay = SheetOverlay.of(context);
   // The overlay may be above the phone's Back: it's found from here.
   final back = PhoneBack.maybeOf(context);
+  // And above its routes: what's in the sheet opens pages as anything
+  // under it would (an app chosen from All apps, a file).
+  final routes = context.getInheritedWidgetOfExactType<PhoneRoutesScope>();
   final done = Completer<T?>();
   late final OverlayEntry entry;
   final host = GlobalKey<_SheetHostState>();
@@ -331,7 +335,17 @@ Future<T?> presentSheet<T>(
           onClose: closeButton ? dismiss : null,
           child: _SheetGuard(
             slot: guard,
-            child: Builder(builder: (context) => builder(context, close)),
+            child: Builder(
+              builder: (context) => routes == null
+                  ? builder(context, close)
+                  : PhoneRoutesScope(
+                      routes: routes.routes,
+                      version: routes.version,
+                      child: Builder(
+                        builder: (context) => builder(context, close),
+                      ),
+                    ),
+            ),
           ),
         ),
       ),

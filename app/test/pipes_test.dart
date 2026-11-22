@@ -1,6 +1,8 @@
 import 'package:factory_app/controls.dart' show Toggle;
+import 'package:factory_app/decision.dart';
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_layout.dart';
+import 'package:factory_app/pipe_timeline.dart' show pipeItemKey;
 import 'package:factory_app/pipes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -262,6 +264,73 @@ void main() {
     expect(decided.allow, isTrue);
   });
 
+  testWidgets('a held message takes a comment for this side\'s agent only: '
+      'the lead for one coming in, never the other side', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(members: ['june'], lead: 'june'),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'Can you send the deck?',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+            name: 'Bo',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING,
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    expect(find.text("Only June sees it, not Ana's Claktory."), findsOneWidget);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+      'Only the public deck.',
+    );
+    await tester.tap(find.text('Let in'));
+    await settle(tester);
+    final decided = harness.last.decidePipeMessage;
+    expect(decided.allow, isTrue);
+    expect(decided.comment, 'Only the public deck.');
+  });
+
+  testWidgets("the person's own held message has no one to comment to", (
+    tester,
+  ) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(members: ['june'], lead: 'june'),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'Hello Ana',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_ME,
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD,
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(find.textContaining('Waiting for you to send it'), findsOneWidget);
+    expect(find.text('Add a comment'), findsNothing);
+  });
+
   testWidgets("on a phone, the pipe's header leads with Menu", (tester) async {
     final harness = Harness(_workspace([_pipe()], selected: 'pipe1'));
     var menus = 0;
@@ -351,6 +420,36 @@ void main() {
     expect(approve.reviewIncoming, isFalse);
     expect(approve.hasReviewOutgoing(), isTrue);
     expect(approve.reviewOutgoing, isFalse);
+  });
+
+  testWidgets('Decline takes a comment for this side only', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+      ], selected: 'pipe1'),
+    );
+    final add = find.text('Add a comment');
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await settle(tester);
+    expect(
+      find.text("Only your agents see it, not Ana's Claktory."),
+      findsOneWidget,
+    );
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+      'Not this client.',
+    );
+    await tester.ensureVisible(find.text('Decline'));
+    await tester.tap(find.text('Decline'));
+    await settle(tester);
+    final approve = harness.last.approvePipe;
+    expect(approve.approve, isFalse);
+    expect(approve.comment, 'Not this client.');
   });
 
   testWidgets('Review incoming, turned on at approval, goes with it', (
@@ -882,6 +981,30 @@ void main() {
       );
     });
 
+    test('a site, direct messages, and a kind still to come', () {
+      expect(
+        taintLines(
+          [
+            PipeTaint(kind: 'browser', pipeName: 'https://docs.example.com'),
+            PipeTaint(
+              kind: 'dm',
+              pipeName: 'Direct messages with Ana · K7QF2M',
+              viaNames: ['Ada', 'Lea'],
+            ),
+            PipeTaint(kind: 'later', pipeName: 'something new'),
+          ],
+          agent: 'Ada',
+          pipes: pipes,
+        ),
+        [
+          'from Ada, which read a page on https://docs.example.com',
+          'from Lea, which heard from direct messages with Ana · K7QF2M '
+              'via Ada',
+          'from Ada, which read something new',
+        ],
+      );
+    });
+
     testWidgets('a line per pipe; nothing when none', (tester) async {
       final harness = Harness(_workspace([_pipe()]));
       await harness.show(
@@ -909,5 +1032,49 @@ void main() {
       );
       expect(find.byType(PortalGlyph), findsNWidgets(2));
     });
+  });
+
+  testWidgets("a pipe with no liaison opens at a message it's asked to, "
+      'loading back to it', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([_pipe()], selected: 'pipe1'),
+    );
+    List<PipeMessage> page(int from, int to) => [
+      for (var seq = from; seq <= to; seq++)
+        _message(
+          seq,
+          'Message $seq',
+          PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+          name: 'Bo',
+        ),
+    ];
+    harness.backend.pipeChat.load(
+      PipeTranscript(pipeId: 'pipe1', messages: page(41, 80), hasEarlier: true),
+    );
+    await settle(tester);
+    bool inView(String text) {
+      final found = find.text(text);
+      if (found.evaluate().isEmpty) return false;
+      final y = tester.getCenter(found).dy;
+      return y > 0 && y < 900;
+    }
+
+    expect(inView('Message 80'), isTrue);
+
+    // Asked for one in a page not loaded yet: it goes up, loading it.
+    harness.backend.reveal.reachExtra(
+      pipeChatRevealId('pipe1'),
+      pipeItemKey(7),
+    );
+    await pumpFrames(tester);
+    expect(harness.backend.sent.any((m) => m.hasLoadPipeMessages()), isTrue);
+    harness.backend.pipeChat.prepend(
+      PipeMessagePage(pipeId: 'pipe1', messages: page(1, 40)),
+    );
+    await pumpFrames(tester);
+    expect(inView('Message 7'), isTrue);
+    expect(inView('Message 80'), isFalse);
+    expect(harness.backend.reveal.extra, isNull, reason: 'used once');
   });
 }

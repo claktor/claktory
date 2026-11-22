@@ -69,7 +69,7 @@ const _maxTemplateItems = 500;
 const _maxInsetDepth = 8;
 
 class _Renderer {
-  const _Renderer({
+  _Renderer({
     required this.surface,
     required this.onAction,
     required this.appName,
@@ -78,6 +78,111 @@ class _Renderer {
   final AppSurfaceModel surface;
   final AppViewAct? onAction;
   final String appName;
+
+  /// How many TextFields each component holds, counted once per drawing.
+  final _fieldCounts = <String, int>{};
+
+  /// How many TextFields component [id] holds, itself and in what it holds
+  /// (a template's counts twice: it may repeat).
+  int _fieldsIn(Object? id) {
+    if (id is! String) return 0;
+    final known = _fieldCounts[id];
+    if (known != null) return known;
+    // A component that holds itself adds nothing a second time.
+    _fieldCounts[id] = 0;
+    final c = surface.components[id];
+    var count = 0;
+    if (c != null) {
+      if (c['component'] == 'TextField') count = 1;
+      count += _fieldsIn(c['child']) + _fieldsInList(c['children']);
+      final tabs = c['tabs'];
+      if (tabs is List) {
+        for (final tab in tabs) {
+          if (tab is Map<String, Object?>) count += _fieldsIn(tab['child']);
+        }
+      }
+    }
+    return _fieldCounts[id] = count;
+  }
+
+  /// Whether component [id] says its fields' note itself, or something in
+  /// it does: a Column or a vertical List holding more than one, or what
+  /// holds all of them in one such.
+  bool _notes(Object? id) {
+    if (id is! String) return false;
+    final known = _notesAt[id];
+    if (known != null) return known;
+    _notesAt[id] = false;
+    final c = surface.components[id];
+    final count = _fieldsIn(id);
+    var notes = false;
+    if (c != null && count > 1) {
+      final kind = c['component'];
+      if (kind == 'Column' ||
+          (kind == 'List' && c['direction'] != 'horizontal')) {
+        notes = true;
+      } else {
+        final list = c['children'];
+        notes = [
+          c['child'],
+          if (list is List) ...list,
+        ].any((child) => _fieldsIn(child) == count && _notes(child));
+      }
+    }
+    return _notesAt[id] = notes;
+  }
+
+  /// [_notes], for each component, once per drawing.
+  final _notesAt = <String, bool>{};
+
+  /// [_fieldsIn], for a ChildList.
+  int _fieldsInList(Object? list) {
+    if (list is List) {
+      return list.fold(0, (sum, id) => sum + _fieldsIn(id));
+    }
+    if (list is Map<String, Object?>) return 2 * _fieldsIn(list['componentId']);
+    return 0;
+  }
+
+  /// A Column's or a vertical List's [list] of children, laid out by [lay].
+  /// When they hold more than one field (a form), whose what's typed is
+  /// is said once, above the first that holds one, rather than under each.
+  Widget _noted(
+    BuildContext context,
+    Object? list,
+    String scope,
+    int depth,
+    Widget Function(List<Widget> children) lay,
+  ) {
+    final built = _children(context, list, scope, depth);
+    final count = _fieldsInList(list);
+    final ids = list is List ? list.whereType<String>().toList() : const [];
+    // Said nearest the fields: by the one child holding all of them, when
+    // it says it.
+    if (count < 2 || ids.any((id) => _fieldsIn(id) == count && _notes(id))) {
+      return lay(built);
+    }
+    // Where the first field is: a template's are in its first copy.
+    final at = math.max(0, ids.indexWhere((id) => _fieldsIn(id) > 0));
+    return Builder(
+      builder: (context) {
+        // Said already, by a form this one is in.
+        if (_FieldsNoted.on(context)) return lay(built);
+        final palette = Palette.of(context);
+        return _FieldsNoted(
+          child: lay([
+            ...built.take(at),
+            Text(
+              fieldsNote(appName),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textFaint),
+            ),
+            ...built.skip(at),
+          ]),
+        );
+      },
+    );
+  }
 
   Widget node(BuildContext context, String id, String scope, int depth) {
     final component = surface.components[id];
@@ -115,29 +220,56 @@ class _Renderer {
             ? Semantics(header: true, child: text)
             : text;
       case 'Row':
-        return Row(
-          spacing: Space.s,
-          mainAxisAlignment: _justify(c['justify']),
-          crossAxisAlignment: _align(c['align'], CrossAxisAlignment.center),
-          children: [
-            for (final (child, weight) in _weighted(
-              context,
-              c['children'],
-              scope,
-              depth,
-            ))
-              weight == null
-                  ? Flexible(child: child)
-                  : Expanded(flex: weight, child: child),
-          ],
+        final weighted = _weighted(context, c['children'], scope, depth);
+        final anyWeight = weighted.any((one) => one.$2 != null);
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            // Weighted children (a dashboard's grid of stats) too narrow
+            // side by side (a phone): one under another instead. Unweighted
+            // ones (buttons, say) keep their line.
+            final each = constraints.maxWidth / math.max(1, weighted.length);
+            if (anyWeight && weighted.length > 1 && each < minRowChildWidth) {
+              return Column(
+                spacing: Space.s,
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [for (final (child, _) in weighted) child],
+              );
+            }
+            return Row(
+              spacing: Space.s,
+              mainAxisAlignment: _justify(c['justify']),
+              crossAxisAlignment: _align(c['align'], CrossAxisAlignment.center),
+              children: [
+                for (final (child, weight) in weighted)
+                  if (weight != null)
+                    Expanded(flex: weight, child: child)
+                  // Beside weighted ones, an unweighted child keeps its own
+                  // width (up to its share) rather than a sliver of theirs.
+                  else if (anyWeight && constraints.hasBoundedWidth)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: each),
+                      child: child,
+                    )
+                  else
+                    Flexible(child: child),
+              ],
+            );
+          },
         );
       case 'Column':
-        return Column(
-          spacing: Space.s,
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: _justify(c['justify']),
-          crossAxisAlignment: _align(c['align'], CrossAxisAlignment.stretch),
-          children: children(c['children']),
+        return _noted(
+          context,
+          c['children'],
+          scope,
+          depth,
+          (children) => Column(
+            spacing: Space.s,
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: _justify(c['justify']),
+            crossAxisAlignment: _align(c['align'], CrossAxisAlignment.stretch),
+            children: children,
+          ),
         );
       case 'List':
         if (c['direction'] == 'horizontal') {
@@ -150,11 +282,17 @@ class _Renderer {
             ),
           );
         }
-        return Column(
-          spacing: Space.xs,
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: _align(c['align'], CrossAxisAlignment.stretch),
-          children: children(c['children']),
+        return _noted(
+          context,
+          c['children'],
+          scope,
+          depth,
+          (children) => Column(
+            spacing: Space.xs,
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: _align(c['align'], CrossAxisAlignment.stretch),
+            children: children,
+          ),
         );
       case 'Card':
         return Container(
@@ -647,6 +785,10 @@ class _QuietButton extends StatelessWidget {
   }
 }
 
+/// The least each of a weighted Row's children gets side by side;
+/// narrower, they go one under another.
+const minRowChildWidth = 120.0;
+
 /// One of a ChoicePicker's options: a row with a round (one of them) or
 /// square (any of them) mark, or a pill when drawn as chips; chosen, the
 /// mark fills in `signal` and a chip in `selected`.
@@ -685,7 +827,6 @@ class _Choice extends StatelessWidget {
               duration: Motion.fast,
               constraints: BoxConstraints(minHeight: phone ? 32 : 24),
               padding: const EdgeInsets.symmetric(horizontal: Space.s + 2),
-              alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: chosen
                     ? palette.selected
@@ -697,11 +838,15 @@ class _Choice extends StatelessWidget {
                 ),
                 borderRadius: BorderRadius.circular(999),
               ),
-              child: Text(
-                label,
-                style: type.caption.copyWith(
-                  color: chosen ? palette.text : palette.textMuted,
-                  fontWeight: chosen ? FontWeight.w600 : null,
+              // As wide as its words, in a Wrap with the others.
+              child: Center(
+                widthFactor: 1,
+                child: Text(
+                  label,
+                  style: type.caption.copyWith(
+                    color: chosen ? palette.text : palette.textMuted,
+                    fontWeight: chosen ? FontWeight.w600 : null,
+                  ),
                 ),
               ),
             );
@@ -844,11 +989,29 @@ class _BoundTextFieldState extends State<_BoundTextField> {
       ignoring: !widget.enabled,
       child: Field(
         label: widget.label.isEmpty ? widget.appName : widget.label,
-        note: '${widget.appName} gets what you type here.',
+        // Said once above a form's fields instead (_FieldsNoted).
+        note: _FieldsNoted.on(context) ? null : fieldNote(widget.appName),
         child: field,
       ),
     );
   }
+}
+
+/// What an app's field says, under it, about what's typed in it.
+String fieldNote(String appName) => '$appName gets what you type here.';
+
+/// The same, said once above a form's fields.
+String fieldsNote(String appName) => '$appName gets what you type below.';
+
+/// Over a form whose fields' note is said once, above them.
+class _FieldsNoted extends InheritedWidget {
+  const _FieldsNoted({required super.child});
+
+  static bool on(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_FieldsNoted>() != null;
+
+  @override
+  bool updateShouldNotify(_FieldsNoted old) => false;
 }
 
 /// A Slider bound to the data model: a 4px track in `text` at 14%, filled

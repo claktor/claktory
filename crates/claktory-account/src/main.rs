@@ -226,6 +226,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             service.service_key()
         );
         service.spawn_upkeep();
+        service.spawn_app_purges();
         tokio::select! {
             result = server::serve(listener, service) => result.map_err(|error| error.to_string()),
             _ = shutdown() => {

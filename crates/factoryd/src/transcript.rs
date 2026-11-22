@@ -376,6 +376,7 @@ impl Transcript {
             (Some(Kind::DevicePairing(shown)), Kind::DevicePairing(updated)) => shown.id == updated.id,
             (Some(Kind::AskPerson(shown)), Kind::AskPerson(updated)) => shown.id == updated.id,
             (Some(Kind::PipeStart(shown)), Kind::PipeStart(updated)) => shown.id == updated.id,
+            (Some(Kind::AppGrant(shown)), Kind::AppGrant(updated)) => shown.id == updated.id,
             _ => false,
         })?;
         entry.kind = Some(kind);
@@ -423,6 +424,13 @@ impl Transcript {
     /// the changed entry, or None if the conversation doesn't show it.
     pub fn set_pipe_start(&mut self, start: v1::PipeStart) -> Option<Entry> {
         self.replace_shown(Kind::PipeStart(start))
+    }
+
+    /// Shows Rivet's proposal to give an agent access to an app as it is
+    /// now (decided, say); the changed entry, or None if the conversation
+    /// doesn't show it.
+    pub fn set_app_grant(&mut self, proposal: v1::AppGrantProposal) -> Option<Entry> {
+        self.replace_shown(Kind::AppGrant(proposal))
     }
 
     /// Shows a pipe secret approval as decided; None if it isn't shown.
@@ -629,6 +637,10 @@ impl Transcript {
                 // And a card for the person to start a pipe.
                 if let Some(start) = crate::pipes::start::started(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::PipeStart(start)));
+                }
+                // And Rivet's proposal to give an agent access to an app.
+                if let Some(proposal) = crate::user_apps::proposed(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::AppGrant(proposal)));
                 }
                 changed
             }
@@ -907,6 +919,7 @@ fn waits(kind: Option<&Kind>, owner: &str) -> bool {
             matches!(pairing.state(), v1::DevicePairingState::Waiting | v1::DevicePairingState::Asking)
         }
         Some(Kind::PipeStart(start)) => start.state() == v1::PipeStartState::Waiting,
+        Some(Kind::AppGrant(proposal)) => proposal.state() == v1::AppGrantState::Pending,
         _ => false,
     }
 }
@@ -949,6 +962,10 @@ fn user_kind(message: &UserMessage) -> Kind {
         summary: event.summary.clone(),
         text,
         pipe_seqs: event.pipe_seqs.clone(),
+        message_id: event.provenance.as_ref().map_or(0, |provenance| provenance.message),
+        reply_to_ids: event.provenance.as_ref().map(|provenance| provenance.reply_to.clone()).unwrap_or_default(),
+        intent: event.provenance.as_ref().map(|provenance| provenance.intent.clone()).unwrap_or_default(),
+        quiet: event.provenance.as_ref().is_some_and(|provenance| provenance.quiet),
     })
 }
 
@@ -1022,6 +1039,11 @@ fn user_text(content: &UserContent) -> String {
 struct ToolOutput {
     output: String,
     details: String,
+}
+
+/// Owned text fields for a stored frame or tool-result card; non-strings are empty.
+pub(crate) fn text_fields(value: &serde_json::Value) -> impl Fn(&str) -> String + '_ {
+    move |key| value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned()
 }
 
 /// A result's details for the app: empty for none (null or `{}`).

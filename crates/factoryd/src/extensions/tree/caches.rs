@@ -10,8 +10,9 @@
 //! them. Then, when the place's caches together still take more than the
 //! budget (`resources.build_cache_gb`, 25 GB unless changed), it clears
 //! them, largest first, until it's under: each is moved aside at once and
-//! deleted in the background. The agents that work there hear of that at
-//! their next run (the stale objects go unannounced: nothing rebuilds).
+//! deleted in the background. The agents that work there hear of it: one
+//! working now after its current step, an idle one at its next run (the
+//! stale objects go unannounced: nothing rebuilds).
 //!
 //! Only folders known to be build caches are ever touched: a `target/` next
 //! to a Cargo.toml, a Flutter `build/` or `.dart_tool/` next to a
@@ -19,9 +20,13 @@
 //! folder tagged as a cache (CACHEDIR.TAG). Never one git tracks a file in,
 //! and never anything else git ignores (.env files, local data).
 //!
-//! Nothing is cleared while something works there: an agent working in the
-//! folder (running, or with a background task or watch), a cache written in
-//! the last few minutes, or a Rust build holding its lock.
+//! Nothing is cleared while something works there: an agent of the folder
+//! running a tool call, or with a background task or watch running, a cache
+//! written in the last few minutes, or a Rust build holding its lock. An
+//! agent that's working but between steps (waiting on its model) doesn't
+//! hold it: busy agents are seldom idle, and their caches grow most. The
+//! last checks and the clearing itself happen under Factory's lock, which a
+//! tool call's start takes before the tool runs, so none starts in between.
 //!
 //! The dev Claktory (`~/.factory-dev`) looks only inside its own data
 //! folder: its agents' checkouts and its projects there. A project folder
@@ -33,10 +38,10 @@ use std::io::Read as _;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::factory::{Factory, Queued, host_event};
+use crate::factory::{Factory, Inner, Queued, host_event};
 use crate::transcript::now_ms;
 
 /// Cache folders by name, each with the files beside it that make it one.
@@ -350,6 +355,20 @@ fn workers(factory: &Factory, place: &Place) -> Vec<String> {
 
 /// Agents working now: running, or with a background task or a watch running.
 fn working(factory: &Factory) -> HashSet<String> {
+    let mut busy = occupied(factory);
+    let inner = factory.lock();
+    busy.extend(inner.agents.iter().filter(|(_, runtime)| runtime.running).map(|(id, _)| id.clone()));
+    busy
+}
+
+/// Whether `agent` is running a tool call now (not between its steps).
+fn mid_tool(inner: &Inner, agent: &str) -> bool {
+    inner.agents.get(agent).is_some_and(|runtime| runtime.running && runtime.doing.is_some())
+}
+
+/// Agents with a background task or a watch running, whether or not they
+/// run themselves.
+fn occupied(factory: &Factory) -> HashSet<String> {
     let mut busy: HashSet<String> = HashSet::new();
     match factory.store.running_tasks() {
         Ok(tasks) => busy.extend(tasks.into_iter().map(|(agent, _)| agent)),
@@ -363,9 +382,32 @@ fn working(factory: &Factory) -> HashSet<String> {
     if let Ok(monitors) = crate::extensions::monitors::query(&factory.store, &active) {
         busy.extend(monitors.into_iter().filter(|monitor| monitor.cursor.pid.is_some()).map(|monitor| monitor.agent));
     }
-    let inner = factory.lock();
-    busy.extend(inner.agents.iter().filter(|(_, runtime)| runtime.running).map(|(id, _)| id.clone()));
     busy
+}
+
+/// Whether a build wrote in `dir` lately, by its folders' times down to
+/// `target/debug/deps` (a file made or removed in a folder changes its
+/// time): quick enough to ask under Factory's lock, just before clearing.
+fn written_lately(dir: &Path) -> bool {
+    let Some(lately) = SystemTime::now().checked_sub(RECENT) else { return true };
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((at, depth)) = stack.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&at) else { continue };
+        if metadata.modified().is_ok_and(|modified| modified > lately) {
+            return true;
+        }
+        if depth < 2
+            && let Ok(entries) = std::fs::read_dir(&at)
+        {
+            stack.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| (entry.path(), depth + 1)),
+            );
+        }
+    }
+    false
 }
 
 /// Moves the cache aside at once and deletes it in the background: into
@@ -398,8 +440,10 @@ fn empty_trash(factory: &Factory) {
     }
 }
 
-/// Tells the place's agents, at their next run, that a cache was cleared.
-fn tell(factory: &Factory, place: &Place, workers: &[String], cache: &Cache) {
+/// Tells the place's agents that a cache was cleared: one working now (it
+/// was between steps) after its current step, an idle one at its next run.
+/// `now` is Factory and its state, when the caller holds its lock.
+fn tell(factory: &Factory, mut now: Option<(&Arc<Factory>, &mut Inner)>, place: &Place, workers: &[String], cache: &Cache) {
     let size = gb(cache.bytes);
     for agent in workers {
         let text = if place.agent.is_some() {
@@ -407,7 +451,15 @@ fn tell(factory: &Factory, place: &Place, workers: &[String], cache: &Cache) {
         } else {
             format!("The build cache {} ({size}) was cleared; the next build there is cold.", cache.path.display())
         };
-        factory.build_caches.note(agent, text);
+        match now.as_mut() {
+            Some((factory, inner)) if inner.agents.get(agent).is_some_and(|runtime| runtime.running) => {
+                let note = Queued::event(text, host_event("A build cache was cleared".to_owned()));
+                if let Err(error) = factory.enqueue(inner, agent, note) {
+                    tracing::error!(%agent, %error, "could not tell an agent a build cache was cleared");
+                }
+            }
+            _ => factory.build_caches.note(agent, text),
+        }
     }
 }
 
@@ -427,20 +479,27 @@ pub(crate) fn take_note(factory: &Factory, agent: &str) -> Option<Queued> {
 }
 
 /// Looks at every place once: measures its caches and clears those of a
-/// place over the budget while nothing works there.
-pub(crate) fn sweep(factory: &Factory) {
+/// place over the budget while nothing works there (its agents may be
+/// between steps).
+pub(crate) fn sweep(factory: &Arc<Factory>) {
     let budget_gb = factory.lock().config.resources.build_cache_gb;
     let deadline = Instant::now() + SWEEP_BUDGET;
     let mut places = places(factory);
     let mut seen = HashSet::new();
-    let busy = working(factory);
+    let tasks = occupied(factory);
     for place in &mut places {
         let (caches, leftovers) = find(&place.path);
         for leftover in leftovers {
             delete_later(leftover);
         }
-        // Stale objects first, where nothing works: they cost no rebuild.
-        if !workers(factory, place).iter().any(|agent| busy.contains(agent)) {
+        // Stale objects first, where nothing works: they cost no rebuild,
+        // and no build uses them, so a tool call starting meanwhile is fine.
+        let workers = workers(factory, place);
+        let quiet = !workers.iter().any(|agent| tasks.contains(agent)) && {
+            let inner = factory.lock();
+            !workers.iter().any(|agent| mid_tool(&inner, agent))
+        };
+        if quiet {
             for cache in caches.iter().filter(|cache| !cargo_locked(cache)) {
                 let (count, bytes) = sweep_objects(cache);
                 if count > 0 {
@@ -461,9 +520,9 @@ pub(crate) fn sweep(factory: &Factory) {
                 continue;
             }
             let workers = workers(factory, place);
-            let busy = working(factory);
-            if let Some(agent) = workers.iter().find(|agent| busy.contains(*agent)) {
-                tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent works there");
+            let tasks = occupied(factory);
+            if let Some(agent) = workers.iter().find(|agent| tasks.contains(*agent)) {
+                tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent's task or watch runs");
                 continue;
             }
             let mut kept = Vec::new();
@@ -472,11 +531,24 @@ pub(crate) fn sweep(factory: &Factory) {
                     kept.push(cache);
                     continue;
                 }
+                // The last checks, and the clearing, under the lock a tool
+                // call's start waits for: none of the place's agents is in
+                // one, and none starts until the cache is moved aside.
+                let mut inner = factory.lock();
+                if let Some(agent) = workers.iter().find(|agent| mid_tool(&inner, agent)) {
+                    tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent runs a tool");
+                    kept.push(cache);
+                    continue;
+                }
+                if written_lately(&cache.path) || cargo_locked(&cache.path) {
+                    kept.push(cache);
+                    continue;
+                }
                 match clear(factory, &cache.path) {
                     Ok(()) => {
                         tracing::info!(cache = %cache.path.display(), bytes = cache.bytes, budget, "cleared a build cache over budget");
                         total -= cache.bytes;
-                        tell(factory, place, &workers, &cache);
+                        tell(factory, Some((factory, &mut inner)), place, &workers, &cache);
                     }
                     Err(error) => {
                         tracing::warn!(cache = %cache.path.display(), %error, "could not clear a build cache");
@@ -526,7 +598,7 @@ pub(crate) fn clear_on_request(factory: &Factory, path: &str) -> Result<String, 
     }
     clear(factory, path).map_err(|error| format!("Couldn't clear {}: {error}", path.display()))?;
     tracing::info!(cache = %path.display(), bytes = cache.bytes, "cleared a build cache on request");
-    tell(factory, &place, &workers, &cache);
+    tell(factory, None, &place, &workers, &cache);
     {
         let mut found = factory.build_caches.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for place in found.iter_mut() {

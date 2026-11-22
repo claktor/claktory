@@ -151,6 +151,11 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
+    // A pasted code asks first, as a link does: nothing yet.
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(harness.connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
     expect(harness.connections.current?.endpointId, 'c' * 64);
     expect(harness.backend.target?.endpointId, 'c' * 64);
     expect(find.byType(PairScreen), findsNothing);
@@ -184,6 +189,31 @@ void main() {
 
     harness.camera.scan(_code);
     await pumpFrames(tester);
+    // A scanned code asks first, as a link does, and asks once, however
+    // often the camera reads it meanwhile.
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    harness.camera.scan(_code);
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(harness.connections.current, isNull);
+    // Cancel: nothing connects, and the same code in view doesn't ask
+    // again.
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(harness.connections.current, isNull);
+    harness.camera.scan(_code);
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsNothing);
+    // Another code asks; then the first again, and Connect connects.
+    harness.camera.scan('factory://?t=${'e' * 64}&name=pi&e=${'f' * 64}');
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    harness.camera.scan(_code);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
     expect(harness.connections.current?.endpointId, 'c' * 64);
     expect(find.byType(PairScreen), findsNothing);
   });
@@ -207,6 +237,9 @@ void main() {
   testWidgets('a refused camera says how to allow it, and scans once allowed', (
     tester,
   ) async {
+    // An iPhone's words (Android's: mobile_pair_android_test.dart).
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace(), localBackend: false);
     harness.camera
       ..state = CameraAccess.undetermined

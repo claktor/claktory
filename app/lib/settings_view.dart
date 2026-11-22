@@ -6,9 +6,12 @@ import 'account.dart';
 import 'apps.dart' show AppsSettings;
 import 'avatar.dart';
 import 'backend.dart';
+import 'browser/browser_log.dart'
+    show BrowserLogSettings, browserControlAvailable;
 import 'claktory_identity.dart' show ClaktoryIdentity, claktoryName;
 import 'controls.dart';
 import 'devices.dart';
+import 'diagnostics.dart' show DiagnosticsSettings;
 import 'identity.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
@@ -17,6 +20,8 @@ import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart';
 import 'move.dart' show BackendMove, MoveSettingRow;
+import 'notification_settings.dart'
+    show NotificationSettingsView, notificationsSummary;
 import 'pane_chrome.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'provider_picker.dart' show ProviderSettings;
@@ -26,6 +31,7 @@ import 'screens.dart' show SettingsScroller, SettingsSectionAnchor;
 import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
+import 'update_check.dart' show UpdateCheckRow;
 import 'selection.dart';
 import 'voice.dart' show VoiceSettings, voiceKnown;
 import 'zoom.dart' show ZoomSetting;
@@ -195,10 +201,20 @@ List<SettingsSection> settingsSectionsOf(
       summary: claktoryName(AppScope.of(context)),
       children: [
         ClaktoryIdentity(workspace: workspace),
+        // The version, and checking for a newer one now.
+        UpdateCheckRow(workspace: workspace),
         // Moving this Claktory to another computer, from any device.
         MoveSettingRow(source: BackendMove(AppScope.of(context))),
       ],
     ),
+    // What notifies the person, from a backend that has notifications.
+    if (settings.hasNotifications())
+      SettingsSection(
+        title: 'Notifications',
+        glyph: lucide('bell'),
+        summary: notificationsSummary(settings.notifications),
+        children: [NotificationSettingsView(settings: settings.notifications)],
+      ),
     // Only while the backend has the account on.
     if (workspace.hasAccount() &&
         workspace.account.state !=
@@ -242,6 +258,14 @@ List<SettingsSection> settingsSectionsOf(
       summary: model == null ? '' : modelLabel(model),
       children: [_Defaults(workspace: workspace)],
     ),
+    // Only from a backend that has checklist reminders' timing.
+    if (settings.hasChecklist())
+      SettingsSection(
+        title: 'Checklist',
+        group: 1,
+        glyph: lucide('list-checks'),
+        children: [ChecklistTimes(settings: settings.checklist)],
+      ),
     // Only where the Claktory knows voice messages.
     if (voiceKnown(workspace))
       SettingsSection(
@@ -256,6 +280,15 @@ List<SettingsSection> settingsSectionsOf(
       glyph: lucide('monitor-smartphone'),
       children: [DevicesSettings(workspace: workspace)],
     ),
+    // Browser control's log, only where the backend has browser control
+    // (its preview).
+    if (browserControlAvailable(workspace))
+      SettingsSection(
+        title: 'Browser',
+        group: 2,
+        glyph: lucide('globe'),
+        children: [BrowserLogSettings(workspace: workspace)],
+      ),
     SettingsSection(
       title: 'Resources',
       group: 3,
@@ -272,6 +305,14 @@ List<SettingsSection> settingsSectionsOf(
         _Highlights(workspace: workspace),
       ],
     ),
+    // Advanced diagnostics, from a backend that records them.
+    if (workspace.hasDiagnostics())
+      SettingsSection(
+        title: 'Advanced diagnostics',
+        group: 4,
+        glyph: lucide('network'),
+        children: [DiagnosticsSettings(workspace: workspace)],
+      ),
     // Removing Claktory, from the Mac it runs on.
     if (canRemoveThisMac(context))
       SettingsSection(
@@ -831,6 +872,158 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
   }
 }
 
+/// How long a duration of [minutes] is, in words: "15 minutes", "1 hour",
+/// "2 days"; in the largest unit it divides evenly into.
+String minutesLabel(int minutes) {
+  String unit(int count, String one) =>
+      count == 1 ? '1 $one' : '$count ${one}s';
+  if (minutes > 0 && minutes % 1440 == 0) return unit(minutes ~/ 1440, 'day');
+  if (minutes > 0 && minutes % 60 == 0) return unit(minutes ~/ 60, 'hour');
+  return unit(minutes, 'minute');
+}
+
+/// When Claktory follows up on blocked checklist items (Settings.checklist):
+/// a choice of durations for each, the one in effect added when it isn't
+/// among them. The backend refuses what's out of range, and says so.
+class ChecklistTimes extends StatefulWidget {
+  const ChecklistTimes({super.key, required this.settings});
+
+  final ChecklistSettings settings;
+
+  /// The durations offered, in minutes: 15 minutes to 7 days.
+  static const choices = [
+    15,
+    30,
+    60,
+    120,
+    240,
+    480,
+    720,
+    1440,
+    2880,
+    4320,
+    10080,
+  ];
+
+  @override
+  State<ChecklistTimes> createState() => _ChecklistTimesState();
+}
+
+class _ChecklistTimesState extends State<ChecklistTimes> with SettingRequests {
+  // Only the field that changed: 0 leaves the others as they are.
+  void _save(ChecklistSettings change) => run(
+    () =>
+        AppScope.of(context).updateSettings(UpdateSettings(checklist: change)),
+  );
+
+  Widget _row(
+    BuildContext context,
+    Palette palette, {
+    required String label,
+    required int minutes,
+    required String note,
+    required ChecklistSettings Function(int minutes) change,
+  }) => SettingRow(
+    label: label,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: controlWidth(context, 160),
+          child: Select(
+            title: label,
+            value: minutes,
+            options: [
+              if (!ChecklistTimes.choices.contains(minutes))
+                SelectOption(minutes, minutesLabel(minutes)),
+              for (final choice in ChecklistTimes.choices)
+                SelectOption(choice, minutesLabel(choice)),
+            ],
+            onChanged: (value) {
+              if (value != minutes) _save(change(value));
+            },
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        Text(
+          note,
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.textFaint),
+        ),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final settings = widget.settings;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: Space.m),
+          child: Text(
+            'How soon Claktory follows up on blocked checklist items.',
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+        ),
+        _row(
+          context,
+          palette,
+          label: 'Waiting for an agent',
+          minutes: settings.agentBlockedMinutes,
+          note:
+              "After this long, Claktory asks the item's agent whether it's "
+              "still blocked, and keeps asking at this pace until it isn't.",
+          change: (minutes) => ChecklistSettings(agentBlockedMinutes: minutes),
+        ),
+        _row(
+          context,
+          palette,
+          label: 'Waiting for you',
+          minutes: settings.personBlockedMinutes,
+          note: "The same, for items waiting for your decision or for you to act.",
+          change: (minutes) => ChecklistSettings(personBlockedMinutes: minutes),
+        ),
+        _row(
+          context,
+          palette,
+          label: 'Waiting for something outside',
+          minutes: settings.externalRetryMinutes,
+          note:
+              "The item's agent checks again after this long, then twice as "
+              'long each time, up to a day.',
+          change: (minutes) => ChecklistSettings(externalRetryMinutes: minutes),
+        ),
+        _row(
+          context,
+          palette,
+          label: 'Asking you again',
+          minutes: settings.reaskMinutes,
+          note:
+              'If you dismiss a question about an item that still needs you, '
+              'its agent can ask again after this long.',
+          change: (minutes) => ChecklistSettings(reaskMinutes: minutes),
+        ),
+        _row(
+          context,
+          palette,
+          label: 'Overdue',
+          minutes: settings.overdueMinutes,
+          note:
+              'After this long, an item still blocked is raised with its '
+              "agent's lead, once. Never with you.",
+          change: (minutes) => ChecklistSettings(overdueMinutes: minutes),
+        ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
 /// When admin agents with the Resources extension are told the machine runs
 /// low: memory used, a volume's free space, the processors' load.
 class _ResourceAlerts extends StatefulWidget {
@@ -1079,66 +1272,48 @@ class _YourNameState extends State<_YourName> with SettingRequests {
       kind: InputKind.name,
       onSubmitted: (_) => _save(),
     );
-    if (isPhoneLayout(context)) {
-      // The field as wide as the screen, Save or the note under it.
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SettingRow(
-            label: 'Your name',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                field,
-                const SizedBox(height: Space.s),
-                ListenableBuilder(
-                  listenable: _name,
-                  builder: (context, _) =>
-                      _name.text.trim() == widget.workspace.settings.userName
-                      ? Text(
-                          'Your agents call you by it.',
-                          style: PhoneType.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
-                        )
-                      : Align(
-                          alignment: AlignmentDirectional.centerStart,
-                          child: Button(label: 'Save', onPressed: _save),
-                        ),
-                ),
-              ],
+    final phone = isPhoneLayout(context);
+    final note = ListenableBuilder(
+      listenable: _name,
+      builder: (context, _) =>
+          _name.text.trim() == widget.workspace.settings.userName
+          ? Text(
+              'Your agents call you by it.',
+              style: (phone ? PhoneType.caption : TypeScale.of(context).caption)
+                  .copyWith(color: palette.textFaint),
+            )
+          : Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Button(label: 'Save', onPressed: _save),
             ),
-          ),
-          failureLine(palette),
-        ],
-      );
-    }
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SettingRow(
           label: 'Your name',
-          child: Row(
-            children: [
-              SizedBox(width: 200, child: field),
-              const SizedBox(width: Space.m),
-              Expanded(
-                child: ListenableBuilder(
-                  listenable: _name,
-                  builder: (context, _) =>
-                      _name.text.trim() == widget.workspace.settings.userName
-                      ? Text(
-                          'Your agents call you by it.',
-                          style: TypeScale.of(context).caption
-                              .copyWith(color: palette.textFaint),
-                        )
-                      : Align(
-                          alignment: Alignment.centerLeft,
-                          child: Button(label: 'Save', onPressed: _save),
-                        ),
-                ),
-              ),
-            ],
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // On a phone or in a narrow pane, the field as wide as
+              // there's room for, Save or the note under it.
+              if (phone || constraints.maxWidth < _besideWidth) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    field,
+                    const SizedBox(height: Space.s),
+                    note,
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  SizedBox(width: 200, child: field),
+                  const SizedBox(width: Space.m),
+                  Expanded(child: note),
+                ],
+              );
+            },
           ),
         ),
         failureLine(palette),
@@ -1220,6 +1395,11 @@ class _AvatarColors extends StatelessWidget {
   }
 }
 
+/// The narrowest a setting's control and the words beside it (the
+/// avatar and Shuffle colors and their caption, the name field and its
+/// note) share a line in; narrower, the words go under.
+const _besideWidth = 360.0;
+
 /// The person's avatar (Workspace.person): its colors to pick from
 /// (Person.avatar_choices) and Shuffle, and the account they're signed in
 /// as, when they are.
@@ -1242,8 +1422,8 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
       children: [
         SettingRow(
           label: 'Avatar',
-          child: Builder(
-            builder: (context) {
+          child: LayoutBuilder(
+            builder: (context, constraints) {
               final avatar = PersonAvatar(person: person, size: 40);
               final shuffle = Button(
                 label: 'Shuffle colors',
@@ -1265,8 +1445,10 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
                       ),
                     );
               // A phone's finger-sized button leaves the words no room
-              // beside it: they go under.
-              if (isPhoneLayout(context)) {
+              // beside it, and so does a narrow pane (an iPad's, at its
+              // finger sizes, overflowed): they go under.
+              if (isPhoneLayout(context) ||
+                  constraints.maxWidth < _besideWidth) {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [

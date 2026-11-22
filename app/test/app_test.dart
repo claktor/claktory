@@ -14,6 +14,7 @@ import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart' show SettingsView;
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 
 const diff = '''Index: src/lib.rs
 ===================================================================
@@ -213,6 +214,32 @@ void main() {
     expect(harness.last.startLogin.methodId, 'oauth');
   });
 
+  testWidgets("on an iPad the box's button is a finger's size, its words "
+      'whole', (tester) async {
+    // Sorbet's iPad pass: a 28pt row cut a 44pt button's label in half.
+    asIPad();
+    final snapshot = workspace(
+      signedIn: false,
+      agents: [builder(modelAvailable: false, working: false)],
+    );
+    final harness = Harness(snapshot);
+    harness.backend.transcript.load(transcript());
+    await harness.show(tester, size: const Size(1032, 1300));
+    await settle(tester);
+    final label = find.text('Connect a model…');
+    final button = find.ancestor(of: label, matching: find.byType(Button));
+    expect(tester.getSize(button).height, greaterThanOrEqualTo(44));
+    // The label as tall as its line, not squeezed.
+    final paragraph = tester.renderObject<RenderParagraph>(label);
+    expect(
+      tester.getSize(label).height,
+      greaterThanOrEqualTo(paragraph.getMaxIntrinsicHeight(double.infinity)),
+    );
+    // Why sits level with it.
+    final why = find.text('Connect a model so Builder can answer.');
+    expect(tester.getCenter(why).dy, closeTo(tester.getCenter(button).dy, 1));
+  });
+
   testWidgets('a browser sign-in opens once and takes a pasted code', (
     tester,
   ) async {
@@ -238,6 +265,8 @@ void main() {
     expect(find.text('Copy link'), findsOneWidget);
 
     await tester.enterText(settingsField, 'code#state');
+    await tester.pump();
+    await tester.ensureVisible(find.text('Continue'));
     await tester.pump();
     await tester.tap(find.text('Continue'));
     await settle(tester);

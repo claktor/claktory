@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
-import 'package:flutter/rendering.dart' show CustomSemanticsAction;
+import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -31,6 +32,7 @@ import 'inbox.dart' show needsYouCount, needsYouLabel;
 import 'identity.dart';
 import 'loopback_forward.dart' show ForwardingsLine;
 import 'markdown.dart';
+import 'quiet_copies.dart' show quietWaitingAbout, quietWaitingShort;
 import 'mobile/haptics.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -369,7 +371,7 @@ bool _elsewhere(
 /// it needs up to 40% of the sidebar (room for three rows at least), and
 /// scrolls past that. A folded section is only its heading. Null [projects]
 /// or [chats] is folded.
-class _Sections extends StatelessWidget {
+class _Sections extends StatefulWidget {
   const _Sections({
     required this.height,
     required this.top,
@@ -386,33 +388,85 @@ class _Sections extends StatelessWidget {
   final Widget chatsHeading;
   final List<Widget>? chats;
 
+  @override
+  State<_Sections> createState() => _SectionsState();
+}
+
+/// When [top] and the headings alone are taller than the room (an iPad's
+/// largest text in a short window), the sections can't keep their
+/// headings in view: then they scroll as one list, all of it a scroll
+/// away, rather than spilling.
+class _SectionsState extends State<_Sections> {
   static const _inset = EdgeInsets.symmetric(horizontal: Space.s);
+
+  /// The height the sections took when they last didn't fit, for what
+  /// [_neededFor] says they held; null while they fit.
+  double? _needed;
+  Object? _neededFor;
 
   @override
   Widget build(BuildContext context) {
-    final projects = this.projects;
-    final chats = this.chats;
+    final projects = widget.projects;
+    final chats = widget.chats;
+    // What they take changes with the text's size and what's fixed.
+    final holding = (
+      MediaQuery.textScalerOf(context).scale(100),
+      widget.top.length,
+      projects == null,
+      chats == null,
+    );
+    if (holding != _neededFor) {
+      _neededFor = holding;
+      _needed = null;
+    }
+    if (_needed case final needed? when widget.height < needed) {
+      return ListView(
+        key: const ValueKey('sidebar-one-list'),
+        padding: const EdgeInsets.only(bottom: Space.m),
+        children: [
+          if (widget.top.isNotEmpty)
+            Padding(
+              padding: _inset,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: widget.top,
+              ),
+            ),
+          Padding(padding: _inset, child: widget.projectsHeading),
+          for (final row in projects ?? const <Widget>[])
+            Padding(padding: _inset, child: row),
+          Padding(
+            padding: _inset.copyWith(top: Space.s),
+            child: widget.chatsHeading,
+          ),
+          for (final row in chats ?? const <Widget>[])
+            Padding(padding: _inset, child: row),
+        ],
+      );
+    }
     Widget list(List<Widget> children, {double bottom = 0}) => ListView(
       shrinkWrap: true,
       padding: _inset.copyWith(bottom: bottom),
       children: children,
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return _FitColumn(
+      onOverflow: (needed) {
+        if (mounted && needed != _needed) setState(() => _needed = needed);
+      },
       children: [
-        if (top.isNotEmpty)
+        if (widget.top.isNotEmpty)
           Padding(
             padding: _inset,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: top,
+              children: widget.top,
             ),
           ),
-        Padding(padding: _inset, child: projectsHeading),
+        Padding(padding: _inset, child: widget.projectsHeading),
         if (projects != null) Flexible(child: list(projects)),
         Padding(
           padding: _inset.copyWith(top: Space.s),
-          child: chatsHeading,
+          child: widget.chatsHeading,
         ),
         if (chats != null)
           if (projects == null)
@@ -420,12 +474,84 @@ class _Sections extends StatelessWidget {
           else
             ConstrainedBox(
               constraints: BoxConstraints(
-                maxHeight: math.max(height * 0.4, 3 * 28.0 + Space.m),
+                maxHeight: math.max(widget.height * 0.4, 3 * 28.0 + Space.m),
               ),
               child: list(chats, bottom: Space.m),
             ),
       ],
     );
+  }
+}
+
+/// A stretched column that says, after laying out, when its children
+/// took more than its height ([onOverflow], with what they took, once the
+/// frame is done), and clips them meanwhile rather than spilling.
+class _FitColumn extends Flex {
+  const _FitColumn({required this.onOverflow, super.children})
+    : super(
+        direction: Axis.vertical,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+      );
+
+  final ValueChanged<double> onOverflow;
+
+  @override
+  RenderFlex createRenderObject(BuildContext context) => _RenderFitColumn(
+    onOverflow: onOverflow,
+    textDirection: getEffectiveTextDirection(context),
+  );
+
+  @override
+  void updateRenderObject(BuildContext context, RenderFlex renderObject) {
+    super.updateRenderObject(context, renderObject);
+    (renderObject as _RenderFitColumn).onOverflow = onOverflow;
+  }
+}
+
+class _RenderFitColumn extends RenderFlex {
+  _RenderFitColumn({required this.onOverflow, super.textDirection})
+    : super(
+        direction: Axis.vertical,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+      );
+
+  ValueChanged<double> onOverflow;
+  var _overflows = false;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    var taken = 0.0;
+    var child = firstChild;
+    while (child != null) {
+      taken += child.size.height;
+      child = childAfter(child);
+    }
+    _overflows = taken > size.height + 0.5;
+    if (_overflows) {
+      final report = onOverflow;
+      SchedulerBinding.instance.addPostFrameCallback((_) => report(taken));
+    }
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (!_overflows) return super.paint(context, offset);
+    _clip.layer = context.pushClipRect(
+      needsCompositing,
+      offset,
+      Offset.zero & size,
+      defaultPaint,
+      oldLayer: _clip.layer,
+    );
+  }
+
+  final _clip = LayerHandle<ClipRectLayer>();
+
+  @override
+  void dispose() {
+    _clip.layer = null;
+    super.dispose();
   }
 }
 
@@ -1824,129 +1950,206 @@ class _AgentRowState extends State<_AgentRow> {
       underlay: working
           ? WorkingWave(color: color, radius: Radii.control - 1)
           : null,
-      builder: (context, hovered) => Row(
-        children: [
-          if (widget.gutter)
-            SizedBox(
-              // On a phone, wide enough for a fingertip, the row's height.
-              width: touchFirst(context) ? _phoneAvatar(context) : Space.m + 2,
-              child: widget.children.isEmpty
-                  ? null
-                  : Semantics(
-                      button: true,
-                      label: agent.collapsed
-                          ? "Show ${agent.name}'s reports"
-                          : "Hide ${agent.name}'s reports",
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => fireAndLog(
-                          backend.setAgentCollapsed(agent.id, !agent.collapsed),
-                        ),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: AnimatedRotation(
-                            turns: agent.collapsed ? 0 : 0.25,
-                            duration: Motion.fast,
-                            curve: Curves.easeOut,
-                            child: Chevron(
-                              color: hovered
-                                  ? palette.textMuted
-                                  : palette.textFaint,
-                              down: false,
+      builder: (context, hovered) {
+        final nameStyle = TypeScale.of(context).body.copyWith(
+          color: widget.selected || hovered || stands
+              ? palette.text
+              : palette.textMuted,
+          fontWeight: stands
+              ? FontWeight.w600
+              : widget.selected
+              ? FontWeight.w500
+              : FontWeight.w400,
+        );
+        return Row(
+          children: [
+            if (widget.gutter)
+              SizedBox(
+                // On a phone, wide enough for a fingertip, the row's height.
+                width: touchFirst(context)
+                    ? _phoneAvatar(context)
+                    : Space.m + 2,
+                child: widget.children.isEmpty
+                    ? null
+                    : Semantics(
+                        button: true,
+                        label: agent.collapsed
+                            ? "Show ${agent.name}'s reports"
+                            : "Hide ${agent.name}'s reports",
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => fireAndLog(
+                            backend.setAgentCollapsed(
+                              agent.id,
+                              !agent.collapsed,
+                            ),
+                          ),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: AnimatedRotation(
+                              turns: agent.collapsed ? 0 : 0.25,
+                              duration: Motion.fast,
+                              curve: Curves.easeOut,
+                              child: Chevron(
+                                color: hovered
+                                    ? palette.textMuted
+                                    : palette.textFaint,
+                                down: false,
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-            ),
-          // The agent itself, living: its own mood, not its hidden agents'
-          // (the wave and the unseen mark speak for those).
-          Padding(
-            padding: const EdgeInsets.only(right: Space.s - 2),
-            child: AgentCharacter(
-              agent: agent,
-              size: touchFirst(context) ? _phoneAvatar(context) : 24,
-              live: true,
-            ),
-          ),
-          Expanded(
-            child: _NameOverRole(
-              name: agent.name,
-              role: wait.isEmpty ? agent.role : wait,
-              style: TypeScale.of(context).body.copyWith(
-                color: widget.selected || hovered || stands
-                    ? palette.text
-                    : palette.textMuted,
-                fontWeight: stands
-                    ? FontWeight.w600
-                    : widget.selected
-                    ? FontWeight.w500
-                    : FontWeight.w400,
               ),
-              roleColor: widget.selected || hovered
-                  ? palette.textMuted
-                  : palette.textFaint,
-            ),
-          ),
-          // Whom it reports to, for VoiceOver: what the nesting shows, and
-          // an admin lead (Rivet) the nesting can't.
-          if (backend.workspace.agent(agent.leadId) case final lead?)
-            Semantics(
-              label: 'reports to ${lead.name}',
-              child: const SizedBox(),
-            ),
-          if (agent.queuedMessages > 0)
-            Text(
-              '${agent.queuedMessages}',
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.textFaint),
-            ),
-          if (waiting > 0)
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: widget.onReach,
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: _needsYou(waitingLabel(agent.name, waiting), waiting),
-              ),
-            )
-          // A status mark, not the agent's identity: it stays a dot.
-          else if (unseen)
+            // The agent itself, living: its own mood, not its hidden agents'
+            // (the wave and the unseen mark speak for those).
             Padding(
-              padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
-              child: Semantics(
-                label: '${agent.name} has something new',
-                child: Dot(color: agentColor(agent.color), size: 7),
+              padding: const EdgeInsets.only(right: Space.s - 2),
+              child: AgentCharacter(
+                agent: agent,
+                size: touchFirst(context) ? _phoneAvatar(context) : 24,
+                live: true,
               ),
             ),
-          // On a phone, its reports' disclosure at the row's end, a
-          // fingertip wide: right while they're folded, down while shown.
-          if (isPhoneLayout(context) && widget.children.isNotEmpty)
-            Semantics(
-              button: true,
-              label: agent.collapsed
-                  ? "Show ${agent.name}'s reports"
-                  : "Hide ${agent.name}'s reports",
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => fireAndLog(
-                  backend.setAgentCollapsed(agent.id, !agent.collapsed),
+            Expanded(
+              child: _QuietAfterName(
+                count: agent.quietWaiting,
+                about: quietWaitingAbout(agent),
+                name: _NameOverRole(
+                  name: agent.name,
+                  role: wait.isEmpty ? agent.role : wait,
+                  style: nameStyle,
+                  roleColor: widget.selected || hovered
+                      ? palette.textMuted
+                      : palette.textFaint,
                 ),
-                child: SizedBox(
-                  width: Touch.target - Space.s,
-                  child: Center(
-                    child: AnimatedRotation(
-                      turns: agent.collapsed ? 0 : 0.25,
-                      duration: Motion.fast,
-                      curve: Curves.easeOut,
-                      child: Chevron(color: palette.textFaint, down: false),
+                nameText: agent.name,
+                nameStyle: nameStyle,
+              ),
+            ),
+            // Whom it reports to, for VoiceOver: what the nesting shows, and
+            // an admin lead (Rivet) the nesting can't.
+            if (backend.workspace.agent(agent.leadId) case final lead?)
+              Semantics(
+                label: 'reports to ${lead.name}',
+                child: const SizedBox(),
+              ),
+            if (agent.queuedMessages > 0)
+              Text(
+                '${agent.queuedMessages}',
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
+              ),
+            if (waiting > 0)
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: widget.onReach,
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: _needsYou(waitingLabel(agent.name, waiting), waiting),
+                ),
+              )
+            // A status mark, not the agent's identity: it stays a dot.
+            else if (unseen)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.s, right: Space.xs),
+                child: Semantics(
+                  label: '${agent.name} has something new',
+                  child: Dot(color: agentColor(agent.color), size: 7),
+                ),
+              ),
+            // On a phone, its reports' disclosure at the row's end, a
+            // fingertip wide: right while they're folded, down while shown.
+            if (isPhoneLayout(context) && widget.children.isNotEmpty)
+              Semantics(
+                button: true,
+                label: agent.collapsed
+                    ? "Show ${agent.name}'s reports"
+                    : "Hide ${agent.name}'s reports",
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => fireAndLog(
+                    backend.setAgentCollapsed(agent.id, !agent.collapsed),
+                  ),
+                  child: SizedBox(
+                    width: Touch.target - Space.s,
+                    child: Center(
+                      child: AnimatedRotation(
+                        turns: agent.collapsed ? 0 : 0.25,
+                        duration: Motion.fast,
+                        curve: Curves.easeOut,
+                        child: Chevron(color: palette.textFaint, down: false),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-        ],
-      ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// A row's [name] with how many quiet messages wait for its agent at its
+/// end ("4 quiet", faint), only while the name has room for both: the count
+/// gives way first, VoiceOver still saying it.
+class _QuietAfterName extends StatelessWidget {
+  const _QuietAfterName({
+    required this.count,
+    required this.about,
+    required this.name,
+    required this.nameText,
+    required this.nameStyle,
+  });
+
+  final int count;
+  final String about;
+  final Widget name;
+  final String nameText;
+  final TextStyle nameStyle;
+
+  @override
+  Widget build(BuildContext context) {
+    if (count == 0) return name;
+    final quiet = TypeScale.of(context).caption
+        .copyWith(color: Palette.of(context).textFaint);
+    final scaler = MediaQuery.textScalerOf(context);
+    double width(String text, TextStyle style) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: scaler,
+        maxLines: 1,
+      )..layout();
+      final w = painter.width;
+      painter.dispose();
+      return w;
+    }
+
+    final words = quietWaitingShort(count);
+    return LayoutBuilder(
+      builder: (context, box) {
+        final fits =
+            width(nameText, nameStyle) + Space.s + width(words, quiet) <=
+            box.maxWidth;
+        return Semantics(
+          // Read after the name, shown or not.
+          label: about,
+          child: Row(
+            children: [
+              Expanded(child: name),
+              if (fits)
+                Padding(
+                  padding: const EdgeInsets.only(left: Space.s),
+                  child: ExcludeSemantics(
+                    child: Text(words, maxLines: 1, style: quiet),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -40,8 +40,9 @@ static MANIFEST: Manifest = Manifest {
 /// How long move_claktory waits for the other computer's digits.
 const CONNECT_WAIT: Duration = Duration::from_secs(90);
 
-const START: &str = "Start moving this Claktory to another computer, when the person asks: code, the receive code `factoryd receive` printed there (claktory-move://…). It connects and returns the digits both computers show, or why it can't. Claktory then asks the person itself to confirm the move; nothing is copied until they have, and you can't confirm it for them.";
+const START: &str = "Start moving this Claktory to another computer, when the person asks: code, the receive code `factoryd receive` printed there (claktory-move://…). It connects and returns the digits both computers show, or why it can't, and where project folders outside the person's home folder will go there. Claktory then asks the person itself to confirm the move; nothing is copied until they have, and you can't confirm it for them. skip: project folders the person wants left out of the move, by their full paths (a folder holding a project's folder leaves that out too).";
 const STATUS: &str = "Where the move stands: its phase, the other computer, the digits, what it's copying and any problem.";
+const REPORT: &str = "On the new computer, once Claktory runs there after a move: how it went, in plain words, to tell the person before you say the move is done. It says whether its secrets are unlocked (or still locked), whether the account checked in, which devices connected since, whether every project folder is in place, whether each sign-in still works (a refused one shows Sign in again), the tools the agents used that aren't here, and what of each project needs a Mac. Ask for it again once they're unlocked if it said they were locked.";
 const CANCEL: &str = "Call off the move, or dismiss one that failed. Use it when the digits don't match, or when the person asks; it can't be called off once the other computer is taking over.";
 
 /// How Rivet moves this Claktory to a server (Pericolo's tested recipe,
@@ -62,7 +63,7 @@ KEY below is the file of an SSH key the vault generated for it (secrets_request 
      touch "$M/done"; exit "$s"; }
 3. The log's first {"event":"code",…} line's code goes to move_claktory. Compare the digits it returns with the log's {"event":"confirm","digits":…} line: if they differ, call move_cancel at once, since something is between the two computers. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices. Then wait, following move_status: once it says {person} confirmed the move here, write their yes, `echo yes >> "$HOME/.claktory-move/answers"`; if they called it off (move_status says no move is under way), write `echo no`. Never before a confirm line, and never your own judgement. A new code line after a no is a fresh code.
 4. The task's last line is {"ok":true,…} (Claktory runs on the server) or {"ok":false,…}: not moved (exit 3 refused, or "error":"called_off" when the move was called off after the confirm; 1 failed; 130 stopped). Then nothing runs on the server: tell {person} why, in its message. Running step 2 again resumes a move that stopped. To stop it on purpose, stop receive on the server, not the local task: ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'pkill -TERM -f "factoryd receive"'
-5. At the freeze your run stops like every agent's, and you carry on on the server.
+5. At the freeze your run stops like every agent's, and you carry on on the server. There, call move_report before you tell {person} the move is done, and pass on what it says: the copy left behind can still be gone back to while something is wrong. If it says the secrets are locked, call it again once they're unlocked, to check the sign-ins.
 "#;
 
 pub(crate) struct Move;
@@ -82,14 +83,18 @@ impl Extension for Move {
         let code = json!({
             "type": "object",
             "required": ["code"],
-            "properties": {"code": {"type": "string", "minLength": 1}},
+            "properties": {
+                "code": {"type": "string", "minLength": 1},
+                "skip": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            },
             "additionalProperties": false,
         });
         let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
         vec![
             async_tool(factory, agent, "move_claktory", "Move this Claktory", START, code, start),
             super::tool("move_status", "Move status", STATUS, none.clone(), super::typed_handler(factory, agent, status)),
-            super::tool("move_cancel", "Call off the move", CANCEL, none, super::typed_handler(factory, agent, cancel)),
+            super::tool("move_cancel", "Call off the move", CANCEL, none.clone(), super::typed_handler(factory, agent, cancel)),
+            async_tool(factory, agent, "move_report", "Check the moved Claktory", REPORT, none, report),
         ]
     }
 
@@ -143,8 +148,9 @@ fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
         Ok(())
     } else {
         let person = factory.lock().config.person_capitalized().to_owned();
+        let read = crate::pipes::agents::what_was_read(factory, agent);
         Err(format!(
-            "You've read a pipe, so you can't start a move: what you read there may be someone else's instructions. {person} can start the move from Settings → Move. Nothing was done."
+            "You've read {read}, so you can't start a move: what you read there may be someone else's instructions. {person} can start the move from Settings → Move. Nothing was done."
         ))
     }
 }
@@ -152,6 +158,54 @@ fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
 #[derive(Deserialize)]
 struct StartArgs {
     code: String,
+    #[serde(default)]
+    skip: Vec<String>,
+}
+
+/// The folders to leave out, as full paths ("~" expanded), each holding at
+/// least one of the projects' folders.
+fn skipped(factory: &Factory, skip: &[String]) -> Result<Vec<String>, String> {
+    let folders: Vec<std::path::PathBuf> = {
+        let inner = factory.lock();
+        crate::move_report::projects_of(&inner.config).into_iter().flat_map(|(_, paths)| paths).collect()
+    };
+    let user_home = std::env::home_dir().unwrap_or_default();
+    let mut kept = Vec::new();
+    for given in skip {
+        let given = given.trim().trim_end_matches('/');
+        let path = match given.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => user_home.join(rest.trim_start_matches('/')),
+            _ => std::path::PathBuf::from(given),
+        };
+        if !path.is_absolute() {
+            return Err(format!(
+                "Name each folder to leave out by its full path, such as /Volumes/Data/Assets; \"{given}\" isn't one. Nothing was done."
+            ));
+        }
+        if !folders.iter().any(|folder| folder.starts_with(&path)) {
+            return Err(format!(
+                "{} holds none of the projects' folders, so there's nothing there to leave out. Nothing was done.",
+                path.display()
+            ));
+        }
+        kept.push(path.display().to_string());
+    }
+    Ok(kept)
+}
+
+/// The planned folders outside this computer's home folders, and where
+/// each goes, for move_claktory's answer.
+fn outside_folders(factory: &Factory, view: &v1::Move) -> Vec<String> {
+    let user_home = std::env::home_dir().unwrap_or_default();
+    let home = factory.home.root();
+    view.map
+        .iter()
+        .filter(|path| {
+            let from = std::path::Path::new(&path.from);
+            !from.starts_with(home) && !from.starts_with(&user_home)
+        })
+        .map(|path| format!("- {} → {}", path.from, path.to))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -162,7 +216,8 @@ struct NoArgs {}
 async fn start(factory: Arc<Factory>, agent: String, args: StartArgs) -> Result<ToolResult, String> {
     only_rivet(&factory, &agent)?;
     untainted(&factory, &agent)?;
-    crate::move_run::start_by(&factory, args.code.trim(), &agent).map_err(|error| error.to_string())?;
+    let skip = skipped(&factory, &args.skip)?;
+    crate::move_run::start_by(&factory, args.code.trim(), &agent, skip.clone()).map_err(|error| error.to_string())?;
     let until = Instant::now() + CONNECT_WAIT;
     loop {
         let view = factory.moving.view().unwrap_or_default();
@@ -176,12 +231,28 @@ async fn start(factory: Arc<Factory>, agent: String, args: StartArgs) -> Result<
             }
             Phase::Failed => return Err(view.error),
             Phase::Confirm => {
-                let person = factory.lock().config.person().to_owned();
+                let (person, projects) = {
+                    let inner = factory.lock();
+                    (inner.config.person().to_owned(), crate::move_report::projects_of(&inner.config))
+                };
                 let machine = &view.target_machine;
-                return Ok(said(format!(
-                    "Connected to {machine} ({}, {}, Claktory {}). Both computers show {}.\n\nCompare them with the digits factoryd receive printed on {machine}. If they differ, call move_cancel now. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices, and to check the digits there; you can't confirm it, and don't ask them yourself. Once move_status says they confirmed it, answer yes to receive there.",
+                let platform = crate::move_report::platform_lines(&projects, &view.target_os, false);
+                let mut text = format!(
+                    "Connected to {machine} ({}, {}, Claktory {}). Both computers show {}.\n\nCompare them with the digits factoryd receive printed on {machine}. If they differ, call move_cancel now. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices, and to check the digits there; you can't confirm it, and don't ask them yourself. Once move_status says they confirmed it, answer yes to receive there.\n\nWhat to tell {person} about their projects on {machine}:\n{platform}",
                     view.target_os, view.target_arch, view.target_version, view.digits
-                )));
+                );
+                let outside = outside_folders(&factory, &view);
+                if !outside.is_empty() {
+                    let _ = write!(
+                        text,
+                        "\n\nThese folders are outside {person}'s home folder here, so on {machine} they go under its home folder, keeping their paths:\n{}\nTell {person} before they confirm. To leave one out instead, call move_cancel (answer no to receive if it's yours to answer, as for any move called off; it then shows a new code), then call move_claktory again with that new code and skip listing the folder.",
+                        outside.join("\n")
+                    );
+                }
+                if !skip.is_empty() {
+                    let _ = write!(text, "\n\nLeft out of the move, as asked: {}.", skip.join("; "));
+                }
+                return Ok(said(text));
             }
             // A move a restart interrupted, picked up where it was: its
             // digits were confirmed then.
@@ -246,6 +317,12 @@ fn describe(factory: &Factory, view: &v1::Move) -> String {
         let _ = write!(text, "\nFolder: {} → {}", path.from, path.to);
     }
     text
+}
+
+/// move_report: on the new computer, how the move went.
+async fn report(factory: Arc<Factory>, agent: String, _args: NoArgs) -> Result<ToolResult, String> {
+    only_rivet(&factory, &agent)?;
+    Ok(said(crate::move_report::report(&factory).await))
 }
 
 /// move_cancel.

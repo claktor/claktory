@@ -261,7 +261,7 @@ class _ShellState extends State<Shell> {
                     constraints.maxWidth -
                     rail -
                     sidebar -
-                    extensionBarWidth -
+                    extensionBarWidthOf(context) -
                     minContent;
                 // The panel as wide as it was left, as far as there's room.
                 final panelRoom = math.min(panelMaxWidth, room);

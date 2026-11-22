@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "recognizeText",
+  "arguments": {
+    "page_1based": 3,
+    "scope": "all"
+  },
+  "result": {
+    "available": true,
+    "stale": true,
+    "page_1based": 3,
+    "ink_layer_id": "layer-paper-p3",
+    "base_revision": 2,
+    "local_seq": 7,
+    "drawing_sha256": "31dce1ce4d14082f603559233e71bfd901d08b83787297e80f0001d6c7050b82",
+    "stroke_count": 15,
+    "text": null,
+    "languages": [
+      "en-US"
+    ],
+    "recognition_version": 1
+  }
+}

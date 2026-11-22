@@ -58,8 +58,19 @@ const FINISHED_TAIL: usize = 4_000;
 #[derive(Clone)]
 pub struct Background {
     pub dir: PathBuf,
+    /// Variables every command gets, foreground or background, before its
+    /// secrets' (Factory sets FACTORY_AGENT_ID to the agent's id).
+    pub environment: Vec<(String, String)>,
     pub started: Arc<dyn Fn(&Task) + Send + Sync>,
     pub finished: Arc<dyn Fn(Finished) + Send + Sync>,
+}
+
+impl Background {
+    /// Its own variables, then `secrets` (so a secret's variable wins).
+    fn with(&self, secrets: Vec<(String, Zeroizing<String>)>) -> Vec<(String, Zeroizing<String>)> {
+        let own = self.environment.iter().map(|(name, value)| (name.clone(), Zeroizing::new(value.clone())));
+        own.chain(secrets).collect()
+    }
 }
 
 /// A command running in the background.
@@ -582,7 +593,7 @@ async fn start_background(cwd: &Path, args: BashArgs, background: &Background, i
     tokio::fs::create_dir_all(&background.dir).await?;
     let (id, log, file) = new_log(&background.dir)?;
     let mut files = SecretFiles(Some(log.with_extension("secrets")));
-    let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let environment = background.with(injected.environment(files.0.as_deref().unwrap_or(cwd))?);
     let (child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
     files.keep();
     let task = Task { id, command: args.command, pid, log, started: crate::clock::now_ms() };
@@ -723,7 +734,7 @@ async fn run_logged(
     let (id, log, file) = new_log(&background.dir)?;
     let mut reader = std::fs::File::open(&log)?;
     let mut files = SecretFiles(Some(log.with_extension("secrets")));
-    let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let environment = background.with(injected.environment(files.0.as_deref().unwrap_or(cwd))?);
     let (mut child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
     let timeout = foreground_timeout(args.timeout);
     let sleeping = checks::starts_with_sleep(&args.command);

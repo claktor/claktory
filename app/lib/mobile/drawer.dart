@@ -5,6 +5,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../app_dock.dart' show AppStrip;
 import '../backend.dart';
 import '../characters/clock.dart' show CharacterHost;
 import '../claktory_identity.dart' show claktoryName;
@@ -12,7 +13,7 @@ import '../controls.dart';
 import '../identity.dart';
 import '../phone.dart' show PhoneProjects;
 import '../pipes.dart' show selectedPipe;
-import '../rail.dart' show PhoneConnectionWord;
+import '../rail.dart' show ClaktoriesScope, OffAccountMark, PhoneConnectionWord;
 import '../scope.dart';
 import '../selection.dart' show Unselectable;
 import '../sidebar.dart';
@@ -39,6 +40,9 @@ abstract class PhonePages {
 
   /// [PhoneRoutes.showFile].
   bool showFile(String agentId, String path);
+
+  /// [PhoneRoutes.showPane].
+  bool showPane(String agentId, String paneId);
 
   /// The page on top, as Back closes it; null with none.
   PageTarget? get topPage;
@@ -87,6 +91,15 @@ class PhoneDrawerHost extends StatefulWidget {
   static PhoneDrawerHostState? of(BuildContext context) =>
       context.getInheritedWidgetOfExactType<_HostScope>()?.host;
 
+  /// Closes any phone drawer that's open, for what comes from outside the
+  /// app (a link, say) and asks the person something in a sheet: from
+  /// above the drawer it would open behind it.
+  static void closeAll() {
+    for (final host in PhoneDrawerHostState._live.toList()) {
+      host.closeDrawer();
+    }
+  }
+
   @override
   State<PhoneDrawerHost> createState() => PhoneDrawerHostState();
 }
@@ -127,14 +140,19 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     popPage: pop,
   );
 
+  /// Every drawer host showing now ([PhoneDrawerHost.closeAll]).
+  static final _live = <PhoneDrawerHostState>{};
+
   @override
   void initState() {
     super.initState();
+    _live.add(this);
     _front.addListener(_frontAsked);
   }
 
   @override
   void dispose() {
+    _live.remove(this);
     back.dispose();
     _front.dispose();
     _drawer.dispose();
@@ -282,6 +300,14 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     if (pages == null) return false;
     closeDrawer();
     return pages.showFile(agentId, path);
+  }
+
+  @override
+  bool showPane(String agentId, String paneId) {
+    final pages = _pages;
+    if (pages == null) return false;
+    closeDrawer();
+    return pages.showPane(agentId, paneId);
   }
 
   @override
@@ -524,6 +550,82 @@ class _EdgeDrag extends HorizontalDragGestureRecognizer {
 /// this Claktory's name and connection, Close, a search field and the tree
 /// of its projects, agents and pipes ([Sidebar]), or what matches the
 /// search ([SidebarSearch]).
+/// How far the app strip's words grow with the text size: its chips are
+/// 44pt high, like a tab bar's buttons.
+const _appStripTextScale = 1.35;
+
+/// How much of the drawer's height its top (the Claktory's name, the
+/// Claktories row and the apps) may take before it scrolls within that.
+const _topShare = 0.4;
+
+/// The drawer's top when it can scroll: what's past its foot fades out,
+/// so a line cut there reads as more to come, not as broken.
+class _ScrollingTop extends StatefulWidget {
+  const _ScrollingTop({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_ScrollingTop> createState() => _ScrollingTopState();
+}
+
+class _ScrollingTopState extends State<_ScrollingTop> {
+  final _scroll = ScrollController();
+  var _more = false;
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  bool _measured(ScrollMetricsNotification notification) {
+    _follow(notification.metrics);
+    return false;
+  }
+
+  bool _scrolled(ScrollUpdateNotification notification) {
+    _follow(notification.metrics);
+    return false;
+  }
+
+  void _follow(ScrollMetrics metrics) {
+    final more = metrics.extentAfter > 0.5;
+    if (more != _more) setState(() => _more = more);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scroll = SingleChildScrollView(
+      key: const ValueKey('drawer-top'),
+      controller: _scroll,
+      primary: false,
+      child: widget.child,
+    );
+    return NotificationListener<ScrollMetricsNotification>(
+      onNotification: _measured,
+      child: NotificationListener<ScrollUpdateNotification>(
+        onNotification: _scrolled,
+        // Always masked, so the scroll view keeps its place in the tree
+        // (and its offset) as the fade comes and goes.
+        child: ShaderMask(
+          blendMode: BlendMode.dstIn,
+          shaderCallback: (bounds) => LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              const Color(0xFFFFFFFF),
+              _more ? const Color(0x00FFFFFF) : const Color(0xFFFFFFFF),
+            ],
+            stops: [math.max(0, 1 - Space.xl / math.max(bounds.height, 1)), 1],
+          ).createShader(bounds),
+          child: scroll,
+        ),
+      ),
+    );
+  }
+}
+
 class _DrawerPanel extends StatefulWidget {
   const _DrawerPanel({
     super.key,
@@ -589,40 +691,67 @@ class _DrawerPanelState extends State<_DrawerPanel> {
                   Container(width: 1, color: palette.hairline),
                 ],
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      ListenableBuilder(
-                        listenable: backend.workspace,
-                        builder: (context, _) => _DrawerHeader(
-                          name: claktoryName(backend),
-                          backend: backend,
-                          onClose: widget.onClose,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) => Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // The top (name, Claktories, apps) takes at most
+                        // [_topShare] of the drawer and scrolls within it,
+                        // so at the largest text the list keeps the rest.
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight: constraints.maxHeight * _topShare,
+                          ),
+                          child: _ScrollingTop(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ListenableBuilder(
+                                  listenable: backend.workspace,
+                                  builder: (context, _) => _DrawerHeader(
+                                    name: claktoryName(backend),
+                                    backend: backend,
+                                    onClose: widget.onClose,
+                                  ),
+                                ),
+                                if (rail != null &&
+                                    large &&
+                                    widget.onClaktories != null)
+                                  _ClaktoriesRow(onTap: widget.onClaktories!),
+                                // The pinned apps, then All apps: nothing without
+                                // apps. Its chips keep their height, as a tab bar's
+                                // do, so their words grow only so far.
+                                MediaQuery.withClampedTextScaling(
+                                  maxScaleFactor: _appStripTextScale,
+                                  child: const AppStrip(),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                      ),
-                      if (rail != null && large && widget.onClaktories != null)
-                        _ClaktoriesRow(onTap: widget.onClaktories!),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                          Space.s,
-                          Space.xs,
-                          Space.s,
-                          Space.s,
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            Space.s,
+                            Space.xs,
+                            Space.s,
+                            Space.s,
+                          ),
+                          child: _SearchField(controller: _query),
                         ),
-                        child: _SearchField(controller: _query),
-                      ),
-                      Expanded(
-                        child: ListenableBuilder(
-                          listenable: _query,
-                          builder: (context, _) {
-                            final query = _query.text.trim();
-                            return query.isEmpty
-                                ? const Sidebar(width: double.infinity)
-                                : SidebarSearch(query: query);
-                          },
+                        Expanded(
+                          child: ListenableBuilder(
+                            listenable: _query,
+                            builder: (context, _) {
+                              final query = _query.text.trim();
+                              return query.isEmpty
+                                  ? const Sidebar(width: double.infinity)
+                                  : SidebarSearch(query: query);
+                            },
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -674,6 +803,15 @@ class _DrawerHeader extends StatelessWidget {
                       style: type.title.copyWith(color: palette.text),
                     ),
                   ),
+                  // Not on the person's Claktory account: marked here too.
+                  if (ClaktoriesScope.of(context)?.selected case final shown?
+                      when identical(shown.backend, backend))
+                    // Kept to about two lines at the largest text: the
+                    // list, the form and VoiceOver have it whole.
+                    MediaQuery.withClampedTextScaling(
+                      maxScaleFactor: 1.6,
+                      child: OffAccountMark(claktory: shown),
+                    ),
                   Transform.translate(
                     offset: const Offset(-Space.xs, 0),
                     child: PhoneConnectionWord(backend),

@@ -205,7 +205,7 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
 /// Approved, Rivet gets it as the person's message; it stays pending when
 /// there's no Rivet, or Rivet has no model. Either way the agent is told.
 pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: bool, comment: &str) -> Result<(), RequestError> {
-    let comment = comment.trim();
+    let comment = crate::decisions::comment(comment)?;
     let unknown = || RequestError::UnknownProposal(id.to_owned());
     let number: i64 = id.trim().parse().map_err(|_| unknown())?;
     let found = factory
@@ -284,12 +284,8 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
             factory.broadcast_workspace(&inner);
         }
     }
-    let mut summary = format!("{person} {state} your proposal to {rivet_name}");
-    if !comment.is_empty() {
-        let _ = write!(summary, " (comment: {comment})");
-    }
-    summary.push('.');
-    let text = format!("{summary}\n\nYour proposal:\n{}", row.text);
+    let summary = format!("{person} {state} your proposal to {rivet_name}.");
+    let text = format!("{summary}{}\n\nYour proposal:\n{}", crate::decisions::note(&person, comment), row.text);
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())

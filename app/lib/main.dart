@@ -4,11 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'browser/browser_view.dart' show BrowserHost, BrowserScope;
 import 'connections.dart';
 import 'drafts.dart';
 import 'drop.dart';
 import 'identity.dart';
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
+import 'licenses.dart';
 import 'links.dart' show appLinks;
 import 'mobile/device.dart' show loadDeviceCapabilities;
 import 'mobile/platform_policy.dart';
@@ -25,6 +27,8 @@ import 'zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Third-party licences the app ships, before anything can list them.
+  registerLicenses();
   // What this device is (an iPad, a phone), before the first frame: so
   // nothing lays out as another device first.
   await loadDeviceCapabilities();
@@ -159,6 +163,10 @@ class _FactoryAppState extends State<FactoryApp> {
         system: MacNotifications(),
       );
     }
+    // Chrome's tabs reach an agent only through a Mac's app.
+    if (defaultTargetPlatform == TargetPlatform.macOS) {
+      _browser = BrowserHost.of(_claktories);
+    }
     // An iPhone registers with each Claktory for pushes, once the person
     // allows notifications (mobile/push.dart).
     if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -171,6 +179,9 @@ class _FactoryAppState extends State<FactoryApp> {
   }
 
   PushRegistrar? _pushes;
+
+  /// This Mac's browser control (browser/browser_view.dart).
+  BrowserHost? _browser;
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -201,6 +212,7 @@ class _FactoryAppState extends State<FactoryApp> {
     _setup?.dispose();
     _notifications?.dispose();
     _pushes?.dispose();
+    _browser?.dispose();
     _claktories.dispose();
     for (final focus in _focuses.values) {
       focus.dispose();
@@ -291,7 +303,10 @@ class _FactoryAppState extends State<FactoryApp> {
                 ),
               ),
             );
-            return SetupScope(setup: _setup, child: scope);
+            return SetupScope(
+              setup: _setup,
+              child: BrowserScope(host: _browser, child: scope),
+            );
           },
         ),
       ),

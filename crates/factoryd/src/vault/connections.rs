@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Value, Vault, VaultError, aad, crypto};
 use crate::connectors::{Control, ExportMeta};
+use crate::store::query;
 use crate::transcript::now_ms;
 
 pub(super) const KIND_CONNECTION: &str = "connection";
@@ -362,17 +363,12 @@ impl Vault {
         if Self::kind_of(&transaction, &id)? != KIND_CONNECTION {
             return Err(VaultError::Invalid(format!("{name} isn't a connected service.")));
         }
-        let exports: Vec<(String, String)> = transaction
-            .prepare("SELECT id, name FROM secrets WHERE parent = ?1 AND kind = ?2")?
-            .query_map([&id, KIND_EXPORT], crate::store::row2)?
-            .collect::<Result<_, _>>()?;
+        let exports: Vec<(String, String)> =
+            query(&transaction, "SELECT id, name FROM secrets WHERE parent = ?1 AND kind = ?2", [&id, KIND_EXPORT], crate::store::row2)?;
         let mut names = vec![name];
         let mut agents = Vec::new();
         for secret in std::iter::once(id.as_str()).chain(exports.iter().map(|(id, _)| id.as_str())) {
-            let had: Vec<String> = transaction
-                .prepare("SELECT agent FROM grants WHERE secret = ?1")?
-                .query_map([secret], |row| row.get(0))?
-                .collect::<Result<_, _>>()?;
+            let had: Vec<String> = query(&transaction, "SELECT agent FROM grants WHERE secret = ?1", [secret], |row| row.get(0))?;
             for agent in had {
                 if !agents.contains(&agent) {
                     agents.push(agent);
@@ -437,10 +433,12 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::ConnectProposal
 
 /// The proposals waiting for the person, oldest first.
 pub(super) fn pending_proposals(db: &Connection) -> Result<Vec<v1::ConnectProposal>, VaultError> {
-    let mut statement =
-        db.prepare(&format!("SELECT {PROPOSAL_COLUMNS} FROM connect_proposals WHERE state = 'pending' ORDER BY created, id"))?;
-    let proposals = statement.query_map([], proposal_row)?.collect::<Result<Vec<_>, _>>()?;
-    Ok(proposals)
+    Ok(query(
+        db,
+        &format!("SELECT {PROPOSAL_COLUMNS} FROM connect_proposals WHERE state = 'pending' ORDER BY created, id"),
+        [],
+        proposal_row,
+    )?)
 }
 
 impl Vault {
@@ -516,8 +514,11 @@ impl Vault {
     pub(crate) fn proposals_of(&self, agent: &str) -> Result<Vec<v1::ConnectProposal>, VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let mut statement = db.prepare(&format!("SELECT {PROPOSAL_COLUMNS} FROM connect_proposals WHERE agent = ?1 ORDER BY created"))?;
-        let proposals = statement.query_map([agent], proposal_row)?.collect::<Result<Vec<_>, _>>()?;
-        Ok(proposals)
+        Ok(query(
+            db,
+            &format!("SELECT {PROPOSAL_COLUMNS} FROM connect_proposals WHERE agent = ?1 ORDER BY created"),
+            [agent],
+            proposal_row,
+        )?)
     }
 }

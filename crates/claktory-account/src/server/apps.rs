@@ -92,16 +92,57 @@ pub(super) async fn call(service: &Service, call: &Call) -> Result<Reply, ApiErr
     Ok(Reply { status, content_type: "application/json", headers: Vec::new(), body })
 }
 
-/// Tells the worker an account was deleted, so its apps forget it. Its
-/// calls no longer authenticate, so what's left is unreachable meanwhile.
-pub(super) async fn purge_account(service: &Service, account_id: &str) {
-    let Some(apps) = service.config.user_apps.clone() else { return };
+/// Tells the worker an account was deleted, so its apps forget it; its
+/// deletion queued that (`db::delete_account`), and it's done once the
+/// worker says so. Until then (the worker down, say), it's asked again
+/// (`retry_purges`), first after a minute, then waiting twice as long each
+/// time, up to an hour. The account's calls no longer authenticate, so
+/// what's left is unreachable meanwhile. Whether it's purged.
+pub(super) async fn purge_account(service: &Service, account_id: &str, tries: i64) -> bool {
+    let Some(apps) = service.config.user_apps.clone() else { return false };
     let request = Request::PurgeAccount { account_id: account_id.to_owned(), time: service.now() };
-    match ipc::ask(&apps.socket, apps.uid, &request, &[]).await {
-        Ok((204, _)) => {}
-        Ok((status, _)) => tracing::error!(status, "the user-apps worker didn't purge a deleted account"),
-        Err(error) => tracing::error!("a deleted account's apps weren't purged: {error}"),
+    let failure = match ipc::ask(&apps.socket, apps.uid, &request, &[]).await {
+        Ok((204, _)) => {
+            if let Err(error) = db::apps_purged(&service.db(), account_id) {
+                tracing::error!("a purged account stays queued, so it's purged again: {error}");
+            }
+            return true;
+        }
+        Ok((status, _)) => format!("the worker answered {status}"),
+        Err(error) => error.to_string(),
+    };
+    let wait = (60_i64 << tries.clamp(0, 6)).min(3600);
+    if tries >= 10 {
+        tracing::error!(tries = tries + 1, "a deleted account's apps still aren't purged: {failure}");
+    } else {
+        tracing::warn!(tries = tries + 1, wait, "a deleted account's apps weren't purged yet: {failure}");
     }
+    if let Err(error) = db::apps_purge_failed(&service.db(), account_id, service.now() + wait) {
+        tracing::error!("couldn't schedule purging a deleted account's apps again: {error}");
+    }
+    false
+}
+
+/// Asks the worker again to purge the deleted accounts that are due: how
+/// many it purged.
+pub(super) async fn retry_purges(service: &Service) -> usize {
+    if service.config.user_apps.is_none() {
+        return 0;
+    }
+    let due = match db::apps_purges_due(&service.db(), service.now(), 50) {
+        Ok(due) => due,
+        Err(error) => {
+            tracing::error!("can't read the accounts to purge from the user-level apps: {error}");
+            return 0;
+        }
+    };
+    let mut purged = 0;
+    for (account_id, tries) in due {
+        if purge_account(service, &account_id, tries).await {
+            purged += 1;
+        }
+    }
+    purged
 }
 
 /// The account page's view of the account's grants.

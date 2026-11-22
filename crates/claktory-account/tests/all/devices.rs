@@ -179,10 +179,6 @@ async fn an_assertion_vouches_for_a_tunnel_key_and_lets_it_through_relays_for_a_
     // 60 an hour.
     instance.advance(3600 - instance.now().rem_euclid(3600));
     for number in 0..60 {
-        if number % 20 == 0 {
-            // An IP may make 30 requests a minute.
-            instance.advance(60);
-        }
         let body = json!({"device_key": format!("{number:064x}")});
         assert_eq!(instance.device_signed(&phone, "POST", "/v1/devices/assertion", Some(&body), None).await.status, 200, "{number}");
     }

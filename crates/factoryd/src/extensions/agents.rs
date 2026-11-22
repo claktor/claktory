@@ -17,8 +17,13 @@ use serde_json::json;
 
 use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection, agent_list, enabled, switch};
 use crate::config::{AgentConfig, Config};
-use crate::factory::{Factory, Inner};
+use crate::factory::{Factory, Inner, Runtime};
 use crate::transcript::now_ms;
+
+pub(crate) mod provenance;
+pub(crate) mod quiet;
+
+use provenance::Said;
 
 pub(crate) const ID: &str = "agents";
 
@@ -64,7 +69,7 @@ static MANIFEST: Manifest = Manifest {
     ],
 };
 
-const SEND: &str = "Message an agent by id or name, or several at once with a list (up to 20), each getting the same text and told who else got it. It arrives as an event from you and wakes the agent if it's idle; a working agent reads it after its current step.";
+const SEND: &str = "Message an agent by id or name, or several at once with a list (up to 20), each getting the same text and told who else got it. It arrives as an event from you and wakes the agent if it's idle; a working agent reads it after its current step. Optional: `reply_to`, the msg numbers of the agents' messages to you it answers; `intent`: handoff, decision_request, decision or status; `copy_lead`: a quiet copy for your lead, which doesn't wake it (it reads its copies when it next works), for a handoff it should know of without acting on; `quiet`: it doesn't wake the agents it goes to, but waits for whatever next wakes them (a working one reads it after its current step), for a heads-up, an FYI or a copy, never for work you hand over, an answer someone is waiting on, or anything that blocks.";
 /// The most agents one `agents_send` reaches.
 const MAX_RECIPIENTS: usize = 20;
 const MAP: &str =
@@ -217,7 +222,7 @@ impl Extension for Agents {
     fn prompt(&self, _factory: &Factory, inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let config = &inner.config;
         let mut text = String::from(
-            "## Other agents\n\nMessage agents with agents_send, by id or name (a list sends the same message to several), and see who's idle or working with agents_status. Messages from agents arrive as events from them. Say everything the agent needs in the message, since it can't see your conversation. Don't send messages only to acknowledge or thank.\n\n",
+            "## Other agents\n\nMessage agents with agents_send, by id or name (a list sends the same message to several), and see who's idle or working with agents_status. Messages from agents arrive as events from them. Say everything the agent needs in the message, since it can't see your conversation. Don't send messages only to acknowledge or thank. Send heads-ups, FYIs and copies with `quiet`, so they wait for the agent's next wake instead of waking it; never work you hand over, an answer someone is waiting on, or anything that blocks. Quiet messages you get say quiet=\"true\"; past the most that come at once, agents_quiet brings the rest.\n\n",
         );
         let others = reachable(config, agent);
         if others.is_empty() {
@@ -250,8 +255,14 @@ impl Extension for Agents {
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
-        let mut tools =
-            vec![send_tool(factory, agent), status_tool(factory, agent), suggest_tool(factory, agent), inspect_tool(factory, agent)];
+        let mut tools = vec![
+            send_tool(factory, agent),
+            status_tool(factory, agent),
+            suggest_tool(factory, agent),
+            inspect_tool(factory, agent),
+            provenance::tool(factory, agent),
+            quiet::tool(factory, agent),
+        ];
         let (map, propose) = match factory.lock().config.agent(agent) {
             Some(me) => (sees_map(me), !crate::proposals::is_admin(me)),
             None => (false, false),
@@ -348,6 +359,14 @@ fn map_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
 struct SendArgs {
     to: To,
     text: String,
+    #[serde(default)]
+    reply_to: Vec<u64>,
+    #[serde(default)]
+    intent: String,
+    #[serde(default)]
+    copy_lead: bool,
+    #[serde(default)]
+    quiet: bool,
 }
 
 /// One recipient, as before, or several.
@@ -381,6 +400,10 @@ fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
                 {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_RECIPIENTS},
             ]},
             "text": {"type": "string", "minLength": 1},
+            "reply_to": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 20},
+            "intent": {"type": "string", "enum": provenance::INTENTS},
+            "copy_lead": {"type": "boolean"},
+            "quiet": {"type": "boolean"},
         },
         "additionalProperties": false,
     });
@@ -389,12 +412,15 @@ fn send_tool(factory: &Arc<Factory>, sender: &str) -> Tool {
         "Message agent",
         SEND,
         parameters,
-        super::typed_handler(factory, sender, |factory, sender, args: SendArgs| match args.to {
-            // An agent whose context began before lists were allowed has a
-            // schema that says `to` is a string, so it writes the list in one.
-            To::One(to) if let Some(several) = listed(&to) => send_to_several(factory, sender, &several, args.text),
-            To::One(to) => send(factory, sender, &to, args.text),
-            To::Several(to) => send_to_several(factory, sender, &to, args.text),
+        super::typed_handler(factory, sender, |factory, sender, args: SendArgs| {
+            let said = Said { reply_to: args.reply_to, intent: args.intent, copy_lead: args.copy_lead, quiet: args.quiet };
+            match args.to {
+                // An agent whose context began before lists were allowed has a
+                // schema that says `to` is a string, so it writes the list in one.
+                To::One(to) if let Some(several) = listed(&to) => send_to_several(factory, sender, &several, args.text, said),
+                To::One(to) => send(factory, sender, &to, args.text, said),
+                To::Several(to) => send_to_several(factory, sender, &to, args.text, said),
+            }
         }),
     )
 }
@@ -493,23 +519,42 @@ fn resolve<'a>(config: &'a Config, from: &AgentConfig, to: &str) -> Result<&'a A
 /// Its details: whom it went to (`to`, its id, `name` and `role`), and whether it
 /// was `working`, so it reads the message after its current step; and, as for
 /// several, `text` and `recipients`.
-pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String) -> Result<ToolResult, String> {
-    let target = {
+pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String, mut said: Said) -> Result<ToolResult, String> {
+    provenance::check(factory, sender, &mut said)?;
+    let (target, copy) = {
         let inner = factory.lock();
         let config = &inner.config;
         let from = super::caller(config, sender)?;
-        resolve(config, from, to)?.id.clone()
+        let target = resolve(config, from, to)?.id.clone();
+        (target.clone(), copy_to(config, from, &said, &[target])?)
     };
-    let delivered = deliver(factory, sender, &[target], &text);
-    let Some(recipient) = delivered.first() else { return Err("That agent is no longer in this Claktory.".to_owned()) };
+    let delivered = deliver(factory, sender, &[target], &text, &said, copy.as_deref());
+    let Some(recipient) = delivered.reached.first() else { return Err("That agent is no longer in this Claktory.".to_owned()) };
     let working = recipient.working;
-    let said = if working { "Sent; it's working and reads it after its current step." } else { "Sent." };
+    let mut result = match (said.quiet, working) {
+        (false, false) => "Sent.".to_owned(),
+        (false, true) => "Sent; it's working and reads it after its current step.".to_owned(),
+        (true, false) => format!("Sent quietly to {}, who reads it when next woken; this doesn't wake it.", recipient.name),
+        (true, true) => format!("Sent quietly to {}, who is working and reads it after its current step.", recipient.name),
+    };
+    result.push_str(&delivered.copy_line(&said));
     let (target, name, role) = (recipient.id.clone(), recipient.name.clone(), recipient.role.clone());
     let recipients = vec![recipient.details(to)];
     Ok(ToolResult::text(
-        said,
-        json!({"to": target, "name": name, "role": role, "working": working, "text": text, "recipients": recipients}),
+        result,
+        delivered.details(json!({"to": target, "name": name, "role": role, "working": working, "text": text, "recipients": recipients})),
     ))
+}
+
+/// The lead that gets a quiet copy of this send: none unless asked, or when
+/// it's among `targets` already (it gets the message itself); why not when
+/// it can't.
+fn copy_to(config: &Config, from: &AgentConfig, said: &Said, targets: &[String]) -> Result<Option<String>, String> {
+    if !said.copy_lead {
+        return Ok(None);
+    }
+    let lead = provenance::lead_for_copy(config, from)?;
+    Ok((!targets.contains(&lead.id)).then(|| lead.id.clone()))
 }
 
 /// Delivers one agent's message to several, each told who else got it; says
@@ -518,7 +563,8 @@ pub(crate) fn send(factory: &Arc<Factory>, sender: &str, to: &str, text: String)
 /// `text` and `recipients`, each with `to` as written, its `id`, `name` and
 /// `role`, the `outcome` ("sent", "working": sent, read after its current
 /// step, or "failed") and, failed, `why`.
-fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text: String) -> Result<ToolResult, String> {
+fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text: String, mut said: Said) -> Result<ToolResult, String> {
+    provenance::check(factory, sender, &mut said)?;
     if names.is_empty() {
         return Err("Name at least one agent in `to`.".to_owned());
     }
@@ -527,7 +573,7 @@ fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text:
     }
     // Each name: the agent it means, or why not.
     let mut resolved: Vec<(&str, Result<String, String>)> = Vec::new();
-    {
+    let copy = {
         let inner = factory.lock();
         let config = &inner.config;
         let from = super::caller(config, sender)?;
@@ -544,20 +590,27 @@ fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text:
             }
             resolved.push((name, found));
         }
-    }
+        let targets: Vec<String> = resolved.iter().filter_map(|(_, found)| found.as_ref().ok().cloned()).collect();
+        copy_to(config, from, &said, &targets)?
+    };
     let targets: Vec<String> = resolved.iter().filter_map(|(_, found)| found.as_ref().ok().cloned()).collect();
     if targets.is_empty() {
         let reasons: Vec<String> = resolved.iter().filter_map(|(_, found)| found.as_ref().err().cloned()).collect();
         return Err(if reasons.is_empty() { "That's only you.".to_owned() } else { format!("Sent to no one. {}", reasons.join(" ")) });
     }
-    let delivered = deliver(factory, sender, &targets, &text);
+    let delivered = deliver(factory, sender, &targets, &text, &said, copy.as_deref());
     let mut lines = Vec::new();
     let mut recipients = Vec::new();
     for (name, found) in &resolved {
-        let reached = found.as_ref().ok().and_then(|id| delivered.iter().find(|recipient| &recipient.id == id));
+        let reached = found.as_ref().ok().and_then(|id| delivered.reached.iter().find(|recipient| &recipient.id == id));
         match (found, reached) {
             (_, Some(recipient)) => {
-                let said = if recipient.working { "sent; it's working and reads it after its current step" } else { "sent" };
+                let said = match (recipient.quiet, recipient.working) {
+                    (false, false) => "sent",
+                    (false, true) => "sent; it's working and reads it after its current step",
+                    (true, false) => "sent quietly; it reads it when next woken",
+                    (true, true) => "sent quietly; it's working and reads it after its current step",
+                };
                 lines.push(format!("{}: {said}.", recipient.label));
                 recipients.push(recipient.details(name));
             }
@@ -572,7 +625,9 @@ fn send_to_several(factory: &Arc<Factory>, sender: &str, names: &[String], text:
             }
         }
     }
-    Ok(ToolResult::text(lines.join("\n"), json!({"text": text, "recipients": recipients})))
+    let mut result = lines.join("\n");
+    result.push_str(&delivered.copy_line(&said));
+    Ok(ToolResult::text(result, delivered.details(json!({"text": text, "recipients": recipients}))))
 }
 
 /// An agent a message reached.
@@ -584,25 +639,74 @@ struct Recipient {
     label: String,
     /// It was working, so it reads the message after its current step.
     working: bool,
+    /// It was sent quietly: idle, it reads it when it next wakes.
+    quiet: bool,
 }
 
 impl Recipient {
     fn details(&self, to: &str) -> serde_json::Value {
-        let outcome = if self.working { "working" } else { "sent" };
+        let outcome = match (self.working, self.quiet) {
+            (true, _) => "working",
+            (false, true) => "waiting",
+            (false, false) => "sent",
+        };
         json!({"to": to, "id": self.id, "name": self.name, "role": self.role, "outcome": outcome})
     }
 }
 
+/// What a send did: the agents it reached, in order, and the quiet copy
+/// for the lead, if one was asked for: its id and the lead's name, or why
+/// it wasn't made.
+struct Delivered {
+    reached: Vec<Recipient>,
+    copy: Option<Result<(i64, String), String>>,
+}
+
+impl Delivered {
+    /// What the sender's result says of the copy.
+    fn copy_line(&self, said: &Said) -> String {
+        match &self.copy {
+            Some(Ok((_, lead))) => format!("\nCopied quietly to {lead}."),
+            Some(Err(why)) => format!("\nNo copy for your lead: {why}"),
+            None if said.copy_lead => "\nYour lead is a recipient, so it got the message itself, not a quiet copy.".to_owned(),
+            None => String::new(),
+        }
+    }
+
+    /// The result's details, with `copy` when one was asked for, and
+    /// `quiet` when it was sent quietly.
+    fn details(&self, mut details: serde_json::Value) -> serde_json::Value {
+        if self.reached.iter().any(|recipient| recipient.quiet) {
+            details["quiet"] = json!(true);
+        }
+        match &self.copy {
+            Some(Ok((id, lead))) => details["copy"] = json!({"id": id, "lead": lead}),
+            Some(Err(why)) => details["copy"] = json!({"failed": why}),
+            None => {}
+        }
+        details
+    }
+}
+
 /// Delivers `text` from `sender` to each of `targets` (ids), each told who
-/// else got it when there are several, and lights up their rows; the agents
-/// it reached, in order.
-fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str) -> Vec<Recipient> {
+/// else got it when there are several, with what the sender said of it
+/// (`said`), and lights up their rows; once the messages are recorded, the
+/// quiet copy for `copy` (the sender's lead), of what reached someone.
+fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str, said: &Said, copy: Option<&str>) -> Delivered {
     let mut letters = Vec::new();
     let mut reached = Vec::new();
+    let sent = provenance::sent(factory, sender);
+    let mut copy_signature = None;
     {
         let inner = factory.lock();
         let config = &inner.config;
-        let Some(from) = config.agent(sender) else { return reached };
+        let Some(from) = config.agent(sender) else { return Delivered { reached, copy: None } };
+        let label = crate::pipes::agents::taint_label(factory, sender);
+        if let Some(lead) = copy.and_then(|id| config.agent(id)) {
+            let mut signature = signed(config, from, lead);
+            signature.push_str(&label);
+            copy_signature = Some((lead.id.clone(), lead.name.clone(), signature));
+        }
         let agents: Vec<&AgentConfig> = targets.iter().filter_map(|id| config.agent(id)).collect();
         for agent in &agents {
             let mut text = text.to_owned();
@@ -613,9 +717,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
             }
             // Read a pipe: those it messages know it.
             let mut signature = signed(config, from, agent);
-            if !factory.pipes.tainted(sender).is_empty() {
-                signature.push_str(crate::pipes::agents::TAINT_LABEL);
-            }
+            signature.push_str(&label);
             let event = Event {
                 source: EventSource::Agent,
                 from: signature,
@@ -623,6 +725,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
                 summary: String::new(),
                 transient: false,
                 pipe_seqs: Vec::new(),
+                provenance: Some(said.provenance()),
             };
             letters.push((agent.id.clone(), text, event));
             reached.push(Recipient {
@@ -631,15 +734,37 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
                 role: agent.role.clone(),
                 label: format!("{} ({})", agent.name, agent.id),
                 working: inner.agents.get(&agent.id).is_some_and(|runtime| runtime.running),
+                quiet: said.quiet,
             });
         }
     }
     // What a pipe brought reaches them through the sender: they're as
     // tainted as it is (their secrets wait for the person too).
+    let mut recorded = Vec::new();
     for (id, text, event) in letters {
         crate::pipes::agents::spread_taint(factory, sender, &id);
-        factory.deliver_event(&id, text, event);
+        if factory.deliver_sent(&id, text, event, sent.clone()) {
+            recorded.push(id);
+        }
     }
+    reached.retain(|recipient| recorded.contains(&recipient.id));
+    // The copy, of what was recorded for someone: never of a send that wasn't.
+    let copy = copy_signature.map(|(lead, name, signature)| {
+        if recorded.is_empty() {
+            return Err("the message reached no one.".to_owned());
+        }
+        let copy = provenance::Copy { lead: &lead, sender, signature: &signature, text, to: &recorded, said, sent: &sent };
+        match provenance::record(&factory.store, &copy) {
+            Ok(id) => {
+                factory.broadcast_workspace(&factory.lock());
+                Ok((id, name))
+            }
+            Err(error) => {
+                tracing::error!(%sender, %lead, %error, "could not record a quiet copy");
+                Err("Claktory couldn't record it.".to_owned())
+            }
+        }
+    });
     // The person sees who talks to whom: the rows glow.
     let row = |id: &str| v1::HighlightTarget { kind: "agent".to_owned(), id: id.to_owned() };
     let mut rows = vec![row(sender)];
@@ -650,7 +775,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
         from_agent_id: sender.to_owned(),
         kind: v1::HighlightKind::Message.into(),
     }));
-    reached
+    Delivered { reached, copy }
 }
 
 /// "12m", "3h", "2d": how long ago `since` was.
@@ -709,9 +834,13 @@ fn state(inner: &Inner, times: &crate::store::RunTimes, agent: &AgentConfig, now
             let _ = write!(line, " {}", ago(ended, now));
         }
     }
-    let queued = runtime.map_or(0, |runtime| runtime.queue.len());
+    let quiet = runtime.map_or(0, Runtime::quiet_waiting);
+    let queued = runtime.map_or(0, |runtime| runtime.queue.len()) - quiet;
     if queued > 0 {
         let _ = write!(line, "; {queued} queued");
+    }
+    if quiet > 0 {
+        let _ = write!(line, "; {quiet} quiet waiting");
     }
     if !inner.models.iter().any(|model| model.id == agent.model) {
         line.push_str("; no model");

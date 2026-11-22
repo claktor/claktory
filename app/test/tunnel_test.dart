@@ -128,6 +128,29 @@ class FakeTunnels implements Tunnels {
   }) async => (device: 'b' * 64, backend: 'a' * 64);
 }
 
+/// Tunnels that open each of [tunnels] in turn, the last again after.
+class _TunnelsInTurn extends FakeTunnels {
+  _TunnelsInTurn(this.tunnels) : super(tunnels.last);
+
+  final List<FakeTunnel> tunnels;
+
+  @override
+  Future<Tunnel> open({
+    required String deviceKey,
+    required String endpointId,
+    required List<String> relays,
+    List<String> addresses = const [],
+  }) async {
+    await super.open(
+      deviceKey: deviceKey,
+      endpointId: endpointId,
+      relays: relays,
+      addresses: addresses,
+    );
+    return tunnels[(opened.length - 1).clamp(0, tunnels.length - 1)];
+  }
+}
+
 /// Tunnels whose open finishes only when [opens] completes.
 class _SlowTunnels extends FakeTunnels {
   _SlowTunnels(super.tunnel, this.opens);
@@ -464,13 +487,255 @@ void main() {
 
     // Longer, and it dials afresh at once, saying nothing meanwhile.
     backend.hidden();
-    backend.resumed(now: DateTime.now().add(const Duration(minutes: 1)));
+    backend.resumed(now: DateTime.now().add(const Duration(seconds: 10)));
     expect(backend.reconnecting.value, isTrue);
     expect(tunnels.tunnel.reconnects, 1);
     await until(() => hellos == 2 && backend.connected.value);
     expect(backend.reconnecting.value, isFalse);
+    expect(tunnels.opened, hasLength(1));
+
+    // However long, the tunnel only reconnects (it makes its endpoint
+    // afresh itself when that's needed): the same tunnel, told once.
+    backend.hidden();
+    backend.resumed(now: DateTime.now().add(const Duration(hours: 1)));
+    expect(backend.reconnecting.value, isTrue);
+    expect(tunnels.tunnel.reconnects, 2);
+    // The phone's clock jumped too, so a check comes at once: the old
+    // connection is closing, and that's no error; nor does it tell the
+    // tunnel again while it's bringing the connection back.
+    backend.check();
+    expect(tunnels.tunnel.reconnects, 2);
+    await until(() => hellos == 3 && backend.connected.value);
+    expect(tunnels.tunnel.closed, isFalse);
+    expect(tunnels.opened, hasLength(1));
+    expect(backend.reconnecting.value, isFalse);
     await backend.close();
     await server.close(force: true);
+  });
+
+  test(
+    'back from the background, a tunnel that does not bring the '
+    'connection back in time is told once, then opened afresh, once',
+    () async {
+      // The first tunnel's backend stops welcoming (its connection dead);
+      // the second's welcomes.
+      var welcoming = true;
+      Future<HttpServer> serve(bool Function() welcomes) async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((request) async {
+          final socket = await WebSocketTransformer.upgrade(request);
+          socket.listen((frame) {
+            final message = ClientMessage.fromBuffer(frame as List<int>);
+            if (message.hasHello() && welcomes()) {
+              socket.add(
+                ServerMessage(
+                  replyTo: message.id,
+                  welcome: Welcome(serverVersion: 'test'),
+                ).writeToBuffer(),
+              );
+            }
+          });
+        });
+        return server;
+      }
+
+      final stuck = await serve(() => welcoming);
+      final fine = await serve(() => true);
+      final first = FakeTunnel(stuck.port);
+      final tunnels = _TunnelsInTurn([first, FakeTunnel(fine.port)]);
+      final backend = backendWith(tunnels)
+        ..deviceKey = ((_) => 'k' * 64)
+        ..connectWithin = const Duration(milliseconds: 150)
+        ..tunnelBackWithin = const Duration(milliseconds: 800);
+      backend.connectTo(parsePairingCode(_code));
+      unawaited(backend.run());
+      Future<void> until(bool Function() done) async {
+        for (var i = 0; i < 150 && !done(); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        expect(done(), isTrue);
+      }
+
+      await until(() => backend.connected.value);
+      welcoming = false;
+      backend.hidden();
+      backend.resumed(now: DateTime.now().add(const Duration(minutes: 5)));
+      expect(first.reconnects, 1);
+      // Tries that fail meanwhile (no welcome in time) don't tell it again.
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      expect(backend.connected.value, isFalse);
+      expect(first.reconnects, 1);
+      expect(tunnels.opened, hasLength(1));
+      // Past its time, it's closed, and a new one opened once it has.
+      await until(() => backend.connected.value);
+      expect(first.closed, isTrue);
+      expect(first.reconnects, 1);
+      expect(tunnels.opened, hasLength(2));
+      await backend.close();
+      await stuck.close(force: true);
+      await fine.close(force: true);
+    },
+  );
+
+  test('in the background, a dropped connection waits for the app to be '
+      'back: no reconnect, no new tunnel, no tries meanwhile', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var welcoming = true;
+    var attempts = 0;
+    final sockets = <WebSocket>[];
+    server.listen((request) async {
+      attempts++;
+      final socket = await WebSocketTransformer.upgrade(request);
+      if (!welcoming) {
+        await socket.close();
+        return;
+      }
+      sockets.add(socket);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final backend = backendWith(tunnels)
+      ..deviceKey = ((_) => 'k' * 64)
+      ..connectWithin = const Duration(milliseconds: 150)
+      ..tunnelBackWithin = const Duration(milliseconds: 300);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 150 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => backend.connected.value);
+    // Hidden (Android keeps the app running), then its connection drops,
+    // and the backend turns tries away for a while.
+    backend.hidden();
+    welcoming = false;
+    final before = attempts;
+    for (final socket in sockets) {
+      await socket.close();
+    }
+    await until(() => !backend.connected.value);
+    backend.check();
+    await Future<void>.delayed(const Duration(seconds: 1));
+    expect(tunnels.tunnel.reconnects, 0);
+    expect(tunnels.tunnel.closed, isFalse);
+    expect(tunnels.opened, hasLength(1));
+    expect(attempts - before, lessThanOrEqualTo(1));
+
+    // Back: told once, and connected.
+    welcoming = true;
+    backend.resumed(now: DateTime.now().add(const Duration(minutes: 5)));
+    await until(() => backend.connected.value);
+    expect(tunnels.tunnel.reconnects, 1);
+    expect(tunnels.opened, hasLength(1));
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("its tunnel's port no longer answering (taken back while the app "
+      'was away), it opens the tunnel afresh at once', () async {
+    final firstSockets = <WebSocket>[];
+    Future<HttpServer> serve(
+      void Function() hello, [
+      List<WebSocket>? kept,
+    ]) async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        final socket = await WebSocketTransformer.upgrade(request);
+        kept?.add(socket);
+        socket.listen((frame) {
+          final message = ClientMessage.fromBuffer(frame as List<int>);
+          if (message.hasHello()) {
+            hello();
+            socket.add(
+              ServerMessage(
+                replyTo: message.id,
+                welcome: Welcome(serverVersion: 'test'),
+              ).writeToBuffer(),
+            );
+          }
+        });
+      });
+      return server;
+    }
+
+    var firstHellos = 0;
+    var hellos = 0;
+    final first = await serve(() => firstHellos++, firstSockets);
+    final server = await serve(() => hellos++);
+    final taken = FakeTunnel(first.port);
+    final tunnels = _TunnelsInTurn([taken, FakeTunnel(server.port)]);
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    for (var i = 0; i < 100 && !backend.connected.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(backend.connected.value, isTrue);
+    expect(firstHellos, 1);
+    // The system takes its port back: the connection drops, and nothing
+    // listens there any more.
+    final started = DateTime.now();
+    await first.close(force: true);
+    for (final socket in firstSockets) {
+      await socket.close();
+    }
+    for (var i = 0; i < 50 && backend.connected.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    for (var i = 0; i < 100 && !backend.connected.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(backend.connected.value, isTrue);
+    // Well within the time the tunnel is given to come back on its own.
+    expect(
+      DateTime.now().difference(started),
+      lessThan(const Duration(seconds: 2)),
+    );
+    expect(taken.closed, isTrue);
+    expect(tunnels.opened, hasLength(2));
+    expect(hellos, 1);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("a tunnel whose port never answered isn't opened afresh over and "
+      'over: it stays, so why it can\'t connect shows', () async {
+    // A port nothing listens on.
+    final gone = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final dead = FakeTunnel(gone.port)
+      ..status = tunnelStatus(
+        phase: TunnelPhase.failed,
+        path: TunnelPath.none,
+        failure: TunnelFailure.unreachable,
+        error: "Can't reach the Mac",
+      );
+    await gone.close();
+    final tunnels = FakeTunnels(dead);
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    for (var i = 0; i < 100 && backend.tunnel.value == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(backend.connected.value, isFalse);
+    expect(backend.tunnel.value?.failure, TunnelFailure.unreachable);
+    expect(dead.closed, isFalse);
+    expect(tunnels.opened, hasLength(1));
+    await backend.close();
   });
 
   test('a check the backend answers changes nothing; one it doesn\'t '
@@ -640,8 +905,10 @@ void main() {
       error: 'Nothing answered within 20 seconds.',
     );
     await harness.show(tester);
-    await tester.tap(find.text("Can't connect to mac-mini"));
+    await tester.tap(find.text("Can't connect to mac-mini").first);
     await settle(tester);
+    // Not connected: the click reconnects at once too (#214).
+    expect(harness.backend.reconnectsAsked, 1);
     expect(find.byType(ConnectionDialog), findsOneWidget);
     expect(find.text('Nothing answered within 20 seconds.'), findsOneWidget);
     expect(
@@ -651,6 +918,7 @@ void main() {
     await tester.tap(find.text('Reconnect'));
     await settle(tester);
     expect(find.byType(ConnectionDialog), findsNothing);
+    expect(harness.backend.reconnectsAsked, 2);
   });
 
   testWidgets('reconnecting after a resume or a drop, the footer says '
@@ -677,7 +945,8 @@ void main() {
     expect(find.textContaining('Connecting'), findsNothing);
     harness.backend.reconnecting.value = false;
     await settle(tester);
-    expect(find.text("Can't connect to mac-mini"), findsOneWidget);
+    // The footer, and the line above the conversation's message box.
+    expect(find.text("Can't connect to mac-mini"), findsNWidgets(2));
   });
 
   testWidgets('Settings → Devices says this device is connected', (

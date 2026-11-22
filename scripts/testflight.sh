@@ -2,7 +2,7 @@
 # Builds Claktory for iPhone (com.claktory.app) for the App Store and
 # uploads it to App Store Connect, where it shows up in TestFlight.
 #
-#   scripts/testflight.sh [--no-upload] [--ipad]
+#   scripts/testflight.sh [--no-upload] [--ipad] [--source COMMIT]
 #
 # --no-upload archives and signs it, and leaves the .ipa in
 # app/build/ios/testflight/, without sending it anywhere.
@@ -30,16 +30,32 @@
 # The version is the latest released one in docs/CHANGELOG.md (v0.1.3 is
 # 0.1.3); the build number is the time it's built, so every upload is new.
 # Nothing here is committed, and no secret is printed.
+#
+# --source builds that commit, which must be on main: a release's own
+# source (the `source` in its folder in ~/.factory/releases), so the iPhone
+# app of v0.1.16 is v0.1.16's code even once main has moved on.
+#
+# Otherwise it builds the checkout's commit (HEAD), so the checkout must be clean, and
+# builds it in the same private folder as scripts/release.sh, never in the
+# checkout itself: Dart's snapshot keeps the absolute path of a file Flutter
+# generates (dart-lang/sdk#55282), so a build in a home folder would put
+# that path in the app. Before anything is signed or uploaded, no binary in
+# the app may carry this Mac's home folder, user or host name
+# (check_no_traces in scripts/lib.sh).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$root/scripts/lib.sh"
 upload=true
 ipad=false
-for arg in "$@"; do
-  case "$arg" in
-    --no-upload) upload=false ;;
-    --ipad) ipad=true ;;
-    *) echo "usage: scripts/testflight.sh [--no-upload] [--ipad]" >&2; exit 2 ;;
+from=""
+usage() { echo "usage: scripts/testflight.sh [--no-upload] [--ipad] [--source COMMIT]" >&2; exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-upload) upload=false; shift ;;
+    --ipad) ipad=true; shift ;;
+    --source) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
+    *) usage ;;
   esac
 done
 family=()
@@ -98,7 +114,25 @@ if [ -z "${DEVELOPER_DIR:-}" ]; then
 fi
 echo "With $(xcodebuild -version | head -1) (${DEVELOPER_DIR:-$(xcode-select -p)})"
 
-version="$(sed -n 's/^## v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$root/docs/CHANGELOG.md" | head -1)"
+if [ -n "$from" ]; then
+  commit="$(git -C "$root" rev-parse --verify -q "$from^{commit}")" &&
+    git -C "$root" merge-base --is-ancestor "$commit" main || {
+    echo "--source $from isn't a commit on main." >&2
+    exit 1
+  }
+else
+  if [ -n "$(git -C "$root" status --porcelain --untracked-files=no)" ]; then
+    echo "The checkout has uncommitted changes: commit them, since only the commit is built." >&2
+    exit 1
+  fi
+  commit="$(git -C "$root" rev-parse HEAD)"
+fi
+src="$(release_tree "$root" "$commit")"
+signing="$(mktemp -d)"
+trap 'rm -rf "$signing"; release_unlock' EXIT
+release_pub_cache
+
+version="$(sed -n 's/^## v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$src/docs/CHANGELOG.md" | head -1)"
 if [ -z "$version" ]; then
   echo "No released version in docs/CHANGELOG.md to build." >&2
   exit 1
@@ -116,8 +150,8 @@ auth=(
   -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 )
 
-echo "Building Claktory $version ($build) for $devices…"
-cd "$root/app"
+echo "Building Claktory $version ($build) for $devices from ${commit:0:10} in $src…"
+cd "$src/app"
 # Flutter's half (the Dart code, its assets and the tunnel's Rust library),
 # then Xcode's archive of it. The bundle id, com.claktory.app, comes from
 # the project: set on the command line it would reach the plugins' resource
@@ -126,8 +160,9 @@ cd "$root/app"
 # signing the archive itself would use the project's development identity,
 # whose profile needs a registered device (the team may have none), while
 # the export's distribution certificate and App Store profile need none.
-# Its build folder is its own, kept between runs: the shared DerivedData is
-# also every other build's on this Mac, and other Xcode versions'.
+# Its build folder is its own, inside the export (fresh every run): the
+# shared DerivedData is also every other build's on this Mac, and other
+# Xcode versions'.
 # FACTORY_VERSION stamps the version the app shows and checks its backend
 # against (app/lib/update.dart); unstamped, the app reads "dev".
 flutter build ios --release --config-only --build-name "$version" --build-number "$build" --dart-define=FACTORY_VERSION="v$version"
@@ -135,11 +170,16 @@ cd ios
 xcodebuild archive -quiet \
   -workspace Runner.xcworkspace -scheme Runner -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
-  -derivedDataPath "$root/app/build/ios/testflight-derived" \
+  -derivedDataPath "$src/app/build/ios/testflight-derived" \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
   CODE_SIGNING_ALLOWED=NO ${family[@]+"${family[@]}"}
 
 app_dir="$archive/Products/Applications/Runner.app"
+# Unsigned, the archive expands $(AppIdentifierPrefix) to nothing in the
+# Info.plists: v0.1.16 shipped a push keychain group without its team
+# prefix, the key never saved and the phone never registered for
+# notifications. Fill it in from the sources before anything is signed.
+python3 "$root/scripts/ios-build-vars.py" fill "$app_dir" "$src/app/ios" "$CLAKTORY_TEAM_ID"
 if $ipad; then
   # The archive is unsigned and the export signs it, so the archived app's
   # Info.plist can still change here. The iPhone's own orientations
@@ -198,6 +238,12 @@ if [ -n "$problems" ]; then
   exit 1
 fi
 
+# The app, its frameworks and its extensions carry no trace of this Mac.
+check_no_traces "$app_dir"
+# And every Mach-O in it loads the way the strictest device dyld demands.
+python3 "$root/scripts/check-macho.py" "$app_dir" ||
+  { echo "Not uploading: a device's dyld would refuse what's above." >&2; exit 1; }
+
 # The export signs with the entitlements it finds on the archived code, and
 # an unsigned archive has none: the app would reach TestFlight without push,
 # time-sensitive notifications or its keychain groups (it did on 2026-11-22),
@@ -211,8 +257,6 @@ entitlements() { # SOURCE BUNDLE_ID OUT
     /usr/libexec/PlistBuddy -c 'Set :aps-environment production' "$3"
   fi
 }
-signing="$(mktemp -d)"
-trap 'rm -rf "$signing"' EXIT
 for framework in "$app_dir"/Frameworks/*; do
   [ -e "$framework" ] || continue
   codesign --force --sign - "$framework"
@@ -220,12 +264,16 @@ done
 for appex in "$app_dir"/PlugIns/*.appex; do
   [ -e "$appex" ] || continue
   name="$(basename "$appex" .appex)"
-  entitlements "$root/app/ios/$name/$name.entitlements" \
+  entitlements "$src/app/ios/$name/$name.entitlements" \
     "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Info.plist")" "$signing/$name.entitlements"
   codesign --force --sign - --entitlements "$signing/$name.entitlements" "$appex"
 done
-entitlements "$root/app/ios/Runner/Runner.entitlements" com.claktory.app "$signing/Runner.entitlements"
+entitlements "$src/app/ios/Runner/Runner.entitlements" com.claktory.app "$signing/Runner.entitlements"
 codesign --force --sign - --entitlements "$signing/Runner.entitlements" "$app_dir"
+# Nothing unexpanded, and every keychain group the app names is one it's
+# entitled to, with the team prefix.
+python3 "$root/scripts/ios-build-vars.py" check "$app_dir" "$CLAKTORY_TEAM_ID" ||
+  { echo "Not uploading: the app's build variables aren't filled in (above)." >&2; exit 1; }
 
 destination=export
 $upload && destination=upload
@@ -256,6 +304,15 @@ if $ipad && ! $upload; then
     echo "--ipad: the exported .ipa lost its iPad orientations" >&2
     exit 1
   }
+fi
+if ! $upload; then
+  payload="$signing/payload"
+  mkdir "$payload"
+  unzip -q "$out"/*.ipa -d "$payload"
+  # The app only: the .ipa's Symbols/ go to Apple and name build paths.
+  check_no_traces "$payload/Payload"
+  # And as the distribution signature left it.
+  python3 "$root/scripts/ios-build-vars.py" check "$payload/Payload/Runner.app" "$CLAKTORY_TEAM_ID"
 fi
 if $upload; then
   echo "Uploaded Claktory $version ($build) for $devices. It shows in TestFlight once App Store Connect has processed it, usually within half an hour."

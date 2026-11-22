@@ -12,11 +12,13 @@ import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
+import 'links.dart' show confirmPairing;
 import 'controls.dart';
 import 'explorer.dart';
 import 'extensions.dart';
 import 'identity.dart';
 import 'ipad/columns.dart' show compactRoutes;
+import 'ipad/document_host.dart' show ipadDocumentPane, ipadProjectDocument;
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'layout.dart';
 import 'map.dart';
@@ -146,7 +148,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     if (_attached) _host?.detach(this);
     _opened?.removeListener(_toFront);
     _page?.removeListener(_pageChanged);
-    _waitingFileTimer?.cancel();
+    _waitingPaneTimer?.cancel();
     for (final entry in _stack) {
       entry.done?.complete();
     }
@@ -367,42 +369,48 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     _changed();
   }
 
-  /// A file [showFile] opened, to push once its pane is in the layout;
-  /// given up on after a while ([_waitingFileTimer]).
-  ({String agentId, String paneId})? _waitingFile;
-  Timer? _waitingFileTimer;
+  /// A pane [showPane] (or [showFile]) asked for, to push once it's in its
+  /// agent's layout; given up on after a while ([_waitingPaneTimer]).
+  ({String agentId, String paneId})? _waitingPane;
+  Timer? _waitingPaneTimer;
 
   @override
   bool showFile(String agentId, String path) {
-    final backend = AppScope.of(context);
-    final agent = backend.workspace.agent(agentId);
+    final agent = AppScope.of(context).workspace.agent(agentId);
     if (agent == null) return false;
+    // In the agent's layout as its `show` puts it, so the Mac and the iPad
+    // have it too; already there, it's that pane.
+    final root = layoutOf(agent);
+    final opened = open(root, path);
+    if (!identical(opened.root, root)) {
+      fireAndLog(AppScope.of(context).setLayout(agentId, opened.root));
+    }
+    return showPane(agentId, opened.paneId);
+  }
+
+  @override
+  bool showPane(String agentId, String paneId) {
+    final backend = AppScope.of(context);
+    if (backend.workspace.agent(agentId) == null) return false;
     final workspace = backend.workspace.workspace;
     if (workspace.selectedAgentId != agentId ||
         selectedPipe(workspace) != null ||
         workspace.selectedChatId.isNotEmpty) {
       fireAndLog(backend.selectAgent(agentId));
     }
-    // In the agent's layout as its `show` puts it, so the Mac and the iPad
-    // have it too; already there, it's that pane.
-    final root = layoutOf(agent);
-    final opened = open(root, path);
-    if (!identical(opened.root, root)) {
-      fireAndLog(backend.setLayout(agentId, opened.root));
-    }
-    _waitingFile = (agentId: agentId, paneId: opened.paneId);
-    _waitingFileTimer?.cancel();
-    _waitingFileTimer = Timer(
+    _waitingPane = (agentId: agentId, paneId: paneId);
+    _waitingPaneTimer?.cancel();
+    _waitingPaneTimer = Timer(
       const Duration(seconds: 10),
-      () => _waitingFile = null,
+      () => _waitingPane = null,
     );
-    _showWaitingFile();
+    _showWaitingPane();
     return true;
   }
 
-  /// Pushes [_waitingFile] once its agent shows and its pane is there.
-  void _showWaitingFile() {
-    final waiting = _waitingFile;
+  /// Pushes [_waitingPane] once its agent shows and the pane is there.
+  void _showWaitingPane() {
+    final waiting = _waitingPane;
     if (waiting == null || !mounted) return;
     final agent = AppScope.of(context).workspace.selectedAgent;
     if (agent == null ||
@@ -410,8 +418,8 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
         find(layoutOf(agent), waiting.paneId) == null) {
       return;
     }
-    _waitingFile = null;
-    _waitingFileTimer?.cancel();
+    _waitingPane = null;
+    _waitingPaneTimer?.cancel();
     _soon(() => _showViewer(waiting.agentId, waiting.paneId));
   }
 
@@ -447,6 +455,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
               }
               return _ViewerScreen(
                 leaf: viewer.leaf,
+                node: viewer,
                 agentId: shown.id,
                 glyph: paneGlyph(
                   shown,
@@ -600,7 +609,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
         }
         _soon(_attach);
         _prune();
-        _showWaitingFile();
+        _showWaitingPane();
         final workspace = backend.workspace.workspace;
         final pipe = selectedPipe(workspace);
         final chat = selectedChat(workspace);
@@ -856,30 +865,40 @@ class _FilesScreen extends StatelessWidget {
                 decoration: BoxDecoration(
                   border: Border(bottom: BorderSide(color: palette.hairline)),
                 ),
-                child: Row(
-                  children: [
-                    _BackButton(onBack: onBack),
-                    const SizedBox(width: Space.xs),
-                    FolderGlyph(color: palette.textMuted),
-                    const SizedBox(width: Space.s),
-                    Text(
-                      'Files',
-                      style: TextStyles.label.copyWith(color: palette.text),
-                    ),
-                    const SizedBox(width: Space.s),
-                    Expanded(
-                      child: Text(
-                        project.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
+                // A narrow window (an iPad's Split View) or large text keeps
+                // only Show hidden files' check, named on hover.
+                child: LayoutBuilder(
+                  builder: (context, box) => Row(
+                    children: [
+                      _BackButton(onBack: onBack),
+                      const SizedBox(width: Space.xs),
+                      FolderGlyph(color: palette.textMuted),
+                      const SizedBox(width: Space.s),
+                      Text(
+                        'Files',
+                        style: TextStyles.label.copyWith(color: palette.text),
+                      ),
+                      const SizedBox(width: Space.s),
+                      Expanded(
+                        child: Text(
+                          project.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyles.caption.copyWith(
+                            color: palette.textFaint,
+                          ),
                         ),
                       ),
-                    ),
-                    if (explorer != null)
-                      ShowEverything(project: project, explorer: explorer),
-                  ],
+                      if (explorer != null)
+                        ShowEverything(
+                          project: project,
+                          explorer: explorer,
+                          compact:
+                              box.maxWidth < 380 ||
+                              MediaQuery.textScalerOf(context).scale(1) > 1.3,
+                        ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: Space.s),
@@ -908,9 +927,15 @@ class _ViewerScreen extends StatelessWidget {
     required this.onBack,
     this.onClose,
     this.agentId,
+    this.node,
   });
 
   final ViewLeaf leaf;
+
+  /// [leaf]'s node in the agent's layout: on an iPad in a narrow window,
+  /// a document in it opens in the document host, which draws and has
+  /// its own review bar. Null for a project's file.
+  final ViewNode? node;
 
   /// The agent whose pane it is: a review it asks of the file shows at
   /// its foot ([PhoneReviewBar]). Null for a project's file.
@@ -929,11 +954,18 @@ class _ViewerScreen extends StatelessWidget {
       ),
       child: Builder(
         builder: (context) {
+          final node = this.node, agentId = this.agentId;
+          final document = node != null && agentId != null
+              ? ipadDocumentPane(context, node, agentId: agentId)
+              // A project's file on an iPad: the host, only to read.
+              : node == null && agentId == null
+              ? ipadProjectDocument(context, leaf)
+              : null;
+          if (document != null) return document;
           // An app's view (C1F) is its own pane; any other leaf a viewer.
           final body = leaf.kind == appKind
               ? AppPane(leaf: leaf)
               : viewerBody(context, leaf);
-          final agentId = this.agentId;
           if (agentId == null || leaf.path.isEmpty) return body;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -980,8 +1012,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   /// Whether the camera may be used; null until known.
   CameraAccess? _access;
 
-  /// This phone can't scan (no camera, or none the app can use yet, as on
-  /// Android): it says where the code is to paste.
+  /// This phone can't scan (no camera, as in the Simulator or an emulator
+  /// without one): it says where the code is to paste.
   bool get _pasteOnly => _access == CameraAccess.unavailable;
 
   /// The person chose to paste the code instead.
@@ -1021,10 +1053,14 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     final camera = AppScope.scope(context).camera;
     var access = await camera.access();
+    if (!mounted) return;
     if (ask && access == CameraAccess.undetermined) {
+      // Refused, it's asked again rather than assumed for good: Android
+      // can still ask after a first no (undetermined), and only a second
+      // one, or an iPhone's, sends the person to Settings (denied).
       access = await camera.request()
           ? CameraAccess.granted
-          : CameraAccess.denied;
+          : await camera.access();
     }
     if (mounted && access != _access) setState(() => _access = access);
   }
@@ -1036,16 +1072,43 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   }
 
   void _scanned(String code) {
-    final problem = pairingProblem(code.trim(), scanned: true);
+    final text = code.trim();
+    // The camera keeps reading while the question is up, and the code the
+    // person just turned down stays in view: neither asks again.
+    if (_confirming || text == _declined) return;
+    final problem = pairingProblem(text, scanned: true);
     if (problem != null) {
       setState(() => _scanError = problem);
       return;
     }
-    _connect(parsePairingCode(code.trim())!);
+    unawaited(_connect(parsePairingCode(text)!, code: text));
   }
 
-  void _connect(RemoteFactory target) =>
-      AppScope.switchFactory(context, target);
+  /// While the person is asked whether to connect.
+  var _confirming = false;
+
+  /// The code the person last said no to, not asked about again while the
+  /// camera still sees it.
+  String? _declined;
+
+  /// Connects to [target] once the person says so: a code, scanned or
+  /// pasted, asks first, as a link does (links.dart), so nothing connects
+  /// without their tap.
+  Future<void> _connect(RemoteFactory target, {String? code}) async {
+    if (_confirming) return;
+    _confirming = true;
+    try {
+      final yes = await confirmPairing(context, target);
+      if (!mounted) return;
+      if (yes) {
+        AppScope.switchFactory(context, target);
+      } else {
+        _declined = code;
+      }
+    } finally {
+      _confirming = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1060,7 +1123,12 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          YourClaktories(onConnect: _connect, offerDelete: true),
+          YourClaktories(
+            // Picked from the person's own account, after its own
+            // "Connect to …?": nothing more to ask.
+            onConnect: (target) => AppScope.switchFactory(context, target),
+            offerDelete: true,
+          ),
           const SizedBox(height: Space.m),
           _Link(
             'Use a code instead',
@@ -1103,6 +1171,13 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                 Text(
                   _pasteOnly
                       ? 'Paste the code for this phone. Find it in Settings → '
+                            "Devices → Add a device on a device that's "
+                            'already connected, or where you set up your '
+                            'Claktory.'
+                      // Android is often paired to a Claktory on a
+                      // server, with no Mac in sight.
+                      : defaultTargetPlatform == TargetPlatform.android
+                      ? 'Scan the code for this phone. Find it in Settings → '
                             "Devices → Add a device on a device that's "
                             'already connected, or where you set up your '
                             'Claktory.'
@@ -1179,6 +1254,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
           restricted
               ? "The camera isn't available on this ${_phoneWord()}. Paste "
                     'the code instead.'
+              : defaultTargetPlatform == TargetPlatform.android
+              ? 'To scan, allow Claktory to use the camera in Settings.'
               : 'To scan, allow camera access in Settings → Claktory.',
           style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
@@ -1226,7 +1303,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
         final error = pasted.isEmpty ? null : pairingProblem(pasted);
         final target = error == null ? parsePairingCode(pasted) : null;
         void connect() {
-          if (target != null) _connect(target);
+          if (target != null) unawaited(_connect(target));
         }
 
         return Column(
@@ -1302,12 +1379,15 @@ String _phoneWord() =>
 /// code, or it's from a Claktory before the private tunnel.
 String? pairingProblem(String code, {bool scanned = false}) {
   final target = parsePairingCode(code);
-  // A phone that can't scan (Android, for now) is often paired to a
-  // Claktory on a server, with no Mac in sight.
+  // Android is often paired to a Claktory on a server, with no Mac in
+  // sight.
   final android = defaultTargetPlatform == TargetPlatform.android;
   if (target == null && android) {
-    return "That isn't a Claktory code. Copy it again, all of it, and paste "
-        'it here.';
+    return scanned
+        ? "That isn't a Claktory code. Scan the one shown for this phone in "
+              'Settings → Devices → Add a device.'
+        : "That isn't a Claktory code. Copy it again, all of it, and paste "
+              'it here.';
   }
   if (target != null && !target.tunnelled && android) {
     return 'This code is from an older Claktory. Update it where it runs, '

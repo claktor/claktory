@@ -1,12 +1,16 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show kLongPressTimeout, kTouchSlop;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
 import 'backend.dart';
+import 'browser/browser_view.dart' show BrowserSessionStrip;
 import 'characters/character.dart';
+import 'connection.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -20,6 +24,8 @@ import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
 import 'pipes.dart' show PipeLimitMark;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'quiet_copies.dart'
+    show QuietCopiesChip, QuietWaitingChip, showsNewCopies;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'transcript.dart';
@@ -156,6 +162,8 @@ class _AgentViewState extends State<AgentView> {
             ),
           ),
           _bottom(constraints, [
+            // Its browser sessions: waiting, running, just ended.
+            BrowserSessionStrip(agentId: agent.id),
             ArchivedLine(agent: agent),
             // One line above the box, so the box never changes as the
             // agent starts and stops: reconnecting, else working with
@@ -278,9 +286,14 @@ class _Header extends StatelessWidget {
             context,
             (context, close) => AgentSettingsForm(agent: agent, close: close),
           ),
+          // At least the title bar's height, and taller when large text
+          // needs it (an iPad at accessibility sizes), never cut.
           builder: (context, hovered) => Container(
-            height: titleBarHeight,
-            padding: const EdgeInsets.symmetric(horizontal: Space.xl),
+            constraints: const BoxConstraints(minHeight: titleBarHeight),
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.xl,
+              vertical: Space.xs,
+            ),
             color: hovered ? palette.hover : null,
             child: Row(
               children: [
@@ -334,6 +347,17 @@ class _Header extends StatelessWidget {
                     ],
                   ),
                 ),
+                // Quiet copies it hasn't read, which open Messaging.
+                if (showsNewCopies(agent)) ...[
+                  const SizedBox(width: Space.l),
+                  // Cut rather than overflow where large text leaves no room.
+                  Flexible(child: QuietCopiesChip(agent: agent)),
+                ],
+                // Quiet messages waiting for it to start working.
+                if (agent.quietWaiting > 0) ...[
+                  const SizedBox(width: Space.s),
+                  Flexible(child: QuietWaitingChip(agent: agent)),
+                ],
                 const SizedBox(width: Space.l),
                 _ContextMeter(
                   used: agent.contextTokens.toInt(),
@@ -440,6 +464,8 @@ class _PhoneHeader extends StatelessWidget {
         (context, close) => AgentSettingsForm(agent: agent, close: close),
       ),
       trailing: [
+        if (showsNewCopies(agent)) QuietCopiesChip(agent: agent, phone: true),
+        if (agent.quietWaiting > 0) QuietWaitingChip(agent: agent, phone: true),
         if (onMore != null)
           HeaderButton.more(label: 'Extensions', onTap: onMore!),
       ],
@@ -587,7 +613,11 @@ class _ContextMeter extends StatelessWidget {
 /// While the connection is down (after a second, so a quick reconnect
 /// doesn't flash it): a quiet line above the message box saying it's
 /// reconnecting and that what shows may be out of date. The backend's
-/// snapshot brings the conversation up to date once it's back.
+/// snapshot brings the conversation up to date once it's back. Once its
+/// tries fail (the machine off, asleep or offline), it says it can't
+/// connect and what to do, as the Claktory's connection line does. A tap
+/// (a click on a Mac) reconnects from scratch at once, as relaunching the
+/// app would (#214).
 class ReconnectingLine extends StatefulWidget {
   const ReconnectingLine({super.key, this.otherwise = const SizedBox.shrink()});
 
@@ -603,27 +633,28 @@ class ReconnectingLine extends StatefulWidget {
 
 class _ReconnectingLineState extends State<ReconnectingLine> {
   Backend? _backend;
+  Listenable? _link;
   Timer? _wait;
   var _shown = false;
+
+  /// The connection's state, while the line shows: failing says so.
+  Connection? _connection;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final backend = AppScope.of(context);
     if (identical(backend, _backend)) return;
-    _backend?.connected.removeListener(_changed);
-    _backend?.refused.removeListener(_changed);
-    _backend = backend
-      ..connected.addListener(_changed)
-      ..refused.addListener(_changed);
+    _link?.removeListener(_changed);
+    _backend = backend;
+    _link = Connection.of(backend)..addListener(_changed);
     _changed();
   }
 
   @override
   void dispose() {
     _wait?.cancel();
-    _backend?.connected.removeListener(_changed);
-    _backend?.refused.removeListener(_changed);
+    _link?.removeListener(_changed);
     super.dispose();
   }
 
@@ -637,35 +668,142 @@ class _ReconnectingLineState extends State<ReconnectingLine> {
       if (_shown) setState(() => _shown = false);
       return;
     }
+    final connection = Connection(backend);
+    final was = _connection;
+    _connection = connection;
+    if (_shown &&
+        (was?.link != connection.link || was?.details != connection.details)) {
+      setState(() {});
+    }
     _wait ??= Timer(ReconnectingLine.after, () {
       if (mounted) setState(() => _shown = true);
     });
+  }
+
+  /// Reconnects from scratch at once: the person tapped the line.
+  void _reconnect() {
+    if (touchPlatform) unawaited(HapticFeedback.selectionClick());
+    _backend?.reconnectNow();
+  }
+
+  /// The line, [child], as one control: a finger's height on a phone, its
+  /// words for VoiceOver, and a tap that reconnects.
+  Widget _tappable(String label, Widget child, {bool live = false}) {
+    final least = touchPlatform ? Touch.target : 0.0;
+    return Semantics(
+      button: true,
+      liveRegion: live,
+      label: label,
+      hint: reconnectHint,
+      onTap: _reconnect,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: _reconnect,
+        builder: (context, _) => ConstrainedBox(
+          constraints: BoxConstraints(minHeight: least),
+          child: Center(child: child),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     if (!_shown) return widget.otherwise;
     final palette = Palette.of(context);
+    final connection = _connection;
+    if (connection != null && connection.link == Link.failing) {
+      return _failing(context, connection);
+    }
+    final text = reconnectingText(touch: touchPlatform);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Space.xl, Space.s, Space.xl, 0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const LiveDot(),
-          const SizedBox(width: Space.s),
-          Flexible(
-            child: Text(
-              reconnectingText,
-              textAlign: TextAlign.center,
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.textMuted),
+      child: _tappable(
+        text,
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const LiveDot(),
+            const SizedBox(width: Space.s),
+            Flexible(
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Its tries failing: "Can't connect to mac-mini" by a red dot, and what
+  /// to do under it, as the connection line says them, ending with the
+  /// tap that tries again.
+  Widget _failing(BuildContext context, Connection connection) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final advice = tryAgainAdvice(connection.details, touch: touchPlatform);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Space.xl, Space.s, Space.xl, 0),
+      child: _tappable(
+        '${connection.line}. $advice',
+        live: true,
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Dot(color: palette.danger),
+                const SizedBox(width: Space.s),
+                Flexible(
+                  child: Text(
+                    connection.line,
+                    textAlign: TextAlign.center,
+                    style: type.caption.copyWith(
+                      color: palette.text,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              advice,
+              textAlign: TextAlign.center,
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
+
+/// Whether this is a touch device (iPhone, iPad, Android): "Tap", else
+/// "Click".
+bool get touchPlatform =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
+
+/// What [ReconnectingLine] says while it reconnects.
+String reconnectingText({required bool touch}) =>
+    'Reconnecting… ${touch ? 'Tap' : 'Click'} to try now.';
+
+/// The connection's advice ([Connection.details]), its "Trying again…"
+/// made the tap that tries again.
+String tryAgainAdvice(String details, {required bool touch}) {
+  final advice = details.replaceFirst(RegExp(r'\s*Trying again…$'), '');
+  final cue = '${touch ? 'Tap' : 'Click'} to try again.';
+  return advice.isEmpty ? cue : '$advice $cue';
+}
+
+/// VoiceOver's hint on [ReconnectingLine].
+const reconnectHint = 'Tries to reconnect now';
 
 /// While the agent works, a line above the message box at its end: the
 /// live dot, "Working", and Stop (Esc on a Mac). Above the box rather than
@@ -745,9 +883,6 @@ class WorkingLine extends StatelessWidget {
     );
   }
 }
-
-/// What [ReconnectingLine] says.
-const reconnectingText = "Reconnecting… You can send once it's back.";
 
 /// For an agent in an archived project (opened from a link, say), a quiet
 /// line above the message box saying so, with Unarchive. Messages sent

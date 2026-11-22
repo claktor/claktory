@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::encoding::{hex, unhex};
+use crate::encoding::{hex, same, unhex};
 use crate::factory::Factory;
 use crate::transcript::now_ms;
 
@@ -302,6 +302,9 @@ pub(crate) struct State {
     active: AtomicUsize,
     /// Joins under way: remote access stays on for them too.
     joining: AtomicUsize,
+    /// Their wires: the inviter may already be talking on one before the
+    /// join has saved its link here.
+    joining_wires: Mutex<HashSet<String>>,
     /// Each pipe's worker, which reaches its peer.
     workers: Mutex<HashMap<String, Arc<Worker>>>,
     /// One frame at a time per pipe from its peer.
@@ -422,6 +425,30 @@ impl Link {
         Ok(())
     }
 
+    /// Saves only what hearing from the peer changes (`received`): where
+    /// it's reached, its approval and pause, how far its frames have come
+    /// and when it was seen. The rest of the row is this side's to change
+    /// (`control`, `send`) at any moment meanwhile, and a whole-row save
+    /// from a copy read earlier would undo it: a ping heard while the
+    /// person approved left the link unapproved, so nothing went.
+    fn save_received(&self, db: &rusqlite::Connection) -> rusqlite::Result<()> {
+        db.execute(
+            "UPDATE pipe_links SET relays = ?2, addresses = ?3, peer_approved = ?4, peer_paused = ?5, received_seq = ?6, \
+             received_cseq = ?7, last_seen = ?8 WHERE pipe = ?1",
+            params![
+                self.pipe,
+                text(&self.relays),
+                text(&self.addresses),
+                self.peer_approved,
+                self.peer_paused,
+                self.received_seq,
+                self.received_cseq,
+                self.last_seen,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Both people approved and neither paused: messages go.
     fn flowing(&self) -> bool {
         self.approved && self.peer_approved && !self.paused && !self.peer_paused && !self.closed
@@ -429,7 +456,12 @@ impl Link {
 }
 
 fn load(factory: &Factory, pipe: &str) -> Option<Link> {
-    let db = factory.store.db();
+    load_from(&factory.store.db(), pipe)
+}
+
+/// The link, read with the database already held: read, changed and saved
+/// under one hold, nothing of this side's can come between.
+fn load_from(db: &rusqlite::Connection, pipe: &str) -> Option<Link> {
     db.query_row(&format!("SELECT {COLUMNS} FROM pipe_links WHERE pipe = ?1"), [pipe], Link::read).optional().unwrap_or_else(|error| {
         tracing::error!(%error, "could not read a pipe's link");
         None
@@ -694,11 +726,6 @@ fn sha256_hex(text: &str) -> String {
     hex(&Sha256::digest(text.as_bytes()))
 }
 
-/// Compares in full whatever matches.
-fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
 /// The four digits both people compare: as a device's, from the inviter's
 /// key, the joiner's and the secret's SHA-256.
 fn digits(inviter: &str, joiner: &str, secret_sha256: &str) -> String {
@@ -862,12 +889,21 @@ pub fn cancel_invite(factory: &Arc<Factory>, pipe: &str) {
 }
 
 /// Keeps remote access on while a join is under way.
-struct Joining(Weak<Factory>);
+struct Joining(Weak<Factory>, String);
+
+impl Joining {
+    fn start(factory: &Arc<Factory>, wire: &str) -> Joining {
+        factory.remote.pipes.joining.fetch_add(1, Ordering::Relaxed);
+        lock(&factory.remote.pipes.joining_wires).insert(wire.to_owned());
+        Joining(Arc::downgrade(factory), wire.to_owned())
+    }
+}
 
 impl Drop for Joining {
     fn drop(&mut self) {
         if let Some(factory) = self.0.upgrade() {
             factory.remote.pipes.joining.fetch_sub(1, Ordering::Relaxed);
+            lock(&factory.remote.pipes.joining_wires).remove(&self.1);
         }
     }
 }
@@ -884,8 +920,7 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
     if load(factory, pipe).is_some() || by_wire(factory, &code.wire).is_some() {
         return Err(PipeError::Exists);
     }
-    factory.remote.pipes.joining.fetch_add(1, Ordering::Relaxed);
-    let _joining = Joining(Arc::downgrade(factory));
+    let _joining = Joining::start(factory, &code.wire);
     let (endpoint, relays, addresses) = factory.reachable().await.map_err(|error| PipeError::Unreachable(error.to_string()))?;
     let me = endpoint.id().to_string();
     if me == code.endpoint {
@@ -945,26 +980,27 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
 
 /// Queues a control for the peer (`kind`), after `change`s the link.
 fn control(factory: &Arc<Factory>, pipe: &str, kind: &str, change: impl FnOnce(&mut Link)) -> Result<(), PipeError> {
-    let mut link = load(factory, pipe).ok_or(PipeError::NotFound)?;
-    if link.closed {
-        return Err(PipeError::Closed);
-    }
-    if link.peer.is_empty() {
-        return Err(PipeError::NotOpen);
-    }
-    change(&mut link);
-    let payload = Payload {
-        v: 1,
-        wire: link.wire.clone(),
-        kind: kind.to_owned(),
-        seq: link.next_cseq as u64,
-        sent_at: now_ms(),
-        ..Payload::default()
-    };
-    let bytes = frame(key(factory)?, &payload, &[]);
-    link.next_cseq += 1;
+    let key = key(factory)?;
     {
         let mut db = factory.store.db();
+        let mut link = load_from(&db, pipe).ok_or(PipeError::NotFound)?;
+        if link.closed {
+            return Err(PipeError::Closed);
+        }
+        if link.peer.is_empty() {
+            return Err(PipeError::NotOpen);
+        }
+        change(&mut link);
+        let payload = Payload {
+            v: 1,
+            wire: link.wire.clone(),
+            kind: kind.to_owned(),
+            seq: link.next_cseq as u64,
+            sent_at: now_ms(),
+            ..Payload::default()
+        };
+        let bytes = frame(key, &payload, &[]);
+        link.next_cseq += 1;
         let transaction = db.transaction().map_err(other)?;
         link.save(&transaction).map_err(other)?;
         transaction.execute("INSERT INTO pipe_outbox (pipe, control, frame) VALUES (?1, 1, ?2)", params![pipe, bytes]).map_err(other)?;
@@ -983,13 +1019,18 @@ pub fn approve(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
 /// Only once the pipe is open (both approved). Returns its place in this
 /// side's order.
 pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64, PipeError> {
-    let mut link = load(factory, pipe).ok_or(PipeError::NotFound)?;
-    if link.closed {
-        return Err(PipeError::Closed);
-    }
-    if !(link.approved && link.peer_approved) {
-        return Err(PipeError::NotOpen);
-    }
+    // Said before the files are read, as ever; said again under the hold
+    // below, where it counts.
+    let open = |link: &Link| {
+        if link.closed {
+            return Err(PipeError::Closed);
+        }
+        if !(link.approved && link.peer_approved) {
+            return Err(PipeError::NotOpen);
+        }
+        Ok(())
+    };
+    open(&load(factory, pipe).ok_or(PipeError::NotFound)?)?;
     if message.text.len() > MAX_TEXT {
         return Err(PipeError::TooLarge(format!("A message can hold at most {} KB of text.", MAX_TEXT / 1024)));
     }
@@ -1008,30 +1049,34 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
         metas.push(FileMeta { name: file.name.clone(), size: bytes.len() as u64, sha256: hex(&Sha256::digest(&bytes)) });
         files.push(bytes);
     }
-    let seq = link.next_seq as u64;
-    let payload = Payload {
-        v: 1,
-        wire: link.wire.clone(),
-        kind: KIND_MESSAGE.to_owned(),
-        seq,
-        msg_id: message.msg_id.clone(),
-        via: Some(message.via),
-        text: message.text,
-        files: metas,
-        sent_at: now_ms(),
-        ..Payload::default()
-    };
-    let bytes = frame(key(factory)?, &payload, &files);
-    link.next_seq += 1;
-    {
+    let key = key(factory)?;
+    let seq = {
         let mut db = factory.store.db();
+        let mut link = load_from(&db, pipe).ok_or(PipeError::NotFound)?;
+        open(&link)?;
+        let seq = link.next_seq as u64;
+        let payload = Payload {
+            v: 1,
+            wire: link.wire.clone(),
+            kind: KIND_MESSAGE.to_owned(),
+            seq,
+            msg_id: message.msg_id.clone(),
+            via: Some(message.via),
+            text: message.text,
+            files: metas,
+            sent_at: now_ms(),
+            ..Payload::default()
+        };
+        let bytes = frame(key, &payload, &files);
+        link.next_seq += 1;
         let transaction = db.transaction().map_err(other)?;
         link.save(&transaction).map_err(other)?;
         transaction
             .execute("INSERT INTO pipe_outbox (pipe, control, msg_id, frame) VALUES (?1, 0, ?2, ?3)", params![pipe, message.msg_id, bytes])
             .map_err(other)?;
         transaction.commit().map_err(other)?;
-    }
+        seq
+    };
     let count = queued(factory, pipe);
     // Not under the workers' lock: the store's link_changed takes Factory's,
     // and status, called under Factory's, takes the workers'.
@@ -1384,6 +1429,12 @@ fn joined(factory: &Arc<Factory>, peer: &str, payload: Payload) -> Reply {
 /// A frame of a pinned peer's: a ping, a control or a message.
 async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: Vec<Vec<u8>>) -> Reply {
     let Some(link) = by_wire(factory, &payload.wire) else {
+        // A join of ours whose answer came but whose link isn't saved yet:
+        // the inviter's first ping can come first, and "closed" would end
+        // the pipe it just joined.
+        if lock(&factory.remote.pipes.joining_wires).contains(&payload.wire) {
+            return Reply::code("later");
+        }
         return Reply::code("closed");
     };
     if link.peer != peer {
@@ -1426,7 +1477,7 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                         return Reply::code("ok");
                     }
                 }
-                if let Err(error) = link.save(&factory.store.db()) {
+                if let Err(error) = link.save_received(&factory.store.db()) {
                     tracing::error!(%error, "could not save a pipe's link");
                     return Reply::code("later");
                 }
@@ -1473,7 +1524,7 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
         }
         _ => Reply::code("bad"),
     };
-    if let Err(error) = link.save(&factory.store.db()) {
+    if let Err(error) = link.save_received(&factory.store.db()) {
         tracing::error!(%error, "could not save a pipe's link");
         return Reply::code("later");
     }
@@ -1547,5 +1598,38 @@ mod tests {
         offline(&mut status, "connection lost");
         assert_eq!(status.reason, "connection lost");
         assert_eq!(status.offline_since_ms, since);
+    }
+
+    /// A frame heard from the peer is handled on a copy of the link read
+    /// when it came; this side's person approving or an agent sending
+    /// meanwhile must survive its save (the pipes_between flake: a ping
+    /// heard while the person approved left the link unapproved here, and
+    /// the held message they let through never went).
+    #[test]
+    fn hearing_from_the_peer_never_undoes_what_this_side_changed_meanwhile() {
+        let dir = std::env::temp_dir().join(format!("factoryd-pipe-link-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let store = crate::store::Store::open(&dir.join("factory.db")).expect("store");
+        let link = Link { pipe: "p".into(), wire: "w".into(), peer: "k".into(), next_seq: 1, next_cseq: 1, ..Link::default() };
+        link.save(&store.db()).expect("saved");
+
+        let mut heard = load_from(&store.db(), "p").expect("the copy a frame is handled on");
+        {
+            let db = store.db();
+            let mut mine = load_from(&db, "p").expect("the link");
+            mine.approved = true;
+            mine.next_seq = 2;
+            mine.next_cseq = 2;
+            mine.save(&db).expect("saved");
+        }
+        heard.peer_approved = true;
+        heard.received_seq = 3;
+        heard.last_seen = 5;
+        heard.save_received(&store.db()).expect("saved");
+
+        let now = load_from(&store.db(), "p").expect("the link");
+        assert!(now.approved && now.peer_approved);
+        assert_eq!((now.next_seq, now.next_cseq, now.received_seq, now.last_seen), (2, 2, 3, 5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

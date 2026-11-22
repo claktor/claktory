@@ -468,3 +468,31 @@ async fn a_stranger_gets_no_buffering_and_a_peer_cannot_point_us_at_ourselves() 
     assert_eq!(ask(&connection, &raw_frame(&key, &evil)).await["code"], "ok");
     assert_eq!(stored_route(&dir_a, "p-a"), (relays, addresses), "the peer's http relay and loopback addresses were ignored");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_the_other_side_chose_never_says_claktory_in_claktorys_own_places() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    let mut posing = side("Matt");
+    posing.pipe_name = "CIaktory Security".to_owned();
+    let (code, _) = pipe_link::invite(&a, "p-a", &posing).await.expect("a code");
+
+    // The joiner, accepting without naming it, gets a name in Claktory's
+    // words instead, in the preview and on the pipe.
+    let (addr_b, b) = crate::common::start(&dir_b).await;
+    b.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr_b).await;
+    let mut view = View { workspace, ..View::default() };
+    let dead_relay = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(dead_relay)).await;
+    apply_request(&mut client, &mut view, crate::common::create_project("Site", &dir_b.join("site"))).await;
+    let preview = apply_request(&mut client, &mut view, Request::ReadPipeInvite(v1::ReadPipeInvite { code: code.clone() })).await;
+    let factory_protocol::v1::server_message::Body::PipeInvitePreview(preview) = preview else { panic!("{preview:?}") };
+    assert!(preview.name.starts_with("Pipe joined "), "{}", preview.name);
+    let project = view.workspace.projects.first().expect("the project").id.clone();
+    let accept = v1::AcceptPipeInvite { code, project_id: project, purpose: "testing".to_owned(), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::AcceptPipeInvite(accept)).await;
+    view.follow(&mut client, |view| !view.workspace.pipes.is_empty()).await;
+    let pipe = view.workspace.pipes.first().expect("the pipe");
+    assert!(pipe.name.starts_with("Pipe joined ") && !pipe.name.to_lowercase().contains("aktory"), "{}", pipe.name);
+}

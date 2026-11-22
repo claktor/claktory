@@ -139,7 +139,7 @@ where
         parameters,
         super::agent_handler(factory, agent, move |factory, agent, args| async move {
             let args: A = serde_json::from_value(args)?;
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = super::live(factory)?;
             run(factory, agent, args).await.map_err(factory_agent::Error::Other)
         }),
     )
@@ -238,7 +238,7 @@ pub(crate) fn started(tool: &str, is_error: bool, details: &Value) -> Option<v1:
     if !matches!(tool, "devices_add" | "extension_call") || is_error {
         return None;
     }
-    let text = |key: &str| details.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(details);
     let id = details.get("device_pairing")?.as_str()?.to_owned();
     Some(v1::DevicePairing {
         id,
@@ -390,10 +390,12 @@ fn word(state: State) -> &'static str {
 
 fn live_rows(store: &Store, agent: Option<&str>) -> rusqlite::Result<Vec<Row>> {
     let db = store.db();
-    let mut statement = db.prepare(&format!(
-        "SELECT {COLUMNS} FROM device_pairings WHERE state IN ('waiting', 'asking') AND (?1 IS NULL OR agent = ?1) ORDER BY id"
-    ))?;
-    statement.query_map([agent], Row::read)?.collect()
+    crate::store::query(
+        &db,
+        &format!("SELECT {COLUMNS} FROM device_pairings WHERE state IN ('waiting', 'asking') AND (?1 IS NULL OR agent = ?1) ORDER BY id"),
+        [agent],
+        Row::read,
+    )
 }
 
 /// Shows the agent's pairings as they are in its just-loaded conversation.

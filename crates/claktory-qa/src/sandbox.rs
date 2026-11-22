@@ -10,6 +10,7 @@
 //!                         mail/          the account service's emails, one file each
 //!                         account/       the account service's database and keys
 //!                         model.json     qa-model's script (with --model), read for every request
+//!                         home/models/speech/  the speech model (with --speech), copied in
 //!                         model.jsonl    what qa-model was asked and answered, a line each
 //!                         factoryd.log, account.log, model.out
 //! ```
@@ -171,6 +172,13 @@ pub struct Sandbox {
     /// The machine name its Claktory shows (devices, the footer, move
     /// codes): never this computer's own.
     pub machine_name: String,
+    /// It recognizes speech (`up --speech`): its factoryd runs the
+    /// commit's claktory-speech, on the model copied into its home.
+    pub speech: bool,
+    /// Who made it (`caller`), and when (ms since 1970): `down --all` ends
+    /// only the caller's own. Empty and 0 for sandboxes from before.
+    pub owner: String,
+    pub created_ms: i64,
 }
 
 impl Sandbox {
@@ -217,6 +225,9 @@ impl Sandbox {
             "log": self.dir.join("factoryd.log"),
             "commit": self.commit,
             "machine_name": self.machine_name,
+            "speech": self.speech,
+            "owner": self.owner,
+            "created_ms": self.created_ms,
         })
     }
 
@@ -232,6 +243,9 @@ impl Sandbox {
             "bin": self.bin,
             "commit": self.commit,
             "machine_name": self.machine_name,
+            "speech": self.speech,
+            "owner": self.owner,
+            "created_ms": self.created_ms,
         })
     }
 
@@ -257,8 +271,37 @@ impl Sandbox {
             model_pid: number("model_pid").and_then(|pid| i32::try_from(pid).ok()),
             bin: PathBuf::from(record.get("bin")?.as_str()?),
             commit: record.get("commit").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            speech: record.get("speech").and_then(Value::as_bool).unwrap_or(false),
+            owner: record.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            created_ms: number("created_ms").unwrap_or(0),
         })
     }
+}
+
+/// Who's running claktory-qa, so each sandbox records who made it and
+/// `down --all` ends only the caller's own (the QA root is shared by every
+/// agent on this computer): `CLAKTORY_QA_OWNER`, else `FACTORY_AGENT_ID`,
+/// else the agent whose checkout scripts/qa.sh ran from
+/// (`…/trees/<id>/…`), else that checkout's path.
+pub fn caller() -> String {
+    for key in ["CLAKTORY_QA_OWNER", "FACTORY_AGENT_ID"] {
+        if let Some(owner) = std::env::var(key).ok().map(|owner| owner.trim().to_owned()).filter(|owner| !owner.is_empty()) {
+            return owner;
+        }
+    }
+    let repo = std::env::var_os("CLAKTORY_QA_REPO").map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    owner_of(&repo)
+}
+
+/// The agent a checkout at `repo` belongs to (`…/trees/<id>/…`), or its path.
+fn owner_of(repo: &Path) -> String {
+    let parts: Vec<&std::ffi::OsStr> = repo.iter().collect();
+    parts
+        .windows(2)
+        .rev()
+        .find(|pair| pair[0] == "trees")
+        .and_then(|pair| pair[1].to_str())
+        .map_or_else(|| repo.display().to_string(), str::to_owned)
 }
 
 /// The machine name a sandbox shows unless `up --machine-name` chose one.
@@ -293,6 +336,9 @@ pub struct Up {
     pub model: Option<Option<PathBuf>>,
     /// The machine name it shows; "qa-<name>" when left out.
     pub machine_name: Option<String>,
+    /// Speech recognition, on this model (a GGUF with its `.receipt`
+    /// beside it, as a Claktory keeps it in models/speech).
+    pub speech: Option<PathBuf>,
 }
 
 /// Starts a sandbox: its account service (unless left out), its settings,
@@ -307,6 +353,13 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         let text = std::fs::read_to_string(script).map_err(|error| Failure::usage(format!("Can't read {}: {error}", script.display())))?;
         crate::model::check_script(&text).map_err(Failure::usage)?;
     }
+    if request.speech.is_some() && !bin.join("claktory-speech").is_file() {
+        return Err(Failure::failed(format!(
+            "There's no claktory-speech beside claktory-qa in {}: run `scripts/qa.sh up --speech MODEL`, which builds it.",
+            bin.display()
+        )));
+    }
+    let speech = request.speech.as_deref().map(speech_model).transpose()?;
     for binary in ["factoryd", "claktory-account"] {
         if !bin.join(binary).is_file() {
             return Err(Failure::failed(format!(
@@ -357,8 +410,15 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         bin: bin.clone(),
         commit: std::env::var("CLAKTORY_QA_COMMIT").unwrap_or_default(),
         machine_name,
+        speech: speech.is_some(),
+        owner: caller(),
+        created_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX)),
     };
-    let started = start(&mut sandbox, request.account, request.model.as_ref(), &ports);
+    let started = speech
+        .map_or(Ok(()), |(model, receipt)| copy_speech_model(&sandbox.home(), &model, &receipt))
+        .and_then(|()| start(&mut sandbox, request.account, request.model.as_ref(), &ports));
     if let Err(failure) = started {
         // Whatever started goes again, and the folder with it.
         stop(&sandbox);
@@ -473,6 +533,42 @@ fn launch(sandbox: &mut Sandbox) -> Result<(), Failure> {
     let address = SocketAddr::from(([127, 0, 0, 1], sandbox.port));
     wait_for(START_WAIT, || pairing.is_file() && TcpStream::connect(address).is_ok(), || sandbox.running())
         .map_err(|why| Failure::failed(format!("factoryd didn't start ({why}). Its log: {}", dir.join("factoryd.log").display())))?;
+    Ok(())
+}
+
+/// A speech model to copy in: the GGUF and its receipt, both files.
+fn speech_model(model: &Path) -> Result<(PathBuf, PathBuf), Failure> {
+    let is_model = model.extension().is_some_and(|extension| extension == "gguf");
+    if !is_model || !model.is_file() {
+        return Err(Failure::usage(format!("--speech takes a speech model's .gguf file; {} isn't one.", model.display())));
+    }
+    let receipt = model.with_extension("receipt");
+    if !receipt.is_file() {
+        return Err(Failure::usage(format!(
+            "There's no {} beside the model: give the one a Claktory keeps in models/speech, receipt and all.",
+            receipt.display()
+        )));
+    }
+    Ok((model.to_owned(), receipt))
+}
+
+/// Copies the speech model and its receipt into the sandbox's models/speech,
+/// where its factoryd looks. A copy (a clone, on APFS), never a link: the
+/// sandbox can delete or replace it without touching the original, which is
+/// only read. The receipt names the model's modified time, so the copy keeps
+/// it.
+fn copy_speech_model(home: &Path, model: &Path, receipt: &Path) -> Result<(), Failure> {
+    let dir = home.join("models/speech");
+    std::fs::create_dir_all(&dir).map_err(|error| Failure::failed(format!("Can't make {}: {error}", dir.display())))?;
+    for file in [model, receipt] {
+        let Some(name) = file.file_name() else { continue };
+        let copy = dir.join(name);
+        let copied = std::fs::copy(file, &copy).and_then(|_| {
+            let modified = std::fs::metadata(file)?.modified()?;
+            std::fs::File::options().write(true).open(&copy)?.set_modified(modified)
+        });
+        copied.map_err(|error| Failure::failed(format!("Can't copy {} into the sandbox: {error}", file.display())))?;
+    }
     Ok(())
 }
 
@@ -597,6 +693,9 @@ fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
         ("FACTORY_PORT", sandbox.port.to_string()),
         ("FACTORY_MACHINE_NAME", sandbox.machine_name.clone()),
     ];
+    if sandbox.speech {
+        environment.push(("FACTORY_SPEECH", sandbox.bin.join("claktory-speech").display().to_string()));
+    }
     if let Some(port) = sandbox.model_port {
         environment.push(("OPENROUTER_API_KEY", "qa-model".to_owned()));
         environment.push(("OPENROUTER_BASE_URL", format!("http://127.0.0.1:{port}/v1")));
@@ -710,6 +809,13 @@ pub fn env_lines(sandbox: &Sandbox) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sandbox_is_owned_by_the_agent_whose_checkout_made_it() {
+        assert_eq!(owner_of(Path::new("/Users/me/.factory/trees/backend-2/factory")), "backend-2");
+        assert_eq!(owner_of(Path::new("/Users/me/.factory/trees/qa/factory/crates")), "qa");
+        assert_eq!(owner_of(Path::new("/Users/me/factory")), "/Users/me/factory", "the main checkout is its own");
+    }
 
     #[test]
     fn real_folders_ports_and_broad_roots_are_refused() {

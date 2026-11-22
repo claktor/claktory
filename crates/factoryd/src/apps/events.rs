@@ -141,6 +141,7 @@ fn deliver(factory: &Arc<Factory>, app: &str, name: &str, agent: &str, text: &st
         summary,
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     factory.deliver_event(agent, text.to_owned(), event);
 }

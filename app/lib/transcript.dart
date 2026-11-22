@@ -9,6 +9,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'app_grant_card.dart';
 import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
@@ -16,6 +17,7 @@ import 'avatar.dart';
 import 'chats.dart' show ChatScope, chatTitle;
 import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
+import 'decision.dart';
 import 'conversation_scrollbar.dart';
 import 'explorer.dart' show openFile;
 import 'extensions.dart' show logTime;
@@ -35,6 +37,7 @@ import 'pipe_start.dart' show PipeStartCard;
 import 'pipes.dart' show SecretApprovalCard;
 import 'refusal_card.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'quiet_copies.dart' show MessageProvenance, quietQueuedLabel;
 import 'scope.dart';
 import 'secrets.dart';
 import 'state.dart';
@@ -1233,10 +1236,23 @@ class _TranscriptViewState extends State<TranscriptView>
                 if (voice != null && !sending)
                   const TranscribingLine()
                 else
-                  Text(
-                    sending ? 'Sending…' : 'Queued',
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textFaint),
+                  // Wraps: a quiet one's words name the agent.
+                  Flexible(
+                    child: Text(
+                      sending
+                          ? 'Sending…'
+                          // A quiet one waits for the agent to start working.
+                          : message.quiet
+                          ? quietQueuedLabel(
+                              AppScope.of(context).workspace
+                                      .agent(widget.agentId)
+                                      ?.name ??
+                                  'the agent',
+                            )
+                          : 'Queued',
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textFaint),
+                    ),
                   ),
               ],
             ),
@@ -2074,6 +2090,15 @@ class _EntryViewState extends State<EntryView> {
         ),
         Space.l,
       ),
+      Entry_Kind.appGrant => (
+        AppGrantCard(
+          key: ValueKey(entry.appGrant.id),
+          entry.appGrant,
+          agentId: AppScope.of(context).transcript.agentId,
+          seq: seq,
+        ),
+        Space.l,
+      ),
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
     // A message's words, for its Copy and Select text on a phone and its
@@ -2490,8 +2515,8 @@ class DeviceMark extends StatelessWidget {
 }
 
 /// The agent's proposal to Rivet, for the person to decide: a card in
-/// Rivet's color with the proposal, a comment box (Enter approves), Dismiss
-/// and Approve. Decided, it says how and when, with the person's comment.
+/// Rivet's color with the proposal, Dismiss and Approve, and a comment
+/// for either (Enter approves). Decided, it says how and when, with the person's comment.
 /// The backend sends the entry back decided; the card keeps nothing.
 class ProposalCard extends StatefulWidget {
   const ProposalCard(this.proposal, {super.key, this.agentId, this.chatId});
@@ -2538,7 +2563,7 @@ class _ProposalCardState extends State<ProposalCard> {
             : '',
         widget.proposal.id,
         approve: approve,
-        comment: approve ? _comment.text.trim() : '',
+        comment: _comment.text.trim(),
         chatId: chatId,
       );
     } on RequestFailure catch (failure) {
@@ -2598,17 +2623,11 @@ class _ProposalCardState extends State<ProposalCard> {
           Markdown(proposal.text, color: dismissed ? palette.textMuted : null),
           const SizedBox(height: Space.m),
           if (pending) ...[
-            TextField(
-              controller: _comment,
-              placeholder: 'A comment for $name, if you like',
-              onSubmitted: (_) => _decide(approve: true),
-            ),
-            const SizedBox(height: Space.s),
             Row(
               children: [
                 Expanded(
                   child: Text(
-                    _error ?? 'Enter approves; $name gets it as your message.',
+                    _error ?? 'If you approve, $name gets it as your message.',
                     style: TypeScale.of(context).caption.copyWith(
                       color: _error == null
                           ? palette.textFaint
@@ -2628,6 +2647,12 @@ class _ProposalCardState extends State<ProposalCard> {
                   onPressed: _deciding ? null : () => _decide(approve: true),
                 ),
               ],
+            ),
+            DecisionComment(
+              controller: _comment,
+              agent: name,
+              enabled: !_deciding,
+              onSubmitted: () => _decide(approve: true),
             ),
           ] else ...[
             // Who decided: the person.
@@ -2795,6 +2820,8 @@ class _AgentMessageState extends State<_AgentMessage> {
                   .copyWith(color: palette.textFaint),
             ),
           ),
+        // Why it was sent and what it replies to, when it says.
+        MessageProvenance(event: widget.event),
       ],
     );
   }

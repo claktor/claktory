@@ -25,6 +25,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../backend.dart' show Backend;
+import '../diagnostics_record.dart'
+    show NotificationsKey, NotificationsKind, PushStep;
 import '../notifications.dart' show claktoryId;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../rail.dart' show Claktories, Claktory;
@@ -176,6 +179,30 @@ class PushRegistrar {
 
   final Claktories claktories;
   final PushDevice device;
+
+  /// Where setting up notifications last failed, by the connection to each
+  /// Claktory it failed for, until it works: Settings → Notifications says
+  /// so, with Try again ([retry]).
+  final failures = ValueNotifier<Map<Backend, PushStep>>(const {});
+
+  /// Sets notifications up with [backend]'s Claktory again, now.
+  void retry(Backend backend) {
+    for (final claktory in claktories.all) {
+      if (identical(claktory.backend, backend)) _sync(claktory);
+    }
+  }
+
+  void _failed(Backend backend, PushStep? step) {
+    final now = {...failures.value};
+    if (step == null) {
+      if (now.remove(backend) == null) return;
+    } else {
+      if (now[backend] == step) return;
+      now[backend] = step;
+    }
+    failures.value = now;
+  }
+
   final PushRelay relay;
   final DateTime Function() _now;
 
@@ -275,6 +302,8 @@ class PushRegistrar {
     if (id == 'local') return;
     final settings = backend.workspace.workspace.settings.notifications;
     final relayUrl = settings.relay.isEmpty ? defaultPushRelay : settings.relay;
+    var step = PushStep.other;
+    var fresh = false;
     try {
       var kept = await device.registration(id);
       if (kept == null ||
@@ -282,11 +311,14 @@ class PushRegistrar {
           kept.relay != relayUrl ||
           kept.platform != state.platform ||
           _now().difference(kept.registered) > pushRefresh) {
+        fresh = true;
+        step = PushStep.relay;
         final handle = await relay.register(
           relayUrl,
           state.platform,
           state.token,
         );
+        step = PushStep.key;
         final key = await device.register(
           id,
           handle: handle,
@@ -303,6 +335,7 @@ class PushRegistrar {
           key: key,
         );
       }
+      step = PushStep.claktory;
       await backend.registerNotifications(
         RegisterNotifications(
           handle: kept.handle,
@@ -310,13 +343,64 @@ class PushRegistrar {
           platform: state.pushPlatform,
         ),
       );
+      _failed(backend, null);
+      backend.diagnostics?.add(NotificationsKind.registered, {
+        NotificationsKey.fresh: fresh,
+      });
     } catch (error) {
       // The relay out of reach or refusing, the keychain or the Claktory:
-      // tried again on the next connect.
+      // shown in Settings, and tried again on the next connect.
       // Only what kind of failure: what it says could hold the token or
       // the handle, which never go in a log.
-      debugPrint("couldn't register for notifications (${error.runtimeType})");
+      var status = 0;
+      if (error case PlatformException(code: 'keychain', :final details)) {
+        if (details case {'step': 'registration'}) {
+          step = PushStep.registration;
+        }
+        if (details case {'status': final int code}) status = code.abs();
+      }
+      debugPrint(
+        "couldn't register for notifications at ${step.name} "
+        '(${error.runtimeType}${status == 0 ? '' : ' $status'})',
+      );
+      _failed(backend, step);
+      backend.diagnostics?.add(NotificationsKind.failed, {
+        NotificationsKey.step: step,
+        NotificationsKey.fresh: fresh,
+        if (status != 0) NotificationsKey.status: status,
+      });
     }
+  }
+
+  /// Whether the person lets Claktory notify them, and this device's push
+  /// token, as last read; null before it's read.
+  PushState? get state => _state;
+
+  /// The person asked for notifications in Settings: the system asks
+  /// (unless it has already), and a yes registers with every Claktory at
+  /// once. Answers the state as it is now, read afresh (after the person
+  /// changed it in the system's Settings, say).
+  Future<PushState?> ask() async {
+    _asked = true;
+    // Afresh: the person may have changed it in the system's Settings.
+    final state = await _safely(device.state) ?? _state;
+    if (state != null && state.permission == 'not_determined') {
+      final answer = await _safely(device.ask);
+      if (answer == 'allowed') {
+        _state = await _safely(device.state) ?? state;
+        _syncAll();
+      }
+    }
+    return refresh();
+  }
+
+  /// Reads the state again (the app came back from the system's
+  /// Settings): newly allowed, it registers with every Claktory.
+  Future<PushState?> refresh() async {
+    final before = _state;
+    _state = await _safely(device.state) ?? before;
+    if (_state?.allowed == true && before?.allowed != true) _syncAll();
+    return _state;
   }
 
   /// The person just did something they'd want to hear back about (sent a

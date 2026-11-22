@@ -37,6 +37,9 @@ void main() {
       await tester.enterText(find.byType(EditableText), _code);
       await tester.pump();
       await tester.tap(find.text('Connect'));
+      await tester.pump(const Duration(milliseconds: 500));
+      // A code asks first: the confirmation's Connect.
+      await tester.tap(find.text('Connect').last);
     }
     // Paired before with a key this Claktory no longer knows: the new code.
     for (var i = 0; i < 100 && _code.isNotEmpty; i++) {

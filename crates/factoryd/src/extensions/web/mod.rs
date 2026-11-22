@@ -1,5 +1,5 @@
 //! Web: the agent searches the web and reads pages, as a browser on this
-//! computer would. Search goes to public engines (DuckDuckGo, then Brave)
+//! computer would. Search goes to free public engines (see `engines`)
 //! with no account or key; every request looks like one real browser (its
 //! TLS handshake, HTTP/2 settings and headers, from `primp`), is paced for
 //! the whole Factory, and a block is never retried but cooled down. Pages
@@ -160,7 +160,12 @@ async fn run_search(factory: Arc<Factory>, agent: String, args: serde_json::Valu
         text.push_str(&format!("\n{notice}\n"));
     }
     if answers.iter().all(|answer| answer.unavailable.is_some()) {
-        let why: Vec<&str> = answers.iter().filter_map(|answer| answer.unavailable.as_deref()).collect();
+        let mut why: Vec<&str> = Vec::new();
+        for reason in answers.iter().filter_map(|answer| answer.unavailable.as_deref()) {
+            if !why.contains(&reason) {
+                why.push(reason);
+            }
+        }
         let mut error = format!("Search is unavailable right now: {}. Fetch a known URL with web_fetch, or try later.", why.join("; "));
         for notice in &blocked {
             error.push(' ');

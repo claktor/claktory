@@ -5,9 +5,15 @@ import 'protocol/factory/v1/factory.pb.dart';
 
 /// What waits for the person's answer in agents' conversations: pending
 /// secret requests, connections to make and proposals to Rivet
-/// (Agent.waiting_seqs, the backend's).
-int waitingIn(Iterable<Agent> agents) =>
-    agents.fold(0, (sum, agent) => sum + agent.waitingSeqs.length);
+/// (Agent.waiting_seqs, the backend's), and checklist items waiting on the
+/// person with no card asking (Agent.waiting_items).
+int waitingIn(Iterable<Agent> agents) => agents.fold(
+  0,
+  (sum, agent) =>
+      sum +
+      agent.waitingSeqs.length +
+      agent.waitingItems.where((item) => !item.hasPendingAsk).length,
+);
 
 /// How a count of what waits reads on a mark: "9+" past nine.
 String waitingCount(int count) => count > 9 ? '9+' : '$count';

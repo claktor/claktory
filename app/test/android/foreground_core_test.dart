@@ -705,6 +705,9 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Connect'));
       await pumpFrames(tester);
+      // A code asks first (confirmPairing).
+      await tester.tap(find.text('Connect').last);
+      await pumpFrames(tester);
       expect(harness.connections.current?.code, code);
       expect(harness.backend.target?.endpointId, 'c' * 64);
       expect(harness.camera.asked, 0);

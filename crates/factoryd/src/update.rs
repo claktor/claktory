@@ -23,6 +23,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use factory_protocol::v1::{self, UpdateCheckState as CheckState};
+
 use crate::factory::{Factory, RequestError};
 use crate::home::Home;
 
@@ -414,6 +416,40 @@ impl Health {
     }
 }
 
+/// Asking again within this of the last check gives its answer again.
+const CHECK_AGAIN_AFTER: Duration = Duration::from_secs(10);
+
+/// The release channel, shared by its schedule and Check for updates so
+/// only one of them reads or downloads at a time, and the person's checks.
+#[derive(Default)]
+pub struct Updates {
+    channel: std::sync::OnceLock<Arc<tokio::sync::Mutex<crate::channel::Channel>>>,
+    /// A check the person asked for is running.
+    asked: AtomicBool,
+    /// When the person's last check finished.
+    last: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// What a finished check says: `failed`, unless a newer release than this
+/// backend is here to offer.
+fn answer(latest: &Release, failed: Option<String>) -> v1::UpdateCheck {
+    answer_for(VERSION, latest, failed)
+}
+
+/// As `answer`, for a backend of version `running`. An unstamped one ("dev")
+/// is older than any release, as the channel takes it.
+fn answer_for(running: &str, latest: &Release, failed: Option<String>) -> v1::UpdateCheck {
+    let checked_ms = crate::transcript::now_ms();
+    let offered = !latest.version.is_empty() && (running == "dev" || newer(&latest.version, running));
+    if offered {
+        return v1::UpdateCheck { state: CheckState::Ready.into(), version: latest.version.clone(), checked_ms, ..Default::default() };
+    }
+    if let Some(error) = failed {
+        return v1::UpdateCheck { state: CheckState::Failed.into(), error, checked_ms, ..Default::default() };
+    }
+    v1::UpdateCheck { state: CheckState::UpToDate.into(), version: running.to_owned(), checked_ms, ..Default::default() }
+}
+
 impl Factory {
     /// Judges a backend on trial: it passes once it serves an app, or when no
     /// app tried to connect within the trial. An app that tried and wasn't
@@ -463,8 +499,125 @@ impl Factory {
             }
             inner.update_error.clear();
             inner.latest_release = latest;
+            // A release that turned up after a check, from anywhere, is
+            // what that check's answer says now.
+            if matches!(inner.update_check.state(), CheckState::UpToDate | CheckState::Ready | CheckState::Failed) {
+                inner.update_check = answer(&inner.latest_release, None);
+            }
             self.broadcast_workspace(&inner);
         }
+    }
+
+    /// Settings' Check for updates: checks the channel and the releases
+    /// here now, in the background; Workspace.update_check says what it
+    /// found. While a check runs, or within `CHECK_AGAIN_AFTER` of the last,
+    /// asking again changes nothing.
+    pub fn check_for_updates(self: &Arc<Self>) -> Result<(), RequestError> {
+        {
+            let mut last = self.updates.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.updates.asked.load(Ordering::Relaxed) || last.is_some_and(|at| at.elapsed() < CHECK_AGAIN_AFTER) {
+                return Ok(());
+            }
+            self.updates.asked.store(true, Ordering::Relaxed);
+            *last = None;
+        }
+        self.show_check(v1::UpdateCheck { state: CheckState::Checking.into(), checked_ms: crate::transcript::now_ms(), ..Default::default() });
+        let factory = self.clone();
+        tokio::spawn(async move {
+            let failed = match factory.updates.channel.get().cloned() {
+                // Waits for a check of the schedule's that's running.
+                Some(channel) => factory.check_channel(&mut *channel.lock().await, true).await.err(),
+                None => None,
+            };
+            factory.refresh_release().await;
+            {
+                let mut inner = factory.lock();
+                inner.update_check = answer(&inner.latest_release, failed);
+                factory.broadcast_workspace(&inner);
+            }
+            *factory.updates.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
+            factory.updates.asked.store(false, Ordering::Relaxed);
+        });
+        Ok(())
+    }
+
+    /// Checks the release channel at `url` from now on (`channel::poll`
+    /// checks it on a schedule); once, at start.
+    pub fn use_channel(&self, url: &str) {
+        let _ = self.updates.channel.set(Arc::new(tokio::sync::Mutex::new(crate::channel::Channel::new(self.home.clone(), url))));
+    }
+
+    /// The scheduled check of the channel. It keeps an answer the person
+    /// saw current, but shows a failure only of a download it showed; any
+    /// other failure leaves the answer as it was.
+    pub async fn check_on_schedule(self: &Arc<Self>) {
+        let Some(channel) = self.updates.channel.get().cloned() else { return };
+        let result = self.check_channel(&mut *channel.lock().await, false).await;
+        self.refresh_release().await;
+        if self.updates.asked.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut inner = self.lock();
+        let shown = inner.update_check.state();
+        if shown == CheckState::None {
+            return;
+        }
+        let now = match result {
+            Ok(()) => answer(&inner.latest_release, None),
+            // The download it showed failed.
+            Err(why) if shown == CheckState::Downloading => answer(&inner.latest_release, Some(why)),
+            // A failure nobody asked about leaves the answer as it was: it
+            // never turns into "up to date".
+            Err(_) => return,
+        };
+        inner.update_check = now;
+        self.broadcast_workspace(&inner);
+    }
+
+    /// Reads the channel and downloads a newer release, showing it as
+    /// downloading when the person asked or saw an answer already. Err says
+    /// why it couldn't, for the person.
+    async fn check_channel(&self, channel: &mut crate::channel::Channel, asked: bool) -> Result<(), String> {
+        use crate::channel::{ChannelError, Checked, Found};
+        let words = |error: ChannelError| {
+            tracing::warn!(%error, "could not check for releases");
+            match error {
+                ChannelError::Fetch(_) => "Claktory couldn't reach the update server. Check your internet connection, then try again.".to_owned(),
+                ChannelError::Manifest(_) => "The update server's answer couldn't be read. Try again later.".to_owned(),
+                ChannelError::Unsigned(_) => "The update offered isn't signed by Claktory, so it wasn't downloaded.".to_owned(),
+                ChannelError::Rejected { version, .. } => format!("{version} didn't download correctly, so Claktory didn't keep it."),
+                ChannelError::Io(error) => format!("Claktory couldn't save the update: {error}."),
+            }
+        };
+        match channel.find().await {
+            Ok(Found::UpToDate) => Ok(()),
+            Ok(Found::Skipped { version, why }) => Err(format!("{version} is out, but it can't run here: {why}.")),
+            Ok(Found::Newer(manifest, tarball)) => {
+                if asked || self.lock().update_check.state() != CheckState::None {
+                    self.show_check(v1::UpdateCheck {
+                        state: CheckState::Downloading.into(),
+                        version: manifest.version.clone(),
+                        checked_ms: crate::transcript::now_ms(),
+                        ..Default::default()
+                    });
+                }
+                match channel.fetch(&manifest, &tarball).await {
+                    Ok(Checked::Downloaded(version)) => {
+                        tracing::info!(%version, "release ready to install");
+                        Ok(())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(words(error)),
+                }
+            }
+            Err(error) => Err(words(error)),
+        }
+    }
+
+    fn show_check(&self, check: v1::UpdateCheck) {
+        let mut inner = self.lock();
+        inner.update_check = check;
+        self.broadcast_workspace(&inner);
     }
 
     pub async fn install_update(self: &Arc<Self>, app_path: &str) -> Result<(), RequestError> {
@@ -739,6 +892,20 @@ pub fn fall_back(home: &Home, how_it_ended: &str) -> bool {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_offers_a_newer_release_even_when_the_channel_failed() {
+        let release = |version: &str| Release { version: version.into(), backend: version.into(), changelog: Vec::new() };
+        let failed = || Some("no network".to_owned());
+        let ready = answer_for("v0.1.16", &release("v0.1.17"), failed());
+        assert_eq!((ready.state(), ready.version.as_str(), ready.error.as_str()), (CheckState::Ready, "v0.1.17", ""));
+        let current = answer_for("v0.1.16", &release("v0.1.16"), None);
+        assert_eq!((current.state(), current.version.as_str()), (CheckState::UpToDate, "v0.1.16"));
+        let older = answer_for("v0.1.16", &release("v0.1.15"), failed());
+        assert_eq!((older.state(), older.error.as_str()), (CheckState::Failed, "no network"));
+        assert_eq!(answer_for("v0.1.16", &release(""), None).state(), CheckState::UpToDate);
+        assert_eq!(answer_for("dev", &release("v0.1.3-dev.4"), None).state(), CheckState::Ready);
+    }
 
     fn bundle(at: &Path, marker: &str) {
         std::fs::create_dir_all(at.join("Contents")).expect("dir");

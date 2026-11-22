@@ -26,8 +26,18 @@ pub(crate) const WORLD_VIEWS: &str = "claktory:app@1.1";
 pub(crate) const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// What the signature is made over, before the files' lines.
 const SIGNED_PREFIX: &str = "claktory-app-v1\n";
-/// Claktory's own key for apps it makes (tier Claktory); none yet.
-const CLAKTORY_KEYS: &[&str] = &[];
+/// Claktory's own keys for apps it makes (tier Claktory): the Ed25519
+/// public key, standard base64. Apps only: this isn't the key releases of
+/// Claktory are signed with, and it signs nothing else. Its private half
+/// lives in the vault (scripts/sign-clapp.sh --claktory signs with it and
+/// refuses a key not listed here). An install pins the key it came with,
+/// so adding or retiring a key here never lets one publisher's app replace
+/// another's: it only changes the tier shown.
+const CLAKTORY_KEYS: &[&str] = &[
+    // The Claktory apps publisher key (2026-11), from the vault's
+    // "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII5l9hw1FpwDhaXLFH/NhQkOYKrjZSBr6fKotr5j8vaH".
+    "jmX2HDUWnAOFpcsUf82FCQ5gquNlIGvp8qi2vmPy9oc=",
+];
 /// The most an app may ask for.
 const MAX_MEMORY_MB: u32 = 1024;
 const MAX_STORAGE_MB: u32 = 1024;
@@ -443,6 +453,19 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claktorys_apps_key_is_the_vaults_and_only_it_is_claktorys() {
+        // The vault's public key as ssh shows it: its last 32 bytes are the key.
+        let ssh = STANDARD.decode("AAAAC3NzaC1lZDI1NTE5AAAAII5l9hw1FpwDhaXLFH/NhQkOYKrjZSBr6fKotr5j8vaH").expect("base64");
+        let key = STANDARD.encode(&ssh[ssh.len() - 32..]);
+        assert_eq!(CLAKTORY_KEYS, [key.as_str()]);
+        assert_eq!(tier_of(&key), Tier::Claktory);
+        assert_eq!(short_key(&key), "ed25519:jmX2HDUWnAOFpcsU");
+        let other = STANDARD.encode([9u8; 32]);
+        assert_eq!(tier_of(&other), Tier::Local);
+        assert_eq!(tier_of(""), Tier::Local);
+    }
 
     #[test]
     fn zoes_telegram_manifest_reads() {

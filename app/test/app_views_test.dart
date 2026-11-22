@@ -518,6 +518,67 @@ void main() {
       expect(find.text('and 100 more', skipOffstage: false), findsOneWidget);
     });
 
+    testWidgets("a form's fields say once, above them, who gets what's "
+        'typed', (tester) async {
+      Map<String, Object?> field(String id, String label) => {
+        'id': id,
+        'component': 'TextField',
+        'label': label,
+        'value': {'@path': '/$id'},
+      };
+      transport.answer = (_) => _surface(
+        snapshot: _snapshot(
+          [
+            {
+              'id': 'root',
+              'component': 'Column',
+              'children': ['title', 'card', 'search_card'],
+            },
+            {'id': 'title', 'component': 'Text', 'text': 'Edit chart'},
+            {'id': 'card', 'component': 'Card', 'child': 'form'},
+            {
+              'id': 'form',
+              'component': 'Column',
+              'children': ['heading', 'name', 'range', 'series'],
+            },
+            {'id': 'heading', 'component': 'Text', 'text': 'Chart'},
+            field('name', 'Name'),
+            {
+              'id': 'range',
+              'component': 'Row',
+              'children': ['min', 'max'],
+            },
+            field('min', 'Least'),
+            field('max', 'Most'),
+            {
+              'id': 'series',
+              'component': 'List',
+              'children': {'componentId': 'serie', 'path': '/series'},
+            },
+            field('serie', 'Series'),
+            // Holds itself: counted once, never forever.
+            {'id': 'loop', 'component': 'Card', 'child': 'loop'},
+          ],
+          {
+            'series': ['a', 'b'],
+          },
+        ),
+      );
+      await show(tester);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Charts gets what you type below.'), findsOneWidget);
+      expect(find.text('Charts gets what you type here.'), findsNothing);
+      // Above the first field, under what comes before it.
+      final note = tester.getTopLeft(
+        find.text('Charts gets what you type below.'),
+      );
+      expect(note.dy, greaterThan(tester.getTopLeft(find.text('Chart')).dy));
+      expect(note.dy, lessThan(tester.getTopLeft(find.text('Name')).dy));
+
+      // A lone field says it under it: the dashboard's, above.
+    });
+
     testWidgets("without the app's name, it's \"This app\", never a title the "
         'app chose', (tester) async {
       transport.answer = (_) => AppSurfaceData(

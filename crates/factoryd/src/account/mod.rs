@@ -23,6 +23,7 @@
 
 pub(crate) mod analytics;
 pub(crate) mod anchor;
+pub(crate) mod apps;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -441,10 +442,29 @@ impl State {
         body: Vec<u8>,
         signer: Option<(&str, &SigningKey)>,
     ) -> Result<Vec<u8>, Failure> {
+        self.send_waiting(service, service_key, method, path, body, signer, None).await
+    }
+
+    /// `send`, allowed `wait` instead of the usual timeout: a long poll
+    /// (the apps' DM events), which the service holds for up to 25 seconds.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_waiting(
+        &self,
+        service: &str,
+        service_key: Option<&VerifyingKey>,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        signer: Option<(&str, &SigningKey)>,
+        wait: Option<Duration>,
+    ) -> Result<Vec<u8>, Failure> {
         let unreachable = |why: String| Failure::Unreachable(why);
         for attempt in 0..3 {
             let mut request =
                 self.http.request(method.parse().map_err(|_| unreachable(format!("bad method {method}")))?, format!("{service}{path}"));
+            if let Some(wait) = wait {
+                request = request.timeout(wait);
+            }
             if !body.is_empty() {
                 request = request.header(reqwest::header::CONTENT_TYPE, "application/json").body(body.clone());
             }
@@ -479,7 +499,8 @@ impl State {
                 });
             }
             self.lock().saved.last_contact_ms = now_ms();
-            if status == 200 {
+            // 204: done, with nothing to say (revoking an app grant).
+            if status == 200 || status == 204 {
                 return Ok(answer);
             }
             let error: ErrorBody = serde_json::from_slice(&answer).map_err(|_| unreachable(format!("{status}: an unreadable error")))?;
@@ -570,6 +591,15 @@ impl State {
         let saved = &inner.saved;
         (config.enabled && saved.signed_in() && !saved.revoked)
             .then(|| (saved.account_id.clone(), saved.email.clone(), saved.service.clone()))
+    }
+
+    /// This Claktory's registration while it's signed in and not removed:
+    /// the account, its Claktory id and the registration's epoch, which a
+    /// sign-in again or a move changes (its direct-message leaf goes with it).
+    pub(crate) fn registration(&self, config: &AccountConfig) -> Option<(String, String, u64)> {
+        let inner = self.lock();
+        let saved = &inner.saved;
+        (config.enabled && saved.signed_in() && !saved.revoked).then(|| (saved.account_id.clone(), saved.claktory_id.clone(), saved.epoch))
     }
 
     /// What the app shows: None while signing in is off.
@@ -1213,6 +1243,7 @@ async fn check_in(factory: &Arc<Factory>) {
             reseal(factory, checked.epoch).await;
             register_endpoints(factory).await;
             note_key_from(account).await;
+            crate::user_apps::reconcile(factory).await;
         }
         Err(Failure::Refused(_, body)) if body.error == "revoked" => {
             tracing::warn!("this Claktory was removed at the account service");

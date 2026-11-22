@@ -39,9 +39,12 @@ const HEADROOM: u64 = 256 << 20;
 const MEMORY: u64 = 256 << 20;
 /// How long Claktory has to stop, or start answering again.
 const STOP_WITHIN: Duration = Duration::from_secs(40);
-/// The home's entries a bundle never holds.
-const LEFT_OUT: [&str; 12] = [
+/// The home's entries a bundle never holds. `dm` is the direct-message
+/// leaf's store: two copies of a leaf would reuse its keys, so a moved or
+/// restored Claktory enrolls a new one (dms-e2ee.md §5.2).
+const LEFT_OUT: [&str; 13] = [
     "bin",
+    "dm",
     "releases",
     "trees",
     "models",
@@ -667,6 +670,10 @@ pub(crate) fn plan(place: &Place, options: &Options) -> Result<Plan, Refused> {
             return false;
         }
         if name == ".DS_Store" || (is_dir && name == ".partial") {
+            return false;
+        }
+        // Ink still coming in; its blobs go as they are (`crate::ink`).
+        if is_dir && relative == "annotations/staging" {
             return false;
         }
         if !is_dir && sqlite_sidecar(&home.join(relative)) {

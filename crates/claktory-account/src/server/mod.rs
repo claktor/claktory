@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -45,6 +46,19 @@ const BODY_LIMIT: usize = 1024 * 1024;
 const PUBLIC_STATS_FOR: i64 = 60;
 /// Requests an IP may make a minute.
 const IP_PER_MINUTE: u32 = 30;
+
+/// Whether a route is for requests signed by a Claktory's backend key or a
+/// device's account key, which every one of its handlers checks first.
+/// The rest (sign-in, codes, web pages, public answers) are limited by
+/// address.
+fn signed(method: &Method, path: &str) -> bool {
+    matches!(
+        (method, path),
+        (&Method::POST, "/v1/share" | "/v1/check-in" | "/v1/move" | "/v1/devices/sign-out" | "/v1/devices/assertion")
+            | (&Method::PUT, "/v1/endpoints")
+            | (&Method::GET, "/v1/devices/me" | "/v1/claktories")
+    ) || path.starts_with("/v1/apps/")
+}
 
 pub struct Config {
     /// Where the account page is, as emails write it.
@@ -202,6 +216,30 @@ impl Service {
         });
     }
 
+    /// Asks the user-apps worker every minute to purge the deleted accounts
+    /// it hasn't yet (it was down when they were deleted, say).
+    pub fn spawn_app_purges(self: &Arc<Self>) {
+        if self.config.user_apps.is_none() {
+            return;
+        }
+        let service = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                every.tick().await;
+                let Some(service) = service.upgrade() else { return };
+                apps::retry_purges(&service).await;
+            }
+        });
+    }
+
+    /// Purges, now, the deleted accounts due to be purged from the
+    /// user-level apps: how many were. For tests; `spawn_app_purges` does it
+    /// every minute.
+    pub async fn retry_app_purges(&self) -> usize {
+        apps::retry_purges(self).await
+    }
+
     /// Where a request came from, when the service has a GeoIP file and
     /// the IP is a public one.
     fn locate(&self, ip: &str) -> Option<geo::Location> {
@@ -249,6 +287,7 @@ impl Service {
             headers: parts.headers,
             body,
             ip,
+            verified: AtomicBool::new(false),
         };
         let reply = match self.route(&call).await {
             Ok(reply) => reply,
@@ -264,10 +303,36 @@ impl Service {
         if call.path == "/mark.png" && matches!(call.method, Method::GET | Method::HEAD) {
             return Ok(mark());
         }
-        if !relay {
+        // A signed request is limited by its key once it's verified
+        // (Service::verified), not by its address: a person's Claktory and
+        // devices, and a household or a carrier's NAT behind one address,
+        // share one. Its address counts only the requests that don't
+        // verify, refused or never checked, and once those are spent,
+        // refuses the rest before checking them, except those naming a
+        // Claktory or device it knows: someone else's bad requests on the
+        // address mustn't lock a person's phone out.
+        let signed = signed(&call.method, &call.path);
+        let unverified = format!("ip-unverified:{}", call.ip);
+        if signed {
+            let spent = db::spent(&self.db(), &[(&unverified, 60, IP_PER_MINUTE)], self.now())?;
+            if let Some(wait) = spent
+                && !self.names_known_key(call)?
+            {
+                return Err(ApiError::rate_limited(wait));
+            }
+        } else if !relay {
             let key = format!("ip-minute:{}", call.ip);
             self.limit(&[(&key, 60, IP_PER_MINUTE)])?;
         }
+        let result = self.dispatch(call).await;
+        if signed && !call.verified.load(Ordering::Relaxed) {
+            // Full meanwhile, it's full: nothing more to count.
+            let _ = db::take(&self.db(), &[(&unverified, 60, IP_PER_MINUTE)], self.now())?;
+        }
+        result
+    }
+
+    async fn dispatch(&self, call: &Call) -> Result<Reply, ApiError> {
         match (&call.method, call.path.as_str()) {
             (&Method::GET, protocol::WELL_KNOWN) => api::well_known(self),
             (&Method::POST, "/v1/sign-in/start") => api::sign_in_start(self, call).await,
@@ -289,6 +354,27 @@ impl Service {
             (_, path) if path == "/account" || path.starts_with("/account/") => Ok(web::page(self, call).await),
             _ => Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "There's nothing here.")),
         }
+    }
+
+    /// Whether a request names a Claktory (by its token) or a signed-in
+    /// device (by its account key) that's known here, checked or not.
+    fn names_known_key(&self, call: &Call) -> Result<bool, ApiError> {
+        let Some(authorization) = call.header("authorization") else { return Ok(false) };
+        if let Some(token) = authorization.strip_prefix("Bearer ") {
+            return Ok(db::claktory_by_token(&self.db(), token.trim())?.is_some());
+        }
+        match authorization.strip_prefix(protocol::DEVICE_AUTH).and_then(|value| value.strip_prefix(' ')) {
+            Some(account_key) => Ok(db::device(&self.db(), account_key.trim())?.is_some()),
+            None => Ok(false),
+        }
+    }
+
+    /// Marks a request as from a Claktory or a signed-in device, its
+    /// signature checked by the key it's known by, and counts it against
+    /// that key's requests a minute instead of its address's.
+    fn verified(&self, call: &Call, key: &str) -> Result<(), ApiError> {
+        call.verified.store(true, Ordering::Relaxed);
+        self.limit(&[(&format!("key-minute:{key}"), 60, api::KEY_PER_MINUTE)])
     }
 
     /// Counts against limits, or refuses with when to try again.
@@ -372,6 +458,9 @@ pub(crate) struct Call {
     headers: HeaderMap,
     body: Bytes,
     ip: String,
+    /// Set once the request is known to be from a Claktory or a signed-in
+    /// device (Service::verified).
+    verified: AtomicBool,
 }
 
 impl Call {

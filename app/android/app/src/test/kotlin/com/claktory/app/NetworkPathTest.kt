@@ -10,8 +10,13 @@ import org.junit.Test
 
 /** factory/network's events are the iPhone's (app/lib/network.dart reads them). */
 class NetworkPathTest {
-    private fun event(transports: Set<Int>?, internet: Boolean = true, metered: Boolean = false, dataSaver: Boolean = false) =
-        NetworkPath.describe(transports, internet, metered, dataSaver)
+    private fun event(
+        transports: Set<Int>?,
+        internet: Boolean = true,
+        metered: Boolean = false,
+        dataSaver: Boolean = false,
+        network: Long? = null,
+    ) = NetworkPath.describe(transports, internet, metered, dataSaver, network)
 
     @Test
     fun noNetworkIsUnsatisfiedWithNoInterfaces() {
@@ -46,5 +51,22 @@ class NetworkPathTest {
     @Test
     fun aNetworkWithoutInternetIsntSatisfied() {
         assertEquals(false, event(setOf(TRANSPORT_WIFI), internet = false)["satisfied"])
+    }
+
+    @Test
+    fun theLogLineReadsAsDartsSummary() {
+        assertEquals("down ", NetworkPath.summary(event(null)))
+        assertEquals("up wifi,wired", NetworkPath.summary(event(setOf(TRANSPORT_WIFI, TRANSPORT_ETHERNET))))
+        assertEquals(
+            "up cellular expensive constrained",
+            NetworkPath.summary(event(setOf(TRANSPORT_CELLULAR), metered = true, dataSaver = true)),
+        )
+    }
+
+    @Test
+    fun theNetworkIsNamedOnlyWhileThereIsOne() {
+        assertEquals("432902426637", event(setOf(TRANSPORT_WIFI), network = 432902426637L)["network"])
+        assertEquals(false, event(setOf(TRANSPORT_WIFI)).containsKey("network"))
+        assertEquals(false, NetworkPath.describe(null, false, false, false, network = 1L).containsKey("network"))
     }
 }

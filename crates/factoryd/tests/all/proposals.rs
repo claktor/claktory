@@ -117,7 +117,8 @@ async fn an_approved_proposal_reaches_rivet_as_the_persons_message_with_their_co
             _ => None,
         })
         .expect("Builder is told");
-    assert_eq!(told.summary, "The person approved your proposal to Rivet (comment: Yes, call it Backend 4.).");
+    assert_eq!(told.summary, "The person approved your proposal to Rivet.");
+    assert!(told.text.contains("\n\nThe person's note: Yes, call it Backend 4.\n\nYour proposal:"), "{}", told.text);
 
     // Rivet got it as the person's own message, not an agent's event.
     apply_request(&mut client, &mut view, select("rivet")).await;
@@ -309,7 +310,7 @@ async fn a_proposal_from_an_agent_that_read_a_pipe_says_so() {
     view.follow(&mut client, |view| view.agent("builder").tainted_by_pipes == [pipe.clone()] && idle(view, "builder")).await;
     let (_, after) = propose(&mut client, &mut view, NEEDED).await;
     let after = after.expect("a proposal");
-    let route = v1::PipeTaint { pipe_name: "Launch".into(), via_names: Vec::new(), pipe_id: pipe.clone() };
+    let route = v1::PipeTaint { pipe_name: "Launch".into(), via_names: Vec::new(), pipe_id: pipe.clone(), kind: String::new() };
     assert_eq!(after.taint, std::slice::from_ref(&route));
     apply_request(&mut client, &mut view, decide("builder", &after.id, false, "")).await;
     let decided = proposal_entry(&view.entries, &after.id);

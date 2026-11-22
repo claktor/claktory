@@ -9,7 +9,9 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -37,11 +39,15 @@ Rect? inkRegion(Object? value) {
 }
 
 Map<String, Object?> inkRegionJson(Rect r) => {
-  'x': r.left,
-  'y': r.top,
-  'w': r.width,
-  'h': r.height,
+  'x': _unit(r.left),
+  'y': _unit(r.top),
+  'w': _unit(r.width),
+  'h': _unit(r.height),
 };
+
+/// A region's number to a billionth: a Rect keeps its right and bottom, so
+/// a width read back has float dust (0.21 as 0.20999999999999996).
+double _unit(double v) => (v * 1e9).round() / 1e9;
 
 /// `#RRGGBBAA` (the fixtures') from an ARGB int (Flutter's).
 String inkHex(int argb) {
@@ -74,7 +80,11 @@ enum InkDrawingPolicy {
   pencilOnly('pencil_only'),
 
   /// Any touch draws (Draw with finger).
-  anyInput('any_input');
+  anyInput('any_input'),
+
+  /// Nothing draws: the document is only read (an iPhone's PDF page). It
+  /// scrolls, zooms, selects and follows links.
+  none('none');
 
   const InkDrawingPolicy(this.wire);
   final String wire;
@@ -178,13 +188,17 @@ class InkLayerRef {
   });
 
   final int? page1based;
-  final String inkLayerId;
-  final int revision;
+
+  /// Null for ink drawn here and not saved yet (a reload's answer).
+  final String? inkLayerId;
+
+  /// Null with [inkLayerId].
+  final int? revision;
 
   factory InkLayerRef.fromJson(Map<String, Object?> json) => InkLayerRef(
     page1based: _int(json['page_1based']),
-    inkLayerId: json['ink_layer_id'] as String? ?? '',
-    revision: _int(json['revision']) ?? 0,
+    inkLayerId: json['ink_layer_id'] as String?,
+    revision: _int(json['revision']),
   );
 
   Map<String, Object?> toJson() => {
@@ -356,19 +370,40 @@ class InkLayerDrawing {
     this.page1based,
     required this.inkLayerId,
     required this.revision,
-    required this.drawing,
+    required InkDrawingData this.drawing,
+    this.keepMine = false,
   });
 
+  /// Nothing on [page1based] any more (its layer was deleted elsewhere):
+  /// the page shows no ink, and has no layer.
+  const InkLayerDrawing.cleared({this.page1based})
+    : inkLayerId = null,
+      revision = null,
+      drawing = null,
+      keepMine = false;
+
   final int? page1based;
-  final String inkLayerId;
-  final int revision;
-  final InkDrawingData drawing;
+
+  /// Null, with [revision], for ink drawn here and not saved yet (a view
+  /// made again is loaded with it all the same).
+  final String? inkLayerId;
+  final int? revision;
+
+  /// Null only for [InkLayerDrawing.cleared].
+  final InkDrawingData? drawing;
+
+  /// Keep both: [drawing] (another device's, saved first) goes under what's
+  /// on the page now, and the two are sent at once as a drawingChanged
+  /// (cause "keep_both") on this layer's [revision].
+  final bool keepMine;
 
   Map<String, Object?> toJson() => {
     'page_1based': page1based,
     'ink_layer_id': inkLayerId,
     'revision': revision,
-    'drawing': drawing.toJson(),
+    'drawing': drawing?.toJson(),
+    if (drawing == null) 'clear': true,
+    if (keepMine) 'keep_mine': true,
   };
 }
 
@@ -398,7 +433,7 @@ class InkExportRequest {
     this.page1based,
     this.inkLayerId,
     this.layerRevision,
-    required this.region,
+    this.region,
     this.maxLongEdge = 2048,
     this.maxBytes = 3145728,
     this.includeInk = true,
@@ -407,7 +442,9 @@ class InkExportRequest {
   final int? page1based;
   final String? inkLayerId;
   final int? layerRevision;
-  final Rect region;
+
+  /// Null for the whole page (its CropBox), a page's preview.
+  final Rect? region;
   final int maxLongEdge;
   final int maxBytes;
   final bool includeInk;
@@ -416,7 +453,7 @@ class InkExportRequest {
     'page_1based': page1based,
     'ink_layer_id': inkLayerId,
     'layer_revision': layerRevision,
-    'region': inkRegionJson(region),
+    if (region != null) 'region': inkRegionJson(region!),
     'max_long_edge': maxLongEdge,
     'max_bytes': maxBytes,
     'include_ink': includeInk,
@@ -444,6 +481,140 @@ class InkComposite {
   ];
   String? get sourceSha256 => raw['source_sha256'] as String?;
   String? get drawingSha256 => raw['drawing_sha256'] as String?;
+}
+
+/// A new version of the PDF shown in place (bridge fixture
+/// cmd_reload_document.json): its pages, where the person is now, the
+/// pages that changed, came or went (compared page by page, never
+/// remapped), the ink still shown (kept) and the ink of the earlier
+/// version no longer shown (outdated), saved or not.
+class InkReload {
+  const InkReload(this.raw);
+
+  final Map<String, Object?> raw;
+
+  bool get reloaded => raw['reloaded'] as bool? ?? false;
+  String get sourceSha256 => raw['source_sha256'] as String? ?? '';
+  String? get previousSha256 => raw['previous_sha256'] as String?;
+  int get pageCount => _int(raw['page_count']) ?? 0;
+  List<InkPage> get pages => [
+    for (final p in _maps(raw['pages'])) InkPage.fromJson(p),
+  ];
+
+  /// Where it's shown now.
+  int? get page1based => _int(raw['page_1based']);
+  List<int> get pagesChanged => _ints(raw['pages_changed']);
+  List<int> get pagesAdded => _ints(raw['pages_added']);
+  List<int> get pagesRemoved => _ints(raw['pages_removed']);
+
+  /// How pages were compared ("content_then_render").
+  String get comparison => raw['comparison'] as String? ?? '';
+  List<InkLayerRef> get keptLayers => [
+    for (final l in _maps(raw['kept_layers'])) InkLayerRef.fromJson(l),
+  ];
+  List<InkLayerRef> get outdatedLayers => [
+    for (final l in _maps(raw['outdated_layers'])) InkLayerRef.fromJson(l),
+  ];
+
+  static List<int> _ints(Object? value) => [
+    for (final v in value is List ? value : const []) ?_int(v),
+  ];
+}
+
+/// A page's drawing as it is now, ready to save as its ink layer's next
+/// revision (bridge fixture cmd_export_layer.json): the drawing and an
+/// ink-only preview as temporary files for Dart to upload and delete, and
+/// where they lie in the document, as `layer_*.json` keeps them.
+class InkLayerExport {
+  const InkLayerExport(this.raw);
+
+  final Map<String, Object?> raw;
+
+  Map<String, Object?> get _drawing => _map(raw['drawing']);
+  Map<String, Object?> get _preview => _map(raw['ink_preview']);
+
+  /// Null for a surface with one drawing (an image, an excerpt, a sketch).
+  int? get page1based => _int(raw['page_1based']);
+
+  /// Null before the layer's first save.
+  String? get inkLayerId => raw['ink_layer_id'] as String?;
+
+  /// The revision this one follows; null to create the layer.
+  int? get baseRevision => _int(raw['base_revision']);
+
+  /// The drawingChanged this export is; null when unchanged since loaded.
+  int? get localSeq => _int(raw['local_seq']);
+  String? get sourceSha256 => raw['source_sha256'] as String?;
+  int get strokeCount => _int(raw['stroke_count']) ?? 0;
+
+  /// The layer's `coordinate_space`, as the evidence fixtures have it.
+  Map<String, Object?> get coordinateSpace => _map(raw['coordinate_space']);
+
+  /// "page_overlay", "oriented_image", "excerpt_rendition" or
+  /// "blank_canvas".
+  String get drawingSpace => _drawing['space'] as String? ?? '';
+  List<double> get drawingToDocument => [
+    for (final v in _drawing['drawing_to_document'] as List? ?? const [])
+      _double(v),
+  ];
+  int get contentVersion => _int(_drawing['content_version']) ?? 1;
+  String get drawingFile => _drawing['file'] as String? ?? '';
+  String get drawingSha256 => _drawing['sha256'] as String? ?? '';
+  int get drawingBytes => _int(_drawing['bytes']) ?? 0;
+
+  String get previewFile => _preview['file'] as String? ?? '';
+  String get previewSha256 => _preview['sha256'] as String? ?? '';
+  int get previewBytes => _int(_preview['bytes']) ?? 0;
+  int get previewWidth => _int(_preview['pixel_width']) ?? 0;
+  int get previewHeight => _int(_preview['pixel_height']) ?? 0;
+}
+
+// MARK: Search
+
+/// A search's answer: its matches, or none when a newer search came first
+/// ([superseded]).
+class InkSearchResult {
+  const InkSearchResult({
+    required this.query,
+    required this.matches,
+    required this.truncated,
+    required this.superseded,
+  });
+
+  final String query;
+  final List<InkSearchMatch> matches;
+  final bool truncated;
+  final bool superseded;
+
+  factory InkSearchResult.fromJson(Map<String, Object?> json) =>
+      InkSearchResult(
+        query: json['query'] as String? ?? '',
+        matches: [
+          for (final m in _maps(json['matches'])) InkSearchMatch.fromJson(m),
+        ],
+        truncated: json['truncated'] as bool? ?? false,
+        superseded: json['superseded'] as bool? ?? false,
+      );
+}
+
+/// One match: its page, where on it (0..1 from the CropBox's top left) and
+/// its line.
+class InkSearchMatch {
+  const InkSearchMatch({
+    required this.page1based,
+    required this.region,
+    required this.text,
+  });
+
+  final int page1based;
+  final Rect? region;
+  final String text;
+
+  factory InkSearchMatch.fromJson(Map<String, Object?> json) => InkSearchMatch(
+    page1based: _int(json['page_1based']) ?? 1,
+    region: inkRegion(json['region']),
+    text: json['text'] as String? ?? '',
+  );
 }
 
 // MARK: Events
@@ -481,6 +652,12 @@ sealed class InkEvent {
         kept: a['kept'] as bool? ?? false,
       ),
       'error' => InkError.fromJson(a),
+      'linkTapped' => InkLinkTapped(a['url'] as String? ?? ''),
+      'strokeSelectionChanged' => InkStrokeSelectionChanged(
+        page1based: _int(a['page_1based']),
+        strokeCount: _int(a['stroke_count']) ?? 0,
+        bounds: inkRegion(a['bounds']),
+      ),
       _ => InkUnknownEvent(method, a),
     };
   }
@@ -532,6 +709,8 @@ class InkReady extends InkEvent {
     required this.pageCount,
     required this.pages,
     required this.drawingSpace,
+    this.outline = const [],
+    this.handwriting = InkHandwriting.unavailable,
   });
 
   final InkSurfaceKind surface;
@@ -543,6 +722,13 @@ class InkReady extends InkEvent {
   /// "page_overlay", "oriented_image", "excerpt_rendition" or "blank_canvas".
   final String drawingSpace;
 
+  /// A PDF's own contents, when it has them (at most 500 entries).
+  final List<InkOutlineEntry> outline;
+
+  /// Whether this iPad reads handwriting (iPadOS 27 and later); an older
+  /// native that doesn't say can't.
+  final InkHandwriting handwriting;
+
   factory InkReady.fromJson(Map<String, Object?> json) => InkReady(
     surface: InkSurfaceKind.values.byName(
       json['surface'] as String? ?? 'blank',
@@ -552,7 +738,139 @@ class InkReady extends InkEvent {
     pageCount: _int(json['page_count']) ?? 1,
     pages: [for (final p in _maps(json['pages'])) InkPage.fromJson(p)],
     drawingSpace: json['drawing_space'] as String? ?? '',
+    outline: [
+      for (final entry in _maps(json['outline']))
+        InkOutlineEntry.fromJson(entry),
+    ],
+    handwriting: json['handwriting'] is Map
+        ? InkHandwriting.fromJson(_map(json['handwriting']))
+        : InkHandwriting.unavailable,
   );
+}
+
+/// Reading handwriting on the device ([InkReady.handwriting]): whether it
+/// can, from which iPadOS, and in which languages (BCP 47, as the system
+/// gives them: "en", "hi-Latn").
+class InkHandwriting {
+  const InkHandwriting({
+    required this.available,
+    this.minOs = '',
+    this.recognitionVersion,
+    this.supportedLanguages = const [],
+  });
+
+  static const unavailable = InkHandwriting(available: false);
+
+  final bool available;
+  final String minOs;
+  final int? recognitionVersion;
+  final List<String> supportedLanguages;
+
+  factory InkHandwriting.fromJson(Map<String, Object?> json) => InkHandwriting(
+    available: json['available'] as bool? ?? false,
+    minOs: json['min_os'] as String? ?? '',
+    recognitionVersion: _int(json['recognition_version']),
+    supportedLanguages: [
+      for (final l in (json['supported_languages'] as List?) ?? const [])
+        if (l is String) l,
+    ],
+  );
+}
+
+/// Which strokes [InkSurfaceController.recognizeText] reads.
+enum InkRecognitionScope {
+  /// Those chosen with the lasso on the page.
+  selection,
+
+  /// Those whose bounds meet a region (0..1 of the page).
+  region,
+
+  /// The page's whole layer.
+  all,
+}
+
+/// What native read: a candidate, never applied or sent by native. No
+/// [text] means nothing to read; [stale] means the drawing changed while
+/// it read (drop it); not [available], an iPad below iPadOS 27.
+class InkRecognition {
+  const InkRecognition({
+    required this.available,
+    this.stale = false,
+    this.page1based,
+    this.inkLayerId,
+    this.baseRevision,
+    this.localSeq,
+    this.drawingSha256,
+    this.strokeCount = 0,
+    this.text,
+    this.languages = const [],
+    this.recognitionVersion,
+    this.reason,
+    this.minOs,
+  });
+
+  final bool available;
+  final bool stale;
+  final int? page1based;
+  final String? inkLayerId;
+  final int? baseRevision;
+
+  /// The drawingChanged it read (null: the page as loaded or saved).
+  final int? localSeq;
+  final String? drawingSha256;
+  final int strokeCount;
+  final String? text;
+  final List<String> languages;
+  final int? recognitionVersion;
+
+  /// Not available: why ("os_too_old") and from which iPadOS.
+  final String? reason;
+  final String? minOs;
+
+  /// Text worth offering: read, current and not blank.
+  String? get candidate {
+    final read = text?.trim();
+    return available && !stale && read != null && read.isNotEmpty ? read : null;
+  }
+
+  factory InkRecognition.fromJson(Map<String, Object?> json) => InkRecognition(
+    available: json['available'] as bool? ?? false,
+    stale: json['stale'] as bool? ?? false,
+    page1based: _int(json['page_1based']),
+    inkLayerId: json['ink_layer_id'] as String?,
+    baseRevision: _int(json['base_revision']),
+    localSeq: _int(json['local_seq']),
+    drawingSha256: json['drawing_sha256'] as String?,
+    strokeCount: _int(json['stroke_count']) ?? 0,
+    text: json['text'] as String?,
+    languages: [
+      for (final l in (json['languages'] as List?) ?? const [])
+        if (l is String) l,
+    ],
+    recognitionVersion: _int(json['recognition_version']),
+    reason: json['reason'] as String?,
+    minOs: json['min_os'] as String?,
+  );
+}
+
+/// An entry of a PDF's contents: its title, its page, how deep (from 0).
+class InkOutlineEntry {
+  const InkOutlineEntry({
+    required this.title,
+    required this.page1based,
+    required this.depth,
+  });
+
+  final String title;
+  final int page1based;
+  final int depth;
+
+  factory InkOutlineEntry.fromJson(Map<String, Object?> json) =>
+      InkOutlineEntry(
+        title: json['title'] as String? ?? '',
+        page1based: _int(json['page_1based']) ?? 1,
+        depth: _int(json['depth']) ?? 0,
+      );
 }
 
 class InkPageChanged extends InkEvent {
@@ -585,7 +903,8 @@ class InkDrawingChanged extends InkEvent {
   final int? baseRevision;
   final int localSeq;
 
-  /// "stroke", "erase", "undo", "redo" or "lasso".
+  /// "stroke", "erase", "undo", "redo", "lasso" or "keep_both" (another
+  /// device's drawing put under the person's).
   final String cause;
   final int strokeCount;
 
@@ -660,6 +979,20 @@ class InkStrokeInterrupted extends InkEvent {
   final bool kept;
 }
 
+/// The strokes chosen with the lasso on a page changed (iPadOS 27 and
+/// later only): how many, and where (0..1 of the page). None chosen:
+/// [strokeCount] 0 and no [bounds].
+class InkStrokeSelectionChanged extends InkEvent {
+  const InkStrokeSelectionChanged({
+    this.page1based,
+    required this.strokeCount,
+    this.bounds,
+  });
+  final int? page1based;
+  final int strokeCount;
+  final Rect? bounds;
+}
+
 class InkError extends InkEvent {
   const InkError({
     required this.code,
@@ -668,12 +1001,17 @@ class InkError extends InkEvent {
   });
 
   /// document_hash_mismatch, document_unreadable, document_locked,
-  /// os_too_old, drawing_unreadable or export_too_large.
+  /// document_too_large, os_too_old, drawing_unreadable or
+  /// export_too_large.
   final String code;
   final bool recoverable;
 
   /// The rest of the event's fields.
   final Map<String, Object?> details;
+
+  /// document_too_large's: the PDF's pages and the most that open.
+  int? get pageCount => _int(details['page_count']);
+  int? get maxPages => _int(details['max_pages']);
 
   factory InkError.fromJson(Map<String, Object?> json) => InkError(
     code: json['code'] as String? ?? 'unknown',
@@ -683,6 +1021,13 @@ class InkError extends InkEvent {
         if (e.key != 'code' && e.key != 'recoverable') e.key: e.value,
     },
   );
+}
+
+/// A link to outside the PDF was tapped: native opens nothing by itself;
+/// the app offers to (http, https and mailto only).
+class InkLinkTapped extends InkEvent {
+  const InkLinkTapped(this.url);
+  final String url;
 }
 
 /// An event this app doesn't know yet (a newer native side).
@@ -802,15 +1147,72 @@ class InkSurfaceController {
           as bool? ??
       false;
 
-  /// PDF only. Returns the page shown.
-  Future<int> goToPage(int page1based) async =>
+  /// PDF only, with [region] (0..1 of the page) scrolled into view when
+  /// given: a search match, an item's anchor. Returns the page shown.
+  Future<int> goToPage(int page1based, {Rect? region}) async =>
       _int(
-        (await _call('goToPage', {'page_1based': page1based}))['page_1based'],
+        (await _call('goToPage', {
+          'page_1based': page1based,
+          if (region != null) 'region': inkRegionJson(region),
+        }))['page_1based'],
       ) ??
       page1based;
 
+  /// PDF only: finds [query]'s matches and highlights them on the pages;
+  /// an empty query clears them. A newer search supersedes this one.
+  Future<InkSearchResult> search(String query, {int maxResults = 200}) async =>
+      InkSearchResult.fromJson(
+        await _call('search', {'query': query, 'max_results': maxResults}),
+      );
+
+  /// Reads the handwriting of [scope] on [page1based] (null on an image or
+  /// sketch); [region] with [InkRecognitionScope.region]. Below iPadOS 27
+  /// an answer that isn't [InkRecognition.available], not an error.
+  Future<InkRecognition> recognizeText(
+    int? page1based, {
+    required InkRecognitionScope scope,
+    Rect? region,
+    List<String>? languages,
+  }) async => InkRecognition.fromJson(
+    await _call('recognizeText', {
+      'page_1based': page1based,
+      'scope': scope.name,
+      if (region != null) 'region': inkRegionJson(region),
+      'languages': ?languages,
+    }),
+  );
+
+  /// PDF only: shows [document], a new version of the file ([source]), in
+  /// place. Throws a PlatformException `document_hash_mismatch`,
+  /// `document_too_large`, `document_locked` or `document_unreadable`, and
+  /// the version shown stays.
+  Future<InkReload> reloadDocument(
+    InkSource source,
+    InkDocument document,
+  ) async => InkReload(
+    await _call('reloadDocument', {
+      'source': source.toJson(),
+      'document': document.toJson(),
+    }),
+  );
+
   Future<InkComposite> exportComposite(InkExportRequest request) async =>
       InkComposite(await _call('exportComposite', request.toJson()));
+
+  /// [page1based]'s drawing (null: the surface's one drawing) as it is
+  /// now, to save. Throws a PlatformException `nothing_drawn` for a page
+  /// never drawn on.
+  Future<InkLayerExport> exportLayer({
+    int? page1based,
+    int previewMaxLongEdge = 2048,
+    int previewMaxBytes = 4 * 1024 * 1024,
+  }) async => InkLayerExport(
+    await _call('exportLayer', {
+      'page_1based': page1based,
+      'preview_max_long_edge': previewMaxLongEdge,
+      'preview_max_bytes': previewMaxBytes,
+    }),
+  );
 
   void dispose() {
     if (_disposed) return;
@@ -891,4 +1293,126 @@ class InkCacheWriter {
     'cacheCancel',
     {'token': token},
   );
+}
+
+// MARK: The journal of drawings not yet saved
+
+/// A page's drawing whose latest change isn't saved yet, as the journal on
+/// the iPad keeps it until its save is confirmed.
+class InkJournalEntry {
+  const InkJournalEntry({
+    this.page1based,
+    required this.seq,
+    required this.sourceSha256,
+    this.inkLayerId,
+    this.baseRevision,
+    required this.drawing,
+  });
+
+  final int? page1based;
+
+  /// The change's local_seq.
+  final int seq;
+
+  /// The version of the file it was drawn on.
+  final String sourceSha256;
+
+  /// The layer it was to be the next revision of, and that layer's
+  /// revision then; null for a page's first drawing.
+  final String? inkLayerId;
+  final int? baseRevision;
+  final InkDrawingData drawing;
+
+  Map<String, Object?> toJson() => {
+    'page_1based': page1based,
+    'seq': seq,
+    'source_sha256': sourceSha256,
+    'ink_layer_id': inkLayerId,
+    'base_revision': baseRevision,
+    'drawing': drawing.toJson(),
+  };
+
+  factory InkJournalEntry.fromJson(Map<String, Object?> json) =>
+      InkJournalEntry(
+        page1based: _int(json['page_1based']),
+        seq: _int(json['seq']) ?? 0,
+        sourceSha256: json['source_sha256'] as String? ?? '',
+        inkLayerId: json['ink_layer_id'] as String?,
+        baseRevision: _int(json['base_revision']),
+        drawing: InkDrawingData.fromJson(
+          (json['drawing'] as Map? ?? const {}).cast<String, Object?>(),
+        ),
+      );
+}
+
+/// Drawings not yet saved, kept on the iPad until the backend has them
+/// (Matt's decision: the fourth thing a device keeps), by Claktory and
+/// document, both named by hash. Native keeps them in the app's private
+/// support folder, protected while the iPad is locked, never backed up.
+class InkJournal {
+  const InkJournal();
+
+  /// A Claktory's name in the journal: its endpoint id (the tunnel's,
+  /// stable for that Claktory), by hash; 'local' for one on this device.
+  static String claktoryKey(String? endpointId) =>
+      _hex(endpointId == null || endpointId.isEmpty ? 'local' : endpointId);
+
+  /// A file's name in the journal, by hash.
+  static String documentKey(String path) => _hex(path);
+
+  static String _hex(String s) =>
+      crypto.sha256.convert(utf8.encode(s)).toString();
+
+  @visibleForTesting
+  static MethodChannel channel = _appChannel;
+
+  Future<void> put({
+    required String claktory,
+    required String document,
+    required InkJournalEntry entry,
+  }) => channel.invokeMethod<void>('journalPut', {
+    'claktory': claktory,
+    'document': document,
+    ...entry.toJson(),
+  });
+
+  /// The page's entry, if its change is [uptoSeq] or older (any, without).
+  Future<void> remove({
+    required String claktory,
+    required String document,
+    int? page1based,
+    int? uptoSeq,
+  }) => channel.invokeMethod<void>('journalRemove', {
+    'claktory': claktory,
+    'document': document,
+    'page_1based': page1based,
+    'upto_seq': ?uptoSeq,
+  });
+
+  Future<List<InkJournalEntry>> list({
+    required String claktory,
+    required String document,
+  }) async {
+    final result = await channel.invokeMapMethod<String, Object?>(
+      'journalList',
+      {'claktory': claktory, 'document': document},
+    );
+    return [
+      for (final e in _maps(result?['entries'])) InkJournalEntry.fromJson(e),
+    ];
+  }
+
+  /// One Claktory's entries (a Claktory forgotten), or all (starting
+  /// over). Never throws: where there's no journal (anything but iOS) it
+  /// does nothing, and a failure is only logged, since forgetting goes on
+  /// regardless.
+  Future<void> clear({String? claktory}) async {
+    try {
+      await channel.invokeMethod<void>('journalClear', {'claktory': claktory});
+    } on MissingPluginException {
+      // No journal on this platform.
+    } catch (e) {
+      developer.log('ink journal: clear failed: $e', name: 'ink');
+    }
+  }
 }

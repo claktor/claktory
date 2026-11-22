@@ -156,6 +156,12 @@ async fn run() -> Result<(), MainError> {
     if let Ok(port) = std::env::var("FACTORY_PORT") {
         instance.addr.set_port(port.parse()?);
     }
+    // Browser control stays out of sight until its security proof (B6a):
+    // only a Claktory started with this, the dev one say, has it. No
+    // installer, LaunchAgent or release script ever sets it.
+    factoryd::browser::set_preview(std::env::var_os("FACTORY_BROWSER_PREVIEW").is_some_and(|on| on == "1"));
+    // So do agents in direct messages, until People ships: the same rule.
+    factoryd::user_apps::dms::set_preview(std::env::var_os("FACTORY_DMS_PREVIEW").is_some_and(|on| on == "1"));
     match command.as_slice() {
         [] => {
             // It holds the vault's key: no core dumps, and on Linux no other
@@ -669,7 +675,9 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     factoryd::move_run::resume(&factory);
     // Factories installed from published releases download newer ones.
     if let Some(url) = factoryd::channel::url() {
-        tokio::spawn(factoryd::channel::poll(home.clone(), url));
+        tracing::info!(%url, "checking for releases");
+        factory.use_channel(&url);
+        tokio::spawn(factoryd::channel::poll(factory.clone()));
     }
     // Older installs' LaunchAgent gets what installers write now, once.
     tokio::spawn(factoryd::launch_agent::update(home.clone(), addr.port()));

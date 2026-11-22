@@ -102,7 +102,7 @@ async fn the_report_measures_the_teams_records_and_repeats_nothing_written() {
     assert!(report.contains("\nlea | 33% | 1 | 0%\n"), "{report}");
     assert!(report.contains("\nbo | 0% | 3 | 100%\n"), "{report}");
     assert!(report.contains("\nlea | 1 | 50.0 | 50.0\nbo | 2 | 10.0 | 20.0\n"), "slowest first: {report}");
-    assert!(report.contains("Q3 Traffic: 4 agent-to-agent messages.\nBusiest: bo, sent 2 of them by 1 agent;"), "{report}");
+    assert!(report.contains("Q3 Traffic: 4 agent-to-agent messages.\nBusiest: bo, in 4 of them (it sent 2, and received 2 from 1 agent);"), "{report}");
     assert!(report.contains("\nbo | 5 min | 0 | 2 | 0 | 2\n"), "wake-ups 5 to 60 minutes apart: {report}");
     assert!(report.contains("Q5 Flow: 1 items finished (0.17 an hour), cycle p50 3.0 h, p90 3.0 h; 1 open now"), "{report}");
     assert!(report.contains("Little's law gives 6.0 h"), "{report}");

@@ -210,6 +210,16 @@ pub enum ChannelError {
     Io(#[from] std::io::Error),
 }
 
+/// What reading the manifest found.
+#[derive(Debug, PartialEq)]
+pub enum Found {
+    UpToDate,
+    /// A newer release this machine can't run, or one already rejected.
+    Skipped { version: String, why: String },
+    /// A newer release to download, and its tarball for this machine.
+    Newer(Manifest, Tarball),
+}
+
 /// What a check found.
 #[derive(Debug, PartialEq)]
 pub enum Checked {
@@ -378,8 +388,9 @@ async fn find_app(dir: &Path) -> std::io::Result<Option<PathBuf>> {
 pub struct Channel {
     home: Home,
     url: String,
-    /// A release found unusable, by version: it isn't downloaded again.
-    rejected: Option<String>,
+    /// A release found unusable, by version, and why: it isn't downloaded
+    /// again.
+    rejected: Option<(String, String)>,
     /// The keys its manifest must be signed by; None for a channel in a
     /// folder, whose manifest needn't be (`requires_signature`).
     keys: Option<Vec<(String, VerifyingKey)>>,
@@ -410,6 +421,16 @@ impl Channel {
 
     /// Checks now, and downloads a newer release if there is one.
     pub async fn check(&mut self) -> Result<Checked, ChannelError> {
+        match self.find().await? {
+            Found::UpToDate => Ok(Checked::UpToDate),
+            Found::Skipped { version, .. } => Ok(Checked::Skipped(version)),
+            Found::Newer(manifest, tarball) => self.fetch(&manifest, &tarball).await,
+        }
+    }
+
+    /// Reads the manifest: whether it offers a newer release this machine
+    /// can run, without downloading it (`fetch` does).
+    pub async fn find(&mut self) -> Result<Found, ChannelError> {
         let bytes = curl(&self.url, MANIFEST_TIMEOUT_SECONDS, MANIFEST_MAX_BYTES, None).await?;
         self.check_signature(&bytes).await?;
         let manifest = Manifest::parse(&bytes)?;
@@ -417,24 +438,30 @@ impl Channel {
         // With no release here yet, the one running is what's here.
         let here = if here.is_empty() && VERSION != "dev" { VERSION.to_owned() } else { here };
         if !here.is_empty() && !newer(&manifest.version, &here) {
-            return Ok(Checked::UpToDate);
+            return Ok(Found::UpToDate);
         }
-        if self.rejected.as_deref() == Some(manifest.version.as_str()) {
-            return Ok(Checked::Skipped(manifest.version));
+        if let Some((version, why)) = &self.rejected
+            && *version == manifest.version
+        {
+            return Ok(Found::Skipped { version: version.clone(), why: why.clone() });
         }
-        let tarball = match (unsupported(&manifest).await, manifest.here()) {
-            (None, Some(tarball)) => tarball,
+        match (unsupported(&manifest).await, manifest.here()) {
+            (None, Some(tarball)) => Ok(Found::Newer(manifest, tarball)),
             (reason, _) => {
-                let reason = reason.unwrap_or_else(|| format!("it has no build for Linux {}", std::env::consts::ARCH));
-                tracing::info!(version = %manifest.version, %reason, "a newer release can't run here");
-                self.rejected = Some(manifest.version.clone());
-                return Ok(Checked::Skipped(manifest.version));
+                let why = reason.unwrap_or_else(|| format!("it has no build for Linux {}", std::env::consts::ARCH));
+                tracing::info!(version = %manifest.version, %why, "a newer release can't run here");
+                self.rejected = Some((manifest.version.clone(), why.clone()));
+                Ok(Found::Skipped { version: manifest.version, why })
             }
-        };
-        match self.download(&manifest, &tarball).await {
-            Err(error @ ChannelError::Rejected { .. }) => {
-                self.rejected = Some(manifest.version.clone());
-                Err(error)
+        }
+    }
+
+    /// Downloads the release `find` found.
+    pub async fn fetch(&mut self, manifest: &Manifest, tarball: &Tarball) -> Result<Checked, ChannelError> {
+        match self.download(manifest, tarball).await {
+            Err(ChannelError::Rejected { version, reason }) => {
+                self.rejected = Some((version.clone(), reason.clone()));
+                Err(ChannelError::Rejected { version, reason })
             }
             other => other,
         }
@@ -552,17 +579,12 @@ impl Channel {
 
 /// Checks the channel shortly after start and every half hour after, while
 /// the backend runs. A failed check is tried again at the next one; the
-/// person sees nothing until a release is complete.
-pub async fn poll(home: Home, url: String) {
-    tracing::info!(%url, "checking for releases");
-    let mut channel = Channel::new(home, url);
+/// person sees nothing until a release is complete, unless they asked
+/// (`Factory::check_for_updates`), whose answer it keeps current.
+pub async fn poll(factory: std::sync::Arc<crate::factory::Factory>) {
     tokio::time::sleep(FIRST_CHECK).await;
     loop {
-        match channel.check().await {
-            Ok(Checked::Downloaded(version)) => tracing::info!(%version, "release ready to install"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "could not check for releases"),
-        }
+        factory.check_on_schedule().await;
         tokio::time::sleep(EVERY).await;
     }
 }

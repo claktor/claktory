@@ -89,6 +89,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
         ids,
         [
             "agents",
+            "app_grants",
             "ask",
             "checklist",
             "comments",
@@ -110,25 +111,26 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[9];
+    let manual = &view.workspace.extensions[10];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
-    let records = &view.workspace.extensions[5];
+    let records = &view.workspace.extensions[6];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
     let builder = view.agent("builder").extensions.clone();
-    assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[2].enabled), ("agents", true, false));
+    assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[3].enabled), ("agents", true, false));
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "a new Factory's Rivet points at things");
-    assert!(view.agent("rivet").extensions[6].enabled && !builder[6].enabled, "admins add the person's devices");
-    assert!(view.agent("rivet").extensions[11].enabled && !builder[11].enabled, "admins move Claktory for the person");
-    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins start pipes for the person");
-    assert!(builder[3].enabled, "comments on unless turned off");
+    assert!(view.agent("rivet").extensions[8].enabled && !builder[8].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "admins add the person's devices");
+    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins start pipes for the person");
+    assert!(view.agent("rivet").extensions[1].enabled && !builder[1].enabled, "admins propose app access for the person");
+    assert!(builder[4].enabled, "comments on unless turned off");
     assert!(
-        !builder[4].enabled
-            && !view.agent("rivet").extensions[4].enabled
-            && !builder[5].enabled
-            && view.agent("rivet").extensions[5].enabled,
+        !builder[5].enabled
+            && !view.agent("rivet").extensions[5].enabled
+            && !builder[6].enabled
+            && view.agent("rivet").extensions[6].enabled,
         "a database of its own only when turned on; admins Factory's records"
     );
 
@@ -384,7 +386,8 @@ async fn agents_with_the_same_name_in_different_projects_are_told_apart() {
     let Some(Kind::Event(event)) = &view.entries[0].kind else { panic!("an event") };
     assert_eq!((event.from.as_str(), event.from_id.as_str()), ("Lead (App)", "lead"));
     let Some(Kind::Assistant(read)) = &view.entries[1].kind else { panic!("a reply") };
-    assert!(read.text.contains("<event source=\"agent\" from=\"Lead (App)\" id=\"lead\">"), "{}", read.text);
+    let tag = format!("<event source=\"agent\" from=\"Lead (App)\" id=\"lead\" msg=\"{}\">", event.message_id);
+    assert!(event.message_id > 0 && read.text.contains(&tag), "{}", read.text);
 
     // The admin agent, in neither project, must say which.
     let ambiguous = call(&mut client, &mut view, "rivet", "agents_send", r#"{"to":"frontend ","text":"hi"}"#).await;
@@ -761,6 +764,8 @@ async fn an_item_blocked_on_the_person_with_nothing_asked_reminds_its_owner_dail
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     factory.set_nudge_after(std::time::Duration::from_millis(150));
+    // A minute lasts 2ms: the hour a decision has to get its card is 120ms.
+    factory.set_nudge_minute(std::time::Duration::from_millis(2));
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;

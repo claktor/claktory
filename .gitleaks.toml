@@ -35,6 +35,41 @@ paths = ['''^app/test/map_fixture\.dart$''']
 regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
+# The MLS working group's public interoperability vectors for RFC 9420
+# (github.com/mlswg/mls-implementations, test-vectors/), suite 1 only, which
+# claktory-dm-crypto's tests run (Fugo's condition for E1): their private keys
+# and secrets are published test values, in hex.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "RFC 9420's published interop vectors (mlswg/mls-implementations test-vectors at 2034fe72, suite 1) in claktory-dm-crypto's tests: the vectors' own test keys and secrets, lowercase hex, in those files only"
+condition = "AND"
+paths = ['''^crates/claktory-dm-crypto/tests/vectors/rfc9420/[a-z-]+\.json$''']
+regexTarget = "secret"
+regexes = ['''^[0-9a-f]{16,}$''']
+
+[[rules.allowlists]]
+description = "Cargo.lock (the workspace's and the app's Rust, app/rust) lists libcrux's crates (libcrux-secrets, then libcrux-sha3), which the generic rule reads as a key named secrets: crate names in the lock file only"
+condition = "AND"
+paths = ['''^(?:app/rust/)?Cargo\.lock$''']
+regexTarget = "secret"
+regexes = ['''^libcrux-[a-z0-9-]+$''']
+
+[[rules.allowlists]]
+description = "app/android/DESIGN.md names the Android Keystore alias of the direct-message keys, claktory.dm.v1, after the words 'key of their own': an alias, no key material"
+condition = "AND"
+paths = ['''^app/android/DESIGN\.md$''']
+regexTarget = "secret"
+regexes = ['''^claktory\.dm\.v1$''']
+
+[[rules.allowlists]]
+description = "Web search's page fixtures (#257, real result pages Fugo reviewed, scrubbed of this Mac's address and sessions): the public client-side identifiers Ecosia and Yahoo put in every visitor's page (Ecosia's DataDome client key, Braze SDK key and Tag Manager environment; Yahoo's asset names and hash), not credentials of ours; those exact values in those two files only"
+condition = "AND"
+paths = ['''^crates/factoryd/tests/fixtures/web/(?:ecosia|yahoo)-results\.html$''']
+regexTarget = "secret"
+regexes = ['''^(?:32FD9D46AF889F2B9903ED03CE0B3C|ce0dc535-dc9e-42a0-afe7-a88335a378d4|yQLXq56VlYmlCpsDKUq5-Q|stickyHeaderV2|b8de5b4c1b8afc8e080b5914d595c6da)$''']
+
 # Exceptions. One here, at the top level, names exact values only: given
 # paths, gitleaks (8.30) skips those files whole, whatever its condition. One
 # that holds only in some files goes under its rule, as above, where the
@@ -81,6 +116,12 @@ commits = [
   "b0de673ad11f298bf55cc822dfb2e6fdd1e05555",
   "94266178fd45504f72941283f6891f43c6f821a8",
   "6345f3678176965a600332e446880180c2954558",
+]
+[[allowlists]]
+description = "Move S3's report test (crates/factoryd/tests/all/move_rivet.rs) as first written: a made-up mapping from /Users/matt to /root, the person's name rather than this machine's home, fixed to /Users/me right after. These two commits only; the file as it is now is checked like any other."
+commits = [
+  "84a077dd9ed34b9dd33e045befb29ecd2a58d8b4",
+  "33f7b58a8fbd65fea5e7d25c598465b6ef64fdae",
 ]
 [[allowlists]]
 description = "The redactor tests' made-up PEM keys (crates/factory-agent/src/secrets.rs, a_pem_keys_armor_stays_and_its_body_is_hidden): an OpenSSH armor around only the format's fixed header (openssh-key-v1, cipher none, one key) or around the words 'ssh-ed25519 … Claktory Test Key Only Fake Key' in base64, written with \\n escapes in a Rust string; no key material"

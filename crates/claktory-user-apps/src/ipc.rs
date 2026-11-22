@@ -29,8 +29,9 @@ pub const VERSION: u32 = 1;
 pub const HEAD_LIMIT: usize = 64 * 1024;
 /// The largest body, either way: the root reads no more of a request.
 pub const BODY_LIMIT: usize = 1024 * 1024;
-/// How long the root waits for an answer: a long poll's 25 seconds and some.
-pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the root waits for an answer: a long poll's 25 seconds, with
+/// a busy worker's wait for a turn (5 seconds) before and after, and some.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// Who a call is from, as the root verified it. Nothing here comes from the
 /// caller unchecked except an agent's claims, which its backend signed.

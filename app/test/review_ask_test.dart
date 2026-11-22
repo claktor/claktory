@@ -112,6 +112,8 @@ void main() {
 
   testWidgets('Approve sends the note to the agent that asked', (tester) async {
     final harness = await _inNeedsYou(tester, Harness(_workspace()));
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
     await tester.enterText(
       find.descendant(
         of: find.byType(AskPersonCard),
@@ -127,6 +129,25 @@ void main() {
     expect(answer.seq.toInt(), 7);
     expect(answer.text, 'Looks right');
     expect(answer.dismiss, isFalse);
+  });
+
+  testWidgets('Dismiss sends the comment too', (tester) async {
+    final harness = await _inNeedsYou(tester, Harness(_workspace()));
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AskPersonCard),
+        matching: find.byType(EditableText),
+      ),
+      'Not this week',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    final answer = harness.last.answerAsk;
+    expect(answer.text, 'Not this week');
+    expect(answer.dismiss, isTrue);
   });
 
   testWidgets('an ordinary question has no file', (tester) async {

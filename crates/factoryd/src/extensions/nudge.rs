@@ -3,7 +3,9 @@
 //! doesn't sit until the person notices. And the doctrine on blockers
 //! (#255): an item that blocks on the person, owned by an agent with no
 //! question waiting for them, reminds that agent daily to ask, so work
-//! never sits parked behind a question nobody filed. And the periodic
+//! never sits parked behind a question nobody filed (one whose question
+//! the person dismissed is asked again on its own terms instead, see
+//! `checklist::check_waits`). And the periodic
 //! check-in (#270, the `nudge_every` option, off unless chosen): while an
 //! agent has open goals or outstanding items, it's reminded that often once
 //! idle, even while others work on its items, to see what can move.
@@ -55,6 +57,9 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         }
         if let Err(error) = check_in(&factory, &mut checked_in) {
             tracing::error!(%error, "could not check in on agents' goals and items");
+        }
+        if let Err(error) = checklist::check_waits(&factory) {
+            tracing::error!(%error, "could not check the checklist's waits");
         }
     }
 }
@@ -164,17 +169,26 @@ const ASK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
 /// and text.
 type Blocked = (String, String, u32, String);
 
-/// The daily reminder: items with `blocked_on` "person" whose owning
-/// agent (the owner, or the checklist's agent) has no pending ask get
-/// that agent told to file one, at most once a day.
+/// How long a decision waits on the person before its owner is reminded
+/// to ask, in minutes: time to file the card in the same step.
+const ASK_WITHIN_MINUTES: i64 = 60;
+
+/// The daily reminder: items with `blocked_on` "person", blocked an hour,
+/// whose owning agent (the owner, or the checklist's agent) has no pending
+/// ask about them get that agent told to file one, at most once a day. Not
+/// for something only the person can do (#282: its Needs you entry is
+/// enough), nor once they dismissed a question about it (it's asked again
+/// on its own terms, see `checklist::check_waits`).
 fn check_person_blocked(factory: &Arc<Factory>) -> rusqlite::Result<()> {
     sweep_once(factory)?;
     let rows: Vec<Blocked> = {
         let db = factory.store.db();
         let mut statement = db.prepare(
-            "SELECT agent, owner, id, text FROM checklist_items WHERE status = 'blocked' AND blocked_on = 'person' ORDER BY agent, id",
+            "SELECT agent, owner, id, text FROM checklist_items WHERE status = 'blocked' AND blocked_on = 'person'
+             AND blocked_kind != 'person_action' AND dismissed_at IS NULL AND blocked_since <= ?1 ORDER BY agent, id",
         )?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        let since = now_ms() - ASK_WITHIN_MINUTES.saturating_mul(factory.nudge_minute());
+        let rows = statement.query_map([since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
         rows.collect::<Result<_, _>>()?
     };
     if rows.is_empty() {
@@ -209,7 +223,11 @@ fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person:
             return Ok(());
         }
     }
-    if super::ask::pending_of(&factory.store, owning) {
+    let items: Vec<&Blocked> = items
+        .iter()
+        .filter(|(agent, _, id, _)| !super::ask::pending_about(&factory.store, owning, &checklist::item_key(agent, *id)))
+        .collect();
+    if items.is_empty() {
         return Ok(());
     }
     let now = now_ms();

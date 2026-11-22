@@ -4,6 +4,8 @@
 //! frame), and an image's size in pixels read from its header (PNG, JPEG,
 //! GIF, WebP).
 
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 /// Where in an image or a frame a comment is.
@@ -67,6 +69,101 @@ fn part(selectors: &str, name: &str) -> Option<String> {
         (kind == "FragmentSelector" || kind == "Fragment").then(|| selector["value"].as_str()).flatten()
     })?;
     value.trim().split('&').find_map(|part| part.strip_prefix(name)?.strip_prefix('=')).map(str::to_owned)
+}
+
+/// A place on a PDF's page: RFC 8118's `page=N`, refined by a
+/// `ClaktoryPageRegion` version 1 (#209 phase 3): normalized x, y, w, h from
+/// the top left of the page's crop box, unrotated.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PageRegion {
+    pub page: u32,
+    pub rotation: u32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// The most pages a PDF's comment can be on.
+const PAGES: u32 = 2000;
+
+/// Whether a normalized rectangle is on its surface: each number in 0..1,
+/// and x+w, y+h at most 1 (give or take rounding).
+pub(super) fn in_range(x: f64, y: f64, w: f64, h: f64) -> bool {
+    const SLACK: f64 = 1e-9;
+    [x, y, w, h].iter().all(|number| number.is_finite() && (0.0..=1.0).contains(number)) && x + w <= 1.0 + SLACK && y + h <= 1.0 + SLACK
+}
+
+/// The page region in a PDF thread's selectors, checked; the error is a
+/// sentence for the person.
+pub(super) fn page_region(selectors: &[Value]) -> Result<PageRegion, String> {
+    let needs = || "A comment on a PDF needs a page and a place on it.".to_owned();
+    let selector = selectors
+        .iter()
+        .find(|selector| {
+            let kind = selector["type"].as_str().unwrap_or_default();
+            (kind == "FragmentSelector" || kind == "Fragment")
+                && selector["value"].as_str().is_some_and(|value| value.trim().starts_with("page="))
+        })
+        .ok_or_else(needs)?;
+    let value = selector["value"].as_str().unwrap_or_default().trim();
+    let page = value
+        .split('&')
+        .find_map(|part| part.strip_prefix("page="))
+        .and_then(|page| page.parse::<u32>().ok())
+        .filter(|page| (1..=PAGES).contains(page))
+        .ok_or_else(|| "Comments can go on pages 1 to 2,000.".to_owned())?;
+    let region = &selector["refinedBy"];
+    if region["type"].as_str() != Some("ClaktoryPageRegion") {
+        return Err(needs());
+    }
+    let fixed = [
+        ("version", Value::from(1)),
+        ("box", Value::from("crop")),
+        ("units", Value::from("normalized")),
+        ("origin", Value::from("top_left_unrotated")),
+    ];
+    for (name, expected) in fixed {
+        let matches = match &expected {
+            Value::Number(number) => region[name].as_f64() == number.as_f64(),
+            _ => region[name] == expected,
+        };
+        if !matches {
+            return Err("That place on the page isn't one Claktory can read.".to_owned());
+        }
+    }
+    let rotation = region["rotation"]
+        .as_u64()
+        .filter(|rotation| [0, 90, 180, 270].contains(rotation))
+        .ok_or_else(|| "Couldn't save this comment: the page's rotation isn't supported.".to_owned())?;
+    let number = |name: &str| region[name].as_f64().unwrap_or(f64::NAN);
+    let (x, y, w, h) = (number("x"), number("y"), number("w"), number("h"));
+    if !in_range(x, y, w, h) {
+        return Err("That place isn't on the page.".to_owned());
+    }
+    Ok(PageRegion { page, rotation: rotation as u32, x, y, w, h })
+}
+
+/// A page region in words: "page 3, 12–62% across, 31–49% down"; "page 3,
+/// a spot 12% across and 31% down"; noting a page shown turned.
+pub(super) fn describe_page(region: &PageRegion) -> String {
+    let percent = |value: f64| number(value * 100.0);
+    let mut words = if region.w == 0.0 && region.h == 0.0 {
+        format!("page {}, a spot {}% across and {}% down", region.page, percent(region.x), percent(region.y))
+    } else {
+        format!(
+            "page {}, {}–{}% across, {}–{}% down",
+            region.page,
+            percent(region.x),
+            percent(region.x + region.w),
+            percent(region.y),
+            percent(region.y + region.h)
+        )
+    };
+    if region.rotation != 0 {
+        let _ = write!(words, " of the page unrotated (it's shown turned {}°)", region.rotation);
+    }
+    words
 }
 
 /// When in a video, in words: "at 0:31–0:45", or "at 0:31" for a moment.
@@ -209,6 +306,43 @@ mod tests {
         assert_eq!(describe(r#"[{"type":"FragmentSelector","value":"t=31.2"}]"#, None), None, "no region");
         assert_eq!(when(r#"[{"type":"FragmentSelector","value":"xywh=1,2,3,4"}]"#), None);
         assert_eq!(number(8.0), "8");
+    }
+
+    #[test]
+    fn page_regions_are_checked_and_said() {
+        let selectors = |page: &str, refined: Value| -> Vec<Value> {
+            vec![
+                serde_json::json!({"type": "FragmentSelector", "conformsTo": "http://tools.ietf.org/rfc/rfc8118", "value": page, "refinedBy": refined}),
+            ]
+        };
+        let region = |rotation: u64, x: f64, y: f64, w: f64, h: f64| serde_json::json!({"type": "ClaktoryPageRegion", "version": 1, "box": "crop", "rotation": rotation, "units": "normalized", "origin": "top_left_unrotated", "x": x, "y": y, "w": w, "h": h});
+        // item_pdf_region.json's.
+        let place = page_region(&selectors("page=3", region(0, 0.12, 0.31, 0.5, 0.18))).expect("placed");
+        assert_eq!(place.page, 3);
+        assert_eq!(describe_page(&place), "page 3, 12–62% across, 31–49% down");
+        let turned = page_region(&selectors("page=5", region(90, 0.1, 0.2, 0.3, 0.4))).expect("placed");
+        assert_eq!(describe_page(&turned), "page 5, 10–40% across, 20–60% down of the page unrotated (it's shown turned 90°)");
+        let spot = page_region(&selectors("page=1", region(0, 0.5, 0.25, 0.0, 0.0))).expect("placed");
+        assert_eq!(describe_page(&spot), "page 1, a spot 50% across and 25% down");
+        // The whole page is on it.
+        assert!(page_region(&selectors("page=2000", region(0, 0.0, 0.0, 1.0, 1.0))).is_ok());
+        for (page, refined) in [
+            ("page=0", region(0, 0.1, 0.1, 0.1, 0.1)),
+            ("page=2001", region(0, 0.1, 0.1, 0.1, 0.1)),
+            ("page=x", region(0, 0.1, 0.1, 0.1, 0.1)),
+            ("page=3", region(45, 0.1, 0.1, 0.1, 0.1)),
+            ("page=3", region(0, 0.6, 0.1, 0.5, 0.1)),
+            ("page=3", region(0, 0.1, 0.95, 0.1, 0.1)),
+            ("page=3", region(0, -0.1, 0.1, 0.1, 0.1)),
+            ("page=3", serde_json::json!({"type": "ClaktoryPageRegion", "version": 2})),
+            ("page=3", Value::Null),
+        ] {
+            assert!(page_region(&selectors(page, refined.clone())).is_err(), "{page} {refined}");
+        }
+        assert!(page_region(&[]).is_err());
+        let mut media = region(0, 0.1, 0.1, 0.1, 0.1);
+        media["box"] = Value::from("media");
+        assert!(page_region(&selectors("page=3", media)).is_err());
     }
 
     #[test]

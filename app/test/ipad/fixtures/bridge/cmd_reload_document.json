@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "reloadDocument",
+  "arguments": {
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/papers/paper.pdf",
+      "sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+      "mime": "application/pdf",
+      "size": 497305
+    },
+    "document": {
+      "file": "<render cache>/demo-mac/9c1e7f0a/paper.pdf",
+      "sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"
+    }
+  },
+  "result": {
+    "reloaded": true,
+    "source_sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "previous_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "page_count": 13,
+    "pages": [
+      {
+        "page_1based": 1,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 2,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 3,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 4,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 5,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 90
+      },
+      {
+        "page_1based": 6,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 7,
+        "crop_box": [
+          72,
+          144,
+          432,
+          504
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 8,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 9,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 10,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 11,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 12,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      },
+      {
+        "page_1based": 13,
+        "crop_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "media_box": [
+          0,
+          0,
+          612,
+          792
+        ],
+        "rotation": 0
+      }
+    ],
+    "page_1based": 5,
+    "pages_changed": [
+      5
+    ],
+    "pages_added": [
+      13
+    ],
+    "pages_removed": [],
+    "comparison": "text_and_render",
+    "kept_layers": [
+      {
+        "page_1based": 3,
+        "ink_layer_id": "layer-paper-p3",
+        "revision": 2
+      },
+      {
+        "page_1based": 7,
+        "ink_layer_id": "layer-paper-p7",
+        "revision": 3
+      }
+    ],
+    "outdated_layers": [
+      {
+        "page_1based": 5,
+        "ink_layer_id": "layer-paper-p5",
+        "revision": 1
+      }
+    ]
+  }
+}

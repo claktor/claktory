@@ -65,6 +65,123 @@ CREATE INDEX checklist_goal_events_by_goal ON checklist_goal_events (agent, goal
 ALTER TABLE checklist_items ADD COLUMN goal INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// The migration that typed blocks (#279, #282): what a blocked item waits
+/// on (`blocked_kind`: person_decision, person_action, item, agent or
+/// external; '' for untyped, as before), whom or what (`blocked_ref`: an
+/// agent id, or "agent#12" for an item), when an outside wait is checked
+/// again or a parked item resumes (`retry_at`; `retries` so far, each
+/// twice as long as the last), when the person is asked again after
+/// dismissing its question (`reask_at`, `dismissed_at`), when its owner was
+/// last asked whether it's still blocked (`prompted_at`), and when its
+/// owner's lead was told it's overdue (`overdue_told`). The item an ask is
+/// for ("agent#12"; '' for none). And Settings → Checklist's intervals, in
+/// minutes, by name; a missing one is its default.
+pub(crate) const WAITS: &str = "
+ALTER TABLE checklist_items ADD COLUMN blocked_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE checklist_items ADD COLUMN blocked_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE checklist_items ADD COLUMN retry_at INTEGER;
+ALTER TABLE checklist_items ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE checklist_items ADD COLUMN reask_at INTEGER;
+ALTER TABLE checklist_items ADD COLUMN dismissed_at INTEGER;
+ALTER TABLE checklist_items ADD COLUMN prompted_at INTEGER;
+ALTER TABLE checklist_items ADD COLUMN overdue_told INTEGER;
+ALTER TABLE asks ADD COLUMN item TEXT NOT NULL DEFAULT '';
+CREATE TABLE checklist_settings (name TEXT PRIMARY KEY, minutes INTEGER NOT NULL);
+UPDATE checklist_items SET blocked_kind = 'person_decision' WHERE status = 'blocked' AND blocked_on = 'person';
+";
+
+/// Settings → Checklist (#282): how Claktory follows up on blocked items,
+/// in minutes. Kept in factory.db, not config.json, which an older backend
+/// would refuse whole after a rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Times {
+    /// A block on another agent or item, or of no kind: its owner is asked
+    /// whether it's still blocked this long after, and as often again.
+    pub agent_blocked: i64,
+    /// The same for a wait on the person.
+    pub person_blocked: i64,
+    /// An outside wait with no retry_at is checked again this long after,
+    /// then each time twice as long, a day at most (or this, if longer).
+    pub external_retry: i64,
+    /// After the person dismisses a question about an item that still
+    /// waits on them, its owner asks again this long after, as often.
+    pub reask: i64,
+    /// A block this old is told to its owner's lead, once.
+    pub overdue: i64,
+}
+
+impl Times {
+    const DEFAULT: Times =
+        Times { agent_blocked: 4 * 60, person_blocked: 24 * 60, external_retry: 2 * 60, reask: 24 * 60, overdue: 24 * 60 };
+    /// Each can be from 15 minutes to a week.
+    const RANGE: std::ops::RangeInclusive<u32> = 15..=7 * 24 * 60;
+
+    fn names(&mut self) -> [(&'static str, &mut i64); 5] {
+        [
+            ("agent_blocked", &mut self.agent_blocked),
+            ("person_blocked", &mut self.person_blocked),
+            ("external_retry", &mut self.external_retry),
+            ("reask", &mut self.reask),
+            ("overdue", &mut self.overdue),
+        ]
+    }
+
+    /// The intervals as set, each its default until changed.
+    pub(crate) fn read(store: &Store) -> Times {
+        let mut times = Times::DEFAULT;
+        let db = store.db();
+        for (name, value) in times.names() {
+            let set: Option<i64> =
+                db.query_row("SELECT minutes FROM checklist_settings WHERE name = ?1", [name], |row| row.get(0)).optional().ok().flatten();
+            if let Some(set) = set {
+                *value = set;
+            }
+        }
+        times
+    }
+
+    pub(crate) fn proto(self) -> v1::ChecklistSettings {
+        let minutes = |value: i64| u32::try_from(value).unwrap_or_default();
+        v1::ChecklistSettings {
+            agent_blocked_minutes: minutes(self.agent_blocked),
+            person_blocked_minutes: minutes(self.person_blocked),
+            external_retry_minutes: minutes(self.external_retry),
+            reask_minutes: minutes(self.reask),
+            overdue_minutes: minutes(self.overdue),
+        }
+    }
+
+    /// Sets what `request` gives (0 leaves one as it is), or nothing when
+    /// any is out of range. Says whether anything changed.
+    pub(crate) fn set(store: &Store, request: &v1::ChecklistSettings) -> Result<bool, String> {
+        let given = [
+            ("agent_blocked", request.agent_blocked_minutes),
+            ("person_blocked", request.person_blocked_minutes),
+            ("external_retry", request.external_retry_minutes),
+            ("reask", request.reask_minutes),
+            ("overdue", request.overdue_minutes),
+        ];
+        if given.iter().any(|(_, minutes)| *minutes != 0 && !Times::RANGE.contains(minutes)) {
+            return Err(format!("Choose from {} minutes to {} days.", Times::RANGE.start(), Times::RANGE.end() / (24 * 60)));
+        }
+        let before = Times::read(store);
+        let db = store.db();
+        for (name, minutes) in given.into_iter().filter(|(_, minutes)| *minutes != 0) {
+            db.execute("INSERT OR REPLACE INTO checklist_settings (name, minutes) VALUES (?1, ?2)", params![name, minutes])
+                .map_err(|error| error.to_string())?;
+        }
+        drop(db);
+        Ok(Times::read(store) != before)
+    }
+}
+
+/// An outside wait's retries: each twice as long as the last, from `base`
+/// minutes, at most a day (or `base`, if that's longer).
+fn retry_minutes(base: i64, retries: i64) -> i64 {
+    let most = base.max(24 * 60);
+    base.saturating_mul(1_i64 << retries.clamp(0, 20)).min(most)
+}
+
 /// The longest goal.
 const GOAL_LENGTH: usize = 500;
 
@@ -121,15 +238,18 @@ You keep a checklist of everything the person asks you for, so nothing they said
 - When they ask for things, record each as an item right away. checklist_add takes many at once.
 - Keep items current with checklist_update: in_progress or an owner when work starts, done or dropped with a short note when it ends.
 - in_progress means someone is working on it right now; work waiting its turn stays open, with its owner. Hand each worker one or two items at a time, and the next when one is done.
-- blocked means it waits on the person or something outside; set blocked_on with it: \"person\" when it waits on the person, else a few words naming the blocker, and say more in a note. A decision that gates work is asked the day it blocks: when an item blocks on the person, file ask_person then and there, one card per real decision; only pure preferences batch into one question. While a person-blocked item has no question waiting, Claktory reminds the item's owner daily.
+- blocked means nothing can move until something comes; say what with waits_on: person_decision (a decision only the person can make), person_action (something only they can do), item (another item, ref 12 or Ana#12: it opens again by itself when that one is done or dropped), agent (ref, its id or name: it's told you're waiting) or external (something outside; you're told to check again at retry_at, such as 2h or \"2026-11-23 14:00\", or after a while if you give none, then less and less often). blocked_on adds a few words if useful; say more in a note.
+- An item waiting on the person shows in their Needs you. A decision that gates work is asked the moment it blocks: file ask_person then and there with item naming it, one card per real decision; only pure preferences batch into one question. Something only they can do needs no card. When they answer, clear the block. If they dismiss it, decide yourself if you can and note what you chose; if you truly can't move without them, leave it blocked with a note why, and Claktory has you ask again later.
+- Now and then Claktory asks whether a blocked item is still blocked: try it again, since it may not be. A block that lasts too long (a day, unless the person changed it) is told to your lead.
+- parked means set aside for later (after a release, say) or ongoing, with nothing to wait on: never mark that blocked. Parked items aren't nudged; retry_at sets when one resumes, if you know.
 - Goals are the person's: outcomes they want (\"a link to the Android app I can share\"). Record one with checklist_goals only when the person states it, in their words, never your own plans; the person also adds and changes goals in the app, and you're told when they do. Link the items that serve a goal with `goal` on checklist_add or checklist_update. Mark a goal done only when the person's outcome is reached, or dropped when they say so.
 - checklist_list shows open goals, then open items; filter by status, day, owner or text. checklist_item shows one item's history. Both take `agent` to read another agent's checklist.
 - Check the list before telling the person work is finished.
 ";
 
 const ADD: &str = "Add items to your checklist, many at once. goal: the id of the goal they serve (2 for G2). Returns their ids.";
-const UPDATE: &str = "Change items on your checklist: status (open, in_progress, blocked, done, dropped), blocked_on with status blocked (\"person\" when it waits on the person, else a few words naming the blocker), goal (the id of the goal it serves, 2 for G2; 0 for none), owner (an agent id or name; empty to unassign), text, and/or a short note.";
-const LIST: &str = "List the checklist: its open goals (all of them with status all), then its items, one line each, oldest first: open, in progress and blocked unless `status` says otherwise (open, in_progress, blocked, done, dropped, all). Filter items by `day` added (YYYY-MM-DD), `owner` or text `q`. `agent` reads another agent's checklist.";
+const UPDATE: &str = "Change items on your checklist: status (open, in_progress, blocked, parked, done, dropped); with status blocked, waits_on (person_decision, person_action, item, agent or external), ref (item: 12 or Ana#12; agent: its id or name) and blocked_on (a few words naming the blocker; \"person\" alone means a decision of the person's); retry_at (2h, 1d or \"2026-11-23 14:00\": when you're told to check again, with waits_on external; when it resumes, with status parked), goal (the id of the goal it serves, 2 for G2; 0 for none), owner (an agent id or name; empty to unassign), text, and/or a short note.";
+const LIST: &str = "List the checklist: its open goals (all of them with status all), then its items, one line each, oldest first: open, in progress, blocked and parked unless `status` says otherwise (open, in_progress, blocked, parked, done, dropped, all). Filter items by `day` added (YYYY-MM-DD), `owner` or text `q`. `agent` reads another agent's checklist.";
 const GOALS_TOOL: &str = "The person's goals on your checklist: outcomes they want, recorded in their words, only from what they said. add: new goals' texts. updates: changes by id (1 for G1): text, status (open, done, dropped), or remove. Link items to a goal with `goal` on checklist_add or checklist_update.";
 const ITEM: &str = "One checklist item with everything that happened to it. `agent` reads another agent's checklist.";
 
@@ -143,13 +263,16 @@ pub(crate) enum Status {
     Dropped,
     /// Waiting on the person or something outside; still outstanding.
     Blocked,
+    /// Ongoing or waiting its turn, with nothing to wait on: still
+    /// outstanding, never nudged.
+    Parked,
 }
 
 /// What's still to do: everything not done or dropped.
-const OUTSTANDING: [Status; 3] = [Status::Open, Status::InProgress, Status::Blocked];
+const OUTSTANDING: [Status; 4] = [Status::Open, Status::InProgress, Status::Blocked, Status::Parked];
 
 impl Status {
-    const ALL: [Status; 5] = [Status::Open, Status::InProgress, Status::Done, Status::Dropped, Status::Blocked];
+    const ALL: [Status; 6] = [Status::Open, Status::InProgress, Status::Done, Status::Dropped, Status::Blocked, Status::Parked];
 
     fn name(self) -> &'static str {
         match self {
@@ -158,10 +281,11 @@ impl Status {
             Status::Done => "done",
             Status::Dropped => "dropped",
             Status::Blocked => "blocked",
+            Status::Parked => "parked",
         }
     }
 
-    fn parse(name: &str) -> Option<Status> {
+    pub(crate) fn parse(name: &str) -> Option<Status> {
         Status::ALL.into_iter().find(|status| status.name() == name.trim().to_ascii_lowercase().replace([' ', '-'], "_"))
     }
 
@@ -172,6 +296,7 @@ impl Status {
             Status::Done => "[x]",
             Status::Dropped => "[-]",
             Status::Blocked => "[!]",
+            Status::Parked => "[=]",
         }
     }
 
@@ -182,6 +307,7 @@ impl Status {
             Status::Done => "Done",
             Status::Dropped => "Dropped",
             Status::Blocked => "Blocked",
+            Status::Parked => "Parked",
         }
     }
 
@@ -192,6 +318,64 @@ impl Status {
             Status::Done => v1::ChecklistStatus::Done,
             Status::Dropped => v1::ChecklistStatus::Dropped,
             Status::Blocked => v1::ChecklistStatus::Blocked,
+            Status::Parked => v1::ChecklistStatus::Parked,
+        }
+    }
+}
+
+/// What a blocked item waits on (#279).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Wait {
+    /// Untyped: a blocked item from before, or one given only blocked_on words.
+    #[default]
+    Untyped,
+    /// A decision only the person can make.
+    PersonDecision,
+    /// Something only the person can do (sign in, pay, plug in).
+    PersonAction,
+    /// Another checklist item: it opens again when that one is done or dropped.
+    Item,
+    /// Another agent.
+    Agent,
+    /// Something outside, checked again at its retry time.
+    External,
+}
+
+impl Wait {
+    const ALL: [Wait; 5] = [Wait::PersonDecision, Wait::PersonAction, Wait::Item, Wait::Agent, Wait::External];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Wait::Untyped => "",
+            Wait::PersonDecision => "person_decision",
+            Wait::PersonAction => "person_action",
+            Wait::Item => "item",
+            Wait::Agent => "agent",
+            Wait::External => "external",
+        }
+    }
+
+    pub(crate) fn parse(name: &str) -> Option<Wait> {
+        let name = name.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        Wait::ALL.into_iter().find(|wait| wait.name() == name)
+    }
+
+    fn read(name: &str) -> Wait {
+        Wait::parse(name).unwrap_or_default()
+    }
+
+    pub(crate) fn is_person(self) -> bool {
+        matches!(self, Wait::PersonDecision | Wait::PersonAction)
+    }
+
+    fn proto(self) -> v1::BlockedKind {
+        match self {
+            Wait::Untyped => v1::BlockedKind::Unspecified,
+            Wait::PersonDecision => v1::BlockedKind::PersonDecision,
+            Wait::PersonAction => v1::BlockedKind::PersonAction,
+            Wait::Item => v1::BlockedKind::Item,
+            Wait::Agent => v1::BlockedKind::Agent,
+            Wait::External => v1::BlockedKind::External,
         }
     }
 }
@@ -210,6 +394,17 @@ pub(crate) struct Item {
     pub blocked_since: Option<i64>,
     /// The goal it serves; 0 for none.
     pub goal: u32,
+    /// While blocked: what kind of thing it waits on, and whom or what (an
+    /// agent id, or "agent#12" for an item).
+    pub wait: Wait,
+    pub wait_ref: String,
+    /// While it waits on something outside: when it's checked again.
+    pub retry_at: Option<i64>,
+    /// While it waits on the person after they dismissed its question: when
+    /// Claktory has it asked again; None when it won't be.
+    pub reask_at: Option<i64>,
+    /// When the person last dismissed a question about it while blocked.
+    pub dismissed_at: Option<i64>,
     pub created: i64,
     pub updated: i64,
     /// The local day it was added, "11-18".
@@ -284,7 +479,8 @@ pub(crate) fn query(store: &Store, query: &Query) -> rusqlite::Result<(Vec<Item>
     let total = usize::try_from(total).unwrap_or(0);
     let limit = query.limit.map_or(-1, |limit| limit as i64);
     let mut statement = db.prepare(&format!(
-        "SELECT id, text, status, owner, created, updated, strftime('%m-%d', created / 1000, 'unixepoch', 'localtime'), blocked_on, blocked_since, goal
+        "SELECT id, text, status, owner, created, updated, strftime('%m-%d', created / 1000, 'unixepoch', 'localtime'), blocked_on, blocked_since, goal,
+                blocked_kind, blocked_ref, retry_at, reask_at, dismissed_at
          FROM checklist_items WHERE {filter} ORDER BY id LIMIT {limit}"
     ))?;
     let mut rows = statement.query(params_from_iter(&values))?;
@@ -302,6 +498,11 @@ pub(crate) fn query(store: &Store, query: &Query) -> rusqlite::Result<(Vec<Item>
             blocked_on: row.get(7)?,
             blocked_since: row.get(8)?,
             goal: row.get(9)?,
+            wait: Wait::read(&row.get::<_, String>(10)?),
+            wait_ref: row.get(11)?,
+            retry_at: row.get(12)?,
+            reask_at: row.get(13)?,
+            dismissed_at: row.get(14)?,
             log: Vec::new(),
             blocked_note: String::new(),
         });
@@ -350,6 +551,7 @@ fn changes(events: Vec<Row>) -> Vec<Change> {
             "owner" => format!("Owner: {value}"),
             "edited" => format!("Edited: {value}"),
             "blocked_on" => format!("Blocks on: {value}"),
+            "waits_on" => format!("Waits on: {value}"),
             "goal" if value.is_empty() => "No goal".to_owned(),
             "goal" => format!("Serves {value}"),
             _ => value,
@@ -418,6 +620,33 @@ pub(crate) struct Update {
     pub blocked_on: Option<String>,
     /// The goal it serves; 0 for none.
     pub goal: Option<u32>,
+    /// What it waits on, typed (#279): its kind, and whom or what (an
+    /// agent id, or "agent#12"; already checked). Only on an item that is
+    /// (or becomes) blocked.
+    pub wait: Option<(Wait, String)>,
+    /// When to check again, in ms: an outside wait's next retry, or when a
+    /// parked item resumes. Only with waits_on external or status parked.
+    pub retry_at: Option<i64>,
+    /// An outside wait's first check when no retry_at was given (Settings →
+    /// Checklist's retry interval): only for a new wait, since the same one
+    /// set again keeps its next check.
+    pub first_retry: Option<i64>,
+}
+
+/// The blocked_on words a typed wait shows to older apps: "person" for the
+/// person, else whom or what it waits on.
+fn words_for(wait: Wait, reference: &str, words: Option<&str>) -> String {
+    match (wait, words) {
+        (Wait::PersonDecision | Wait::PersonAction, _) => "person".to_owned(),
+        (_, Some(words)) => words.to_owned(),
+        (Wait::Item, None) => match reference.split_once('#') {
+            Some((agent, id)) => format!("{agent} #{id}"),
+            None => reference.to_owned(),
+        },
+        (Wait::Agent, None) => reference.to_owned(),
+        (Wait::External, None) => "something outside".to_owned(),
+        (Wait::Untyped, None) => String::new(),
+    }
 }
 
 /// Applies changes, each to an existing item; says what changed, item by item.
@@ -427,16 +656,33 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, updates: &[Update]
     let now = now_ms();
     let mut said = Vec::new();
     for update in updates {
-        let was: Option<String> = transaction
-            .query_row("SELECT status FROM checklist_items WHERE agent = ?1 AND id = ?2", params![agent, update.id], |row| row.get(0))
+        let was: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
+                params![agent, update.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .optional()?;
-        let Some(was) = was else {
+        let Some((was, was_kind, was_ref)) = was else {
             said.push(format!("#{}: no such item", update.id));
             continue;
         };
         let blocked = update.status.map_or(Status::parse(&was) == Some(Status::Blocked), |status| status == Status::Blocked);
         if update.blocked_on.is_some() && !blocked {
             said.push(format!("#{}: blocked_on goes with status blocked", update.id));
+            continue;
+        }
+        if update.wait.is_some() && !blocked {
+            said.push(format!("#{}: waits_on goes with status blocked", update.id));
+            continue;
+        }
+        let parked = update.status.map_or(Status::parse(&was) == Some(Status::Parked), |status| status == Status::Parked);
+        let external = match &update.wait {
+            Some((wait, _)) => *wait == Wait::External,
+            None => blocked && update.blocked_on.is_none() && Wait::read(&was_kind) == Wait::External,
+        };
+        if update.retry_at.is_some() && !parked && !external {
+            said.push(format!("#{}: retry_at goes with waits_on external, or status parked", update.id));
             continue;
         }
         if let Some(goal) = update.goal
@@ -456,18 +702,73 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, updates: &[Update]
                 )?;
             } else {
                 transaction.execute(
-                    "UPDATE checklist_items SET status = ?3, blocked_on = '', blocked_since = NULL WHERE agent = ?1 AND id = ?2",
+                    "UPDATE checklist_items SET status = ?3, blocked_on = '', blocked_since = NULL, blocked_kind = '', blocked_ref = '',
+                     retry_at = NULL, retries = 0, reask_at = NULL, dismissed_at = NULL, prompted_at = NULL, overdue_told = NULL
+                     WHERE agent = ?1 AND id = ?2",
                     params![agent, update.id, status.name()],
                 )?;
             }
             record(&transaction, agent, update.id, now, actor, "status", status.name())?;
             parts.push(status.name().to_owned());
         }
-        if let Some(on) = &update.blocked_on {
-            transaction
-                .execute("UPDATE checklist_items SET blocked_on = ?3 WHERE agent = ?1 AND id = ?2", params![agent, update.id, on])?;
+        // The same wait set again (new words, say) keeps where its retries,
+        // re-asks and prompts stand; a new one starts them afresh.
+        let same = |wait: Wait, reference: &str| {
+            Status::parse(&was) == Some(Status::Blocked)
+                && update.status.is_none_or(|status| status == Status::Blocked)
+                && Wait::read(&was_kind) == wait
+                && was_ref == reference
+        };
+        if let Some((wait, reference)) = &update.wait
+            && same(*wait, reference)
+        {
+            // Its words and next check stay unless new ones are given.
+            let on = update.blocked_on.as_deref().map(|words| words_for(*wait, reference, Some(words)));
+            transaction.execute(
+                "UPDATE checklist_items SET blocked_on = COALESCE(?3, blocked_on), retry_at = COALESCE(?4, retry_at) WHERE agent = ?1 AND id = ?2",
+                params![agent, update.id, on, update.retry_at],
+            )?;
+            let mut shown = wait.name().replace('_', " ");
+            if !reference.is_empty() {
+                let _ = write!(shown, " {reference}");
+            }
+            record(&transaction, agent, update.id, now, actor, "waits_on", &shown)?;
+            parts.push(format!("waits on {shown}"));
+        } else if let Some((wait, reference)) = &update.wait {
+            let on = words_for(*wait, reference, update.blocked_on.as_deref());
+            transaction.execute(
+                "UPDATE checklist_items SET blocked_kind = ?3, blocked_ref = ?4, retry_at = ?5, blocked_on = ?6,
+                 retries = 0, reask_at = NULL, dismissed_at = NULL, prompted_at = NULL WHERE agent = ?1 AND id = ?2",
+                params![agent, update.id, wait.name(), reference, update.retry_at.or(update.first_retry), on],
+            )?;
+            let mut shown = wait.name().replace('_', " ");
+            if !reference.is_empty() {
+                let _ = write!(shown, " {reference}");
+            }
+            record(&transaction, agent, update.id, now, actor, "waits_on", &shown)?;
+            parts.push(format!("waits on {shown}"));
+        } else if let Some(on) = &update.blocked_on {
+            // Words alone, as before: "person" is a decision of the person's;
+            // anything else is untyped.
+            let wait = if on == "person" { Wait::PersonDecision } else { Wait::Untyped };
+            transaction.execute(
+                "UPDATE checklist_items SET blocked_on = ?3, blocked_kind = ?4, blocked_ref = '', retry_at = NULL,
+                 retries = 0, reask_at = NULL, dismissed_at = NULL, prompted_at = NULL WHERE agent = ?1 AND id = ?2",
+                params![agent, update.id, on, wait.name()],
+            )?;
             record(&transaction, agent, update.id, now, actor, "blocked_on", on)?;
             parts.push(format!("blocks on {on}"));
+        }
+        // A parked item's resume time, or a new retry for an outside wait
+        // already set.
+        if let Some(at) = update.retry_at
+            && (parked || update.wait.is_none())
+        {
+            transaction.execute("UPDATE checklist_items SET retry_at = ?3 WHERE agent = ?1 AND id = ?2", params![agent, update.id, at])?;
+            let when = super::monitors::when::local(at, now);
+            let kind = if parked { "resumes" } else { "retry" };
+            record(&transaction, agent, update.id, now, actor, kind, &when)?;
+            parts.push(if parked { format!("resumes {when}") } else { format!("checked again {when}") });
         }
         if let Some(goal) = update.goal {
             transaction.execute("UPDATE checklist_items SET goal = ?3 WHERE agent = ?1 AND id = ?2", params![agent, update.id, goal])?;
@@ -498,6 +799,360 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, updates: &[Update]
     }
     transaction.commit()?;
     Ok(said)
+}
+
+/// "agent#12": how a wait on an item, and an ask about one, name it.
+pub(crate) fn item_key(agent: &str, id: u32) -> String {
+    format!("{agent}#{id}")
+}
+
+/// An item's text, by its key; None when it's gone.
+fn text_of(store: &Store, key: &str) -> Option<String> {
+    let (agent, id) = key.rsplit_once('#')?;
+    let id: u32 = id.parse().ok()?;
+    store
+        .db()
+        .query_row("SELECT text FROM checklist_items WHERE agent = ?1 AND id = ?2", params![agent, id], |row| row.get(0))
+        .optional()
+        .ok()
+        .flatten()
+}
+
+/// The agent that acts on an item: its owner, or the checklist's agent.
+fn owning<'a>(agent: &'a str, owner: &'a str) -> &'a str {
+    if owner.is_empty() { agent } else { owner }
+}
+
+/// Items that wait on the person, by checklist (Agent.waiting_items).
+pub(crate) fn waiting_items(store: &Store) -> rusqlite::Result<std::collections::HashMap<String, Vec<v1::WaitingItem>>> {
+    /// Agent, id, text, owner, kind, blocked since, re-ask and dismissal times.
+    type Waiting = (String, u32, String, String, String, Option<i64>, Option<i64>, Option<i64>);
+    let rows: Vec<Waiting> = {
+        let db = store.db();
+        let mut statement = db.prepare(
+            "SELECT agent, id, text, owner, blocked_kind, blocked_since, reask_at, dismissed_at FROM checklist_items
+             WHERE status = 'blocked' AND blocked_kind IN ('person_decision', 'person_action') ORDER BY blocked_since, agent, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let mut waiting: std::collections::HashMap<String, Vec<v1::WaitingItem>> = std::collections::HashMap::new();
+    for (agent, id, text, owner, kind, since, reask, dismissed) in rows {
+        let has_pending_ask = super::ask::pending_about(store, owning(&agent, &owner), &item_key(&agent, id));
+        waiting.entry(agent).or_default().push(v1::WaitingItem {
+            item: id,
+            text,
+            kind: Wait::read(&kind).proto().into(),
+            since_ms: since.unwrap_or_default(),
+            reask_at_ms: reask.unwrap_or_default(),
+            has_pending_ask,
+            owner,
+            dismissed_ms: dismissed.unwrap_or_default(),
+        });
+    }
+    Ok(waiting)
+}
+
+/// Whether the agent's checklist has an item waiting on the person with
+/// no question waiting about it: something for the person all the same.
+pub(crate) fn waits_unasked(store: &Store, agent: &str) -> bool {
+    waiting_items(store).is_ok_and(|waiting| waiting.get(agent).is_some_and(|items| items.iter().any(|item| !item.has_pending_ask)))
+}
+
+/// Items `agent`'s #`id` was blocking open again now it's done or dropped,
+/// each recorded as `actor`'s doing; their owners are told, and their
+/// checklists shown afresh.
+pub(crate) fn finished(factory: &Arc<Factory>, agent: &str, id: u32, status: Status, actor: &str) -> rusqlite::Result<()> {
+    let key = item_key(agent, id);
+    let waiting: Vec<(String, u32, String, String)> = {
+        let db = factory.store.db();
+        let mut statement = db.prepare(
+            "SELECT agent, id, text, owner FROM checklist_items WHERE status = 'blocked' AND blocked_kind = 'item' AND blocked_ref = ?1",
+        )?;
+        let rows = statement.query_map([&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let (text, name) = {
+        let inner = factory.lock();
+        let name = inner.config.agent(agent).map_or_else(|| agent.to_owned(), |config| config.name.clone());
+        (text_of(&factory.store, &key).unwrap_or_default(), name)
+    };
+    let how = if status == Status::Done { "done" } else { "dropped" };
+    for (whose, item, item_text, owner) in waiting {
+        let note = format!("{name}'s #{id} is {how}");
+        update(&factory.store, &whose, actor, &[Update { id: item, status: Some(Status::Open), note: Some(note), ..Update::default() }])?;
+        let on = if whose == owning(&whose, &owner) { String::new() } else { format!(" on {whose}'s checklist") };
+        let said = format!(
+            "#{item}{on} \"{item_text}\" was waiting on {name}'s #{id} \"{text}\", which is {how}: it's open again. Carry on with it, or mark it again if it still can't move."
+        );
+        factory.deliver_event(owning(&whose, &owner), said, crate::factory::host_event(format!("#{item} is open again")));
+        factory.refresh_view(&whose);
+    }
+    factory.broadcast_workspace(&factory.lock());
+    Ok(())
+}
+
+/// Tells agent `on` that `agent`'s #`id` waits on it: no reply needed.
+fn waited_on(factory: &Arc<Factory>, agent: &str, id: u32, on: &str) {
+    let Some(text) = text_of(&factory.store, &item_key(agent, id)) else { return };
+    let name = factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |config| config.name.clone());
+    let said = format!(
+        "{name} is waiting on you for its #{id} \"{text}\". Nothing to answer if you already know; when what it needs is ready, tell {name}."
+    );
+    factory.deliver_event(on, said, crate::factory::host_event(format!("{name} is waiting on you")));
+}
+
+/// The person decided a question about item `key` ("agent#12"): what the
+/// event telling its agent adds, while the item still waits on them; None
+/// when it no longer does. Answered, the agent clears the block or says
+/// what's missing. Dismissed, it decides itself if it can; if it truly
+/// can't, the item stays in Needs you and Claktory has it ask again after
+/// Settings → Checklist's re-ask interval, as often as it takes.
+pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool) -> rusqlite::Result<Option<String>> {
+    let Some((agent, id)) = key.rsplit_once('#') else { return Ok(None) };
+    let Ok(id) = id.parse::<u32>() else { return Ok(None) };
+    let row: Option<(String, String)> = factory
+        .store
+        .db()
+        .query_row(
+            "SELECT text, blocked_kind FROM checklist_items WHERE agent = ?1 AND id = ?2 AND status = 'blocked'",
+            params![agent, id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((text, kind)) = row else { return Ok(None) };
+    if !Wait::read(&kind).is_person() {
+        return Ok(None);
+    }
+    let person = factory.lock().config.person().to_owned();
+    if !dismissed {
+        // Answered: whatever an earlier dismissal set going is over.
+        factory
+            .store
+            .db()
+            .execute("UPDATE checklist_items SET dismissed_at = NULL, reask_at = NULL WHERE agent = ?1 AND id = ?2", params![agent, id])?;
+        return Ok(Some(format!(
+            "\n\nIt was about #{id} \"{text}\", still blocked on {person}. If this settles it, update #{id} now; if something is still missing, say what in a note."
+        )));
+    }
+    let now = now_ms();
+    let reask_at = now + Times::read(&factory.store).reask.saturating_mul(factory.nudge_minute());
+    factory.store.db().execute(
+        "UPDATE checklist_items SET dismissed_at = ?3, reask_at = ?4 WHERE agent = ?1 AND id = ?2",
+        params![agent, id, now, reask_at],
+    )?;
+    let when = super::monitors::when::local(reask_at, now);
+    Ok(Some(format!(
+        "\n\nIt was about #{id} \"{text}\", which still waits on {person}. Decide it yourself if you can, and update #{id}; note what you chose. If you truly can't move without them, leave #{id} blocked and say why in a note: it stays in their Needs you, and Claktory has you ask them again {when}."
+    )))
+}
+
+/// Whether Claktory follows up with `owning` about its blocked items: not
+/// when it's archived or gone, or has its Checklist's reminders off.
+fn followed_up(factory: &Factory, owning: &str) -> bool {
+    let inner = factory.lock();
+    let Some(config) = inner.config.agent(owning) else { return false };
+    !inner.config.archived(config) && !(super::enabled(config, ID) && !super::switch(config, ID, "nudge"))
+}
+
+/// A blocked or parked item as `check_waits` reads it.
+struct Due {
+    agent: String,
+    id: u32,
+    text: String,
+    owner: String,
+    kind: Wait,
+    on: String,
+    since: i64,
+    retries: i64,
+}
+
+impl Due {
+    fn owning(&self) -> &str {
+        owning(&self.agent, &self.owner)
+    }
+
+    /// " on Ana's checklist" when it isn't `owning`'s own.
+    fn whose(&self) -> String {
+        if self.owning() == self.agent { String::new() } else { format!(" on {}'s checklist", self.agent) }
+    }
+}
+
+/// Typed waits and parked items coming due (#279, #282), checked now and
+/// then by the nudge loop, each interval from Settings → Checklist:
+/// - a parked item's resume time opens it again, its owner told;
+/// - an outside wait's retry time tells its owner to check again, and sets
+///   the next, twice as long after;
+/// - a dismissed question's re-ask time has the owner ask the person again,
+///   and sets the next;
+/// - a block on an agent or item, or one waiting on the person, has its
+///   owner asked whether it's still blocked, and again as often;
+/// - a block older than the overdue interval is told to its owner's lead,
+///   once (never to the person).
+pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
+    let now = now_ms();
+    let minute = factory.nudge_minute();
+    let times = Times::read(&factory.store);
+    let after = |minutes: i64| minutes.saturating_mul(minute);
+    let due = |condition: &str, at: i64| -> rusqlite::Result<Vec<Due>> {
+        let db = factory.store.db();
+        let mut statement = db.prepare(&format!(
+            "SELECT agent, id, text, owner, blocked_kind, blocked_on, COALESCE(blocked_since, updated), retries
+             FROM checklist_items WHERE {condition} ORDER BY agent, id"
+        ))?;
+        let rows = statement.query_map([at], |row| {
+            Ok(Due {
+                agent: row.get(0)?,
+                id: row.get(1)?,
+                text: row.get(2)?,
+                owner: row.get(3)?,
+                kind: Wait::read(&row.get::<_, String>(4)?),
+                on: row.get(5)?,
+                since: row.get(6)?,
+                retries: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    };
+    let (person, person_capitalized) = {
+        let inner = factory.lock();
+        (inner.config.person().to_owned(), inner.config.person_capitalized().to_owned())
+    };
+    let mut changed = false;
+
+    for item in due("status = 'parked' AND retry_at <= ?1", now)? {
+        update(
+            &factory.store,
+            &item.agent,
+            &item.agent,
+            &[Update { id: item.id, status: Some(Status::Open), note: Some("Resumed at its set time".to_owned()), ..Update::default() }],
+        )?;
+        let said =
+            format!("#{}{} \"{}\" was parked until now: it's open again. Pick it up, or park it again.", item.id, item.whose(), item.text);
+        factory.deliver_event(item.owning(), said, crate::factory::host_event(format!("#{} resumes", item.id)));
+        factory.refresh_view(&item.agent);
+        changed = true;
+    }
+
+    for item in due("status = 'blocked' AND blocked_kind = 'external' AND retry_at <= ?1", now)? {
+        let next = now + after(retry_minutes(times.external_retry, item.retries + 1));
+        factory.store.db().execute(
+            "UPDATE checklist_items SET retry_at = ?3, retries = retries + 1 WHERE agent = ?1 AND id = ?2",
+            params![item.agent, item.id, next],
+        )?;
+        let said = format!(
+            "#{}{} \"{}\" waits on {}, and it's time to check again. If it can move now, carry on and update it; if not, leave it: you're told again {}, or set your own retry_at.",
+            item.id,
+            item.whose(),
+            item.text,
+            item.on,
+            super::monitors::when::local(next, now),
+        );
+        factory.deliver_event(item.owning(), said, crate::factory::host_event(format!("Check again: #{}", item.id)));
+        factory.refresh_view(&item.agent);
+    }
+
+    for item in due("status = 'blocked' AND blocked_kind IN ('person_decision', 'person_action') AND reask_at <= ?1", now)? {
+        let next = now + after(times.reask);
+        factory
+            .store
+            .db()
+            .execute("UPDATE checklist_items SET reask_at = ?3 WHERE agent = ?1 AND id = ?2", params![item.agent, item.id, next])?;
+        factory.refresh_view(&item.agent);
+        changed = true;
+        let owning = item.owning();
+        if super::ask::pending_about(&factory.store, owning, &item_key(&item.agent, item.id)) {
+            continue;
+        }
+        let name = if owning == item.agent { item.id.to_string() } else { item_key(&item.agent, item.id) };
+        let said = format!(
+            "{person_capitalized} dismissed your question about #{}{} \"{}\", and it still waits on them. If you can decide it yourself now, do, and update #{}. If not, ask them again with ask_person (item: \"{name}\"), saying in a line why only they can settle it.",
+            item.id,
+            item.whose(),
+            item.text,
+            item.id,
+        );
+        factory.deliver_event(owning, said, crate::factory::host_event(format!("Ask {person} again: #{}", item.id)));
+    }
+
+    // Still blocked? On agents and items (and untyped) after the agent
+    // interval; on the person after the person interval, unless a dismissal
+    // has it re-asked or a decision has no card yet (the daily reminder
+    // covers that). Each owner hears of its items together.
+    let mut still: std::collections::BTreeMap<String, Vec<(Due, i64)>> = std::collections::BTreeMap::new();
+    for (kinds, minutes) in [("'', 'item', 'agent'", times.agent_blocked), ("'person_decision', 'person_action'", times.person_blocked)] {
+        let condition = format!(
+            "status = 'blocked' AND blocked_kind IN ({kinds}) AND dismissed_at IS NULL AND COALESCE(prompted_at, blocked_since, updated) <= ?1"
+        );
+        for item in due(&condition, now - after(minutes))? {
+            let key = item_key(&item.agent, item.id);
+            if item.kind == Wait::PersonDecision && !super::ask::pending_about(&factory.store, item.owning(), &key) {
+                continue;
+            }
+            factory
+                .store
+                .db()
+                .execute("UPDATE checklist_items SET prompted_at = ?3 WHERE agent = ?1 AND id = ?2", params![item.agent, item.id, now])?;
+            still.entry(item.owning().to_owned()).or_default().push((item, minutes));
+        }
+    }
+    for (owning, items) in still {
+        if !followed_up(factory, &owning) {
+            continue;
+        }
+        let lines: Vec<String> = items
+            .iter()
+            .map(|(item, _)| {
+                let on = if item.on.is_empty() { String::new() } else { format!(", waiting on {}", item.on) };
+                let how_long = super::monitors::when::duration(now - item.since);
+                format!("#{}{} \"{}\"{on}, blocked {how_long}", item.id, item.whose(), item.text)
+            })
+            .collect();
+        let person_waits = items.iter().any(|(item, _)| item.kind.is_person());
+        let mut said = format!(
+            "Still blocked? {}. It may not be any more: try it again. If it can move, carry on and update it; if it's set aside for later or ongoing rather than blocked, mark it parked.",
+            lines.join("; ")
+        );
+        if person_waits {
+            let _ = write!(
+                said,
+                " One waiting on {person} should be in their Needs you or on a card: ask_person with item, if a question is what it needs."
+            );
+        }
+        let count = items.len();
+        let summary = format!("Still blocked? {count} item{}", if count == 1 { "" } else { "s" });
+        factory.deliver_event(&owning, said, crate::factory::host_event(summary));
+    }
+
+    for item in due("status = 'blocked' AND blocked_since <= ?1 AND overdue_told IS NULL", now - after(times.overdue))? {
+        factory
+            .store
+            .db()
+            .execute("UPDATE checklist_items SET overdue_told = ?3 WHERE agent = ?1 AND id = ?2", params![item.agent, item.id, now])?;
+        let (lead, name) = {
+            let inner = factory.lock();
+            let Some(config) = inner.config.agent(item.owning()) else { continue };
+            (inner.config.lead(config).map(|lead| lead.id.clone()), config.name.clone())
+        };
+        let Some(lead) = lead else { continue };
+        let on = if item.on.is_empty() { String::new() } else { format!(", waiting on {}", item.on) };
+        let how_long = super::monitors::when::duration(now - item.since);
+        let whose = if item.owning() == item.agent { String::new() } else { format!(" (on {}'s checklist)", item.agent) };
+        let said = format!(
+            "{name}'s #{}{whose} \"{}\" has been blocked for {how_long}{on}. See whether you can unblock it, or settle with {name} what happens next.",
+            item.id, item.text,
+        );
+        factory.deliver_event(&lead, said, crate::factory::host_event(format!("Overdue: {name}'s #{}", item.id)));
+    }
+    if changed {
+        factory.broadcast_workspace(&factory.lock());
+    }
+    Ok(())
 }
 
 /// An agent is deleted, and its checklist with it.
@@ -701,6 +1356,32 @@ fn line(item: &Item) -> String {
     if item.goal != 0 {
         let _ = write!(line, " \u{2192} G{}", item.goal);
     }
+    if item.status == Status::Blocked {
+        match (item.wait, item.wait_ref.as_str()) {
+            (Wait::Untyped, _) if item.blocked_on.is_empty() => {}
+            (Wait::Untyped, _) => {
+                let _ = write!(line, " [on {}]", item.blocked_on);
+            }
+            (wait, "") => {
+                let _ = write!(line, " [waits on {}]", wait.name().replace('_', " "));
+            }
+            (wait, reference) => {
+                let _ = write!(line, " [waits on {} {reference}]", wait.name().replace('_', " "));
+            }
+        }
+    }
+    if let Some(at) = item.retry_at {
+        let when = super::monitors::when::local(at, now_ms());
+        match item.status {
+            Status::Parked => {
+                let _ = write!(line, " [resumes {when}]");
+            }
+            Status::Blocked => {
+                let _ = write!(line, " [checked again {when}]");
+            }
+            _ => {}
+        }
+    }
     let _ = write!(line, " {}", item.day);
     line
 }
@@ -727,7 +1408,7 @@ impl Extension for Checklist {
             },
             "additionalProperties": false,
         });
-        let status = json!({"type": "string", "enum": ["open", "in_progress", "blocked", "done", "dropped"]});
+        let status = json!({"type": "string", "enum": ["open", "in_progress", "blocked", "parked", "done", "dropped"]});
         let update = json!({
             "type": "object",
             "required": ["updates"],
@@ -738,6 +1419,9 @@ impl Extension for Checklist {
                     "id": {"type": "integer", "minimum": 1},
                     "status": status,
                     "blocked_on": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "waits_on": {"type": "string", "enum": ["person_decision", "person_action", "item", "agent", "external"]},
+                    "ref": {"type": "string"},
+                    "retry_at": {"type": "string"},
                     "goal": {"type": "integer", "minimum": 0},
                     "owner": {"type": "string"},
                     "text": text(),
@@ -751,7 +1435,7 @@ impl Extension for Checklist {
             "type": "object",
             "properties": {
                 "agent": {"type": "string"},
-                "status": {"type": "string", "enum": ["open", "in_progress", "blocked", "done", "dropped", "all"]},
+                "status": {"type": "string", "enum": ["open", "in_progress", "blocked", "parked", "done", "dropped", "all"]},
                 "day": {"type": "string"},
                 "owner": {"type": "string"},
                 "q": {"type": "string"},
@@ -786,7 +1470,7 @@ impl Extension for Checklist {
         });
         vec![
             factory_tool(factory, agent, "checklist_add", "Add to checklist", ADD, add, run_add),
-            factory_tool(factory, agent, "checklist_update", "Update checklist", UPDATE, update, run_update),
+            super::tool("checklist_update", "Update checklist", UPDATE, update, super::typed_handler(factory, agent, run_update)),
             factory_tool(factory, agent, "checklist_list", "List checklist", LIST, list, run_list),
             factory_tool(factory, agent, "checklist_item", "Checklist item", ITEM, item, run_item),
             factory_tool(factory, agent, "checklist_goals", "Checklist goals", GOALS_TOOL, goals, run_goals),
@@ -801,14 +1485,16 @@ impl Extension for Checklist {
                 return None;
             }
         };
-        // Whether each item's owning agent has a question waiting for the
-        // person, asked once per owner.
-        let mut pending: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
         let mut shown = Vec::new();
         for item in &items {
-            let has_pending_ask = item.blocked_on == "person" && {
-                let owning = if item.owner.is_empty() { agent } else { item.owner.as_str() };
-                *pending.entry(owning).or_insert_with(|| super::ask::pending_of(&factory.store, owning))
+            // A question waiting about it: one that names it, or (asked
+            // without naming one) any of its owning agent's.
+            let has_pending_ask = (item.blocked_on == "person" || item.wait.is_person())
+                && super::ask::pending_about(&factory.store, owning(agent, &item.owner), &item_key(agent, item.id));
+            // An item waited on reads by its text, as it is now.
+            let blocked_on = match item.wait {
+                Wait::Item => text_of(&factory.store, &item.wait_ref).unwrap_or_else(|| item.blocked_on.clone()),
+                _ => item.blocked_on.clone(),
             };
             let mut log = Vec::new();
             for change in &item.log {
@@ -823,10 +1509,15 @@ impl Extension for Checklist {
                 updated: item.updated,
                 log,
                 note: item.blocked_note.clone(),
-                blocked_on: item.blocked_on.clone(),
+                blocked_on,
                 blocked_since_ms: item.blocked_since.unwrap_or_default(),
                 has_pending_ask,
                 goal: item.goal,
+                blocked_kind: item.wait.proto().into(),
+                blocked_ref: item.wait_ref.clone(),
+                retry_at_ms: item.retry_at.unwrap_or_default(),
+                reask_at_ms: item.reask_at.unwrap_or_default(),
+                dismissed_ms: item.dismissed_at.unwrap_or_default(),
             });
         }
         let goals = match goals(&factory.store, agent, true) {
@@ -932,6 +1623,12 @@ struct UpdateArg {
     #[serde(default)]
     blocked_on: Option<String>,
     #[serde(default)]
+    waits_on: Option<String>,
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+    #[serde(default)]
+    retry_at: Option<String>,
+    #[serde(default)]
     goal: Option<u32>,
     #[serde(default)]
     owner: Option<String>,
@@ -941,14 +1638,113 @@ struct UpdateArg {
     note: Option<String>,
 }
 
-fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
+/// The item `reference` names, as its key ("agent#12"): "12" or "#12" on
+/// `agent`'s own checklist, "Ana#12" on Ana's (an id or name).
+pub(crate) fn resolve_item(factory: &Factory, agent: &str, reference: &str) -> Result<String, String> {
+    let (whose, id) = reference.trim().rsplit_once('#').unwrap_or(("", reference.trim()));
+    let id: u32 =
+        id.trim().parse().map_err(|_| format!("\"{reference}\" isn't an item: write 12 for #12, or Ana#12 on Ana's checklist"))?;
+    let whose = if whose.trim().is_empty() { agent.to_owned() } else { agent_id(factory, agent, whose)? };
+    if !has_item(&factory.store, &whose, id).map_err(failed)? {
+        return Err(format!("there's no #{id} on {whose}'s checklist"));
+    }
+    Ok(item_key(&whose, id))
+}
+
+/// A typed wait as the agent gave it, checked: its kind and whom or what
+/// (an agent id, or "agent#12"); and when to check again (retry_at: an
+/// outside wait's, or a parked item's resume time).
+type Given = (Option<(Wait, String)>, Option<i64>);
+
+fn typed_wait(factory: &Factory, agent: &str, item: u32, arg: &UpdateArg) -> Result<Given, String> {
+    let retry_at = match arg.retry_at.as_deref().map(str::trim).filter(|at| !at.is_empty()) {
+        None => None,
+        Some(at) => {
+            let now = now_ms();
+            let at = super::monitors::when::parse_duration(at)
+                .map(|wait| now + wait)
+                .or_else(|_| super::monitors::when::parse_time(at, now))
+                .map_err(|_| format!("#{item}: retry_at \"{at}\" isn't a time: write e.g. 2h, 1d or \"2026-11-23 14:00\""))?;
+            Some(at)
+        }
+    };
+    let Some(kind) = arg.waits_on.as_deref().map(str::trim).filter(|kind| !kind.is_empty()) else {
+        if arg.reference.is_some() {
+            return Err(format!("#{item}: ref goes with waits_on item or agent"));
+        }
+        return Ok((None, retry_at));
+    };
+    let wait =
+        Wait::parse(kind).ok_or_else(|| format!("#{item}: waits_on must be person_decision, person_action, item, agent or external"))?;
+    let reference = arg.reference.as_deref().map(str::trim).filter(|reference| !reference.is_empty());
+    let reference = match (wait, reference) {
+        (Wait::Item, None) => {
+            return Err(format!("#{item}: waits_on item needs ref, the item it waits on: 12 for #12, or Ana#12 on Ana's checklist"));
+        }
+        (Wait::Item, Some(reference)) => {
+            let key = resolve_item(factory, agent, reference).map_err(|problem| format!("#{item}: {problem}"))?;
+            waitable(&factory.store, &item_key(agent, item), &key).map_err(|problem| format!("#{item}: {problem}"))?;
+            key
+        }
+        (Wait::Agent, None) => return Err(format!("#{item}: waits_on agent needs ref, the agent's id or name")),
+        (Wait::Agent, Some(reference)) => agent_id(factory, agent, reference).map_err(|problem| format!("#{item}: {problem}"))?,
+        (_, Some(_)) => return Err(format!("#{item}: ref goes with waits_on item or agent")),
+        (_, None) => String::new(),
+    };
+    Ok((Some((wait, reference)), retry_at))
+}
+
+/// Whether item `from` can wait on item `on` (both "agent#12"): not on
+/// itself, not on one that's already done or dropped, and not in a loop
+/// of items each waiting on the next.
+fn waitable(store: &Store, from: &str, on: &str) -> Result<(), String> {
+    if on == from {
+        return Err("an item can't wait on itself".to_owned());
+    }
+    let read = |key: &str| -> Option<(String, String, String)> {
+        let (agent, id) = key.rsplit_once('#')?;
+        let id: u32 = id.parse().ok()?;
+        store
+            .db()
+            .query_row(
+                "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
+                params![agent, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    };
+    let shown = on.replace('#', " #");
+    if let Some((status, _, _)) = read(on)
+        && let Some(status @ (Status::Done | Status::Dropped)) = Status::parse(&status)
+    {
+        return Err(format!("{shown} is already {}: there's nothing to wait on", status.name()));
+    }
+    // A short walk: a loop is rare, and a long chain is cut off.
+    let mut next = on.to_owned();
+    for _ in 0..50 {
+        let Some((status, kind, reference)) = read(&next) else { break };
+        if status != Status::Blocked.name() || Wait::read(&kind) != Wait::Item {
+            break;
+        }
+        if reference == from {
+            return Err(format!("{shown} already waits, through items, on this one: they'd wait on each other forever"));
+        }
+        next = reference;
+    }
+    Ok(())
+}
+
+fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: UpdateArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let person = factory.lock().config.person().to_ascii_lowercase();
     let mut updates = Vec::new();
     for arg in args.updates {
         let status = match arg.status.as_deref() {
             Some(name) => Some(
-                Status::parse(name).ok_or_else(|| format!("#{}: status must be open, in_progress, blocked, done or dropped", arg.id))?,
+                Status::parse(name)
+                    .ok_or_else(|| format!("#{}: status must be open, in_progress, blocked, parked, done or dropped", arg.id))?,
             ),
             None => None,
         };
@@ -957,6 +1753,7 @@ fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result
             Some(owner) => Some(agent_id(factory, agent, owner).map_err(|problem| format!("#{}: {problem}", arg.id))?),
             None => None,
         };
+        let (wait, retry_at) = typed_wait(factory, agent, arg.id, &arg)?;
         let text = arg.text.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty());
         let note = arg.note.map(|note| note.trim().to_owned()).filter(|note| !note.is_empty());
         // The person however named ("Person", their name) keys the daily
@@ -965,10 +1762,58 @@ fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result
             let lower = on.to_ascii_lowercase();
             if lower == "person" || lower == "the person" || lower == person { "person".to_owned() } else { on }
         });
-        updates.push(Update { id: arg.id, status, owner, text, note, blocked_on, goal: arg.goal });
+        // An outside wait is always checked again: by default after
+        // Settings → Checklist's retry interval.
+        let first_retry = match (&wait, retry_at) {
+            (Some((Wait::External, _)), None) => {
+                Some(now_ms() + Times::read(&factory.store).external_retry.saturating_mul(factory.nudge_minute()))
+            }
+            _ => None,
+        };
+        updates.push(Update { id: arg.id, status, owner, text, note, blocked_on, goal: arg.goal, wait, retry_at, first_retry });
     }
+    // Agents newly waited on: not those this item already waited on.
+    let newly: Vec<(u32, String)> = updates
+        .iter()
+        .filter_map(|update| match &update.wait {
+            Some((Wait::Agent, on)) if on != agent => Some((update.id, on.clone())),
+            _ => None,
+        })
+        .filter(|(id, on)| {
+            let before: Option<(String, String, String)> = factory
+                .store
+                .db()
+                .query_row(
+                    "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
+                    params![agent, id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            !before.is_some_and(|(status, kind, reference)| {
+                status == Status::Blocked.name() && Wait::read(&kind) == Wait::Agent && reference == *on
+            })
+        })
+        .collect();
     let said = update(&factory.store, agent, agent, &updates).map_err(failed)?;
     factory.refresh_view(agent);
+    // Items waiting on one that's now done or dropped open again.
+    for update in &updates {
+        if let Some(status @ (Status::Done | Status::Dropped)) = update.status {
+            finished(factory, agent, update.id, status, agent).map_err(failed)?;
+        }
+    }
+    // An agent waited on is told, once, so a wait never sits on someone
+    // who doesn't know.
+    for (id, on) in &newly {
+        waited_on(factory, agent, *id, on);
+    }
+    // What waits on the person shows in Needs you (Agent.waiting_items).
+    if updates.iter().any(|update| update.status.is_some() || update.wait.is_some() || update.blocked_on.is_some() || update.text.is_some())
+    {
+        factory.broadcast_workspace(&factory.lock());
+    }
     // Each item as it is now, with what changed.
     let (now, _) = query(&factory.store, &Query { agent, ..Query::default() }).map_err(failed)?;
     let items: Vec<_> = updates
@@ -977,6 +1822,7 @@ fn run_update(factory: &Factory, agent: &str, args: serde_json::Value) -> Result
             let changed: Vec<&str> = [
                 (update.status.is_some(), "status"),
                 (update.blocked_on.is_some(), "blocked_on"),
+                (update.wait.is_some(), "waits_on"),
                 (update.goal.is_some(), "goal"),
                 (update.owner.is_some(), "owner"),
                 (update.text.is_some(), "text"),
@@ -1024,7 +1870,7 @@ fn run_list(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<T
     let statuses = match args.status.as_deref().map(str::trim).filter(|status| !status.is_empty()) {
         None => Some(OUTSTANDING.to_vec()),
         Some("all") => None,
-        Some(name) => Some(vec![Status::parse(name).ok_or("status must be open, in_progress, blocked, done, dropped or all")?]),
+        Some(name) => Some(vec![Status::parse(name).ok_or("status must be open, in_progress, blocked, parked, done, dropped or all")?]),
     };
     let owner = match args.owner.as_deref().map(str::trim).filter(|owner| !owner.is_empty()) {
         Some(owner) => Some(agent_id(factory, agent, owner)?),
@@ -1238,6 +2084,13 @@ pub(crate) fn person_update_goal(factory: &Arc<Factory>, request: &v1::UpdateGoa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outside_wait_is_retried_twice_as_long_after_each_time_a_day_at_most() {
+        let minutes: Vec<i64> = (0..6).map(|retries| retry_minutes(120, retries)).collect();
+        assert_eq!(minutes, [120, 240, 480, 960, 1440, 1440]);
+        assert_eq!(retry_minutes(2000, 3), 2000, "a base over a day stays as it is");
+    }
 
     fn store() -> Store {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

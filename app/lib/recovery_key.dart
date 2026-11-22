@@ -93,9 +93,13 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
     return FormFrame(
       title: 'Save your recovery key',
       body:
-          "It unlocks your secrets if claktory.com can't be reached or your "
-          'account is gone. Keep it somewhere safe, such as in your password '
-          'manager or on paper.',
+          'Your secrets open with two halves together: one on the computer '
+          'Claktory runs on and one at claktory.com. Neither can open them '
+          'alone. This key opens them by itself, if claktory.com can\'t be '
+          'reached, your account is gone or that computer\'s half is lost.\n\n'
+          'Save it in a password manager, such as Passwords or 1Password, or '
+          'on paper kept somewhere safe. Not in a note, a screenshot or a '
+          'message. Never share it: anyone with it can open your secrets.',
       fields: [
         if (key != null) ...[
           _KeyBox(key),

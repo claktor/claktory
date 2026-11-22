@@ -65,6 +65,9 @@ pub struct Tool {
     /// Absolute directories read_file may also address, and write_file and edit_file may not
     /// change, even inside `cwd` (see `read_only`).
     read_only: Vec<PathBuf>,
+    /// Absolute directories no file tool may address at all, inside `cwd`
+    /// or not, by any path or link (see `denied`).
+    denied: Vec<PathBuf>,
     handler: Option<Handler>,
     background: Option<bash::Background>,
 }
@@ -89,7 +92,16 @@ impl Tool {
             parameters: schema::parameters(name),
             constrained_sampling: json!({"type": "json_schema", "strict": "prefer"}),
         };
-        Tool { spec, kind, cwd: cwd.to_path_buf(), extra_dirs: Vec::new(), read_only: Vec::new(), handler: None, background: None }
+        Tool {
+            spec,
+            kind,
+            cwd: cwd.to_path_buf(),
+            extra_dirs: Vec::new(),
+            read_only: Vec::new(),
+            denied: Vec::new(),
+            handler: None,
+            background: None,
+        }
     }
 
     /// A tool the program running the agent provides. `parameters` is its
@@ -114,6 +126,7 @@ impl Tool {
             cwd: PathBuf::new(),
             extra_dirs: Vec::new(),
             read_only: Vec::new(),
+            denied: Vec::new(),
             handler: Some(handler),
             background: None,
         }
@@ -148,6 +161,12 @@ impl Tool {
     ) -> Result<ToolResult, Error> {
         let mut cwd = &self.cwd;
         let file = matches!(self.kind, ToolKind::ReadFile | ToolKind::ReadImage | ToolKind::WriteFile | ToolKind::EditFile);
+        if file && !self.denied.is_empty() {
+            let address: FilePath = serde_json::from_value(args.clone())?;
+            if is_denied(&fs::resolve(&self.cwd, &address.path), &self.denied).await {
+                return Err(AgentError::new(AgentFailure::Private { path: address.path }).into());
+            }
+        }
         if file && !(self.extra_dirs.is_empty() && self.read_only.is_empty()) {
             let address: FilePath = serde_json::from_value(args.clone())?;
             let target = fs::resolve(&self.cwd, &address.path);
@@ -270,4 +289,37 @@ pub fn read_only(tools: &mut [Tool], dirs: &[PathBuf]) {
     for tool in tools {
         tool.read_only = dirs.to_vec();
     }
+}
+
+/// Keeps every file tool out of `dirs`, wherever the agent works: a path in
+/// one is refused as written, and so is one whose real place (through links,
+/// or its nearest existing parent's) is in one. Bash isn't held to it.
+pub fn denied(tools: &mut [Tool], dirs: &[PathBuf]) {
+    for tool in tools {
+        tool.denied = dirs.to_vec();
+    }
+}
+
+/// Whether `target` is in one of `dirs`, as written or really.
+async fn is_denied(target: &Path, dirs: &[PathBuf]) -> bool {
+    if dirs.iter().any(|dir| target.starts_with(dir)) {
+        return true;
+    }
+    let mut existing = target.to_path_buf();
+    let real = loop {
+        match tokio::fs::canonicalize(&existing).await {
+            Ok(real) => break real,
+            Err(_) => match existing.parent() {
+                Some(parent) => existing = parent.to_path_buf(),
+                None => return false,
+            },
+        }
+    };
+    for dir in dirs {
+        let dir_real = tokio::fs::canonicalize(dir).await.unwrap_or_else(|_| dir.clone());
+        if real.starts_with(&dir_real) {
+            return true;
+        }
+    }
+    false
 }

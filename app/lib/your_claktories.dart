@@ -821,24 +821,30 @@ class _DeviceSignInDialogState extends State<DeviceSignInDialog> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
+    // Scrolls, and Cancel goes under the title, where the text is large
+    // and the screen small.
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              Text(
                 widget.title,
                 style: type.emphasis.copyWith(color: palette.text),
               ),
-            ),
-            Button(label: 'Cancel', onPressed: widget.close),
-          ],
-        ),
-        const SizedBox(height: Space.l),
-        DeviceSignInForm(intro: widget.intro),
-      ],
+              Button(label: 'Cancel', onPressed: widget.close),
+            ],
+          ),
+          const SizedBox(height: Space.l),
+          DeviceSignInForm(intro: widget.intro),
+        ],
+      ),
     );
   }
 }
@@ -874,27 +880,33 @@ class ConfirmDeviceBanner extends StatelessWidget {
         final palette = Palette.of(context);
         final type = TypeScale.of(context);
         final name = claktoryName(backend);
-        return Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Space.l,
-            vertical: Space.s,
-          ),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: palette.hairline)),
-          ),
-          child: _BannerLine(
-            words: Text(
-              'Confirm this $thisDeviceKind is yours by '
-              '${deadlineDay(by, DateTime.now())} to keep using $name.',
-              style: type.body.copyWith(color: palette.text),
+        // A bar over the window: its words grow only to 2×, so at the
+        // largest text it doesn't take the window (its sign-in, a dialog
+        // of its own, grows in full).
+        return MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 2,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.l,
+              vertical: Space.s,
             ),
-            actions: [
-              Button(
-                label: 'Sign in…',
-                primary: true,
-                onPressed: () => showConfirmSignIn(context, name),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: palette.hairline)),
+            ),
+            child: _BannerLine(
+              words: Text(
+                'Confirm this $thisDeviceKind is yours by '
+                '${deadlineDay(by, DateTime.now())} to keep using $name.',
+                style: type.body.copyWith(color: palette.text),
               ),
-            ],
+              actions: [
+                Button(
+                  label: 'Sign in…',
+                  primary: true,
+                  onPressed: () => showConfirmSignIn(context, name),
+                ),
+              ],
+            ),
           ),
         );
       },

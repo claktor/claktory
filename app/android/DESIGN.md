@@ -45,6 +45,44 @@ A missing piece fails the build and goes to Arjun. Gradle's and AGP's Maven
 dependencies do download into `~/.gradle` on the first build, like Cargo's
 crates: that cache is part of the install budget Matt approves.
 
+**Every dependency is checked against its SHA-256.**
+`gradle/verification-metadata.xml` lists the checksum of every artifact
+the build resolves: Gradle's and AGP's tools, Flutter's engine and
+embedding, plugins, ZXing and the test runners. Any mismatch, or an
+artifact missing from the file, fails the build (Fugo's requirement for
+store builds). Regenerate it whenever a dependency, AGP, Gradle or
+Flutter changes, from a release configuration (so the registrant has no
+dev-only plugins), and review the diff: it may only add or remove
+components whose versions changed. If a version already in the file
+gets a different checksum, don't commit it: stop and tell Fugo, since
+that's the tampering the file exists to catch.
+
+```sh
+cd app && flutter build apk --config-only --release --flavor prod --target-platform android-arm64
+cd android
+P="-Pflutter.androidSdkRoot=$ANDROID_HOME -Pflutter.installedNdkVersions=28.2.13676358"
+# Builds, tests and their tools, for the ABIs the app ships:
+./gradlew --write-verification-metadata sha256 assembleProdRelease assembleProdProfile \
+  assembleDevDebug testDevDebugUnitTest assembleDevDebugAndroidTest connectedDevDebugAndroidTest \
+  -PclaktoryDebugSignedRelease=true $P -Ptarget-platform=android-arm64,android-x64
+# Without a target platform Flutter asks for every ABI's engine (32-bit ARM too),
+# as a plain `gradlew test` does: record those as well.
+./gradlew --write-verification-metadata sha256 testDevDebugUnitTest $P
+```
+
+(`connectedDevDebugAndroidTest` needs an emulator or phone; its test
+runners are what it adds.)
+
+**Lint is a gate.** `tools/lint.sh` runs Android lint over the app and
+its tests and fails on any error; run it before landing anything in
+`app/android`. Every release build stops on its own on the two kinds
+that got through before lint ran: a call minSdk 24 doesn't have
+(`NewApi`: a launch crash on Android 7) and a receiver other apps can
+reach (`UnspecifiedRegisterReceiverFlag`). Both are fatal in
+`build.gradle.kts`, so the release's `lintVitalProdRelease` refuses them;
+a planted API-26 call made it fail. A check lint can't follow (a helper
+that tests the version) gets `@SuppressLint` with the reason beside it.
+
 **Ambient overrides are refused, not tolerated.** The doctor script fails
 when any of these are set: `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
 `CARGO_BUILD_RUSTFLAGS`, `CARGO_TARGET_*_LINUX_ANDROID_RUSTFLAGS`,
@@ -74,8 +112,9 @@ app/android/
     MainActivity.kt          thin: registers the adapters, nothing else
     Adapters.kt              which adapter answers which channel
     NetworkPath.kt           factory/network (boot proof, see below)
-    …                        later: DeviceStore (§5), Drafts, Scanner, Pickers,
-                             WebAuth, Links, Recorder, AudioPlayer, VideoPlayers
+    DeviceChannel.kt …       factory/device, the stores (§5), and phase 2's
+                             adapters (§10): AttachmentPicker, VoiceRecorder,
+                             AudioPlayback, VideoPlayback, QrScanner, WebLinks
   app/src/test/…             JVM unit tests (Robolectric where Android is needed)
   app/src/androidTest/…      instrumentation tests, on an emulator or a phone
 ```
@@ -164,6 +203,23 @@ build, no hand-copied `jniLibs`. Read in the pinned sources (Flutter 3.50's
 (Before edf589a the helper would have applied on this Mac: no
 `.cargo/config*` exists in the repository's ancestors or in `~/.cargo`.
 Once the hook sets the Android triples' flags, it never does.)
+
+**No segmentation offload on Android.** iroh's QUIC hands a burst of
+packets to the kernel in one send (UDP GSO) on Linux and Android, and on
+no other device. On the Android emulator (API 36, MTU 1500) such a burst
+vanished without an error. Every upload of more than about 4 KB on the
+wire stalled until the connection was lost 5–9 s later, while small
+messages, compressible ones and everything downloaded got through. The
+iPhone sent the same files over the same tunnel without a drop (Pesci). A
+matched A/B (Doppio, 53638636, the same sandbox, byte-identical 5,698 B
+and 400 KiB random files through the real picker): the unmodified build
+lost both, and the same build with only GSO off delivered both, byte for
+byte. So `device_endpoint` turns it off on Android
+(`enable_segmentation_offload`, every other iroh default kept). A
+phone's uploads are small, so sending packet by packet costs nothing that
+matters, and nothing tells us every phone's driver handles GSO. Owed:
+uploads on a real phone over Wi-Fi and cellular, and (for information
+only) whether a real phone's driver drops GSO bursts too.
 
 ## 4. The JNI bootstrap
 
@@ -357,6 +413,54 @@ encrypted with the credentials' key and never reset with them.
 Recordings and attachment copies are temporary files in the cache folder,
 cleaned up after sending or cancelling.
 
+### Direct messages' keys (E6, dms-e2ee.md §5.4)
+
+`factory/dm-keys` (contract: `app/lib/people/dm_keys.dart`) keeps the
+identity, leaf and store keys the app's Rust makes: opaque bytes under a
+name. Native code never makes or uses them. `DmKeys.kt` holds the parts:
+
+- **Where:** one file per name, `no_backup/dm-keys/<name>.key`, written
+  atomically. Like everything else, no backup or device transfer takes
+  it (the rules exclude every domain, and `backup_exclusion_check.sh`
+  covers `no_backup/`).
+- **The key:** sealed by a Keystore key of their own,
+  `claktory.dm.v1` (AES-256-GCM, StrongBox when there is one, no user
+  authentication, as above). Starting over on the connections deletes
+  only `claktory.device.v1`, so it never makes the DM keys unreadable.
+- **The envelope:** `"CLDM"`, format 1, key version 1, nonce length 12,
+  then the nonce and the ciphertext with its tag. The additional data is
+  the header, the package name, a zero byte and the name, so a file
+  moved to another name, or the other flavor's file, fails.
+- **Reads:** with no completed file, `get` answers null. A file that's
+  there but can't be read answers `unreadable`, never null, whatever the
+  cause: its key gone, damage, a newer format, Keystore refusing.
+  Absent means "set up again"; unreadable must not. Bad names (anything
+  but `[a-z0-9_-]{1,32}`), values over 4 KiB and failed writes or
+  deletes answer `failed`.
+- **`available`:** seals a random value, writes it, reads it back and
+  opens it through the real key and folder, then removes it. There's no
+  fallback, so false turns People's messages off on the phone. The
+  emulator's Keystore is software; on a phone it's the TEE or StrongBox,
+  and the log says which when the key is made.
+- **`folder`:** the DM store's folder (the app's Rust puts `store.db`
+  and its journal there): `no_backup/dm`, made if missing, the same path
+  every launch, `failed` if it can't be made. Its rows are sealed with
+  the `store` key, and like everything else it's excluded from backup
+  and transfer.
+- **Threading:** calls run on the stores' thread, one at a time, and
+  answer on the main one.
+
+Proofs:
+
+- `DmKeyStoreTest` (JVM) covers every state, every flipped byte, moved
+  and other-app files, unfinished writes, names, and that no log or
+  message carries a key.
+- `DmKeysTest` (instrumentation, real Keystore) covers the round trip,
+  that the key can't be exported, a deleted key, starting over on the
+  connections, and the running app's channel through Flutter's codec.
+
+A real phone's TEE is owed.
+
 ### Proof owed in A.2
 
 Instrumentation tests on an emulator and a real phone: round trip of the
@@ -418,14 +522,28 @@ sandbox (`scripts/qa.sh`), never the dev or real Claktory:
   prefix with a wrong tail can't be tried from outside the process without
   the secret; the tunnel's Rust tests cover it (81cc2b4, 0866ac8). The
   pairing was by code; the gate runs before anything is dialled, the same
-  for a discovered device, which is still to be tried once a sandbox can
-  sign the app in.
+  for a discovered device.
+- A discovered device (2026-11-22, android36-ps16k, a QA sandbox with its
+  own account service, reached through `adb reverse`, with no app
+  change). Sign-in passed: paired by code, the phone signed in by email
+  through the sandbox's service (the code from its mail), and Your
+  Claktories listed the sandbox. After Remove the phone stayed signed in
+  and still listed it. The discovered Connect itself was NOT REACHED in
+  QA: the account service holds a Claktory's endpoint ids and relays,
+  never its addresses, and a sandbox's relay leads nowhere, so the phone
+  has no route to it (a code carries addresses; the account doesn't). The
+  other-UID question is covered by the probe above, since the gate runs
+  before any dial however the phone connects (Prosciutto's call). The
+  account assertion, the number and Allow are shared Dart that runs the
+  same on the iPhone, and Android's relayed dialling passed in #214's
+  relay run.
 - No pairing code, token or capability path in the app's logcat.
 
 Still owed: a real phone (the friend's first session is the device
-acceptance), backup and transfer exclusion on a device with a backup
-transport, process death under memory pressure, and a discovered-device
-pairing.
+acceptance), backup and transfer exclusion on a phone with Google's
+transport (the emulator's local one passes, §10), process death under
+memory pressure, and a discovered device connecting on a real phone over
+the real relay.
 
 ### Release signing
 
@@ -453,6 +571,18 @@ it, and also stamps `FACTORY_VERSION` into the Dart: without it the app
 calls itself "dev", which turns off its version checks against the
 backend and shows "dev" in its footer (the first friend APK, 101500, was
 built so; 101501 replaced it).
+
+An update keeps the pairing (2026-11-22, android36-ps16k, a QA sandbox).
+The friend APK exactly as published (0.1.15, 101502, hash-checked)
+paired by code, allowed with its number, and connected directly. Then
+101503 from main (25e31d57, release key) went on with `adb install -r`.
+Opened again, it was connected directly as the same device, with the
+same endpoint key from the Keystore-sealed file, no new pairing and
+nothing waiting. Every icon drew. 101502's own first dial after the paste
+hung at "Connecting…" and never reached the sandbox, even after a force
+stop. A second clean install connected at once. The tunnel's later
+reconnect fixes (#214) likely cover it; current builds never showed it.
+Still owed: the same on a real phone.
 
 ### Links and the clipboard
 
@@ -521,6 +651,71 @@ Android build run through it and through the NDK's tools (`llvm-readelf
 alignment check script), and differences resolved in the verifier, not
 hand-waved. Then the release install on a 4 KiB and a 16 KiB system
 (`adb shell getconf PAGE_SIZE`), not page-size compatibility mode.
+
+**Results (2026-11-22, emulators only).** The verifier passes today's
+release APK (arm64 + x64) and AAB (`--bundletool`: `PAGE_ALIGNMENT_16K`),
+and `zipalign -c -P 16 -v 4` agrees. A library the pinned NDK links at
+4 KiB pages is refused (alone, and inside an APK, which then fails), one
+linked at 16 KiB passes (`test_check_artifact.RealNdkLink`). The friend
+APK path runs it: ops `release-apk.sh` → `release_apk.sh` →
+`check_artifact.py`, before signing is checked. At runtime, the arm64
+prod release (R8, signed with the debug key, local only) on
+android36-ps16k (`getconf PAGE_SIZE` 16384, API 36): cold launch in
+2.4 s, `libclaktory_tunnel.so` and `libflutter.so` loaded straight from
+the APK, the JNI bootstrap read the DNS servers, Dart drew the pairing
+screen, no crash. On android36 (4 KiB) the same release paired and
+connected in A.2. Pairing over the tunnel on 16 KiB pages (android36-ps16k,
+main 73555661, a QA sandbox): Claktory Dev, debug and then the R8
+release, each freshly installed, pasted a code and went through the
+confirmation sheet. Its code matched the sandbox's endpoint id, and the
+phone's four digits matched the sandbox's waiting device (a phone). Once
+allowed, each connected directly. Force-stopped and opened again, each
+was still connected with no new pairing. No token or `factory://` in
+logcat. Still owed: a physical phone of each page size.
+
+**Reproducible.** The release APK of a commit is the same, byte for
+byte, every time `release_apk.sh` builds it with the same toolchain,
+version and key. Two builds of 12dd2baac3, each from a fresh export,
+matched (with a throwaway key; the release key's RSA signature is just
+as deterministic). Two things stood in the way, found by building one
+commit three times (twice in the checkout, once from an export elsewhere)
+and comparing the APKs entry by entry:
+
+- AGP puts its dependency list, encrypted to Google, in the signing
+  block, differently every build: left out of the APK
+  (`dependenciesInfo.includeInApk = false`; the bundle keeps it for Play).
+- Dart's snapshot (`libapp.so`) keeps the absolute path of
+  `.dart_tool/flutter_build/dart_plugin_registrant.dart`, which Flutter
+  generates (dart-lang/sdk#55282, open), so a build in a home folder put
+  that path, the user's name with it, into the APK. `release_apk.sh` now
+  builds a `git archive` of the commit in one fixed folder,
+  `/tmp/claktory-android-release`, so the only path inside is that one.
+  `/tmp` is everyone's, so the folder must be this user's alone: made
+  700 under umask 077, and the build refused unless it's a real folder
+  (not a link), owned by the user, mode 700. A folder another user made
+  first would let them swap the source mid-build and have it signed with
+  the release key (Fugo, MEDIUM). Fugo checked it on 2026-11-22: a
+  root-owned folder, links to a root-owned one and to one of the user's,
+  and the user's own at 755 were all refused before anything was
+  exported. The user's own at 700 passed, and an absent one was made 700.
+  Once checked, nobody else can write in it, and `/tmp`'s sticky bit
+  stops anyone renaming it, so no race is left before the build.
+
+The Rust library already came out the same from both paths (its paths
+are remapped, §3), and so did everything else. To check a published APK,
+build its commit and version with this script on the same toolchain
+(`toolchain.properties`) and compare: with another key, every entry of
+the zip matches and only the signing block differs (there are no v1
+signature files, minSdk 24); with the release key, the whole file does.
+
+The app bundle Play takes is just as reproducible: `release_apk.sh
+--bundle` builds it in the same folder after the APK. It's checked by
+the verifier (16 KiB through bundletool), by jarsigner ("jar verified";
+not `-strict`, which fails any self-signed key with no timestamp, the
+release key included), for its versions, and for being signed with the
+APK's certificate. Two runs of 05f9de729e with a throwaway key gave the
+same bundle and the same APK, byte for byte. Neither the bundle nor its
+debug symbols hold a home-folder path or the user's name.
 
 ## 7. The boot proof, step by step
 
@@ -630,3 +825,128 @@ he provides), on 4 KiB and 16 KiB systems.
   there: from then on `flutter pub get` writes Android plugin files into
   it in every checkout. These files stay on `factory/android-native` until
   the generated host, with its `.gitignore`, lands with them.
+
+## 10. Phase 2: native parity (android.md §9)
+
+Each channel answers exactly what the iPhone's does (read from
+`ios/Runner` and `macos/Runner`); the Dart contracts are unchanged. Each
+adapter's logic is a plain class tested on the JVM, its Android half
+tested on the emulator; what a person sees and hears is checked by hand
+on a phone, still owed for every item.
+
+| Channel | Android | iPhone's |
+|---|---|---|
+| `factory/device` `pickAttachments` | `AttachmentPicker.kt`: the menu (Choose photos or videos, Choose files, Paste image), the photo picker or `ACTION_OPEN_DOCUMENT`, copies in the cache, ≤ 2 GB each; no storage permission | `Attach` |
+| `factory/recorder` (+`/events`) | `VoiceRecorder.kt`: `MediaRecorder`, AAC in .m4a, 16 kHz mono, 32 kbps, ten minutes; audio focus; a call or leaving the screen interrupts, keeping the file | `Recorder.swift` |
+| `factory/audio` (+`/events`) | `AudioPlayback.kt`: `MediaPlayer`, transient audio focus; a call, unplugged headphones or leaving the screen pause | `AudioPlayer.swift` |
+| `claktory/video` | `VideoPlayback.kt`: `MediaPlayer` into a `SurfaceProducer` texture; the file's turn reported as `quarterTurns` unless the texture turns frames itself | `VideoPlayers.swift` |
+| `factory/device` `cameraAccess`, `requestCamera`, `openCameraSettings`, `qrCode`; `claktory/scanner` view | `QrScanner.kt`: Camera2 into a `TextureView`, frames read with ZXing core 3.5.3 (Apache-2.0, Fugo's review; pinned, Maven Central only); the camera open only while the view shows and the app is on screen; frames in memory only, nothing read logged, codes over 4 KB ignored | `Scanner.swift`, `AppDelegate.qrCode` |
+| `factory/links`; `factory/device` `webAuth`, `cancelWebAuth` | `WebLinks.kt`: `LinkActivity` takes `claktory[-dev\|-debug]://` links and sign-in redirects on the application id's scheme; a Custom Tab (no library) for the page | Mac `Links`, iPhone `WebAuth` |
+
+- **Permissions** are asked on use, never at launch: `RECORD_AUDIO` and
+  `CAMERA`; the camera is an optional feature, so a phone without one
+  installs and pairs by pasting. Access answers: `undetermined` while
+  Android can still show its question (never asked, or refused once),
+  `denied` once it won't (so Settings is the way, §8), `restricted` when
+  the phone's administrator turned the camera off.
+- **Links** never become Flutter routes (`flutter_deeplinking_enabled`
+  false); `LinkActivity` hands each to the one `MainActivity`, found in
+  its own task by `CLEAR_TOP | SINGLE_TOP | NEW_TASK`, never a second.
+  A sign-in redirect is taken only while a sign-in waits, only on the
+  scheme it asked for and, when the opened page had a `state`, only
+  carrying it back (compared in constant time), once; a forged one is
+  ignored and the sign-in waits on. The service's state and PKCE, checked
+  by the backend, are still what make it trusted (Fugo). Neither address
+  is logged.
+- **Owed on the Dart side** (Doppio binds, each with its file's owner):
+  `scanner.dart` (`DeviceCamera._here` and an `AndroidView` for
+  `claktory/scanner`), `links.dart` (`AppLinks.listen` on Android),
+  `connectors.dart` (`connectInSheet` on Android), the attachments'
+  bindings (`apps.dart`, `import_view.dart`), and ZXing's notice through
+  `LicenseRegistry.addLicense`.
+- **Share** (`factory/device` `share`, `ShareSheet.kt`): text only, as
+  the iPhone's contract is (no files, so no FileProvider and no
+  permission), through `ACTION_SEND` in the system's chooser. The chooser
+  reports the app picked to a receiver only this app can reach (a mutable,
+  explicit PendingIntent): true. Back in the app with no pick, after
+  600 ms for a late report: false. The chooser's own Copy isn't a pick,
+  so it answers false.
+- **Tested on the shrunk release too.** `-PclaktoryTestBuildType=release
+  -PclaktoryDebugSignedRelease=true` runs the device tests against the R8
+  release (`connectedDevReleaseAndroidTest`). Only then does the app also
+  get `proguard-test-hooks.pro`: it keeps the app's own classes, Kotlin's
+  and `FlutterEngine`'s members for the test APK to call, still renamed.
+  The test APK gets `proguard-test-apk.pro` (not shrunk or renamed). The
+  release that ships never sees either file. On 01df1870 every test
+  passed on the release, 34 run with 2 skipped (the clipboard fixture),
+  android36. Each failure along the way was in the test setup, never the
+  app: no keep rule and no JNI binding was missing.
+- **A screen taken away mid-call** (`RecreationTest`): Android can
+  finish the activity while the share sheet, a sign-in's Custom Tab or
+  the attach menu covers it. Each call then still answers once, the way a
+  plain close does: share false, sign-in null (and the app isn't brought
+  back by a Custom Tab it no longer shows), attach an empty list. The
+  test finishes the covered activity itself; the developer option "Don't
+  keep activities" didn't take on android36. A process killed under
+  memory pressure is still owed on a phone.
+- **Backup and transfer, proven** (`tools/backup_exclusion_check.sh`,
+  android36, LocalTransport, 01df1870). With canaries in `files/`,
+  `shared_prefs/` and `no_backup/`: cloud backup refuses Claktory Dev
+  outright, and device transfer (which ignores `allowBackup` from
+  Android 12) gets an empty archive that the transport rejects. Nothing
+  came back from either. The control, the test APK, got its canaries back
+  both times. On a phone with Google's transport it's still owed.
+
+## 11. What the Android app touches: the native inventory for Play's Data safety
+
+Facts about the app as built (merged release manifest, prod, 2026-11-22),
+for whoever fills in Play's Data safety form and privacy declarations.
+It's the native side only: what the backend, the account service
+(claktory.com) and the relays keep is theirs to state.
+
+**Permissions** (merged manifest, nothing else added by a library):
+`INTERNET` and `ACCESS_NETWORK_STATE` (the private connection, and
+watching the network to reconnect); `RECORD_AUDIO` and `CAMERA`, each asked
+for when first used (recording a voice message; scanning a pairing code),
+never at launch; the camera is an optional feature. AndroidX adds its own
+`DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`, which only guards the app's own
+receivers. No storage, contacts, location, phone, notification or
+account permissions.
+
+**Components:** `MainActivity`, `LinkActivity` (links and the sign-in
+redirect, §10), url_launcher's `WebViewActivity` (unused by the app, from
+the plugin), AndroidX's startup provider and profile installer receiver.
+No services, no background work, no push.
+
+**Libraries with code on the phone:** Flutter's engine and the app's Dart,
+the tunnel (Rust: iroh, the app's own code), url_launcher, AndroidX (core,
+startup, profile installer, as Flutter brings them) and ZXing core (QR
+codes, on the phone only). No analytics, advertising, crash reporting,
+attribution or Google Play services SDK. Every dependency is checked
+against its checksum at build time (§1).
+
+**What each feature does with data:**
+
+| Feature | Data | Where it goes |
+|---|---|---|
+| Connection | the device's key pair (made on the phone), each Claktory's address | Kept on the phone, encrypted with an Android Keystore key, in `no_backup/` (§5); the public key goes to the person's own Claktory when pairing. Through the tunnel (iroh), end-to-end encrypted, possibly via relays that can't read it. |
+| End-to-end messages with people | this person's identity key, this device's key and the local store's key (made by the app on the phone) | Kept on the phone only, encrypted with a Keystore key of their own, in `no_backup/` (§5); never sent, never in a backup or transfer. |
+| Sign-in with email (account) | email address, codes | To claktory.com's account service, over HTTPS through the app's Dart. |
+| Messages, files, approvals | what the person writes and sends | To the person's own Claktory through the tunnel; nothing kept on the phone but unsent drafts (by the person's decision) and the files they chose, copied to the app's cache for upload and deleted after a day. |
+| Attachments | only the photos, videos and files the person picks (system pickers, no storage permission), or the image they paste | Copied into the app's cache, uploaded to their Claktory. |
+| Voice messages | a recording made while the person holds record | A file in the app's cache, sent to their Claktory, which transcribes it on its own machine. |
+| Camera | frames while the pairing screen's scanner shows | In memory only, read for a QR code on the phone; never stored, logged or sent. Only the code's text goes to the app. |
+| Clipboard | read only when the person taps Paste or Paste image | As above. |
+| Share sheet | the text the person chose to share | To the app they pick. |
+| Web sign-in for a service | the service's page, in a Custom Tab (the browser's) | The redirect's code goes to the person's Claktory, which finishes the sign-in. |
+| Logs | codes and counts only (§5, §10): never codes, keys, addresses, messages or what a QR code says | logcat on the phone; never sent anywhere. |
+
+**Backup and transfer:** off. `allowBackup="false"`, and the backup and
+extraction rules exclude every domain from cloud backup and device
+transfer; `tools/backup_exclusion_check.sh` proves it on an emulator with
+a control app. A new phone starts unpaired.
+
+**Deleting:** uninstalling removes everything the app kept on the phone,
+the Keystore keys included. Deleting the account and the person's own
+Claktory's data are the account service's and the backend's (Play's
+account deletion gate, android.md §7).

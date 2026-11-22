@@ -16,7 +16,9 @@
 //! protocol. The extension serves its instances with the same tools.
 
 pub(crate) mod agents;
+pub(crate) mod app_grants;
 pub(crate) mod ask;
+pub(crate) mod browser;
 pub(crate) mod checklist;
 pub(crate) mod comments;
 pub(crate) mod database;
@@ -136,6 +138,10 @@ pub(crate) trait Extension: Send + Sync {
         let id = self.manifest().id;
         name == id || name.strip_prefix(id).is_some_and(|verb| verb.starts_with('_'))
     }
+    /// Not part of this Claktory now: no agent has it, and no one sees it.
+    fn hidden(&self) -> bool {
+        false
+    }
     /// Its panel's content for the agent; None if it has no panel.
     fn view(&self, _factory: &Factory, _inner: &Inner, _agent: &str) -> Option<v1::ExtensionView> {
         None
@@ -184,7 +190,7 @@ impl Unit {
 
 /// Every extension, each followed by its instances.
 pub(crate) fn units() -> impl Iterator<Item = Unit> {
-    ALL.into_iter().flat_map(|extension| {
+    ALL.into_iter().filter(|extension| !extension.hidden()).flat_map(|extension| {
         std::iter::once(Unit { extension, instance: None })
             .chain(extension.instances().iter().map(move |instance| Unit { extension, instance: Some(instance) }))
     })
@@ -211,13 +217,16 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 18] = [
+pub(crate) const ALL: [&dyn Extension; 21] = [
     &agents::Agents,
+    &app_grants::AppGrants,
     &ask::Ask,
+    &browser::Browser,
     &checklist::Checklist,
     &comments::Comments,
     &database::Database,
     &devices::Devices,
+    &crate::user_apps::dms::Dms,
     &highlight::Highlight,
     &memory::Memory,
     &monitors::Monitors,
@@ -253,6 +262,11 @@ pub(crate) fn caller<'a>(config: &'a Config, id: &str) -> Result<&'a AgentConfig
     config.agent(id).ok_or_else(|| "You're no longer in this Claktory.".to_owned())
 }
 
+/// A captured Factory, or the usual shutdown refusal at the caller's check.
+pub(crate) fn live(factory: Option<Arc<Factory>>) -> Result<Arc<Factory>, factory_agent::Error> {
+    factory.ok_or_else(|| factory_agent::Error::Other("Claktory is stopping.".into()))
+}
+
 /// Captures Factory weakly, upgrading and cloning the agent at invocation, before polling.
 /// Callers keep their own validation and shutdown-check ordering.
 pub(crate) fn agent_handler<F>(
@@ -276,7 +290,7 @@ pub(crate) fn typed_handler<A: serde::de::DeserializeOwned + 'static>(
 ) -> factory_agent::Handler {
     agent_handler(factory, agent, move |factory, agent, args| async move {
         let args = serde_json::from_value(args)?;
-        let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+        let factory = live(factory)?;
         run(&factory, &agent, args).map_err(factory_agent::Error::Other)
     })
 }
@@ -315,7 +329,7 @@ fn factory_tool<R: Reply>(
         description,
         parameters,
         agent_handler(factory, agent, move |factory, agent, args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = live(factory)?;
             run(&factory, &agent, args).map(Reply::result).map_err(factory_agent::Error::Other)
         }),
     )

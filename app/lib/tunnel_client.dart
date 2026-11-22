@@ -59,6 +59,42 @@ abstract interface class Tunnel {
   Future<void> close();
 }
 
+/// What the tunnels run on (#214): one runtime for all of them, which can
+/// be asked whether it still runs anything, and made afresh when it
+/// doesn't, as relaunching the app would.
+abstract interface class TunnelRuntime {
+  /// Whether it runs a task within [within].
+  Future<bool> answers(Duration within);
+
+  /// Ends it, and every tunnel on it; the next tunnel opens on a new one.
+  void fresh();
+}
+
+/// The Rust library's runtime.
+class RustTunnelRuntime implements TunnelRuntime {
+  const RustTunnelRuntime();
+
+  @override
+  Future<bool> answers(Duration within) async {
+    await RustTunnels.load();
+    return rust.runtimeAnswers().timeout(within, onTimeout: () => false);
+  }
+
+  @override
+  void fresh() => rust.freshRuntime();
+}
+
+/// A runtime that always answers: tunnels that aren't Rust's (tests).
+class AnsweringRuntime implements TunnelRuntime {
+  const AnsweringRuntime();
+
+  @override
+  Future<bool> answers(Duration within) async => true;
+
+  @override
+  void fresh() {}
+}
+
 /// The tunnel, in Rust, loaded on first use.
 class RustTunnels implements Tunnels {
   RustTunnels();

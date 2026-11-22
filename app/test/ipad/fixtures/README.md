@@ -47,6 +47,55 @@ files and optional fields; don't change the meaning of a field.
   `ev_stroke_interrupted.json` shows the field's other value).
 - `create_*.json` carry `layers`: the ink layer and revision of each page
   (or the one of an image) to load; `loadDrawing` brings their bytes.
+- PDFs (phase 3, all optional): `ready` may carry the PDF's `outline`
+  (`ev_ready_outline.json`, at most 500 entries, depth first). `search`
+  answers its own `query` with matches (page, region, the matched line),
+  highlighted natively; an empty query clears them, and an answer
+  overtaken by a newer search says `superseded: true`. `goToPage` takes an
+  optional `region` to scroll into view (`cmd_go_to_page_region.json`).
+  `linkTapped` reports a tap on a link out of the PDF, which never opens by
+  itself. `document_too_large` refuses a PDF of more than 2000 pages.
+  `exportComposite` with no `region` exports the whole page.
+  `drawing_policy` `none` (`cmd_set_drawing_policy_none.json`, also in
+  creation params) turns drawing off: neither Pencil nor finger draws, and
+  the document scrolls, zooms, selects text and follows links as when only
+  read; a stroke in progress ends as `strokeInterrupted` `drawing_off`.
+- Handwriting and interruptions (phase 4/6, all optional): `ready` may
+  carry `handwriting` (`ev_ready_handwriting*.json`): whether this iPad
+  can read handwriting (iPadOS 27+, on the device; no cloud fallback).
+  `recognizeText` reads the strokes of a lasso `selection`, a `region` or
+  `all` of a page and answers a candidate text, never applied or sent by
+  native: the host offers it, editable. The answer names the drawing it
+  read (`base_revision`, `local_seq` of the drawingChanged that carried
+  it, null if unchanged since loaded, and `drawing_sha256`); a
+  drawing that changed meanwhile answers `stale: true` with no text; below
+  27 it answers `available: false`, `os_too_old`. `strokeSelectionChanged`
+  reports the lasso selection (27+). `strokeInterrupted` `background`:
+  the app left the screen (or it locked) mid-stroke; native cancels the
+  stroke and flushes the last change.
+- A PDF changing while open (all optional): `reloadDocument` hands native
+  a new version (`source` and `document`, as in creation params). Native
+  checks its hash (else PlatformException `document_hash_mismatch` or
+  `document_too_large`, and the version shown stays), ends a stroke in
+  progress (`strokeInterrupted` `reload`), sends any pending change for
+  the old version, then shows the new one in place, at the same page and
+  zoom where that page still exists. The answer lists the pages
+  `changed` (same number, different text or rendering), `added` and
+  `removed`, compared page by page, never remapped. Ink on unchanged
+  pages stays (`kept_layers`); ink on changed or removed pages is no
+  longer shown and is listed in `outdated_layers`, for the host to show
+  as OUTDATED, never moved onto the new page.
+- Pencil gestures (all optional): double-tap and squeeze do what the
+  person chose in Settings, and only that: switching to the eraser or the
+  previous tool changes the tool natively and says so (`toolChanged`,
+  `source` `pencil_double_tap` or `pencil_squeeze`); showing the colour
+  palette, ink attributes or the contextual palette is Dart's to do
+  (`pencilAction`, with `at`, where the Pencil hovered, 0..1 of the
+  surface, or null). Never send, accept or delete. Hover previews the
+  tool's mark natively; nothing crosses the bridge.
+- Ink keeps its exact colours whatever the appearance: surfaces are always
+  drawn light, so PencilKit never turns black ink white; `ink.appearance`
+  is read but never makes ink adapt.
 
 Drawings travel as `PKDrawing.dataRepresentation()` in base64
 (`bytes_base64`) with their SHA-256 and PencilKit content version. Large

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'device_account.dart';
+import 'ipad/ink_bridge.dart' show InkJournal;
 import 'tunnel_client.dart' show newDeviceKey;
 
 /// A Factory on another machine, as its pairing code describes it. Since
@@ -276,6 +277,8 @@ class Connections extends ChangeNotifier {
   /// again. Throws [ConnectionStorageFailure] when it can't.
   Future<void> startOver() async {
     await _storage.reset();
+    // Drawings an iPad kept unsaved go with what it forgets.
+    unawaited(const InkJournal().clear());
     _readFailure = null;
     _current = null;
     _saved.clear();
@@ -340,6 +343,15 @@ class Connections extends ChangeNotifier {
   void forget(RemoteFactory target) {
     _saved.removeWhere((other) => other == target);
     _keys.remove(target.code);
+    // Its drawings an iPad kept unsaved (a Claktory without an endpoint
+    // shares the journal's 'local' key, so it's left alone).
+    if (target.tunnelled) {
+      unawaited(
+        const InkJournal().clear(
+          claktory: InkJournal.claktoryKey(target.endpointId),
+        ),
+      );
+    }
     if (_current == target) _current = null;
     _changed();
   }

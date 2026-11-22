@@ -51,6 +51,11 @@ import UniformTypeIdentifiers
     CommandMenu.register(with: messenger)
     // Documents and ink (Ink/InkChannel.swift).
     Ink.register(with: engineBridge.pluginRegistry)
+    // Links that open the app: claktory://add?code=…, and a pairing
+    // code's factory://… from the Camera (Links, below).
+    let links = engineBridge.pluginRegistry.registrar(forPlugin: "Links")!
+    links.addSceneDelegate(Links.shared)
+    Links.shared.register(with: links.messenger())
     // Notifications: those the app shows, its pushes' taps, and this
     // iPhone's registration for pushes (Notifications.swift, Push.swift).
     Notifications.shared.register(with: messenger)
@@ -383,5 +388,73 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     return scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first ?? ASPresentationAnchor()
+  }
+}
+
+/// Links that open the app, as on the Mac (links.dart): `claktory://add?code=…`
+/// (the build's own scheme), and a pairing code's own `factory://…`, which
+/// the Camera hands over when it reads a Claktory's QR code. Kept until the
+/// app listens on `factory/links`, then each as it comes. The app asks
+/// before connecting to anything a link names; a link alone does nothing.
+final class Links: NSObject, FlutterSceneLifeCycleDelegate {
+  static let shared = Links()
+
+  /// The schemes a link may have; anything else is dropped here.
+  static let schemes: Set<String> = ["factory", "claktory", "claktory-dev", "claktory-debug"]
+
+  /// Longer than any pairing code: dropped before the app parses it.
+  static let maxLength = 4096
+
+  private var channel: FlutterMethodChannel?
+  private var listening = false
+  private(set) var waiting: [String] = []
+
+  func register(with messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "factory/links", binaryMessenger: messenger)
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else { return result(nil) }
+      switch call.method {
+      case "listen":
+        self.listening = true
+        result(self.waiting)
+        self.waiting = []
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    self.channel = channel
+  }
+
+  /// [urls] opened the app: those it takes go to the app, or wait for it.
+  /// Never logged: a pairing code is a credential.
+  @discardableResult
+  func open(_ urls: [URL]) -> Bool {
+    var took = false
+    for url in urls {
+      let link = url.absoluteString
+      guard let scheme = url.scheme?.lowercased(), Self.schemes.contains(scheme),
+        link.utf8.count <= Self.maxLength
+      else { continue }
+      took = true
+      if listening, let channel {
+        channel.invokeMethod("opened", arguments: link)
+      } else {
+        waiting.append(link)
+      }
+    }
+    return took
+  }
+
+  // The app opened by a link: it comes with the scene's connection.
+  func scene(
+    _ scene: UIScene, willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions?
+  ) -> Bool {
+    open(connectionOptions?.urlContexts.map(\.url) ?? [])
+  }
+
+  // A link while the app runs (or wakes from the background).
+  func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
+    open(URLContexts.map(\.url))
   }
 }

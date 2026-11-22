@@ -111,6 +111,30 @@ pub(crate) fn account_ids(provider: &v1::Provider) -> Vec<String> {
     if provider.accounts.is_empty() { vec![String::new()] } else { provider.accounts.iter().map(|account| account.id.clone()).collect() }
 }
 
+/// How a signed-in account's check went (`Factory::check_sign_ins`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SignInCheck {
+    /// The provider's name, such as "Anthropic".
+    pub provider: String,
+    /// The account's label, such as its email; empty when unknown.
+    pub account: String,
+    pub outcome: SignInOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SignInOutcome {
+    /// Its usage was read: the sign-in works.
+    Works,
+    /// It has no usage to read (an API key): nothing says it doesn't work.
+    NoLimits,
+    /// The provider refused it: it needs signing in again.
+    Refused,
+    /// The vault holding it is locked.
+    Locked,
+    /// The read failed otherwise: why.
+    Failed(String),
+}
+
 /// An account's usage and plan, by provider and account id.
 pub(crate) type AccountKey = (String, String);
 
@@ -221,6 +245,44 @@ impl Factory {
         if named {
             self.refresh_models().await;
         }
+    }
+
+    /// Reads every signed-in account's usage now, as a check that its
+    /// sign-in works here (after a move, #243 S3): no model call, nothing
+    /// spent. A sign-in the provider refuses is marked so, as any usage read
+    /// marks it, and shows Sign in again. Each account's outcome, in order.
+    pub(crate) async fn check_sign_ins(&self) -> Vec<SignInCheck> {
+        let providers = self.lock().providers.clone();
+        let mut checks = Vec::new();
+        let mut refused = false;
+        for provider in providers.iter().filter(|provider| !provider.signed_in_with.is_empty()) {
+            for account in account_ids(provider) {
+                let label = provider.accounts.iter().find(|known| known.id == account).map(|known| known.label.clone()).unwrap_or_default();
+                let key = (provider.id.clone(), account.clone());
+                let outcome = match self.models.usage(&provider.id, &account).await {
+                    Ok(None) => SignInOutcome::NoLimits,
+                    Ok(Some(usage)) => {
+                        self.set_usage(&key, Some(v1::ProviderUsage { updated: now_ms(), error: String::new(), ..usage }));
+                        SignInOutcome::Works
+                    }
+                    Err(error) if error.is_refused() => {
+                        refused = true;
+                        self.usage_failed(&key, &error);
+                        SignInOutcome::Refused
+                    }
+                    Err(error) if error.is_locked() => SignInOutcome::Locked,
+                    Err(error) => {
+                        self.usage_failed(&key, &error);
+                        SignInOutcome::Failed(error.to_string())
+                    }
+                };
+                checks.push(SignInCheck { provider: provider.name.clone(), account: label, outcome });
+            }
+        }
+        if refused {
+            self.refresh_models().await;
+        }
+        checks
     }
 
     /// Keeps showing an account's last good read, with why it's not newer.

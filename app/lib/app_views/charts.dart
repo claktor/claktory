@@ -202,6 +202,9 @@ String readoutTime(DateTime time) {
   return time.hour == 0 && time.minute == 0 ? day : '$day ${_clock(time)}';
 }
 
+/// The least a pie's legend keeps beside its donut: a few words.
+const _leastLegend = 96.0;
+
 /// The agent palette's colors in order: series take them one by one.
 const _paletteOrder = [
   'blue', 'violet', 'green', 'pink', 'teal', 'amber', 'red', 'slate', //
@@ -255,6 +258,10 @@ class ChartSeries {
 
   final String name;
   final points = <(Object?, double)>[];
+
+  /// Each point's row in the table, in step with [points]: categories read
+  /// in the table's order, whichever series has them first.
+  final rows = <int>[];
 }
 
 /// A chart's series out of its table: wide ([y] names a column per series,
@@ -274,7 +281,7 @@ chartSeries(
   final series = <String, ChartSeries>{};
   final beyond = <String>{};
   var pointsLeft = false;
-  void add(String name, Object? at, Object? cell) {
+  void add(String name, Object? at, Object? cell, int row) {
     final value = cellNumber(cell);
     if (value == null) return;
     var one = series[name];
@@ -290,6 +297,7 @@ chartSeries(
       return;
     }
     one.points.add((at, value));
+    one.rows.add(row);
   }
 
   if (seriesBy != null) {
@@ -308,8 +316,8 @@ chartSeries(
     if (yi < 0) {
       return (series: const [], x: xi, seriesLeft: 0, pointsLeft: false);
     }
-    for (final row in table.rows) {
-      add(cellText(row[si]), row[xi], row[yi]);
+    for (final (r, row) in table.rows.indexed) {
+      add(cellText(row[si]), row[xi], row[yi], r);
     }
   } else {
     final ys = <int>[
@@ -319,9 +327,9 @@ chartSeries(
       for (final name in y) table.columns.indexOf(name),
     ];
     if (ys.contains(-1)) return null;
-    for (final row in table.rows) {
+    for (final (r, row) in table.rows.indexed) {
       for (final yi in ys) {
-        add(table.columns[yi], row[xi], row[yi]);
+        add(table.columns[yi], row[xi], row[yi], r);
       }
     }
   }
@@ -401,8 +409,17 @@ class _AppChartState extends State<AppChart> {
             y: widget.y,
             seriesBy: widget.seriesBy,
           );
+    // Under its label, so a dashboard says which chart it is.
+    Widget labelled(String text) => widget.label.isEmpty
+        ? note(text)
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            spacing: Space.xs,
+            children: [_heading(context, widget.label), note(text)],
+          );
     if (table == null || built == null) {
-      return note("Can't show this chart.");
+      return labelled("Can't show this chart.");
     }
     final series = built.series;
     final colors = [
@@ -419,17 +436,7 @@ class _AppChartState extends State<AppChart> {
             'scatter' => _scatter(context, series, colors),
             _ => null,
           };
-    if (drawn == null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        spacing: Space.xs,
-        children: [
-          if (widget.label.isNotEmpty) _heading(context, widget.label),
-          note('Nothing to show.'),
-        ],
-      );
-    }
+    if (drawn == null) return labelled('Nothing to show.');
     final left = [
       if (built.seriesLeft > 0)
         'Showing $maxChartSeries of ${series.length + built.seriesLeft} series.',
@@ -707,26 +714,28 @@ class _AppChartState extends State<AppChart> {
     required bool stacked,
   }) {
     final palette = Palette.of(context);
-    // The categories in the order they first come, each series' value in
-    // each (summed, should one come twice).
-    final categories = <String>[];
-    final index = <String, int>{};
-    var barsLeft = 0;
+    // The categories in the table's order (the row each first comes in,
+    // whichever series has it: a later series' new buckets don't go to the
+    // end), each series' value in each (summed, should one come twice).
+    final first = <String, int>{};
+    for (final one in series) {
+      for (final (k, (at, _)) in one.points.indexed) {
+        final name = cellText(at);
+        final row = k < one.rows.length ? one.rows[k] : k;
+        final seen = first[name];
+        if (seen == null || row < seen) first[name] = row;
+      }
+    }
+    final ordered = first.keys.toList()
+      ..sort((a, b) => first[a]!.compareTo(first[b]!));
+    final categories = ordered.take(maxChartBars).toList();
+    final barsLeft = ordered.length - categories.length;
+    final index = {for (final (i, name) in categories.indexed) name: i};
     final values = [for (final _ in series) <int, double>{}];
     for (var s = 0; s < series.length; s++) {
       for (final (at, value) in series[s].points) {
-        final name = cellText(at);
-        var i = index[name];
-        if (i == null) {
-          if (categories.length >= maxChartBars) {
-            barsLeft++;
-            index[name] = -1;
-            continue;
-          }
-          i = index[name] = categories.length;
-          categories.add(name);
-        }
-        if (i < 0) continue;
+        final i = index[cellText(at)];
+        if (i == null) continue;
         values[s][i] = (values[s][i] ?? 0) + value;
       }
     }
@@ -873,11 +882,18 @@ class _AppChartState extends State<AppChart> {
     );
   }
 
-  /// A category's words: a time when it reads as one ("22 Nov").
+  /// A category's words: a time when it reads as one ("22 Nov", "20 Nov
+  /// 12:00"): an ISO date, or a number big enough to be milliseconds since
+  /// 1970, as the time axis reads them.
   String _category(String name) {
     if (name.length >= 10 && RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(name)) {
       final time = DateTime.tryParse(name);
       if (time != null) return readoutTime(time);
+    }
+    // As cellText writes a number: grouped ("1,795,132,800,000").
+    final number = double.tryParse(name.replaceAll(',', ''));
+    if (number != null && number.abs() >= 1e11 && number.abs() < 1e14) {
+      return readoutTime(DateTime.fromMillisecondsSinceEpoch(number.round()));
     }
     return name;
   }
@@ -942,62 +958,71 @@ class _AppChartState extends State<AppChart> {
             : _colorOf(context, slices[i].$1, i),
     ];
     final touched = _touched;
-    final size = widget.height;
-    final chart = Row(
-      spacing: Space.l,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        SizedBox.square(
-          dimension: size,
-          child: PieChart(
-            duration: Motion.base,
-            PieChartData(
-              startDegreeOffset: -90,
-              sectionsSpace: 1,
-              centerSpaceRadius: size / 2 * 0.58,
-              sections: [
-                for (var i = 0; i < slices.length; i++)
-                  PieChartSectionData(
-                    value: slices[i].$2,
-                    color: touched == null || touched == i
-                        ? colors[i]
-                        : colors[i].withValues(alpha: 0.45),
-                    radius: size / 2 * 0.42,
-                    showTitle: false,
+    // The donut at the chart's height, smaller where the width can't give
+    // it that beside a legend of a few words (a phone, half a row).
+    final chart = LayoutBuilder(
+      builder: (context, constraints) {
+        final donut = math.min(
+          widget.height,
+          math.max(48.0, constraints.maxWidth - Space.l - _leastLegend),
+        );
+        return Row(
+          spacing: Space.l,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            SizedBox.square(
+              dimension: donut,
+              child: PieChart(
+                duration: Motion.base,
+                PieChartData(
+                  startDegreeOffset: -90,
+                  sectionsSpace: 1,
+                  centerSpaceRadius: donut / 2 * 0.58,
+                  sections: [
+                    for (var i = 0; i < slices.length; i++)
+                      PieChartSectionData(
+                        value: slices[i].$2,
+                        color: touched == null || touched == i
+                            ? colors[i]
+                            : colors[i].withValues(alpha: 0.45),
+                        radius: donut / 2 * 0.42,
+                        showTitle: false,
+                      ),
+                  ],
+                  pieTouchData: PieTouchData(
+                    touchCallback: (event, response) {
+                      final i = response?.touchedSection?.touchedSectionIndex;
+                      if (i == null || i < 0 || i >= slices.length) {
+                        return _point(event, null, null);
+                      }
+                      final (name, value) = slices[i];
+                      _point(
+                        event,
+                        '${_seriesName(context, name)} · ${_value(value)} · ${share(value)}',
+                        i,
+                      );
+                    },
                   ),
-              ],
-              pieTouchData: PieTouchData(
-                touchCallback: (event, response) {
-                  final i = response?.touchedSection?.touchedSectionIndex;
-                  if (i == null || i < 0 || i >= slices.length) {
-                    return _point(event, null, null);
-                  }
-                  final (name, value) = slices[i];
-                  _point(
-                    event,
-                    '${_seriesName(context, name)} · ${_value(value)} · ${share(value)}',
-                    i,
-                  );
-                },
+                ),
               ),
             ),
-          ),
-        ),
-        Flexible(
-          child: SingleChildScrollView(
-            child: _Legend(
-              vertical: true,
-              entries: [
-                for (var i = 0; i < slices.length; i++)
-                  (
-                    '${_seriesName(context, slices[i].$1)} · ${share(slices[i].$2)}',
-                    colors[i],
-                  ),
-              ],
+            Flexible(
+              child: SingleChildScrollView(
+                child: _Legend(
+                  vertical: true,
+                  entries: [
+                    for (var i = 0; i < slices.length; i++)
+                      (
+                        '${_seriesName(context, slices[i].$1)} · ${share(slices[i].$2)}',
+                        colors[i],
+                      ),
+                  ],
+                ),
+              ),
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
     return _Drawn(
       chart,

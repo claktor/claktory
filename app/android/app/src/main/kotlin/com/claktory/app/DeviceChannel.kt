@@ -17,11 +17,18 @@ import java.util.concurrent.Executors
  * factory/device, as on the iPhone (ios/Runner/AppDelegate.swift): what
  * this phone keeps (connections, drafts) and what it is (capabilities).
  * The stores read and write off the main thread, one call at a time, and
- * answer on it. What this phone can't do yet answers so: no camera
- * scanner (unavailable), no QR codes (null); the file picker and web
- * sign-in aren't here (not implemented, which the app reads as missing).
+ * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
+ * the camera's permission [CameraAccess]'s, QR codes [QrCodes]', web
+ * sign-in [WebAuth]'s, the share sheet [ShareSheet]'s.
  */
-class DeviceChannel(messenger: BinaryMessenger, private val context: Context) :
+class DeviceChannel(
+    messenger: BinaryMessenger,
+    private val context: Context,
+    private val attachments: AttachmentPicker? = null,
+    private val camera: CameraAccess? = null,
+    private val webAuth: WebAuth? = null,
+    private val share: ShareSheet? = null,
+) :
     MethodChannel.MethodCallHandler, AutoCloseable {
     private val channel = MethodChannel(messenger, "factory/device")
     private val main = Handler(Looper.getMainLooper())
@@ -48,10 +55,25 @@ class DeviceChannel(messenger: BinaryMessenger, private val context: Context) :
                 null
             }
             "capabilities" -> result.success(capabilities(context.resources.configuration))
-            "cameraAccess" -> result.success("unavailable")
-            "requestCamera" -> result.success(false)
-            "openCameraSettings" -> result.success(null)
-            "qrCode" -> result.success(null)
+            "cameraAccess" -> result.success(camera?.access() ?: "unavailable")
+            "requestCamera" -> camera?.request(result) ?: result.success(false)
+            "openCameraSettings" -> {
+                camera?.openSettings()
+                result.success(null)
+            }
+            "qrCode" -> result.success(QrCodes.modules(call.arguments as? String ?: ""))
+            "pickAttachments" -> attachments?.pick(result) ?: result.notImplemented()
+            "webAuth" -> webAuth?.core?.start(
+                (call.arguments as? Map<*, *>)?.get("url") as? String,
+                (call.arguments as? Map<*, *>)?.get("scheme") as? String,
+                result,
+            ) ?: result.notImplemented()
+            "share" -> share?.core?.share((call.arguments as? Map<*, *>)?.get("text") as? String, result)
+                ?: result.notImplemented()
+            "cancelWebAuth" -> {
+                webAuth?.core?.cancel()
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -112,6 +134,7 @@ object DeviceStores {
 
     private var credentials: CredentialStore? = null
     private var drafts: DraftStore? = null
+    private var dmKeys: DmKeyStore? = null
 
     @Synchronized
     fun credentials(context: Context): CredentialStore = credentials ?: run {
@@ -128,6 +151,23 @@ object DeviceStores {
     fun drafts(context: Context): DraftStore = drafts ?: DraftStore(
         File(context.noBackupFilesDir, DraftStore.FILE_NAME),
     ) { Log.i(TAG, it); Unit }.also { drafts = it }
+
+    /**
+     * The DM keys' own Keystore key: apart from the connections', so
+     * starting over there never makes them unreadable.
+     */
+    const val DM_KEY_ALIAS = "claktory.dm.v1"
+
+    @Synchronized
+    fun dmKeys(context: Context): DmKeyStore = dmKeys ?: run {
+        val log = { message: String -> Log.i(TAG, "dm keys: $message"); Unit }
+        DmKeyStore(
+            File(context.noBackupFilesDir, DmKeyStore.FOLDER),
+            context.packageName,
+            KeystoreSealer(context.applicationContext, DM_KEY_ALIAS, log),
+            log,
+        ).also { dmKeys = it }
+    }
 
     private const val TAG = "Claktory"
 }

@@ -25,6 +25,7 @@ import 'mobile/metrics.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
 import 'inbox.dart' show InboxView;
+import 'ipad/document_host.dart' show ipadDocumentPane;
 import 'usage_view.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
@@ -160,6 +161,48 @@ ViewNode withFiles(ViewNode root, Project project) => _besideChat(
   ),
   share: 1 / 4,
 );
+
+/// The pane showing [appId]'s [view] in [root] (empty: its first), or
+/// null. [first] is the id of the app's first view, so a pane opened by
+/// that id (an agent naming it) and one opened as "its first" are the
+/// same pane.
+ViewNode? appPane(
+  ViewNode root,
+  String appId, [
+  String view = '',
+  String first = '',
+]) {
+  String resolved(String id) => id.isEmpty ? first : id;
+  for (final leaf in leaves(root)) {
+    if (leaf.leaf.kind == appKind &&
+        leaf.leaf.appId == appId &&
+        resolved(leaf.leaf.view) == resolved(view)) {
+      return leaf;
+    }
+  }
+  return null;
+}
+
+/// [root] with [app]'s [view] (empty: its first) right of the
+/// conversation, as [withPage] places a page.
+ViewNode withApp(ViewNode root, AppInfo app, [String view = '']) {
+  final spec = view.isEmpty
+      ? app.views.firstOrNull
+      : app.views.where((v) => v.id == view).firstOrNull;
+  return _besideChat(
+    root,
+    ViewNode(
+      id: newPaneId(appKind),
+      leaf: ViewLeaf(
+        kind: appKind,
+        appId: app.id,
+        // Named, never "its first", so it's found by its id too.
+        view: spec?.id ?? view,
+        title: spec?.title ?? '',
+      ),
+    ),
+  );
+}
 
 /// [root] with [pane] right of the conversation, taking [share] of the
 /// conversation's share in a row.
@@ -555,7 +598,11 @@ class _PaneLayoutState extends State<PaneLayout> {
                 paneId: node.id,
               ),
               _ when leaf.kind == appKind => AppPane(leaf: leaf),
-              _ => Builder(builder: (context) => viewerBody(context, leaf)),
+              _ => Builder(
+                builder: (context) =>
+                    ipadDocumentPane(context, node) ??
+                    viewerBody(context, leaf),
+              ),
             },
           );
     return Pane(
@@ -790,17 +837,96 @@ class _PagePane extends StatelessWidget {
     child: LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxWidth >= pagePaneMinWidth) return child;
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: pagePaneMinWidth,
-            height: constraints.maxHeight,
-            child: child,
-          ),
-        );
+        return PageSideways(height: constraints.maxHeight, child: child);
       },
     ),
   );
+}
+
+/// A page squeezed below [pagePaneMinWidth]: it keeps that width and
+/// scrolls sideways, and the edge it's cut at fades out, so what's past
+/// it reads as more to scroll to rather than cut off (horizontal scroll
+/// views have no scrollbar).
+@visibleForTesting
+class PageSideways extends StatefulWidget {
+  const PageSideways({super.key, required this.height, required this.child});
+
+  final double height;
+  final Widget child;
+
+  @override
+  State<PageSideways> createState() => PageSidewaysState();
+}
+
+@visibleForTesting
+class PageSidewaysState extends State<PageSideways> {
+  /// Whether some of the page is past the left edge, and past the right:
+  /// that edge fades out.
+  var _before = false;
+  var _after = true;
+
+  bool get fadesLeft => _before;
+  bool get fadesRight => _after;
+
+  bool _follow(ScrollNotification notification) {
+    // Only this scroll view's own: the page's lists scroll inside it.
+    if (notification.depth != 0) return false;
+    _place(notification.metrics);
+    return false;
+  }
+
+  bool _measured(ScrollMetricsNotification notification) {
+    if (notification.depth == 0) _place(notification.metrics);
+    return false;
+  }
+
+  void _place(ScrollMetrics metrics) {
+    final before = metrics.extentBefore > 0.5;
+    final after = metrics.extentAfter > 0.5;
+    if (before != _before || after != _after) {
+      setState(() {
+        _before = before;
+        _after = after;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const shown = Color(0xFFFFFFFF);
+    const gone = Color(0x00FFFFFF);
+    return NotificationListener<ScrollMetricsNotification>(
+      onNotification: _measured,
+      child: NotificationListener<ScrollNotification>(
+        onNotification: _follow,
+        // Always masked, so the scroll view keeps its place in the tree
+        // (and its offset) as the fades come and go.
+        child: ShaderMask(
+          blendMode: BlendMode.dstIn,
+          shaderCallback: (bounds) {
+            final fade = math.min(0.5, Space.xl / math.max(bounds.width, 1));
+            return LinearGradient(
+              colors: [
+                _before ? gone : shown,
+                shown,
+                shown,
+                _after ? gone : shown,
+              ],
+              stops: [0, fade, 1 - fade, 1],
+            ).createShader(bounds);
+          },
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SizedBox(
+              width: pagePaneMinWidth,
+              height: widget.height,
+              child: widget.child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// The smallest [node] can be along a row ([row]) or a column.
@@ -1005,11 +1131,15 @@ const appKind = 'app';
 /// An app's view as Claktory's chrome names it: the app's name first,
 /// always, then the view's title ("Charts · Days"), since the title is the
 /// app's own words and could pass itself off as Claktory's (Fugo's rule);
-/// "This app" for an app [workspace] doesn't have (or none was given).
+/// "This app" for an app [workspace] doesn't have (or none was given). A
+/// view titled as its app is named once ("Charts", not "Charts · Charts").
 String appViewTitle(ViewLeaf leaf, Workspace? workspace) {
   final app = workspace == null ? null : _appOf(workspace, leaf.appId);
   final name = app == null || app.name.isEmpty ? 'This app' : app.name;
-  return leaf.title.isEmpty ? name : '$name · ${leaf.title}';
+  final title = leaf.title.trim();
+  return title.isEmpty || title.toLowerCase() == name.toLowerCase()
+      ? name
+      : '$name · $title';
 }
 
 /// An app's view in a pane: [AppView], over the backend, framed with the

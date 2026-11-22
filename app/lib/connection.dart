@@ -167,6 +167,7 @@ class ConnectionDot extends StatelessWidget {
 
 /// The sidebar footer's connection line: its mark and words, with how it
 /// connects on hover (or a long press), and a click for [ConnectionDialog].
+/// Not connected, the click reconnects at once too ([reconnectFirst]).
 /// Turned away, a click lists the Claktories instead: trying again won't
 /// help.
 class ConnectionLine extends StatelessWidget {
@@ -201,20 +202,26 @@ class ConnectionLine extends StatelessWidget {
             container: true,
             button: true,
             label: connection.line,
+            hint: reconnectFirst(connection.link) ? reconnectAndShowHint : null,
             child: Pressable(
-              onTap: () => connection.link == Link.refused
-                  ? showModal(
-                      context,
-                      (context, close) => FactoryChooser(close: close),
-                    )
-                  : showModal(
-                      context,
-                      (context, close) => ConnectionDialog(
-                        backend: backend,
-                        machine: machine,
-                        close: close,
-                      ),
-                    ),
+              onTap: () {
+                if (connection.link == Link.refused) {
+                  showModal(
+                    context,
+                    (context, close) => FactoryChooser(close: close),
+                  );
+                  return;
+                }
+                if (reconnectFirst(connection.link)) backend.reconnectNow();
+                showModal(
+                  context,
+                  (context, close) => ConnectionDialog(
+                    backend: backend,
+                    machine: machine,
+                    close: close,
+                  ),
+                );
+              },
               builder: (context, hovered) => ConstrainedBox(
                 constraints: BoxConstraints(minWidth: least, minHeight: least),
                 child: ExcludeSemantics(
@@ -256,6 +263,15 @@ class ConnectionLine extends StatelessWidget {
     );
   }
 }
+
+/// Whether a tap on a connection's status ([ConnectionLine], a phone's
+/// word) reconnects at once before showing the connection: while it's
+/// reconnecting or can't connect, as relaunching the app would (#214).
+bool reconnectFirst(Link link) =>
+    link == Link.connecting || link == Link.failing;
+
+/// VoiceOver's hint on a connection's status that [reconnectFirst].
+const reconnectAndShowHint = 'Reconnects and shows the connection';
 
 /// The connection in full: how it connects, or why it can't and what to
 /// do, with Reconnect.

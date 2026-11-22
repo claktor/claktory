@@ -1,6 +1,7 @@
 allprojects {
     repositories {
-        google()
+        // ZXing comes from Maven Central only (Fugo's review).
+        google { content { excludeGroup("com.google.zxing") } }
         mavenCentral()
     }
 }

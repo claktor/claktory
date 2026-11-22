@@ -19,6 +19,7 @@
 //! nothing would be lost: no uncommitted changes, and no commits that aren't
 //! in the main checkout's branch.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -347,9 +348,61 @@ pub(crate) fn main_branch(repo: &Path) -> Option<String> {
     git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().filter(|branch| !branch.is_empty())
 }
 
+/// How many of main's latest commits count when looking for files a landing
+/// would put back.
+const REWIND_HISTORY: &str = "500";
+/// The most rewound files a refusal names.
+const REWINDS_SHOWN: usize = 20;
+
+/// The files `tip` would put back, against `main_tip`, to a version main had
+/// before (contents a file had in main's recent history, or being absent
+/// for one main added since, or there for one it deleted), sorted. A branch
+/// squashed onto main from a tree based on an older main does this to every
+/// file main changed meanwhile (c9a8000c), and a rebase can't see it: what's
+/// rewound is in its own commit. A real revert does it on purpose.
+fn rewinds(repo: &Path, main_tip: &str, tip: &str) -> Result<Vec<String>, String> {
+    let changed = git(repo, &["diff", "--raw", "-z", "--no-abbrev", "--no-renames", main_tip, tip])?;
+    let wanted: HashMap<String, String> = raw_entries(&changed).map(|(_, new, path)| (path.to_owned(), new.to_owned())).collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let history = git(repo, &["log", "-n", REWIND_HISTORY, "--raw", "-z", "--no-abbrev", "--no-renames", "--format=", main_tip])?;
+    let mut had: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (old, new, path) in raw_entries(&history) {
+        if wanted.contains_key(path) {
+            let versions = had.entry(path).or_default();
+            versions.insert(old);
+            versions.insert(new);
+        }
+    }
+    let mut rewound: Vec<String> =
+        wanted.iter().filter(|(path, new)| had.get(path.as_str()).is_some_and(|versions| versions.contains(new.as_str()))).map(|(path, _)| path.clone()).collect();
+    rewound.sort();
+    Ok(rewound)
+}
+
+/// `git … --raw -z` output's entries: each file's old and new blob (all
+/// zeros for none) and path.
+fn raw_entries(raw: &str) -> impl Iterator<Item = (&str, &str, &str)> {
+    let mut tokens = raw.split('\0');
+    std::iter::from_fn(move || {
+        loop {
+            let token = tokens.next()?;
+            let Some(meta) = token.trim_start_matches('\n').strip_prefix(':') else { continue };
+            let path = tokens.next()?;
+            let fields: Vec<&str> = meta.split(' ').collect();
+            if let [_, _, old, new, ..] = fields.as_slice() {
+                return Some((*old, *new, path));
+            }
+        }
+    })
+}
+
 /// Lands the checkout's branch: fast-forwards the main checkout's branch to
-/// it, in the main checkout. Says what happened, or why it can't.
-pub(crate) fn land(checkout: &Checkout) -> Result<String, String> {
+/// it, in the main checkout. Says what happened, or why it can't. A branch
+/// that would put files back to versions main had before is refused unless
+/// `allow_rewinds` (`rewinds`).
+pub(crate) fn land(checkout: &Checkout, allow_rewinds: bool) -> Result<String, String> {
     if !checkout.exists() {
         return Err("You have no checkout of your own yet.".to_owned());
     }
@@ -367,6 +420,18 @@ pub(crate) fn land(checkout: &Checkout) -> Result<String, String> {
     if git(&checkout.repo, &["merge-base", "--is-ancestor", &before, &tip]).is_err() {
         return Err(format!(
             "{main} has moved on since your branch left it. Rebase onto it first (git rebase {main}), test, then land again."
+        ));
+    }
+    let rewound = rewinds(&checkout.repo, &before, &tip)?;
+    if !rewound.is_empty() && !allow_rewinds {
+        let mut list: Vec<String> = rewound.iter().take(REWINDS_SHOWN).map(|path| format!("- {path}")).collect();
+        if rewound.len() > REWINDS_SHOWN {
+            list.push(format!("- and {} more", rewound.len() - REWINDS_SHOWN));
+        }
+        let (n, them) = if rewound.len() == 1 { ("1 file".to_owned(), "it") } else { (format!("{} files", rewound.len()), "them") };
+        return Err(format!(
+            "Not landed: your branch would put {n} back to a version {main} had before, undoing what others landed since:\n{}\n\nIf you didn't mean to change {them}, your commit was probably made from a checkout behind {main} (a squash with `git reset --soft {main}`, say). Go back to your own commits (git reflog), squash onto where your branch started instead (`git reset --soft $(git merge-base HEAD {main})`, then commit), rebase onto {main}, and land again. If you meant to revert {them}, call tree_land with allow_rewinds: true.",
+            list.join("\n")
         ));
     }
     let count = git(&checkout.repo, &["rev-list", "--count", &format!("{before}..{tip}")])?;
@@ -589,13 +654,13 @@ mod tests {
 
         // main moved on: rebase first.
         commit(&repo, "other.rs", "theirs");
-        let refused = land(&checkout).unwrap_err();
+        let refused = land(&checkout, false).unwrap_err();
         assert!(refused.contains("Rebase onto it first (git rebase main)"), "{refused}");
         run(&tree, &["git", "-c", "user.name=T", "-c", "user.email=t@t", "rebase", "-q", "main"]);
-        let landed = land(&checkout).expect("landed");
+        let landed = land(&checkout, false).expect("landed");
         assert!(landed.starts_with("Landed 1 commit on main"), "{landed}");
         assert_eq!(std::fs::read_to_string(repo.join("new.rs")).expect("landed file"), "work");
-        assert!(land(&checkout).expect("again").starts_with("Nothing to land"));
+        assert!(land(&checkout, false).expect("again").starts_with("Nothing to land"));
 
         assert_eq!(remove(&checkout).expect("remove"), None);
         assert!(!tree.exists() && !checkout.exists());

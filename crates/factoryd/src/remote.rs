@@ -1724,6 +1724,10 @@ impl Factory {
         self.cancel_device_flows(&removed.id);
         // And its notification key.
         crate::notify::push::forget(self, &removed.id);
+        // And where it was reading.
+        if let Err(error) = crate::presentation::forget_device(self, &removed.id) {
+            tracing::warn!(%error, device = %removed.id, "could not forget an unpaired device's reading places");
+        }
         self.refresh_remote();
         // Its zoom goes with it.
         if self.lock().config.display.zoom.contains_key(&removed.id)

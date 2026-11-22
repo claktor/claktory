@@ -41,7 +41,7 @@ async fn an_agent_messages_another_which_wakes_and_knows_who_it_is_from() {
     assert_eq!((event.from.as_str(), event.from_id.as_str(), event.text.as_str()), ("Builder", "builder", "The build is green."));
     assert_eq!(
         describe(&view.entries)[1],
-        "assistant: echo: <event source=\"agent\" from=\"Builder\" id=\"builder\">\nThe build is green.\n</event>",
+        format!("assistant: echo: <event source=\"agent\" from=\"Builder\" id=\"builder\" msg=\"{}\">\nThe build is green.\n</event>", event.message_id),
         "the model reads it tagged with who it's from"
     );
 

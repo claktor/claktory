@@ -177,6 +177,7 @@ struct PushTests {
       func all() -> [String: PushKey] { keys }
       func save(_ key: PushKey, for claktory: String) -> Bool { false }
       func remove(_ claktory: String) {}
+      var lastStatus: OSStatus { errSecIO }
     }
     let key = Data(repeating: 7, count: 32)
     let sealed = try Self.seal(Self.notice(ctr: 1, sentAt: 1_800_000_000_000), key: key)
@@ -184,6 +185,45 @@ struct PushTests {
       for: Self.push(sealed), keys: Full(["e1": PushKey(key: key)]),
       now: Date(timeIntervalSince1970: 1_800_000_000))
     #expect(shown.body == "Claktory has something for you")
+  }
+
+  /// v0.1.16's TestFlight build was archived unsigned, so Info.plist's
+  /// group lost its team prefix and the keychain refused every key: the
+  /// prefix is found again at run time.
+  @Test func aGroupTheBuildLeftWithoutItsTeamGetsItBack() {
+    let bare = "com.claktory.app.notifications"
+    let team = { "ABCDE12345.com.claktory.app" as String? }
+    #expect(KeychainPushKeys.entitled(bare, defaultGroup: team) == "ABCDE12345.\(bare)")
+    #expect(
+      KeychainPushKeys.entitled("ZYXWV98765.\(bare)", defaultGroup: team) == "ZYXWV98765.\(bare)")
+    // None to be had: left as it is, so saving fails and says why.
+    #expect(KeychainPushKeys.entitled(bare, defaultGroup: { nil }) == bare)
+    #expect(KeychainPushKeys.entitled(bare, defaultGroup: { "com.claktory.app" }) == bare)
+    // Not filled in at all, or none: the app's own group.
+    #expect(KeychainPushKeys.entitled("$(AppIdentifierPrefix)\(bare)", defaultGroup: team) == nil)
+    #expect(KeychainPushKeys.entitled(nil, defaultGroup: team) == nil)
+    #expect(KeychainPushKeys.teamPrefix(of: "ABCDE12345.com.x") == "ABCDE12345")
+    #expect(KeychainPushKeys.teamPrefix(of: "com.claktory.app") == nil)
+    #expect(KeychainPushKeys.teamPrefix(of: "ABCDE12345") == nil)
+  }
+
+  /// The keychain itself keeps a key in the group this build names, and in
+  /// that group with its team left out, as an unsigned archive leaves it.
+  @Test func theKeychainKeepsAKeyEvenWhenTheBuildLeftOutTheTeam() throws {
+    let named = try #require(
+      Bundle.main.object(forInfoDictionaryKey: "ClaktoryPushKeychainGroup") as? String)
+    let team = try #require(KeychainPushKeys.appDefaultGroup().flatMap(KeychainPushKeys.teamPrefix))
+    let bare = named.hasPrefix("\(team).") ? String(named.dropFirst(team.count + 1)) : named
+    for group in [named, bare] {
+      let keys = KeychainPushKeys(group: group)
+      #expect(keys.group == "\(team).\(bare)")
+      let account = "test-\(UUID().uuidString)"
+      let key = PushKey(key: Data(repeating: 9, count: 32))
+      #expect(keys.save(key, for: account), "status \(keys.lastStatus)")
+      #expect(keys.all()[account]?.key == key.key)
+      keys.remove(account)
+      #expect(keys.all()[account] == nil)
+    }
   }
 
   @Test func onlyTheNewestShownCountersAreKept() {

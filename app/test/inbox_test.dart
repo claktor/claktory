@@ -210,6 +210,8 @@ void main() {
     await tester.tap(find.text('Ana wants to connect').first);
     await settle(tester);
     expect(find.byType(PipeApprovalCard), findsOneWidget);
+    // Once it has opened to its full height.
+    await settle(tester);
     await tester.ensureVisible(find.text('Approve'));
     await settle(tester);
     await tester.tap(find.text('Approve'));

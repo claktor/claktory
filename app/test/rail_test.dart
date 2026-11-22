@@ -1,8 +1,10 @@
 import 'package:fixnum/fixnum.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/claktory_identity.dart';
+import 'package:factory_app/account_match.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart';
+import 'package:factory_app/device_account.dart';
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
@@ -14,13 +16,19 @@ import 'package:factory_app/rail.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'device_confirm_test.dart' show FakeAccountApi, signedIn;
 import 'harness.dart';
 
-final _nixos = 'factory://?t=${'a' * 64}&name=nixos&e=${'c' * 64}';
-final _mini = 'factory://?t=${'b' * 64}&name=mac-mini&e=${'d' * 64}';
+const _nixosKey =
+    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+const _miniKey =
+    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+final _nixos = 'factory://?t=${'a' * 64}&name=nixos&e=$_nixosKey';
+final _mini = 'factory://?t=${'b' * 64}&name=mac-mini&e=$_miniKey';
 
 Workspace _workspace(
   String agent, {
@@ -53,14 +61,29 @@ Finder _labeled(String label) => find.byWidgetPredicate(
 /// The app with a recording backend for each Claktory, by its pairing code
 /// ('' for this Mac's), each showing [snapshots] for it.
 class _App {
-  _App({this.snapshots = const {}, this.localBackend = true});
+  _App({this.snapshots = const {}, this.localBackend = true, this.account});
 
   /// A Mac, which runs a Claktory of its own; a phone doesn't.
   final bool localBackend;
 
   final Map<String, Workspace> snapshots;
   final storage = MemoryConnectionStorage();
-  late final connections = Connections(storage);
+
+  /// The person's Claktory account on this device: by default signed in,
+  /// with nixos and mac-mini on it.
+  final DeviceAccount? account;
+  final accountApi = FakeAccountApi()
+    ..claktoryList = [
+      const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+      const AccountClaktory(id: 'm', name: 'mac-mini', endpointId: _miniKey),
+    ];
+  late final connections = Connections(
+    storage,
+    null,
+    null,
+    null,
+    account ?? signedIn(accountApi),
+  );
   final draftStorage = MemoryDraftStorage();
   late final drafts = DeviceDrafts(draftStorage);
   final backends = <String, RecordingBackend>{};
@@ -483,7 +506,10 @@ void main() {
 
   testWidgets('on a phone, the Claktories are a rail in the drawer; the '
       'list of them stays in reach', (tester) async {
+    // Signed out, so Add a Claktory asks for a code: and none can be
+    // checked, which each one's label says.
     final app = _App(
+      account: DeviceAccount(),
       localBackend: false,
       snapshots: {
         _nixos: _workspace('Nix'),
@@ -494,6 +520,18 @@ void main() {
       ..use(parsePairingCode(_nixos))
       ..use(parsePairingCode(_mini))
       ..use(parsePairingCode(_nixos));
+    // The phone's camera, which FactoryApp asks the native side about:
+    // none here, so Add a Claktory opens on pasting.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('factory/device'),
+      (call) async => call.method == 'cameraAccess' ? 'unavailable' : null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('factory/device'),
+        null,
+      ),
+    );
     await app.show(tester, size: const Size(390, 844));
     expect(find.byType(ClaktoryRail), findsNothing);
     // The chosen one's conversation fills the screen; the drawer waits.
@@ -510,7 +548,7 @@ void main() {
     expect(_labeled('mac-mini has something new'), findsOneWidget);
 
     // Another: its agents, in the drawer still open.
-    await tester.tap(_labeled('mac-mini'));
+    await tester.tap(_labeled("mac-mini, can't check whose it is"));
     await pumpFrames(tester);
     expect(app.connections.current?.code, _mini);
     expect(
@@ -525,8 +563,8 @@ void main() {
     (back as dynamic).back();
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsOneWidget);
-    expect(_labeled('nixos'), findsOneWidget);
-    await tester.tap(_labeled('nixos'));
+    expect(_labeled("nixos, can't check whose it is"), findsOneWidget);
+    await tester.tap(_labeled("nixos, can't check whose it is"));
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsNothing);
     expect(app.connections.current?.code, _nixos);
@@ -543,6 +581,10 @@ void main() {
     await tester.enterText(find.byType(EditableText), third);
     await tester.pump();
     await tester.tap(find.text('Connect'));
+    await pumpFrames(tester);
+    // A code asks first (confirmPairing), as a link does.
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    await tester.tap(find.text('Connect').last);
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsNothing);
     expect(app.connections.current?.code, third);
@@ -561,7 +603,9 @@ void main() {
         final long =
             'factory://?t=${'e' * 64}&name=a-very-long-machine-name-for-a-'
             'small-screen&e=${'f' * 64}';
+        // Signed out: each row is marked too, which must fit.
         final app = _App(
+          account: DeviceAccount(),
           localBackend: false,
           snapshots: {
             _nixos: _workspace('Nix', working: true),
@@ -654,6 +698,246 @@ void main() {
     ) as dynamic).back();
     await pumpFrames(tester);
     expect(tester.getTopLeft(find.text('Claktories')).dx, greaterThan(47));
+  });
+
+  group('Not on the account', () {
+    final pi = 'factory://?t=${'e' * 64}&name=pi&e=${'F' * 64}';
+
+    test("the account's list decides, by the endpoint dialled", () async {
+      final api = FakeAccountApi()
+        ..claktoryList = [
+          const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+        ];
+      var signedOut = false;
+      var who = 'a@example.com';
+      Object? failure;
+      final changes = ChangeNotifier();
+      final account = ChangeNotifier();
+      final remotes = [_nixosKey];
+      final match = AccountMatch(
+        remotes: () => remotes,
+        changes: changes,
+        account: account,
+        theirs: () => signedOut
+            ? null
+            : failure == null
+            ? api.claktories()
+            : Future.error(failure),
+        whose: () => who,
+      );
+      addTearDown(match.dispose);
+      expect(match.check(_nixosKey), isNull, reason: 'not read yet');
+      expect(match.check(null), AccountCheck.theirs, reason: 'its own');
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.theirs);
+      expect(match.check(_nixosKey.toUpperCase()), AccountCheck.theirs);
+      expect(match.check(_miniKey), AccountCheck.notTheirs);
+      expect(match.check(''), AccountCheck.notTheirs, reason: 'a direct code');
+
+      // Paired since: read again.
+      api.claktoryList = [
+        ...api.claktoryList,
+        const AccountClaktory(id: 'm', name: 'mac-mini', endpointId: _miniKey),
+      ];
+      remotes.add(_miniKey);
+      changes.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_miniKey), AccountCheck.theirs);
+
+      // Unreadable now: the list read stands.
+      failure = const AccountServiceUnreachable('offline');
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_miniKey), AccountCheck.theirs);
+
+      signedOut = true;
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.signedOut);
+      expect(match.check(null), AccountCheck.theirs);
+
+      // Signed in again, but never read since: nothing can be checked.
+      signedOut = false;
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.unreadable);
+      failure = null;
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.theirs);
+      expect(AccountCheck.theirs.marked, isFalse);
+      expect(AccountCheck.signedOut.marked, isTrue);
+      expect(AccountCheck.signedOut.alarming, isFalse);
+      expect(AccountCheck.unreadable.alarming, isTrue);
+
+      // Signed in as someone else, whose list can't be read: the first
+      // one's never stands in for it (Fugo).
+      who = 'b@example.com';
+      failure = const AccountServiceUnreachable('offline');
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.unreadable);
+      failure = null;
+      api.claktoryList = [];
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), AccountCheck.notTheirs);
+    });
+
+    testWidgets('one not on it is marked: its tile, its card and its form; '
+        'never this Mac or one that is', (tester) async {
+      final app = _App();
+      app.connections
+        ..use(parsePairingCode(_nixos))
+        ..use(parsePairingCode(pi))
+        ..use(null);
+      await app.show(tester);
+      expect(_labeled('This Mac'), findsOneWidget);
+      expect(_labeled('nixos'), findsOneWidget);
+      expect(_labeled('pi, not on your Claktory account'), findsOneWidget);
+      Color? ring(String initials) {
+        final tile = find.ancestor(
+          of: find.text(initials),
+          matching: find.byWidgetPredicate(
+            (w) => w.runtimeType.toString() == '_Tile',
+          ),
+        );
+        final box = tester.widget<AnimatedContainer>(
+          find.descendant(of: tile, matching: find.byType(AnimatedContainer)),
+        );
+        return ((box.decoration as BoxDecoration?)?.border as Border?)
+            ?.top
+            .color;
+      }
+
+      final palette = Palette.of(tester.element(find.byType(ClaktoryRail)));
+      expect(ring('P'), palette.danger);
+      expect(ring('N'), isNot(palette.danger));
+
+      // Its card, on hover.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.text('P')));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          "It may belong to someone else. If it's yours, sign it in to your "
+          'Claktory account.',
+        ),
+        findsOneWidget,
+      );
+      await mouse.moveTo(Offset.zero);
+      await pumpFrames(tester, const Duration(seconds: 1));
+
+      // Its form, on a right click.
+      await tester.tap(
+        _labeled('pi, not on your Claktory account'),
+        buttons: kSecondaryButton,
+      );
+      await pumpFrames(tester);
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await pumpFrames(tester);
+      await tester.tap(_labeled('nixos'), buttons: kSecondaryButton);
+      await pumpFrames(tester);
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsNothing,
+      );
+    });
+
+    testWidgets("signed out, none can be checked, and each says so", (
+      tester,
+    ) async {
+      final app = _App(account: DeviceAccount());
+      app.connections
+        ..use(parsePairingCode(_nixos))
+        ..use(null);
+      await app.show(tester);
+      expect(_labeled('This Mac'), findsOneWidget);
+      expect(_labeled("nixos, can't check whose it is"), findsOneWidget);
+      // Neutral: no `danger` ring, the words in `textMuted`.
+      final palette = Palette.of(tester.element(find.byType(ClaktoryRail)));
+      final tile = find.ancestor(
+        of: find.text('N'),
+        matching: find.byWidgetPredicate(
+          (w) => w.runtimeType.toString() == '_Tile',
+        ),
+      );
+      final box = tester.widget<AnimatedContainer>(
+        find.descendant(of: tile, matching: find.byType(AnimatedContainer)),
+      );
+      expect(
+        ((box.decoration as BoxDecoration?)?.border as Border?)?.top.color,
+        isNot(palette.danger),
+      );
+      await tester.tap(
+        _labeled("nixos, can't check whose it is"),
+        buttons: kSecondaryButton,
+      );
+      await pumpFrames(tester);
+      expect(
+        find.textContaining("Can't check whose it is", findRichText: true),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Sign in to your Claktory account on this device to check whose '
+          'it is.',
+        ),
+        findsOneWidget,
+      );
+      final label = tester.widget<RichText>(
+        find.textContaining("Can't check whose it is", findRichText: true),
+      );
+      expect(label.text.style?.color, palette.textMuted);
+    });
+
+    testWidgets("on a phone, the drawer's header and the list say so too", (
+      tester,
+    ) async {
+      final app = _App(localBackend: false);
+      app.connections
+        ..use(parsePairingCode(_nixos))
+        ..use(parsePairingCode(pi));
+      await app.show(tester, size: const Size(390, 844));
+      tester
+          .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+          .openDrawer();
+      await pumpFrames(tester);
+      expect(_labeled('pi, not on your Claktory account'), findsOneWidget);
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(_labeled('nixos'));
+      await pumpFrames(tester);
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsNothing,
+      );
+
+      (tester.widget(
+        find.byWidgetPredicate(
+          (w) => w.runtimeType.toString() == '_BackToList',
+        ),
+      ) as dynamic).back();
+      await pumpFrames(tester);
+      expect(find.byType(ClaktoryList), findsOneWidget);
+      expect(
+        find.textContaining('Not on your Claktory account', findRichText: true),
+        findsOneWidget,
+      );
+      expect(_labeled('pi, not on your Claktory account'), findsOneWidget);
+    });
   });
 
   testWidgets('another Claktory asks the name with the one this Mac knows', (

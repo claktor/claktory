@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 
+use claktory_account::protocol::*;
 use claktory_account::server::{Config, mail};
 
 use crate::support::*;
@@ -48,6 +49,108 @@ async fn an_ip_makes_thirty_requests_a_minute() {
     let answer =
         instance.send("GET", "/.well-known/claktory-account", Vec::new(), &[("x-forwarded-for", "10.0.0.1, 198.51.104.2".into())]).await;
     assert_eq!(answer.status, 200, "the proxy's last entry is the client");
+}
+
+#[tokio::test]
+async fn signed_requests_are_limited_by_their_key_not_their_address() {
+    let instance = start().await;
+    // A person's Claktory, phone and Mac, behind one router.
+    let home = "198.51.108.1";
+    let mut claktory = Claktory::new(home);
+    instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    let (phone, mac) = (Device::new(home), Device::new(home));
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    instance.sign_in_device(&mac, "matt@example.com", "MacBook").await;
+    instance.advance(60 - instance.now().rem_euclid(60));
+    // Each request at a time of its own, a second earlier than the last
+    // (within the skew allowed), so none is a replay of another.
+    let ago = std::cell::Cell::new(0);
+    let at = || {
+        ago.set(ago.get() + 1);
+        Some(instance.now() - ago.get())
+    };
+
+    let check_in = CheckIn { version: "v0.1.9".into(), platform: "macos-arm64".into(), ..Default::default() };
+    for number in 0..20 {
+        assert_eq!(instance.signed(&claktory, "POST", "/v1/check-in", &check_in, at()).await.status, 200, "{number}");
+        assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, at()).await.status, 200, "{number}");
+        assert_eq!(instance.device_signed(&mac, "GET", "/v1/claktories", None, at()).await.status, 200, "{number}");
+    }
+    // None of it counted against the address's 30 unsigned requests.
+    for number in 0..30 {
+        let answer = instance.send("GET", "/.well-known/claktory-account", Vec::new(), &[("x-forwarded-for", home.into())]).await;
+        assert_eq!(answer.status, 200, "{number}");
+    }
+    let answer = instance.send("GET", "/.well-known/claktory-account", Vec::new(), &[("x-forwarded-for", home.into())]).await;
+    assert_eq!(answer.error(), "rate_limited");
+    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, at()).await.status, 200, "signed, it goes on");
+
+    // A key makes 240 a minute, wherever from.
+    for number in 21..240 {
+        let ip = format!("198.51.108.{}", 2 + number % 3);
+        let phone = Device { key: phone.key.clone(), ip };
+        assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, at()).await.status, 200, "{number}");
+    }
+    let answer = instance.device_signed(&phone, "GET", "/v1/devices/me", None, at()).await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+    assert_eq!(answer.value()["retry_after"], 60);
+    assert_eq!(instance.device_signed(&mac, "GET", "/v1/devices/me", None, at()).await.status, 200, "another key");
+    instance.advance(60);
+    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.status, 200, "a new minute");
+}
+
+#[tokio::test]
+async fn requests_that_dont_verify_are_limited_by_their_address() {
+    let instance = start().await;
+    let phone = Device::new("198.51.109.1");
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    instance.advance(60 - instance.now().rem_euclid(60));
+    let from = |ip: &str| [("x-forwarded-for", ip.to_owned())];
+    let ago = std::cell::Cell::new(0);
+    let at = || {
+        ago.set(ago.get() + 1);
+        Some(instance.now() - ago.get())
+    };
+    let stranger = Device::new("198.51.109.1");
+    for number in 0..10 {
+        // Unsigned, signed by a key that isn't signed in, or for an app
+        // (none runs here: refused before it's checked).
+        assert_eq!(instance.send("GET", "/v1/devices/me", Vec::new(), &from("198.51.109.1")).await.error(), "unauthorized");
+        assert_eq!(instance.device_signed(&stranger, "GET", "/v1/claktories", None, at()).await.error(), "unauthorized", "{number}");
+        assert_eq!(instance.send("GET", "/v1/apps/dms/sync", Vec::new(), &from("198.51.109.1")).await.status, 503);
+    }
+    // Spent, the address's signed requests are refused before they're
+    // checked, until the next minute: unsigned, or naming a key or token
+    // no one has.
+    let answer = instance.send("GET", "/v1/devices/me", Vec::new(), &from("198.51.109.1")).await;
+    assert_eq!(answer.error(), "rate_limited");
+    let answer = instance.device_signed(&stranger, "GET", "/v1/claktories", None, at()).await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+    assert_eq!(answer.value()["retry_after"], 60);
+    let nobody = Claktory { token: "not-a-token".into(), ..Claktory::new("198.51.109.1") };
+    let check_in = CheckIn { version: "v0.1.9".into(), platform: "macos-arm64".into(), ..Default::default() };
+    assert_eq!(instance.signed(&nobody, "POST", "/v1/check-in", &check_in, at()).await.error(), "rate_limited");
+    // A device or Claktory it knows is still checked, and goes on: someone
+    // else on a carrier's NAT can't lock a person's phone out. Naming one
+    // with a bad signature is refused as ever.
+    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, at()).await.status, 200, "a known device");
+    let forger = Device { key: stranger.key.clone(), ip: phone.ip.clone() };
+    let signature = sign_request(&forger.key, "GET", "/v1/devices/me", instance.now(), b"");
+    let forged = [
+        ("authorization", format!("{DEVICE_AUTH} {}", phone.account_key())),
+        (TIME_HEADER, instance.now().to_string()),
+        (SIGNATURE_HEADER, signature),
+        ("x-forwarded-for", phone.ip.clone()),
+    ];
+    assert_eq!(instance.send("GET", "/v1/devices/me", Vec::new(), &forged).await.error(), "unauthorized");
+    let mut mac = Claktory::new("198.51.109.3");
+    instance.sign_in(&mut mac, "matt@example.com", "Mac mini").await;
+    let mac = Claktory { ip: "198.51.109.1".into(), ..mac };
+    assert_eq!(instance.signed(&mac, "POST", "/v1/check-in", &check_in, at()).await.status, 200, "a known Claktory");
+    let answer = instance.send("GET", "/.well-known/claktory-account", Vec::new(), &from("198.51.109.1")).await;
+    assert_eq!(answer.status, 200, "unsigned routes count on their own");
+    instance.advance(60);
+    assert_eq!(instance.device_signed(&stranger, "GET", "/v1/claktories", None, None).await.error(), "unauthorized", "a new minute");
 }
 
 #[tokio::test]

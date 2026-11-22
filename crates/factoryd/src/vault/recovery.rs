@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use zeroize::Zeroizing;
 
 use super::{Inner, Vault, VaultError, aad, crypto};
+use crate::encoding::same;
 use crate::transcript::now_ms;
 
 /// How long a check lasts.
@@ -65,12 +66,6 @@ fn normal(text: &str) -> Zeroizing<String> {
             })
             .collect(),
     )
-}
-
-/// Whether two strings are the same, in time that doesn't depend on where
-/// they differ.
-fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |differ, (a, b)| differ | (a ^ b)) == 0
 }
 
 impl Vault {

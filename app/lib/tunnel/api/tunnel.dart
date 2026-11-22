@@ -7,7 +7,19 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `runtime`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `fmt`, `fmt`, `from`
+
+/// Whether the tunnels' runtime runs a task: one that never answers (the
+/// app times this out) is stuck, and only [fresh_runtime] gets past it.
+Future<bool> runtimeAnswers() =>
+    RustLib.instance.api.crateApiTunnelRuntimeAnswers();
+
+/// Ends the tunnels' runtime without waiting for it, and with it every
+/// tunnel it ran (their tasks dropped, their endpoints with them); the next
+/// tunnel opens on a new one. What relaunching the app does, without
+/// relaunching it: only for a runtime that stopped answering (#214).
+void freshRuntime() => RustLib.instance.api.crateApiTunnelFreshRuntime();
 
 /// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
 /// direct addresses [addresses], from its pairing code), as the device

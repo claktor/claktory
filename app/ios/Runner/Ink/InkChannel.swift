@@ -33,11 +33,16 @@ enum Ink {
     register(messenger: messenger)
   }
 
-  /// The app-wide channel: the render cache (InkRenderCache).
+  /// The app-wide channel: the render cache (InkRenderCache) and the
+  /// journal of drawings not yet saved (InkJournal).
   static func register(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: viewType, binaryMessenger: messenger)
     channel.setMethodCallHandler { call, result in
-      InkRenderCache.shared.handle(call, result)
+      if call.method.hasPrefix("journal") {
+        InkJournal.shared.handle(call, result)
+      } else {
+        InkRenderCache.shared.handle(call, result)
+      }
     }
     appChannel = channel
   }
@@ -103,9 +108,12 @@ struct InkParams {
   let document: [String: Any]
   let layers: [[String: Any]]
   let drawingPolicy: PKCanvasViewDrawingPolicy
+  /// "none": nothing draws; the document scrolls, zooms and follows links.
+  let drawingOff: Bool
   let active: Bool
   let initialPage: Int?
   let paper: UIColor
+  let appearance: String
   let style: UIUserInterfaceStyle
 
   init(_ raw: [String: Any]) {
@@ -120,14 +128,18 @@ struct InkParams {
     case "any_input": drawingPolicy = .anyInput
     default: drawingPolicy = .default
     }
+    drawingOff = raw["drawing_policy"] as? String == "none"
     active = raw["active"] as? Bool ?? true
     initialPage = (raw["initial"] as? [String: Any])?["page_1based"] as? Int
     let ink = raw["ink"] as? [String: Any] ?? [:]
     paper = UIColor(inkHex: ink["paper"] as? String) ?? .white
-    // Ink keeps the colours it was drawn in whatever the app's theme:
-    // PencilKit's dynamic colours would turn black ink white over a
-    // dark-mode page (ipad.md §2).
-    style = ink["appearance"] as? String == "dark" ? .dark : .light
+    // Ink keeps the exact colours it was drawn in, whatever the system's
+    // or the app's appearance: PencilKit's dynamic colours would turn
+    // black ink white on a page that stays white (ipad.md §2, HIG "Help
+    // people draw on top of existing content"). So surfaces are always
+    // light; `appearance` is read and never makes ink dynamic.
+    appearance = ink["appearance"] as? String ?? "light"
+    style = .light
   }
 
   var sourceSha256: String? { source["sha256"] as? String }
@@ -219,6 +231,24 @@ extension PKDrawing {
 final class InkCanvas: PKCanvasView {
   var surfaceUndo: UndoManager?
   override var undoManager: UndoManager? { surfaceUndo ?? super.undoManager }
+
+  /// Whether a touch draws at all. PencilKit enables its drawing recognizer
+  /// again when the canvas joins a window, so it's applied then too.
+  var draws = true {
+    didSet { drawingGestureRecognizer.isEnabled = draws }
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    drawingGestureRecognizer.isEnabled = draws
+  }
+
+  /// Cancels the stroke in progress: a recognizer turned off mid-gesture
+  /// is cancelled, and PencilKit drops what it hadn't committed.
+  func cancelStroke() {
+    drawingGestureRecognizer.isEnabled = false
+    drawingGestureRecognizer.isEnabled = draws
+  }
 }
 
 /// The view a surface hands Flutter: reports size changes, so a stroke in
@@ -229,10 +259,14 @@ final class InkRootView: UIView {
   /// Every size change, the first included: to fit the content.
   var onLayout: ((CGSize) -> Void)?
   var onTraits: (() -> Void)?
+  /// The surface's status for VoiceOver: a band along the top.
+  weak var status: UIAccessibilityElement?
   private var last = CGSize.zero
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    status?.accessibilityFrameInContainerSpace = CGRect(
+      x: 0, y: 0, width: bounds.width, height: min(44, bounds.height))
     guard bounds.size != last else { return }
     let had = last
     last = bounds.size

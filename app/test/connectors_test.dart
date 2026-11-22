@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:factory_app/connectors.dart';
+import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/secrets.dart';
 import 'package:factory_app/update.dart';
 import 'package:factory_app/web_auth.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -225,6 +227,7 @@ void main() {
       return true;
     };
     connectInSheet = false;
+    addTearDown(() => debugConnectInSheet = null);
     startConnectReceiver = (path) async {
       final receiver = _Receiver(path);
       receivers.add(receiver);
@@ -389,6 +392,63 @@ void main() {
     );
     expect(receivers.single.closed, isTrue, reason: 'nothing can come back');
   });
+
+  // Left to the platform (no test override): a touch device's sign-in
+  // sheet on the app's scheme (Android's Custom Tab, an iPhone's or iPad's
+  // sheet), a Mac's address of its own.
+  for (final (platform, sheeted) in [
+    (TargetPlatform.android, true),
+    (TargetPlatform.iOS, true),
+    (TargetPlatform.macOS, false),
+  ]) {
+    testWidgets('on ${platform.name} the answer comes back '
+        '${sheeted ? 'in the sign-in sheet' : 'to an address of its own'}', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      if (platform == TargetPlatform.android) {
+        PhonePlatformPolicy.debugAndroidPolicy = true;
+        addTearDown(() => PhonePlatformPolicy.debugAndroidPolicy = false);
+      }
+      debugConnectInSheet = null;
+      expect(connectInSheet, sheeted);
+      final harness = Harness(_workspace());
+      await _show(tester, harness, const SecretsSettings());
+      await tester.tap(find.text('Connect a service…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cloudflare'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Connect'));
+      await tester.pump();
+      await tester.pump();
+      final start = _sent(
+        harness,
+        (m) => m.hasStartConnect() ? m.startConnect : null,
+      ).single;
+      if (!sheeted) {
+        expect(sheets, isEmpty);
+        expect(receivers, hasLength(1));
+        expect(start.redirectUri, startsWith('http://127.0.0.1:'));
+        return;
+      }
+      expect(start.redirectUri, 'com.claktory.app:/oauth/cloudflare');
+      expect(receivers, isEmpty, reason: 'nothing listens on the device');
+      expect(opened, isEmpty, reason: 'no browser beside the sheet');
+      expect(sheets.single.$2, 'com.claktory.app');
+      sheet!.complete(
+        Uri.parse('com.claktory.app:/oauth/cloudflare?code=abc&state=s'),
+      );
+      await tester.pump();
+      expect(
+        _sent(
+          harness,
+          (m) => m.hasFinishConnect() ? m.finishConnect : null,
+        ).single.callbackUrl,
+        'com.claktory.app:/oauth/cloudflare?code=abc&state=s',
+      );
+    });
+  }
 
   testWidgets('on iPhone the sign-in sheet catches the answer on the app '
       'scheme; closing it cancels', (tester) async {
@@ -635,6 +695,10 @@ void main() {
       findsOneWidget,
     );
 
+    // A comment goes with Connect too.
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(find.byType(EditableText).last, 'Only DNS');
     await tester.tap(find.text('Connect Cloudflare'));
     await tester.pump();
     await tester.pump();
@@ -643,12 +707,14 @@ void main() {
       (m) => m.hasStartConnect() ? m.startConnect : null,
     ).single;
     expect(start.proposalId, 'p1');
+    expect(start.comment, 'Only DNS');
     expect(start.accessId, 'deploy');
     expect(opened, hasLength(1));
     await tester.tap(find.text('Cancel'));
     await tester.pump();
     await tester.pump();
 
+    expect(find.textContaining('gets it with your answer.'), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, 'Not yet');
     await tester.tap(find.text('Dismiss'));
     await tester.pump();

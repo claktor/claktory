@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "reloadDocument",
+  "arguments": {
+    "source": {
+      "backend": "demo-mac",
+      "path": "/Users/me/papers/paper.pdf",
+      "sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+      "mime": "application/pdf",
+      "size": 497305
+    },
+    "document": {
+      "file": "<render cache>/demo-mac/9c1e7f0a/paper.pdf",
+      "sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"
+    }
+  },
+  "result": null,
+  "error": {
+    "code": "document_hash_mismatch",
+    "details": {
+      "expected_sha256": "9c1e7f0a52b3d4e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+      "actual_sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "shown_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb"
+    }
+  }
+}

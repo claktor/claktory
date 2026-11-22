@@ -641,7 +641,7 @@ void main() {
       ),
     );
     expect(find.text('Add and give to June'), findsNothing);
-    expect(find.text('Note for June (optional)'), findsNothing);
+    expect(find.text('Add a comment'), findsNothing);
     expect(
       find.textContaining('Gave Resend mail to June · ', findRichText: true),
       findsOneWidget,
@@ -654,13 +654,15 @@ void main() {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));
     await tester.enterText(field('Paste the value'), 're_123456789');
-    await tester.enterText(field('Note for June (optional)'), 'Not yet');
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(field(_comment), 'Not yet');
     await tester.pump();
     for (final label in [
       'Name',
       secretGrantsLabel,
       'RESEND_API_KEY',
-      'Note for June (optional)',
+      'A comment for June',
     ]) {
       expect(
         find.semantics.byPredicate(
@@ -1139,10 +1141,9 @@ void main() {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));
     await tester.enterText(field('Paste the value'), 're_123456789');
-    await tester.enterText(
-      field('Note for June (optional)'),
-      'Check the sender domain first.',
-    );
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(field(_comment), 'Check the sender domain first.');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await pumpFrames(tester);
     expect(
@@ -1175,7 +1176,7 @@ void main() {
   );
 
   testWidgets('a key to generate: its name, whom it is for, Ask each time '
-      'on, Generate', (tester) async {
+      'off, Generate', (tester) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(sshKey()));
     expect(find.text('June asks for a new SSH key'), findsOneWidget);
@@ -1200,7 +1201,7 @@ void main() {
             ),
           )
           .value,
-      isTrue,
+      isFalse,
     );
 
     final name = find.descendant(
@@ -1212,7 +1213,9 @@ void main() {
     expect(tester.widget<EditableText>(name).controller.text, 'deploy-key');
     await tester.enterText(name, 'deploy-key-2');
     await tester.tap(_labeled(askEachTimeLabel));
-    await tester.enterText(field('Note for June (optional)'), 'Only main.');
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(field(_comment), 'Only main.');
     await tester.tap(find.text('Generate'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -1221,14 +1224,14 @@ void main() {
     ).single.decideSecretRequest;
     expect(decided.approve, isTrue);
     expect(decided.name, 'deploy-key-2');
-    expect(decided.askEachTime, isFalse);
+    expect(decided.askEachTime, isTrue, reason: 'turned on in the card');
     expect(decided.comment, 'Only main.');
     expect(decided.entries, isEmpty);
     expect(decided.approveOnly, isFalse);
   });
 
   testWidgets('a key the agent asked to go to no one says so, and Ask each '
-      'time left on is sent on', (tester) async {
+      'time left off is sent off', (tester) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(sshKey(nobody: true)));
     expect(find.text('For no one'), findsOneWidget);
@@ -1239,7 +1242,7 @@ void main() {
       harness,
       (m) => m.hasDecideSecretRequest(),
     ).single.decideSecretRequest;
-    expect(decided.askEachTime, isTrue);
+    expect(decided.askEachTime, isFalse);
     expect(decided.hasAskEachTime(), isTrue);
   });
 
@@ -1318,10 +1321,9 @@ void main() {
     final harness = Harness(_workspace());
     final request = resend();
     await _show(tester, harness, SecretRequestCard(request));
-    await tester.enterText(
-      field('Note for June (optional)'),
-      'Use the test account.',
-    );
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(field(_comment), 'Use the test account.');
     await tester.tap(find.text('Dismiss'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -1572,3 +1574,6 @@ void main() {
     expect(failure.code, ErrorCode.ERROR_CODE_NOT_GRANTED);
   });
 }
+
+/// The comment's placeholder, once Add a comment is tapped.
+const _comment = 'A comment for June, if you like';

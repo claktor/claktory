@@ -128,11 +128,23 @@ final class Notifications: NSObject, UNUserNotificationCenterDelegate {
           }
           key = made
         }
-        guard let key, self.keys.save(key, for: claktory),
-          self.registrations.save(registration, for: claktory)
-        else {
+        // What the keychain said goes with the failure: a number, so the
+        // app can show it failed and record why (diagnostics' allowlist).
+        guard let key else {
+          return result(FlutterError(code: "random", message: "No key could be made.", details: nil))
+        }
+        guard self.keys.save(key, for: claktory) else {
           return result(
-            FlutterError(code: "keychain", message: "The keychain didn't take it.", details: nil))
+            FlutterError(
+              code: "keychain", message: "The keychain didn't take the key.",
+              details: ["step": "key", "status": Int(self.keys.lastStatus)]))
+        }
+        let saved = self.registrations.save(registration, for: claktory)
+        guard saved == errSecSuccess else {
+          return result(
+            FlutterError(
+              code: "keychain", message: "The keychain didn't take the registration.",
+              details: ["step": "registration", "status": Int(saved)]))
         }
         result(FlutterStandardTypedData(bytes: key.key))
       case "kept":
@@ -309,18 +321,18 @@ struct PushRegistrations {
     return try? JSONDecoder().decode(PushRegistration.self, from: data)
   }
 
-  func save(_ registration: PushRegistration, for claktory: String) -> Bool {
-    guard let data = try? JSONEncoder().encode(registration) else { return false }
+  /// errSecSuccess, or why the keychain didn't take it.
+  func save(_ registration: PushRegistration, for claktory: String) -> OSStatus {
+    guard let data = try? JSONEncoder().encode(registration) else { return errSecParam }
     let update: [String: Any] = [
       kSecValueData as String: data,
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     ]
     let status = SecItemUpdate(query(claktory) as CFDictionary, update as CFDictionary)
-    if status == errSecSuccess { return true }
-    guard status == errSecItemNotFound else { return false }
+    guard status == errSecItemNotFound else { return status }
     var add = query(claktory)
     add.merge(update) { $1 }
-    return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    return SecItemAdd(add as CFDictionary, nil)
   }
 
   func remove(_ claktory: String) {

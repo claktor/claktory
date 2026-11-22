@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart' show Pressable;
-import '../extensions.dart' show extensionBarWidth;
+import '../extensions.dart' show extensionBarWidthOf;
 import '../identity.dart';
 import '../layout.dart';
 import '../mobile/device.dart' show WindowControls, windowControls;
@@ -12,10 +12,12 @@ import '../mobile/metrics.dart';
 import '../mobile/popover.dart' show presentPopover;
 import '../panes.dart' show PaneProjection, paneTitle, paneGlyph;
 import '../protocol/factory/v1/factory.pb.dart';
+import '../scope.dart' show AppScope;
 import '../selection.dart' show Unselectable;
 import 'columns.dart';
 import 'columns.dart' as columns show project;
 import 'commands.dart';
+import 'document_host.dart' show DocumentSurfaces;
 
 /// The iPad's window when it isn't compact (docs/ipad-workbench.md): the
 /// Mac's parts (the Claktories rail, the projects sidebar, the extension
@@ -42,6 +44,10 @@ class WorkbenchFocus extends ChangeNotifier {
 
   /// The system's menu for the window's commands.
   final CommandMenu menu;
+
+  /// The documents drawn on in this window, one per agent's document leaf
+  /// (document_host.dart): kept while the leaf is in the agent's layout.
+  final documents = DocumentSurfaces();
 
   final _focused = <String, String>{};
   final _documents = <String, String>{};
@@ -103,6 +109,7 @@ class WorkbenchFocus extends ChangeNotifier {
     required Size room,
     double textFactor = 1,
   }) {
+    documents.prune(agentId, full);
     final projection = columns.project(
       full,
       tier: tier,
@@ -163,6 +170,7 @@ class WorkbenchFocus extends ChangeNotifier {
     _disposed = true;
     menu.removeListener(notifyListeners);
     menu.dispose();
+    documents.dispose();
     super.dispose();
   }
 }
@@ -385,6 +393,9 @@ class _WorkbenchState extends State<Workbench> {
                 textFactor: textFactor,
               ),
               focus: (leaf) => focus.focus(agent.id, leaf),
+              // No divider drag starts while a stroke is down on a
+              // document: a width change would drop it.
+              hold: focus.documents.drawing,
               child: widget.content,
             );
       final body = switch (tier) {
@@ -461,7 +472,7 @@ class _WorkbenchState extends State<Workbench> {
                 SizedBox(width: sidebar, child: widget.sidebar(sidebar)),
                 Container(width: 1, color: palette.hairline),
               ],
-              ?widget.extensionBar,
+              ?_extensionBar,
               Expanded(child: _aboveKeyboard(context, content)),
               if (panelFits)
                 SizedBox(
@@ -504,7 +515,7 @@ class _WorkbenchState extends State<Workbench> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    ?widget.extensionBar,
+                    ?_extensionBar,
                     Expanded(child: _aboveKeyboard(context, content)),
                   ],
                 ),
@@ -521,9 +532,16 @@ class _WorkbenchState extends State<Workbench> {
     );
   }
 
+  /// The extension bar, scrolling when the window is too short for all
+  /// its glyphs (a short Stage Manager window).
+  Widget? get _extensionBar {
+    final bar = widget.extensionBar;
+    return bar == null ? null : WorkbenchBarScroll(child: bar);
+  }
+
   /// The extension bar's width, when there is one.
   double _bar(BuildContext context) =>
-      widget.extensionBar == null ? 0 : extensionBarWidth;
+      widget.extensionBar == null ? 0 : extensionBarWidthOf(context);
 
   double _sidebarWidth(double window) =>
       math.min(widget.sidebarWidth, math.max(200.0, window * 0.4));
@@ -758,7 +776,7 @@ class _PaneRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final title = paneTitle(leaf.leaf);
+    final title = paneTitle(leaf.leaf, _workspace(context));
     return Semantics(
       button: true,
       selected: focused,
@@ -800,6 +818,99 @@ class _PaneRow extends StatelessWidget {
   }
 }
 
+/// A column of glyphs (the extension bar) in a window too short for all
+/// of them: it keeps every glyph at its size and scrolls, and the edge it's
+/// cut at fades out, so what's past it reads as more to scroll to rather
+/// than cut off. Tall enough, it fills the height as it would unwrapped.
+@visibleForTesting
+class WorkbenchBarScroll extends StatefulWidget {
+  const WorkbenchBarScroll({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<WorkbenchBarScroll> createState() => WorkbenchBarScrollState();
+}
+
+@visibleForTesting
+class WorkbenchBarScrollState extends State<WorkbenchBarScroll> {
+  /// Whether some of the column is past the top edge, and past the
+  /// bottom: that edge fades out.
+  var _above = false;
+  var _below = false;
+
+  bool get fadesTop => _above;
+  bool get fadesBottom => _below;
+
+  bool _follow(ScrollNotification notification) {
+    if (notification.depth == 0) _place(notification.metrics);
+    return false;
+  }
+
+  bool _measured(ScrollMetricsNotification notification) {
+    if (notification.depth == 0) _place(notification.metrics);
+    return false;
+  }
+
+  void _place(ScrollMetrics metrics) {
+    final above = metrics.extentBefore > 0.5;
+    final below = metrics.extentAfter > 0.5;
+    if (above != _above || below != _below) {
+      setState(() {
+        _above = above;
+        _below = below;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const shown = Color(0xFFFFFFFF);
+    const gone = Color(0x00FFFFFF);
+    return LayoutBuilder(
+      builder: (context, constraints) =>
+          NotificationListener<ScrollMetricsNotification>(
+            onNotification: _measured,
+            child: NotificationListener<ScrollNotification>(
+              onNotification: _follow,
+              // Always masked, so the scroll view keeps its offset as the
+              // fades come and go.
+              child: ShaderMask(
+                blendMode: BlendMode.dstIn,
+                shaderCallback: (bounds) {
+                  final fade = math.min(
+                    0.5,
+                    Space.xl / math.max(bounds.height, 1),
+                  );
+                  return LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      _above ? gone : shown,
+                      shown,
+                      shown,
+                      _below ? gone : shown,
+                    ],
+                    stops: [0, fade, 1 - fade, 1],
+                  ).createShader(bounds);
+                },
+                child: SingleChildScrollView(
+                  child: ConstrainedBox(
+                    // At least the window's height, so its background and
+                    // hairline run to the foot.
+                    constraints: BoxConstraints(
+                      minHeight: constraints.maxHeight,
+                    ),
+                    child: widget.child,
+                  ),
+                ),
+              ),
+            ),
+          ),
+    );
+  }
+}
+
 /// The rail's column in the wide tiers: Sidebar and, when the window
 /// can't show every pane, Panes, above the rail.
 class _RailColumn extends StatelessWidget {
@@ -827,7 +938,7 @@ class _RailColumn extends StatelessWidget {
     child: Column(
       children: [
         SizedBox(height: windowControls.top),
-        _ToolButton(
+        ToolButton(
           key: const ValueKey('workbench-sidebar'),
           label: sidebarShown ? 'Hide sidebar' : 'Show sidebar',
           active: sidebarShown,
@@ -837,7 +948,7 @@ class _RailColumn extends StatelessWidget {
         if (hidden > 0 && onPanes != null)
           KeyedSubtree(
             key: panesAnchor,
-            child: _ToolButton(
+            child: ToolButton(
               key: const ValueKey('workbench-panes'),
               label: 'Panes, $hidden not shown',
               active: false,
@@ -885,7 +996,7 @@ class _Toolbar extends StatelessWidget {
         ),
         child: Row(
           children: [
-            _ToolButton(
+            ToolButton(
               key: const ValueKey('workbench-sidebar'),
               label: focus.overlayOpen ? 'Hide sidebar' : 'Show sidebar',
               active: focus.overlayOpen,
@@ -917,7 +1028,7 @@ class _Toolbar extends StatelessWidget {
             if (onPanes != null && agent != null && leaves(root!).length > 1)
               KeyedSubtree(
                 key: panesAnchor,
-                child: _ToolButton(
+                child: ToolButton(
                   key: const ValueKey('workbench-panes'),
                   label: 'Panes',
                   active: false,
@@ -1011,7 +1122,7 @@ class PaneSwitch extends StatelessWidget {
                 const ValueKey('workbench-switch-conversation'),
               ),
               segment(
-                paneTitle(document.leaf),
+                paneTitle(document.leaf, _workspace(context)),
                 documentShown,
                 onDocument,
                 const ValueKey('workbench-switch-document'),
@@ -1026,8 +1137,10 @@ class PaneSwitch extends StatelessWidget {
 
 /// A finger's 44pt button around a 16pt glyph, with a count beside it when
 /// [badge] is more than 0.
-class _ToolButton extends StatelessWidget {
-  const _ToolButton({
+/// A 44pt control with a 32pt glyph plate: selected when [active], dimmed
+/// and inert when [onTap] is null.
+class ToolButton extends StatelessWidget {
+  const ToolButton({
     super.key,
     required this.label,
     required this.active,
@@ -1038,7 +1151,7 @@ class _ToolButton extends StatelessWidget {
 
   final String label;
   final bool active;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final Widget Function(Color color) glyph;
   final int badge;
 
@@ -1049,6 +1162,7 @@ class _ToolButton extends StatelessWidget {
       child: Semantics(
         container: true,
         button: true,
+        enabled: onTap != null,
         selected: active,
         label: label,
         excludeSemantics: true,
@@ -1074,7 +1188,13 @@ class _ToolButton extends StatelessWidget {
                   clipBehavior: Clip.none,
                   alignment: Alignment.center,
                   children: [
-                    glyph(active || hovered ? palette.text : palette.textMuted),
+                    glyph(
+                      onTap == null
+                          ? palette.textFaint
+                          : active || hovered
+                          ? palette.text
+                          : palette.textMuted,
+                    ),
                     if (badge > 0)
                       Positioned(
                         right: -8,
@@ -1192,3 +1312,11 @@ void _panesGlyph(Canvas canvas, Paint paint) {
   canvas.drawLine(const Offset(9, 3), const Offset(9, 21), paint);
   canvas.drawLine(const Offset(15, 3), const Offset(15, 21), paint);
 }
+
+/// The window's workspace, for pane titles that name an app (none in a
+/// test without one).
+Workspace? _workspace(BuildContext context) => context
+    .getInheritedWidgetOfExactType<AppScope>()
+    ?.backend
+    .workspace
+    .workspace;

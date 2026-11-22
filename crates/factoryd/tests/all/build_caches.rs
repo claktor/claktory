@@ -152,8 +152,13 @@ async fn caches_are_left_while_the_agent_works_and_cleared_on_request() {
     eventually("clearing after the task ended", || !tree.join("target").exists()).await;
 
     // On request: a cache under the budget is cleared; what isn't a cache isn't.
+    // Builder first hears its task ended (the clearing may come before,
+    // during or after that run), and is idle again.
     factory.set_build_cache_every(Duration::from_secs(3600));
-    view.follow(&mut client, |view| idle(view, "builder")).await;
+    let heard = |view: &View| {
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.source() == v1::EventSource::Task))
+    };
+    view.follow(&mut client, |view| heard(view) && idle(view, "builder")).await;
     std::fs::write(tree.join("package.json"), "{}").expect("package");
     built(&tree.join("node_modules/tiny/index.js"), 1_000);
     built(&tree.join("data/keep.csv"), 1_000);
@@ -203,4 +208,45 @@ async fn the_dev_claktory_keeps_to_its_own_data_folder() {
     let refused = apply_request(&mut client, &mut view, clear).await;
     assert!(matches!(&refused, Body::Error(error) if error.message.contains("outside this Claktory's data folder")), "{refused:?}");
     assert!(outside.join("target/debug/big").exists());
+}
+
+#[tokio::test]
+async fn a_busy_agent_s_caches_are_cleared_between_its_steps_never_in_a_tool_call() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view, _repo, tree) = setup(&dir).await;
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+
+    // In a tool call (a build, say): left, however long it runs.
+    let build = r#"call bash {"command":"sleep 2"}"#;
+    apply_request(&mut client, &mut view, send_message("builder", build)).await;
+    view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working).await;
+    built(&tree.join("target/debug/big"), 2_000_000);
+    factory.set_build_cache_every(Duration::from_millis(50));
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(tree.join("target/debug/big").exists(), "left while Builder's tool call runs");
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    eventually("clearing once the call ended", || !tree.join("target").exists()).await;
+    factory.set_build_cache_every(Duration::from_secs(3600));
+    apply_request(&mut client, &mut view, send_message("builder", "build again")).await;
+    view.follow(&mut client, |view| idle(view, "builder") && told(view).len() == 1).await;
+
+    // Working, between steps (waiting on its model): cleared, and Builder
+    // hears of it after its current step, not at some later run.
+    apply_request(&mut client, &mut view, send_message("builder", "hang")).await;
+    view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working).await;
+    built(&tree.join("target/debug/big"), 2_000_000);
+    // Written just now: left, between steps too.
+    std::fs::write(tree.join("package.json"), "{}").expect("package");
+    std::fs::create_dir_all(tree.join("node_modules/fresh")).expect("fresh");
+    std::fs::write(tree.join("node_modules/fresh/index.js"), vec![7; 2_000_000]).expect("fresh");
+    factory.set_build_cache_every(Duration::from_millis(50));
+    eventually("clearing between steps", || !tree.join("target").exists()).await;
+    view.follow(&mut client, |view| view.agent("builder").queued_messages == 1).await;
+    assert!(tree.join("node_modules/fresh/index.js").exists(), "a cache written in the last minutes is left");
+    factory.set_build_cache_every(Duration::from_secs(3600));
+    apply_request(&mut client, &mut view, client_message::Body::StopAgent(v1::StopAgent { agent_id: "builder".into() })).await;
+    apply_request(&mut client, &mut view, send_message("builder", "go on")).await;
+    view.follow(&mut client, |view| idle(view, "builder") && told(view).len() == 2).await;
+    let told = told(&view);
+    assert!(told[1].starts_with("Your checkout's build cache (") && told[1].ends_with("was cleared; the next build is cold."), "{told:?}");
 }

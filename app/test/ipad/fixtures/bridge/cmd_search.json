@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "search",
+  "arguments": {
+    "query": "vanishing gradient",
+    "max_results": 200
+  },
+  "result": {
+    "query": "vanishing gradient",
+    "truncated": false,
+    "matches": [
+      {
+        "page_1based": 3,
+        "region": {
+          "x": 0.31,
+          "y": 0.42,
+          "w": 0.22,
+          "h": 0.016
+        },
+        "text": "which is the vanishing gradient problem of plain recurrent networks."
+      },
+      {
+        "page_1based": 5,
+        "region": {
+          "x": 0.12,
+          "y": 0.18,
+          "w": 0.21,
+          "h": 0.016
+        },
+        "text": "The vanishing gradient appears once |W| < 1, as (3) shows."
+      }
+    ]
+  }
+}

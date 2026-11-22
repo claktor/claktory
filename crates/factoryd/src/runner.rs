@@ -377,7 +377,7 @@ fn settings_note(
 ) -> Option<(String, Vec<&'static str>)> {
     use crate::extensions::{OptionKind, agent_list, enabled, switch};
     let then: serde_json::Value = serde_json::from_str(told).ok()?;
-    let text = |key: &str| then.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(&then);
     // Turned on, it can use them now if its frame can call tools it doesn't list.
     let call_now = tools.iter().any(|tool| tool.name == EXTENSION_CALL);
     let mut said = Vec::new();
@@ -687,7 +687,8 @@ impl Factory {
         // A new run: a stop before now was of the one that ended.
         runtime.stopped = false;
         runtime.wait_said = None;
-        let mut prompts = runtime.take_ready();
+        // Quiet messages come with what wakes it, never on their own.
+        let mut prompts = crate::extensions::agents::quiet::take(runtime, crate::extensions::agents::quiet::At::Wake);
         prompts.splice(0..0, note.into_iter().chain(cleared));
         let (epoch, compact) = (runtime.epoch, runtime.compact.take());
         let frame = runtime
@@ -739,8 +740,14 @@ impl Factory {
         };
         let apps_note = app_changes(&frame, &apps, &crate::apps::sections_by_app(self, &inner.config, id));
         let pipes_note = crate::pipes::agents::changes(&inner.config, &frame.pipes, &pipes);
-        let notes: Vec<String> =
-            [settings, changes(&frame, &roster, &names, &folders, &secrets), apps_note, pipes_note].into_iter().flatten().collect();
+        // Quiet copies that came, once each: they never woke it (#285).
+        let copies = crate::extensions::agents::provenance::COPIES_TOOL;
+        let direct = frame.tools.iter().any(|tool| tool.name == copies);
+        let copies_note = if quarantined { None } else { crate::extensions::agents::provenance::note(&self.store, id, direct) };
+        let notes: Vec<String> = [settings, changes(&frame, &roster, &names, &folders, &secrets), apps_note, pipes_note, copies_note]
+            .into_iter()
+            .flatten()
+            .collect();
         if notes.is_empty() {
             return None;
         }
@@ -759,6 +766,7 @@ impl Factory {
             summary: String::new(),
             transient: true,
             pipe_seqs: Vec::new(),
+            provenance: None,
         };
         let mut note = Queued::event(notes.join("\n"), event);
         match self.store.add_message(id, &note) {
@@ -1053,6 +1061,8 @@ impl Factory {
         }
         let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, Some(self.background(id)));
         factory_agent::tools::read_only(&mut tools, &places.read_only);
+        // Ink and its staging are the person's until they send it (#209 §7).
+        factory_agent::tools::denied(&mut tools, &crate::ink::private(&self.home));
         // Only agents given a secret see bash's `secrets`.
         if !self.vault.granted(id).is_empty() {
             factory_agent::tools::secrets(&mut tools);
@@ -1315,7 +1325,10 @@ impl Factory {
                     }
                     let note = factory.take_changes(&mut inner, &agent, &current);
                     let Some(runtime) = inner.agents.get_mut(&agent) else { return Arrived::default() };
-                    let mut arrived = runtime.take_ready();
+                    // Quiet messages too, after a step of its work (never
+                    // into compacting while idle).
+                    let at = if runtime.idle { crate::extensions::agents::quiet::At::Never } else { crate::extensions::agents::quiet::At::Step };
+                    let mut arrived = crate::extensions::agents::quiet::take(runtime, at);
                     arrived.splice(0..0, note);
                     if !arrived.is_empty() {
                         let run = factory.begin_run(&agent, runtime);
@@ -1347,6 +1360,7 @@ impl Factory {
         let agent = id.to_owned();
         Background {
             dir: self.home.agent_dir(id).join("tasks"),
+            environment: vec![("FACTORY_AGENT_ID".to_owned(), id.to_owned())],
             started,
             finished: Arc::new(move |done: Finished| {
                 if let Some(factory) = factory.upgrade() {
@@ -1497,7 +1511,7 @@ pub(crate) fn user_message(queued: Queued, images: bool) -> UserMessage {
 
 impl Factory {
     /// Whether the agent's model takes images.
-    fn takes_images(&self, agent: &str) -> bool {
+    pub(crate) fn takes_images(&self, agent: &str) -> bool {
         let model = self.lock().config.agent(agent).map(|agent| agent.model.clone()).unwrap_or_default();
         self.models.resolve(&model).is_some_and(|model| model.input.iter().any(|input| input == "image"))
     }

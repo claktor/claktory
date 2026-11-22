@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "goToPage",
+  "arguments": {
+    "page_1based": 5,
+    "region": {
+      "x": 0.12,
+      "y": 0.18,
+      "w": 0.21,
+      "h": 0.016
+    }
+  },
+  "result": {
+    "page_1based": 5
+  }
+}

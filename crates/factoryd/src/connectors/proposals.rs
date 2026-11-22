@@ -197,7 +197,7 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
         return None;
     }
     let id = details.get("connect_proposal")?.as_str()?.to_owned();
-    let text = |key: &str| details.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(details);
     Some(v1::ConnectProposal {
         id,
         agent_id: text("agent"),
@@ -231,20 +231,16 @@ fn show(factory: &Factory, proposal: &v1::ConnectProposal) {
 
 /// The person dismissed a proposal: its card shows it, and its agent is told.
 pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissConnectProposal) -> Result<(), RequestError> {
-    let proposal = factory.vault.decide_proposal(&request.proposal_id, None, &request.comment)?;
+    let comment = crate::decisions::comment(&request.comment)?;
+    let proposal = factory.vault.decide_proposal(&request.proposal_id, None, comment)?;
     factory.vault_changed();
     show(factory, &proposal);
     let (person, service) = {
         let inner = factory.lock();
         (inner.config.person_capitalized().to_owned(), service_name(factory, &proposal.connector_id))
     };
-    let mut summary = format!("{person} dismissed your proposal to connect {service}");
-    let comment = request.comment.trim();
-    if !comment.is_empty() {
-        summary.push_str(&format!(" (comment: {comment})"));
-    }
-    summary.push('.');
-    let text = format!("{summary}\n\nYou proposed it for: {}", proposal.purpose);
+    let summary = format!("{person} dismissed your proposal to connect {service}.");
+    let text = format!("{summary}{}\n\nYou proposed it for: {}", crate::decisions::note(&person, comment), proposal.purpose);
     factory.deliver_event(&proposal.agent_id, text, host_event(summary));
     Ok(())
 }
@@ -256,8 +252,15 @@ fn service_name(factory: &Factory, connector: &str) -> String {
 /// A connection was made for a proposal: its card shows it, its agent
 /// learns it has nothing yet, and admin agents are asked to give it the
 /// least that does the job.
-pub(crate) fn connected(factory: &Arc<Factory>, proposal_id: &str, secret_id: &str, secret_name: &str, spec: &Spec, meta: &ConnectionMeta) {
-    let proposal = match factory.vault.decide_proposal(proposal_id, Some((secret_id, secret_name)), "") {
+pub(crate) fn connected(
+    factory: &Arc<Factory>,
+    proposal_id: &str,
+    (secret_id, secret_name): (&str, &str),
+    spec: &Spec,
+    meta: &ConnectionMeta,
+    comment: &str,
+) {
+    let proposal = match factory.vault.decide_proposal(proposal_id, Some((secret_id, secret_name)), comment) {
         Ok(proposal) => proposal,
         Err(error) => {
             tracing::warn!(proposal = proposal_id, %error, "could not mark a proposal connected");
@@ -288,8 +291,9 @@ pub(crate) fn connected(factory: &Arc<Factory>, proposal_id: &str, secret_id: &s
     let account = if meta.account.is_empty() { String::new() } else { format!(" ({})", meta.account) };
     let summary =
         format!("{person} connected {}{account} for your proposal. You don't have it: an admin agent decides what you get.", spec.name);
+    let note = crate::decisions::note(&person, comment);
     let text = format!(
-        "{person} connected {}{account} for your proposal, as {secret_name}. You don't have it yet: an admin agent compares it with what you asked for and gives you a secret made from it with only the access the work needs, and you'll be told.",
+        "{person} connected {}{account} for your proposal, as {secret_name}. You don't have it yet: an admin agent compares it with what you asked for and gives you a secret made from it with only the access the work needs, and you'll be told.{note}",
         spec.name
     );
     factory.deliver_event(&proposal.agent_id, text, host_event(summary));
@@ -307,7 +311,7 @@ pub(crate) fn connected(factory: &Arc<Factory>, proposal_id: &str, secret_id: &s
         "{person} connected {}{account} for {proposer}'s proposal, as {secret_name}. No agent has it.\n\n\
          The proposal:\n- Purpose: {}\n- Access asked: {}{exact}\n- Reason: {}\n\n\
          What the connection reaches:\n- Access: {}\n- Scopes: {}\n- Resources: {}\n\n\
-         Compare the two. Make a secret from {secret_name} with only the access the proposal's work needs, give that to {proposer}, and tell it what it got. Never give the connection itself. If it asks for more than the work needs, give the narrower thing or ask {person} first.",
+         Compare the two. Make a secret from {secret_name} with only the access the proposal's work needs, give that to {proposer}, and tell it what it got. Never give the connection itself. If it asks for more than the work needs, give the narrower thing or ask {person} first.{note}",
         spec.name,
         proposal.purpose,
         proposal.access,

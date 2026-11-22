@@ -1096,7 +1096,38 @@ pub(crate) async fn create_invite(factory: &Arc<Factory>, request: &v1::CreatePi
 pub(crate) fn read_invite(code: &str) -> Result<v1::PipeInvitePreview, RequestError> {
     let side = pipe_link::read_invite(code.trim()).map_err(pipe_error)?;
     let peer = PeerRecord::from_side(&side, "");
-    Ok(v1::PipeInvitePreview { code: code.trim().to_owned(), peer: Some(peer.to_proto()), name: peer.pipe_name, expires_ms: 0 })
+    let name = offered_name(&peer.pipe_name, now_ms());
+    Ok(v1::PipeInvitePreview { code: code.trim().to_owned(), peer: Some(peer.to_proto()), name, expires_ms: 0 })
+}
+
+/// The name a pipe joined without naming it takes: the one the other side
+/// chose, when Claktory can show it as its own (up to 40 characters: ASCII
+/// letters, digits, punctuation and spaces, and ⇄ ↔ → – — ·; never saying
+/// Claktory, even spaced out or in letters that read alike: "CIaktory",
+/// "C1a-k.tory"), else "Pipe joined 22 Nov" in Claktory's words. Only ASCII
+/// letters pass, so letters that merely look Latin (Cyrillic С, Greek Α,
+/// fullwidth Ｃ) never do. Names the person types are theirs and stay free.
+fn offered_name(theirs: &str, now: i64) -> String {
+    let theirs = theirs.trim();
+    let plain = !theirs.is_empty()
+        && theirs.chars().count() <= 40
+        && theirs.chars().all(|c| c.is_ascii_graphic() || c == ' ' || "⇄↔→–—·".contains(c));
+    let folded: String = theirs
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| match c.to_ascii_lowercase() {
+            'i' | '1' => 'l',
+            '0' => 'o',
+            c => c,
+        })
+        .collect();
+    if plain && !folded.contains("claktory") {
+        return theirs.to_owned();
+    }
+    let day = jiff::Timestamp::from_millisecond(now)
+        .map(|at| at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%-d %b").to_string())
+        .unwrap_or_default();
+    format!("Pipe joined {day}").trim().to_owned()
 }
 
 /// AcceptPipeInvite: a pipe to `project`, JOINING and selected, then
@@ -1108,7 +1139,7 @@ pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> 
     }
     let side = pipe_link::read_invite(&code).map_err(pipe_error)?;
     let peer = PeerRecord::from_side(&side, "");
-    let name = if request.name.trim().is_empty() { peer.pipe_name.clone() } else { request.name.clone() };
+    let name = if request.name.trim().is_empty() { offered_name(&peer.pipe_name, now_ms()) } else { request.name.clone() };
     let mut record = new_record(factory, &request.project_id, &name, &request.purpose, State::Joining)?;
     record.named_here = Some(!request.name.trim().is_empty());
     let reaching = peer.claktory.clone();
@@ -1179,7 +1210,12 @@ pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> 
 
 /// ApprovePipe: the person approves the pipe, with its members and lead,
 /// or turns it down.
+///
+/// The person's comment goes to this side's agent only: the lead, or, turned
+/// down, the agent whose card started the pipe (else the admin agent with
+/// Pipes); never to the other side.
 pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -> Result<(), RequestError> {
+    let comment = crate::decisions::comment(&request.comment)?;
     let record = known(factory, &request.pipe_id)?;
     if record.state != State::Approval {
         return Err(RequestError::Pipe("This pipe isn't waiting for your approval.".to_owned()));
@@ -1187,6 +1223,21 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     if !request.approve {
         pipe_link::close(factory, &record.id);
         close_with(factory, &record.id, "You turned it down.");
+        if !comment.is_empty() {
+            let starter = start::agent_of(&factory.store, &record.id);
+            let told = starter.or_else(|| {
+                let inner = factory.lock();
+                inner
+                    .config
+                    .agents
+                    .iter()
+                    .find(|agent| crate::proposals::is_admin(agent) && crate::extensions::enabled(agent, crate::extensions::pipes::ID))
+                    .map(|agent| agent.id.clone())
+            });
+            if let Some(agent) = told {
+                noted(factory, &agent, &format!("turned down {}", called(&record)), comment);
+            }
+        }
         return Ok(());
     }
     let mut members = checked_members(factory, &record, &request.member_ids)?;
@@ -1247,7 +1298,30 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     } else {
         line(factory, &record.id, format!("You approved it. Waiting for {} to approve it too.", record.peer_who()));
     }
+    if !comment.is_empty()
+        && let Some(record) = factory.pipes.get(&record.id)
+    {
+        noted(factory, &record.lead, &format!("approved {}, with you answering it", called(&record)), comment);
+    }
     Ok(())
+}
+
+/// The pipe as this side's agents may read it: by its name only when this
+/// side chose it, never a name the other side gave it.
+fn called(record: &Record) -> String {
+    if record.named_here.unwrap_or(record.peer.is_none()) {
+        format!("the pipe \"{}\"", record.name)
+    } else {
+        format!("the pipe {}", record.id)
+    }
+}
+
+/// Tells `agent` what the person decided, with their comment as theirs.
+fn noted(factory: &Arc<Factory>, agent: &str, what: &str, comment: &str) {
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let summary = format!("{person} {what}");
+    let text = format!("{summary}.{}", crate::decisions::note(&person, comment));
+    factory.deliver_event(agent, text, crate::factory::host_event(summary));
 }
 
 /// The agents of the pipe's project among `ids`.
@@ -1494,6 +1568,10 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
                 return Err(RequestError::Pipe(why));
             }
             pipe_link::resume(factory, &id).map_err(pipe_error)?;
+            if record.paused == Pause::Loop {
+                let now = crate::transcript::now_ms();
+                crate::needs_you::pipe_decided(factory, &id, 0, crate::needs_you::PipeDecision::Loop, "", true, "", now);
+            }
             change(factory, &id, |record| {
                 record.state = State::Open;
                 record.paused = Pause::None;
@@ -1534,7 +1612,33 @@ pub(crate) fn close_with(factory: &Factory, id: &str, why: &str) {
         was != State::Closed
     });
     if closed == Some(true) {
+        unsent(factory, id);
         line(factory, id, why);
+    }
+}
+
+/// A closed pipe's queue is dropped, on either side: what it still held
+/// never goes, so it's shown as not sent rather than waiting for ever.
+fn unsent(factory: &Factory, pipe: &str) {
+    let note = "The pipe closed before it went.";
+    let marked = {
+        let db = factory.store.db();
+        let mark = || -> rusqlite::Result<Vec<i64>> {
+            let mut statement =
+                db.prepare("UPDATE pipe_messages SET state = ?2, note = ?3 WHERE pipe = ?1 AND state = ?4 RETURNING seq")?;
+            let rows = statement
+                .query_map(params![pipe, MessageState::Refused.as_str(), note, MessageState::Queued.as_str()], |row| row.get(0))?;
+            rows.collect()
+        };
+        mark().unwrap_or_else(|error| {
+            tracing::error!(%pipe, %error, "could not mark a closed pipe's queue as not sent");
+            Vec::new()
+        })
+    };
+    for seq in marked {
+        if let Some(message) = message(factory, pipe, u64::try_from(seq).unwrap_or_default()) {
+            shown(factory, pipe, &message);
+        }
     }
 }
 
@@ -1664,10 +1768,24 @@ pub(crate) fn transmit(factory: &Arc<Factory>, pipe: &str, message: &Message, vi
 
 /// DecidePipeMessage: send or discard a held message; let in or discard a
 /// held incoming one.
+///
+/// The person's comment goes only to this side's agent (the message's
+/// writer, or the lead for an incoming one), never into the message or
+/// anything the other side gets.
 pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMessage) -> Result<(), RequestError> {
+    let comment = crate::decisions::comment(&request.comment)?;
     let record = known(factory, &request.pipe_id)?;
     let Some(message) = message(factory, &record.id, request.seq) else {
         return Err(RequestError::Pipe("No such message in this pipe.".to_owned()));
+    };
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let note = crate::decisions::note(&person, comment);
+    // Only with a comment: the lead hears nothing else of it.
+    let tell_lead = |what: &str| {
+        if !note.is_empty() && !record.lead.is_empty() {
+            let summary = format!("{person} {what} on {}", called(&record));
+            factory.deliver_event(&record.lead, format!("{summary}.{note}"), crate::factory::host_event(summary));
+        }
     };
     match (message.state, request.allow) {
         (MessageState::Held, true) => {
@@ -1676,10 +1794,14 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
             }
             count_for_loop(factory, &record.id, Author::MyAgent, &message.text);
             transmit(factory, &record.id, &message, Via::Agent { name: message.name.clone(), role: message.role.clone() });
+            // The writer hears it went only with a comment.
+            if !note.is_empty() {
+                agents::tell_noted(factory, &message.agent, &record, None, "approved your held message", &message.text, &note);
+            }
         }
         (MessageState::Held, false) => {
             set_state(factory, &record.id, message.seq, MessageState::Discarded, None);
-            agents::tell(factory, &message.agent, &record, None, "discarded your message; it wasn't sent", &message.text);
+            agents::tell_noted(factory, &message.agent, &record, None, "discarded your message; it wasn't sent", &message.text, &note);
         }
         (MessageState::HeldIncoming, true) => {
             // Its files go to the inbox only now.
@@ -1696,6 +1818,7 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
                 forget_held(&message);
             }
             set_state(factory, &record.id, message.seq, MessageState::Received, Some(""));
+            tell_lead("let in a message from the other side");
             // Let in after later ones the lead was told of: told at its next wake.
             change(factory, &record.id, |record| {
                 if message.seq <= record.told && !record.untold.contains(&message.seq) {
@@ -1708,9 +1831,15 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
             forget_held(&message);
             set_files(factory, &record.id, message.seq, &[]);
             set_state(factory, &record.id, message.seq, MessageState::Discarded, None);
+            tell_lead("discarded a message from the other side before anyone read it");
         }
         _ => return Err(RequestError::Pipe("This message isn't waiting for you.".to_owned())),
     }
+    let (kind, agent) = match message.state {
+        MessageState::Held => (crate::needs_you::PipeDecision::Held, message.agent.as_str()),
+        _ => (crate::needs_you::PipeDecision::HeldIncoming, ""),
+    };
+    crate::needs_you::pipe_decided(factory, &record.id, message.seq, kind, agent, request.allow, comment, message.created);
     Ok(())
 }
 
@@ -2025,6 +2154,22 @@ pub fn refused_for_test(factory: &Arc<Factory>, pipe: &str, seq: u64, reason: &s
     pipe_link::Store::refused(&Link, factory, pipe, &msg_id, reason);
 }
 
+/// Tests: a message of the person's, handed to the transport and waiting in
+/// its queue (or delivered); its seq.
+#[doc(hidden)]
+pub fn sent_for_test(factory: &Arc<Factory>, pipe: &str, text: &str, delivered: bool) -> u64 {
+    let state = if delivered { MessageState::Delivered } else { MessageState::Queued };
+    let message =
+        Message { msg_id: random_hex(16), author: Author::Me, name: "Matt".to_owned(), text: text.to_owned(), state, ..Message::default() };
+    add(factory, pipe, message).expect("kept").seq
+}
+
+/// Tests: the other side closed the pipe, as the transport says.
+#[doc(hidden)]
+pub fn peer_closed_for_test(factory: &Arc<Factory>, pipe: &str) {
+    pipe_link::Store::peer_closed(&Link, factory, pipe);
+}
+
 /// Tests: the pipes' section of an agent's system prompt.
 #[doc(hidden)]
 pub fn prompt_for_test(factory: &Factory, agent: &str) -> Option<String> {
@@ -2099,4 +2244,30 @@ impl Pipes {
 #[doc(hidden)]
 pub fn messages_for_test(factory: &Factory, pipe: &str) -> Vec<v1::PipeMessage> {
     messages(factory, pipe, 0, 1000).0.iter().map(Message::to_proto).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_name_the_other_side_chose_is_kept_only_when_claktory_can_show_it_as_its_own() {
+        let now = 1_795_000_000_000;
+        assert_eq!(super::offered_name(" Site and Marketing ", now), "Site and Marketing");
+        let fallback = super::offered_name("CIaktory", now);
+        assert!(fallback.len() > "Pipe joined ".len() && fallback.chars().last().is_some_and(char::is_alphabetic), "{fallback}");
+        for posing in [
+            "CIaktory Security",
+            "C1aktory",
+            "claktory-verify-your-vault",
+            "Claktory — verify your vault",
+            "Сlaktory",
+            "\u{202e}Security",
+            "",
+        ] {
+            assert!(super::offered_name(posing, now).starts_with("Pipe joined "), "{posing}");
+        }
+        assert!(super::offered_name(&"x".repeat(41), now).starts_with("Pipe joined "));
+        assert_eq!(super::offered_name("Site ⇄ Marketing (Q4)", now), "Site ⇄ Marketing (Q4)");
+        assert!(super::offered_name("C.l.a.k.t.0.r.y", now).starts_with("Pipe joined "));
+        assert!(super::offered_name("Ｃlaktory", now).starts_with("Pipe joined "), "fullwidth");
+    }
 }

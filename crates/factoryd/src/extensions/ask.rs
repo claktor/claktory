@@ -56,7 +56,7 @@ CREATE TABLE asks (
     -- 1: it wants a written answer.
     wants_text INTEGER NOT NULL,
     created INTEGER NOT NULL,
-    -- pending, answered or dismissed
+    -- pending, answered, dismissed, or cleared (/clear closed it unseen)
     state TEXT NOT NULL,
     -- The person's answer or comment; '' for none.
     answer TEXT NOT NULL,
@@ -84,7 +84,7 @@ const REVIEW_TEXT_LIMIT: u64 = 2_000_000;
 
 const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event. Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.";
 
-const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. Ask one real question at a time, not a batch of small ones; at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder) instead of having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. You're told their answer, or that they dismissed it, in an event; meanwhile carry on with whatever doesn't depend on it.";
+const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. Ask one real question at a time, not a batch of small ones; at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder) instead of having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. item: the checklist item it's about (12 for #12, or Ana#12), when it blocks one: if they dismiss it, you're told what to do with the item, and Claktory can have you ask again later. You're told their answer, or that they dismissed it, in an event; meanwhile carry on with whatever doesn't depend on it.";
 
 pub(crate) struct Ask;
 
@@ -106,6 +106,7 @@ impl Extension for Ask {
                 "body": {"type": "string", "minLength": 1},
                 "wants_text": {"type": "boolean"},
                 "review": {"type": "string"},
+                "item": {"type": "string"},
             },
             "additionalProperties": false,
         });
@@ -127,6 +128,8 @@ struct AskArgs {
     wants_text: bool,
     #[serde(default)]
     review: Option<String>,
+    #[serde(default)]
+    item: Option<String>,
 }
 
 /// Records the agent's question, or says why not. The result names it, so
@@ -149,6 +152,13 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
         Some(path) => review_file(factory, agent, path)?,
         None => String::new(),
     };
+    // The checklist item it's about (#279): a dismissal can have it asked again.
+    let item = match args.item.as_deref().map(str::trim).filter(|item| !item.is_empty()) {
+        Some(item) => {
+            super::checklist::resolve_item(factory, agent, item).map_err(|problem| format!("item: {problem}. Nothing was asked."))?
+        }
+        None => String::new(),
+    };
     // Read a pipe: the card says so, and where from.
     let routes = crate::pipes::agents::routes(factory, agent);
     let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
@@ -163,8 +173,8 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
             ));
         }
         db.execute(
-            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, review) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', ?6, ?7)",
-            params![agent, title, body, args.wants_text, now_ms(), taint.as_ref().map(serde_json::Value::to_string), review],
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, review, item) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', ?6, ?7, ?8)",
+            params![agent, title, body, args.wants_text, now_ms(), taint.as_ref().map(serde_json::Value::to_string), review, item],
         )
         .map_err(|error| format!("Couldn't record the question: {error}"))?;
         db.last_insert_rowid().to_string()
@@ -236,7 +246,7 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
     if !matches!(tool, TOOL | "extension_call") || is_error {
         return None;
     }
-    let text = |key: &str| details.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(details);
     let id = details.get("ask")?.as_str()?.to_owned();
     Some(v1::AskPerson {
         id,
@@ -269,9 +279,11 @@ struct Row {
     /// What the person answered or dismissed it with besides words (their
     /// drawings on a PDF's pages), as uploaded.
     answer_attachments: Vec<factory_agent::Attachment>,
+    /// The checklist item it's about, "agent#12"; '' for none.
+    item: String,
 }
 
-const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments";
+const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -286,6 +298,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         review: row.get(8)?,
         created: row.get(9)?,
         answer_attachments: row.get::<_, Option<String>>(10)?.and_then(|list| serde_json::from_str(&list).ok()).unwrap_or_default(),
+        item: row.get(11)?,
     })
 }
 
@@ -293,7 +306,7 @@ impl Row {
     fn to_proto(&self) -> v1::AskPerson {
         let state = match self.state.as_str() {
             "answered" => State::Answered,
-            "dismissed" => State::Dismissed,
+            "dismissed" | "cleared" => State::Dismissed,
             _ => State::Pending,
         };
         v1::AskPerson {
@@ -326,6 +339,19 @@ pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -
     Ok(())
 }
 
+/// Whether the agent has a question waiting for the person about checklist
+/// item `item` ("agent#12"): one that names it, or one that names none.
+pub(crate) fn pending_about(store: &Store, agent: &str, item: &str) -> bool {
+    store
+        .db()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM asks WHERE agent = ?1 AND state = 'pending' AND (item = ?2 OR item = ''))",
+            [agent, item],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
+}
+
 /// Whether the agent has a question waiting for the person.
 pub(crate) fn pending_of(store: &Store, agent: &str) -> bool {
     store
@@ -341,11 +367,13 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
 }
 
 /// The agent's conversation was cleared: its waiting questions can't be
-/// seen any more, so they're dismissed, and don't count against new ones.
+/// seen any more, so they're closed as cleared (shown as dismissed, but
+/// not by the person, so Needs you's history leaves them out), and don't
+/// count against new ones.
 pub(crate) fn cleared(store: &Store, agent: &str) -> rusqlite::Result<()> {
     store
         .db()
-        .execute("UPDATE asks SET state = 'dismissed', decided = ?2 WHERE agent = ?1 AND state = 'pending'", params![agent, now_ms()])?;
+        .execute("UPDATE asks SET state = 'cleared', decided = ?2 WHERE agent = ?1 AND state = 'pending'", params![agent, now_ms()])?;
     Ok(())
 }
 
@@ -412,7 +440,21 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
         inner.config.person_capitalized().to_owned()
     };
     let comments = (!ask.review.is_empty()).then(|| reviewed(factory, agent, &ask));
-    let (summary, text) = told(&person, &ask, comments);
+    let (summary, mut text) = told(&person, &ask, comments);
+    // Decided, a question about an item that still waits on the person
+    // says what to do with it now (#282): clear the block, or decide; and
+    // when dismissed, when it's asked again.
+    if !ask.item.is_empty() {
+        match super::checklist::decided(factory, &ask.item, ask.state == "dismissed") {
+            Ok(Some(more)) => text.push_str(&more),
+            Ok(None) => {}
+            Err(error) => tracing::error!(%agent, %error, "could not note a decided question on its item"),
+        }
+        if let Some((whose, _)) = ask.item.rsplit_once('#') {
+            factory.refresh_view(whose);
+        }
+        factory.broadcast_workspace(&factory.lock());
+    }
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
@@ -423,7 +465,7 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
 /// there since it asked.
 fn reviewed(factory: &Arc<Factory>, agent: &str, ask: &Row) -> i64 {
     // None unsent is the usual case: the app sends each comment as it's written.
-    let unsent = v1::SendComments { agent_id: agent.to_owned(), path: ask.review.clone() };
+    let unsent = v1::SendComments { agent_id: agent.to_owned(), path: ask.review.clone(), ..Default::default() };
     let _ = factory.send_comments(&unsent);
     factory
         .store
@@ -448,6 +490,12 @@ fn drawings(person: &str, attached: &[factory_agent::Attachment]) -> String {
     }
     let page = |attachment: &factory_agent::Attachment| -> Option<u32> {
         let stem = attachment.name.strip_suffix(".png").or_else(|| attachment.name.strip_suffix(".PNG"))?;
+        // A second upload of that name the same day is kept as
+        // "<stem>-p<page> 2.png" (Sorbet's iPad pass).
+        let stem = match stem.rsplit_once(' ') {
+            Some((name, copy)) if !copy.is_empty() && copy.bytes().all(|b| b.is_ascii_digit()) => name,
+            _ => stem,
+        };
         let (_, page) = stem.rsplit_once("-p")?;
         page.parse().ok().filter(|page| *page > 0)
     };
@@ -480,7 +528,10 @@ fn told(person: &str, ask: &Row, comments: Option<i64>) -> (String, String) {
             let said = if comment.is_empty() {
                 format!("{person} dismissed your question \"{}\": they won't answer it. {judge}{asked}", ask.title)
             } else {
-                format!("{person} dismissed your question \"{}\": they won't answer it. Their comment:\n\n{comment}\n\n{judge}{asked}", ask.title)
+                format!(
+                    "{person} dismissed your question \"{}\": they won't answer it. Their comment:\n\n{comment}\n\n{judge}{asked}",
+                    ask.title
+                )
             };
             (format!("{person} dismissed your question \"{}\".", ask.title), said)
         }
@@ -501,6 +552,14 @@ fn told(person: &str, ask: &Row, comments: Option<i64>) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drawing_kept_under_a_second_name_still_names_its_page() {
+        let drawn =
+            |name: &str| factory_agent::Attachment { path: format!("/u/{name}"), name: name.to_owned(), size: 1, mime: String::new() };
+        let said = super::drawings("Matt", &[drawn("field-guide-p1 2.png"), drawn("field-guide-p3.png")]);
+        assert!(said.starts_with("\n\nMatt drew on 2 pages (pages 1 and 3)"), "{said}");
+    }
+
     use super::*;
 
     fn ask(state: &str, wants_text: bool, answer: &str) -> Row {
@@ -516,6 +575,7 @@ mod tests {
             review: String::new(),
             created: 0,
             answer_attachments: Vec::new(),
+            item: String::new(),
         }
     }
 

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Edge cases</title></head>
+<body>
+<h1>Edge cases</h1>
+<p id="controls"></p>
+<button id="long"></button>
+<a href="mailto:someone@example.com">Write to us</a>
+<a href="javascript:void(0)">Do nothing</a>
+<a href="https://user:secret@b.test/in?x=1#y">Signed-in link</a>
+<a href="/a%3Fb/c?q=SECRET-QUERY-CANARY">Odd path</a>
+<div role="checkbox" aria-checked="maybe">Odd checkbox</div>
+<div role="button" aria-expanded="sometimes">Odd expander</div>
+<input type="checkbox" id="tri" aria-label="Some of them">
+<my-very-long-custom-element-name-that-goes-on-and-on contenteditable="true">Typed by someone</my-very-long-custom-element-name-that-goes-on-and-on>
+<script>
+  document.getElementById('long').textContent = 'Go '.repeat(300) + '\u{1F600}'.repeat(50);
+  document.getElementById('tri').indeterminate = true;
+  // The HTML parser rewrites these as references, so they're put in here.
+  document.title = 'Edge\u0007cases';
+  document.getElementById('controls').textContent = 'A bell\u0007here and a C1\u0085there.';
+</script>
+</body></html>

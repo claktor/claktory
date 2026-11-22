@@ -59,6 +59,9 @@ Future<void> _open(WidgetTester tester) async {
     await tester.enterText(find.byType(EditableText), _code);
     await tester.pump();
     await tester.tap(find.text('Connect'));
+    await tester.pump(const Duration(milliseconds: 500));
+    // A code asks first: the confirmation's Connect.
+    await tester.tap(find.text('Connect').last);
   }
 }
 

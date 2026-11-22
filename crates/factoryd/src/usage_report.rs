@@ -163,7 +163,7 @@ fn report(
             return Err(RequestError::Usage(format!("that's {count} buckets; at most {MOST_BUCKETS}")));
         }
         report.series = (0..count)
-            .map(|index| v1::UsageBucket { start_ms: start + index * bucket, tokens: Some(v1::UsageTokens::default()) })
+            .map(|index| v1::UsageBucket { start_ms: start + index * bucket, tokens: Some(v1::UsageTokens::default()), ..Default::default() })
             .collect();
         let mut statement = db.prepare(
             "SELECT hour, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) FROM agent_usage
@@ -179,8 +179,80 @@ fn report(
                 add(tokens_in, &tokens);
             }
         }
+        active(db, &mut report.series, bucket, (from, to))?;
+        working(db, &mut report.series, bucket, now)?;
     }
+    report.working_since_ms = db.query_row("SELECT MIN(started) FROM runs", [], |row| row.get::<_, Option<i64>>(0))?.unwrap_or(0);
     Ok(report)
+}
+
+/// Chats run models too, but aren't agents.
+const NOT_A_CHAT: &str = "agent NOT LIKE 'chat:%'";
+
+/// Each bucket's agents with a model call in it, from `agent_usage`'s hours
+/// [from, to) (seconds).
+fn active(db: &Connection, series: &mut [v1::UsageBucket], bucket: i64, (from, to): (i64, i64)) -> rusqlite::Result<()> {
+    let Some(start) = series.first().map(|first| first.start_ms) else { return Ok(()) };
+    let rows = crate::store::query(
+        db,
+        &format!("SELECT DISTINCT hour, agent FROM agent_usage WHERE hour >= ?1 AND hour < ?2 AND agent != '' AND {NOT_A_CHAT}"),
+        [from, to],
+        crate::store::row2::<i64, String>,
+    )?;
+    let mut agents: Vec<std::collections::HashSet<String>> = vec![Default::default(); series.len()];
+    for (hour, agent) in rows {
+        if let Some(seen) = usize::try_from((hour * 1000 - start).div_euclid(bucket)).ok().and_then(|index| agents.get_mut(index)) {
+            seen.insert(agent);
+        }
+    }
+    for (bucket, seen) in series.iter_mut().zip(agents) {
+        bucket.active_agents = u32::try_from(seen.len()).unwrap_or(u32::MAX);
+    }
+    Ok(())
+}
+
+/// Each bucket's agents working at once, on average: their runs' time in
+/// it over its length (so far, for the one now in progress). A run still
+/// going ends now; one Claktory stopped in ends at its last model answer,
+/// as check-ins count agents' work.
+fn working(db: &Connection, series: &mut [v1::UsageBucket], bucket: i64, now: i64) -> rusqlite::Result<()> {
+    let (Some(start), Some(last)) = (series.first().map(|first| first.start_ms), series.last().map(|last| last.start_ms)) else {
+        return Ok(());
+    };
+    let end = (last + bucket).min(now);
+    let runs = crate::store::query(
+        db,
+        &format!(
+            "SELECT started, ended, outcome, last_call FROM runs
+             WHERE started < ?2 AND (ended IS NULL OR ended > ?1 OR outcome = 'interrupted') AND {NOT_A_CHAT}"
+        ),
+        [start, end],
+        crate::store::row4::<i64, Option<i64>, Option<String>, Option<i64>>,
+    )?;
+    let mut worked = vec![0i64; series.len()];
+    for (started, ended, outcome, last_call) in runs {
+        let ended = match outcome.as_deref() {
+            Some("interrupted") => last_call.unwrap_or(started).clamp(started, ended.unwrap_or(started)),
+            _ => ended.unwrap_or(now),
+        };
+        let (run_start, run_end) = (started.max(start), ended.min(end));
+        if run_start >= run_end {
+            continue;
+        }
+        let first = (run_start - start).div_euclid(bucket);
+        let last = (run_end - 1 - start).div_euclid(bucket);
+        for index in first..=last {
+            let (from, to) = (start + index * bucket, start + (index + 1) * bucket);
+            if let Some(time) = usize::try_from(index).ok().and_then(|index| worked.get_mut(index)) {
+                *time += run_end.min(to) - run_start.max(from);
+            }
+        }
+    }
+    for (shown, time) in series.iter_mut().zip(worked) {
+        let length = (shown.start_ms + bucket).min(now) - shown.start_ms;
+        shown.working_agents = if length > 0 { time as f64 / length as f64 } else { 0.0 };
+    }
+    Ok(())
 }
 
 impl Factory {
@@ -210,6 +282,11 @@ mod tests {
         )
         .expect("model_usage");
         db.execute_batch(SCHEMA).expect("schema");
+        db.execute_batch(
+            "CREATE TABLE runs (id INTEGER PRIMARY KEY, agent TEXT NOT NULL, version TEXT NOT NULL, started INTEGER NOT NULL,
+                 ended INTEGER, outcome TEXT, last_call INTEGER);",
+        )
+        .expect("runs");
         db
     }
 
@@ -263,5 +340,45 @@ mod tests {
 
         assert!(report(&db, &ask(0, 0, 1000, 0), 3 * day * 1000, &labels).is_err(), "not whole hours");
         assert!(report(&db, &ask(0, 0, HOUR_MS, 0), 365 * day * 1000, &labels).is_err(), "too many buckets");
+    }
+
+    #[test]
+    fn buckets_count_the_agents_active_and_working_at_once() {
+        let db = db();
+        let (h, day) = (HOUR_MS, 24 * HOUR_MS);
+        // Calls: June in hours 0 and 1, Omar in hour 1, a chat in hour 2.
+        put(&db, 0, "a1", "june", "June", 5);
+        put(&db, 3600, "a1", "june", "June", 5);
+        put(&db, 3600, "a1", "omar", "Omar", 5);
+        put(&db, 7200, "a1", "chat:1", "", 5);
+        let run = |agent: &str, started: i64, ended: Option<i64>, outcome: Option<&str>, last_call: Option<i64>| {
+            db.execute(
+                "INSERT INTO runs (agent, version, started, ended, outcome, last_call) VALUES (?1, 't', ?2, ?3, ?4, ?5)",
+                params![agent, started, ended, outcome, last_call],
+            )
+            .expect("run");
+        };
+        // Hour 0: June all of it. Hour 1: June half, Omar half, at once. A
+        // chat's run isn't an agent's. Hour 2: a run Claktory stopped in, which
+        // really ended at its last answer, a quarter in. Hour 3: one still
+        // going, half of the hour so far.
+        run("june", 0, Some(h + h / 2), Some("finished"), None);
+        run("omar", h, Some(h + h / 2), Some("finished"), None);
+        run("chat:1", 0, Some(3 * h), Some("finished"), None);
+        run("omar", 2 * h, Some(3 * h), Some("interrupted"), Some(2 * h + h / 4));
+        run("june", 3 * h + h / 4, None, None, None);
+        let now = 3 * h + h / 2;
+        let ask = v1::LoadUsage { since_ms: 0, until_ms: 0, bucket_ms: HOUR_MS, utc_offset_minutes: 0 };
+        let by_hour = report(&db, &ask, now, &HashMap::new()).expect("report");
+        let shown: Vec<(u32, f64)> = by_hour.series.iter().map(|bucket| (bucket.active_agents, bucket.working_agents)).collect();
+        assert_eq!(shown, [(1, 1.0), (2, 1.0), (0, 0.25), (0, 0.5)]);
+        assert_eq!(by_hour.working_since_ms, 0);
+
+        // A day: the same time over the day so far.
+        let ask = v1::LoadUsage { bucket_ms: day, ..ask };
+        let by_day = report(&db, &ask, now, &HashMap::new()).expect("report");
+        assert_eq!(by_day.series.len(), 1);
+        assert_eq!(by_day.series[0].active_agents, 2);
+        assert!((by_day.series[0].working_agents - 2.5 / 3.5).abs() < 1e-9, "{}", by_day.series[0].working_agents);
     }
 }

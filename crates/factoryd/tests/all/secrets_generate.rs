@@ -120,7 +120,7 @@ async fn the_vault_generates_a_key_and_the_agent_sees_only_its_public_half() {
 }
 
 #[tokio::test]
-async fn a_key_for_no_one_stays_with_no_one_and_asks_each_time() {
+async fn a_key_for_no_one_stays_with_no_one() {
     let (_dir, mut client, mut view) = setup().await;
     let ask = r#"{"name":"Release key","generate":"ssh-ed25519","grant":"nobody","reason":"For the release machine."}"#;
     call(&mut client, &mut view, "bo", "secrets_request", ask).await;
@@ -134,9 +134,22 @@ async fn a_key_for_no_one_stays_with_no_one_and_asks_each_time() {
     assert_eq!(generated.state(), v1::SecretRequestState::Generated);
     let kept = secret(&view, "Release key");
     assert!(kept.grants.is_empty(), "{kept:?}");
-    assert!(kept.ask_each_time, "a generated key asks each time unless the person says not to");
+    assert!(!kept.ask_each_time, "an app that doesn't say gets the card's default: not asking each time");
     let used = call(&mut client, &mut view, "bo", "bash", r#"{"command":"echo hi","secrets":["Release key"]}"#).await;
     assert!(!used.contains("hi\n") && !used.starts_with("hi"), "{used}");
+}
+
+#[tokio::test]
+async fn a_generated_key_asks_each_time_when_the_person_turns_it_on() {
+    let (_dir, mut client, mut view) = setup().await;
+    let ask = r#"{"name":"Deploy key","generate":"ssh-ed25519","reason":"To deploy the site."}"#;
+    call(&mut client, &mut view, "bo", "secrets_request", ask).await;
+    let request = pending(&view);
+    apply_request(&mut client, &mut view, decide(&request.id, Some(true), "")).await;
+    view.follow(&mut client, |view| event_text(view, "the vault generated Deploy key").is_some() && idle(view, "bo")).await;
+    let told = event_text(&view, "the vault generated Deploy key").expect("told");
+    assert!(told.contains("It asks the person each time it's used"), "{told}");
+    assert!(secret(&view, "Deploy key").ask_each_time);
 }
 
 #[tokio::test]

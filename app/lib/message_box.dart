@@ -255,10 +255,11 @@ class _MessageBoxState extends State<MessageBox> {
     final access = await deviceRecorder.access();
     if (!mounted) return false;
     setState(() {
-      _micDenied = access == MicAccess.denied || access == MicAccess.restricted;
-      _error = _micDenied
-          ? "To record, allow microphone access in Settings → Claktory."
-          : _voice.error;
+      // Open Settings only when Settings can change it: not while it can
+      // still be asked (Android after a first no), nor when restrictions
+      // decide.
+      _micDenied = access == MicAccess.denied;
+      _error = _voice.error;
     });
     return false;
   }
@@ -403,7 +404,7 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   /// What the box says when a phone's picker failed to open.
-  static const pickerFailed = "Couldn't open Photos or Files. Try again.";
+  static const pickerFailed = "Couldn't open your photos or files. Try again.";
 
   /// What the box says when this phone's app has no picker at all.
   static const pickerMissing = "You can't attach files from this phone yet.";
@@ -842,6 +843,11 @@ class _MessageBoxState extends State<MessageBox> {
     final voice =
         !phone && blocked == null && target.takesVoice && voiceKnown(workspace);
     final recording = voice && (_voice.recording || _voice.starting);
+    // The row's height: a Mac's 28; on a touch screen (an iPad) its
+    // buttons are a finger's size, so it's at least that, and grows with
+    // their text rather than cutting it.
+    final touch = touchFirst(context);
+    final row = touch ? Metrics.of(context).target : _composerRow;
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
@@ -897,17 +903,15 @@ class _MessageBoxState extends State<MessageBox> {
                         children: [
                           _Attachments(boxKey: target.key),
                           ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              minHeight: _composerRow,
-                            ),
+                            constraints: BoxConstraints(minHeight: row),
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 Expanded(
                                   child: recording
                                       ? Container(
-                                          constraints: const BoxConstraints(
-                                            minHeight: _composerRow,
+                                          constraints: BoxConstraints(
+                                            minHeight: row,
                                           ),
                                           alignment: Alignment.centerLeft,
                                           child: Focus(
@@ -921,8 +925,8 @@ class _MessageBoxState extends State<MessageBox> {
                                         )
                                       : blocked == null
                                       ? Container(
-                                          constraints: const BoxConstraints(
-                                            minHeight: _composerRow,
+                                          constraints: BoxConstraints(
+                                            minHeight: row,
                                           ),
                                           alignment: Alignment.centerLeft,
                                           padding: const EdgeInsets.symmetric(
@@ -943,26 +947,30 @@ class _MessageBoxState extends State<MessageBox> {
                                           ),
                                         )
                                       // Sending couldn't work, so don't offer to.
-                                      : SizedBox(
-                                          height: _composerRow,
-                                          child: Align(
-                                            alignment: Alignment.centerLeft,
-                                            child: Text(
-                                              blocked.why,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TypeScale.of(context).body
-                                                  .copyWith(
-                                                    color: palette.textMuted,
-                                                  ),
-                                            ),
+                                      : Container(
+                                          constraints: BoxConstraints(
+                                            minHeight: row,
+                                          ),
+                                          alignment: Alignment.centerLeft,
+                                          child: Text(
+                                            blocked.why,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TypeScale.of(context).body
+                                                .copyWith(
+                                                  color: palette.textMuted,
+                                                ),
                                           ),
                                         ),
                                 ),
                                 // At the end of the row, level with the last
                                 // line: what it's doing, and what can be done.
-                                SizedBox(
-                                  height: _composerRow,
+                                ConstrainedBox(
+                                  constraints: touch
+                                      ? BoxConstraints(minHeight: row)
+                                      : const BoxConstraints.tightFor(
+                                          height: _composerRow,
+                                        ),
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [

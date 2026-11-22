@@ -132,13 +132,19 @@ void main() {
     );
   });
 
-  test('current scanner Android gate is a known integration gap', () async {
+  test('Android camera permission methods reach factory/device', () async {
+    // The wire only (test/scanner_test.dart has every access state and the
+    // preview's view); not a real camera reading a real QR code.
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    script('factory/device', []);
+    script('factory/device', const [
+      ChannelReply('cameraAccess', result: 'undetermined'),
+      ChannelReply('requestCamera', result: true),
+      ChannelReply('openCameraSettings'),
+    ]);
     const camera = DeviceCamera();
-    expect(await camera.access(), CameraAccess.unavailable);
-    expect(await camera.request(), isFalse);
+    expect(await camera.access(), CameraAccess.undetermined);
+    expect(await camera.request(), isTrue);
     await camera.openSettings();
   });
 

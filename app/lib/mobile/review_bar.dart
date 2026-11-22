@@ -150,19 +150,24 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     }
   }
 
-  Future<void> _approve(ReviewAsk ask, String name) => presentSheet<void>(
-    context,
-    title: 'Approve',
-    builder: (context, close) => _ApproveNote(
-      name: name,
-      approve: (note) async {
-        final ok = await _answer(ask, note: note);
-        if (ok) close();
-        return ok;
-      },
-      error: () => _error,
-    ),
-  );
+  /// Approve's or Dismiss's sheet: either way the person may say why, and
+  /// the agent gets it with the answer (Matt's rule).
+  Future<void> _decide(ReviewAsk ask, String name, {required bool dismiss}) =>
+      presentSheet<void>(
+        context,
+        title: dismiss ? 'Dismiss' : 'Approve',
+        builder: (context, close) => _DecisionNote(
+          name: name,
+          action: dismiss ? 'Dismiss' : 'Approve',
+          primary: !dismiss,
+          decide: (note) async {
+            final ok = await _answer(ask, note: note, dismiss: dismiss);
+            if (ok) close();
+            return ok;
+          },
+          error: () => _error,
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -173,12 +178,16 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     final type = TypeScale.of(context);
     final dismiss = Button(
       label: 'Dismiss',
-      onPressed: _busy ? null : () => unawaited(_answer(ask, dismiss: true)),
+      onPressed: _busy
+          ? null
+          : () => unawaited(_decide(ask, agent.name, dismiss: true)),
     );
     final approve = Button(
       label: 'Approve',
       primary: true,
-      onPressed: _busy ? null : () => unawaited(_approve(ask, agent.name)),
+      onPressed: _busy
+          ? null
+          : () => unawaited(_decide(ask, agent.name, dismiss: false)),
     );
     final stacked = largeText(context);
     // A bar over the file, as iOS's toolbars: it grows with the text only
@@ -266,24 +275,28 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   }
 }
 
-/// Approve's sheet: a note for the agent, if the person has one, and the
-/// button that approves.
-class _ApproveNote extends StatefulWidget {
-  const _ApproveNote({
+/// Approve's or Dismiss's sheet: a comment for the agent, if the person
+/// has one, and the button that answers.
+class _DecisionNote extends StatefulWidget {
+  const _DecisionNote({
     required this.name,
-    required this.approve,
+    required this.action,
+    required this.primary,
+    required this.decide,
     required this.error,
   });
 
   final String name;
-  final Future<bool> Function(String note) approve;
+  final String action;
+  final bool primary;
+  final Future<bool> Function(String note) decide;
   final String? Function() error;
 
   @override
-  State<_ApproveNote> createState() => _ApproveNoteState();
+  State<_DecisionNote> createState() => _DecisionNoteState();
 }
 
-class _ApproveNoteState extends State<_ApproveNote> {
+class _DecisionNoteState extends State<_DecisionNote> {
   final _note = TextEditingController();
   var _busy = false;
   String? _error;
@@ -300,7 +313,7 @@ class _ApproveNoteState extends State<_ApproveNote> {
       _busy = true;
       _error = null;
     });
-    final ok = await widget.approve(_note.text);
+    final ok = await widget.decide(_note.text);
     if (!mounted || ok) return;
     setState(() {
       _busy = false;
@@ -325,6 +338,11 @@ class _ApproveNoteState extends State<_ApproveNote> {
             minLines: 2,
             maxLines: 6,
           ),
+          const SizedBox(height: Space.xs),
+          Text(
+            '${widget.name} gets it with your answer.',
+            style: type.caption.copyWith(color: palette.textFaint),
+          ),
           if (_error case final error?)
             Padding(
               padding: const EdgeInsets.only(top: Space.s),
@@ -335,8 +353,8 @@ class _ApproveNoteState extends State<_ApproveNote> {
             ),
           const SizedBox(height: Space.m),
           Button(
-            label: 'Approve',
-            primary: true,
+            label: widget.action,
+            primary: widget.primary,
             onPressed: _busy ? null : () => unawaited(_submit()),
           ),
         ],

@@ -10,7 +10,7 @@ publish.workspace = true
 default = ["worker"]
 # The worker itself. Without it the crate is only `ipc`: the channel's types
 # and framing, for the account service, which forwards to the worker.
-worker = ["dep:getrandom", "dep:jiff", "dep:rusqlite", "dep:tracing-subscriber", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal"]
+worker = ["dep:base64", "dep:claktory-dm-crypto", "dep:openmls", "dep:tls_codec", "dep:chacha20poly1305", "dep:getrandom", "dep:hmac", "dep:jiff", "dep:rusqlite", "dep:sha2", "dep:zeroize", "dep:tracing-subscriber", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal"]
 
 [[bin]]
 name = "claktory-user-apps"
@@ -22,10 +22,20 @@ serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["io-util", "net", "time", "sync"] }
 tracing = "0.1.44"
 
+base64 = { version = "0.23", optional = true }
+chacha20poly1305 = { version = "0.11", features = ["zeroize"], optional = true }
+# End-to-end DMs (E2): the worker parses and checks MLS messages, never
+# opens them. The same pinned OpenMLS as every endpoint.
+claktory-dm-crypto = { path = "../claktory-dm-crypto", optional = true }
+openmls = { version = "=0.9.2", optional = true }
+tls_codec = { version = "0.5", features = ["derive", "serde", "std"], optional = true }
 getrandom = { version = "0.4", optional = true }
+hmac = { version = "0.13", optional = true }
 jiff = { version = "1", optional = true }
 rusqlite = { version = "0.43.0", features = ["bundled"], optional = true }
+sha2 = { version = "0.11", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
+zeroize = { version = "1.9", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "exportLayer",
+  "arguments": {
+    "page_1based": 3,
+    "preview_max_long_edge": 2048,
+    "preview_max_bytes": 4194304
+  },
+  "result": {
+    "page_1based": 3,
+    "ink_layer_id": "layer-paper-p3",
+    "base_revision": 1,
+    "local_seq": 6,
+    "source_sha256": "2633caf4ddce6226590f39adee47b6ba86ac582d4794051adaf77dd25041f3fb",
+    "stroke_count": 4,
+    "coordinate_space": {
+      "kind": "pdf_page",
+      "page_1based": 3,
+      "box": "crop",
+      "crop_box": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "media_box": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "width": 612,
+      "height": 792,
+      "units": "pt"
+    },
+    "drawing": {
+      "format": "pencilkit",
+      "content_version": 1,
+      "space": "page_overlay",
+      "drawing_to_document": [
+        1,
+        0,
+        0,
+        -1,
+        0,
+        792
+      ],
+      "file": "<temp>/ink-export/3F2A9C1E.pkdrawing",
+      "sha256": "7d2e5d40b5e85149b38abc651cf980b8e20cc9455c4295682d873926702ee511",
+      "bytes": 5812
+    },
+    "ink_preview": {
+      "file": "<temp>/ink-export/7B41D0A2.png",
+      "mime": "image/png",
+      "sha256": "c9596fab0f525f519cad2c2200cac2a2a430ff8c671fdec0a8fcbfec5080cd6f",
+      "pixel_width": 1224,
+      "pixel_height": 1584,
+      "bytes": 48211
+    }
+  }
+}

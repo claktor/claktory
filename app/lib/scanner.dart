@@ -35,21 +35,32 @@ abstract interface class Camera {
   Widget preview(ValueChanged<String> onCode);
 }
 
-/// The phone's own camera, through the native side (ios/Runner/Scanner.swift).
-/// Elsewhere there's none.
+/// The phone's own camera, through the native side (ios/Runner/Scanner.swift
+/// on an iPhone, android/…/QrScanner.kt on Android). Elsewhere there's none.
 class DeviceCamera implements Camera {
   const DeviceCamera();
 
   static const _channel = MethodChannel('factory/device');
 
   static bool get _here =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
 
   @override
   Future<CameraAccess> access() async {
     if (!_here) return CameraAccess.unavailable;
-    final access = await _channel.invokeMethod<String>('cameraAccess');
-    return CameraAccess.values.asNameMap()[access] ?? CameraAccess.unavailable;
+    // A native side that doesn't answer (none, or one without a camera
+    // yet) is no camera: the code is pasted instead.
+    try {
+      final access = await _channel.invokeMethod<String>('cameraAccess');
+      return CameraAccess.values.asNameMap()[access] ??
+          CameraAccess.unavailable;
+    } on PlatformException {
+      return CameraAccess.unavailable;
+    } on MissingPluginException {
+      return CameraAccess.unavailable;
+    }
   }
 
   @override
@@ -92,7 +103,18 @@ class _NativePreviewState extends State<_NativePreview> {
       });
   }
 
+  // The same view type and per-view channel on both; nowhere else (a Mac,
+  // say) is there a native view to make.
   @override
-  Widget build(BuildContext context) =>
-      UiKitView(viewType: 'claktory/scanner', onPlatformViewCreated: _created);
+  Widget build(BuildContext context) => switch (defaultTargetPlatform) {
+    TargetPlatform.android => AndroidView(
+      viewType: 'claktory/scanner',
+      onPlatformViewCreated: _created,
+    ),
+    TargetPlatform.iOS => UiKitView(
+      viewType: 'claktory/scanner',
+      onPlatformViewCreated: _created,
+    ),
+    _ => const SizedBox.shrink(),
+  };
 }

@@ -162,6 +162,83 @@ void main() {
       await paths.close();
     });
 
+    test('on Android, which network it is decides: interfaces changing on '
+        'one network are no move, another network is', () {
+      final both = NetworkPath.fromEvent({
+        'satisfied': true,
+        'interfaces': ['wifi', 'wired'],
+        'network': '101',
+      });
+      expect(both.network, '101');
+      expect(NetworkPath.fromEvent({'network': 102}).network, '102');
+      expect(NetworkPath.fromEvent(const {}).network, isEmpty);
+      const wired = NetworkPath(
+        satisfied: true,
+        interfaces: ['wired'],
+        network: '101',
+      );
+      const other = NetworkPath(
+        satisfied: true,
+        interfaces: ['wifi', 'wired'],
+        network: '102',
+      );
+      expect(wired.movedFrom(both), isFalse);
+      expect(both.movedFrom(wired), isFalse);
+      expect(other.movedFrom(both), isTrue);
+      expect(both.movedFrom(_none), isTrue);
+      // One side without an id (the iPhone's, or an older runner): its
+      // first interface, as before.
+      expect(_cellular.movedFrom(both), isTrue);
+    });
+
+    test('on Android, the same network back after a while down is no move; '
+        'another one back is', () async {
+      final paths = StreamController<NetworkPath>();
+      final told = <NetworkPath>[];
+      final listening = networkMoves(
+        paths.stream,
+        settle: const Duration(milliseconds: 20),
+      ).listen(told.add);
+      Future<void> settle(NetworkPath path) async {
+        paths.add(path);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+
+      const wifi = NetworkPath(
+        satisfied: true,
+        interfaces: ['wifi', 'wired'],
+        network: '101',
+      );
+      const wired = NetworkPath(
+        satisfied: true,
+        interfaces: ['wired'],
+        network: '101',
+      );
+      const cellular = NetworkPath(
+        satisfied: true,
+        interfaces: ['cellular'],
+        network: '102',
+      );
+      // An emulator's Wi-Fi off and on, each settled, on network 101.
+      await settle(wifi);
+      await settle(wired);
+      await settle(wifi);
+      expect(told, isEmpty);
+      // Doze keeps the app off the network, and it says down; back on 101.
+      await settle(_none);
+      await settle(wifi);
+      expect(told, isEmpty);
+      // Down, then up on another network: a move.
+      await settle(_none);
+      await settle(cellular);
+      expect(told, [cellular]);
+      // And straight to another one.
+      await settle(wifi);
+      expect(told, [cellular, wifi]);
+      await listening.cancel();
+      await paths.close();
+    });
+
     test('a runner without the channel is no moves', () async {
       final paths = StreamController<NetworkPath>();
       final told = <NetworkPath>[];

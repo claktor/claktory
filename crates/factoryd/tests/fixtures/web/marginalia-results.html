@@ -1,0 +1,3305 @@
+
+<!DOCTYPE html>
+<html lang="en">
+
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sqlite wal checkpoint - Marginalia Search</title>
+    
+        <link rel="stylesheet" href="/css/style.css" />
+        <link rel="stylesheet" href="/css/fa-all.min.css" />
+    
+
+    
+        <meta name="robots" content="noindex">
+    
+
+    <link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="Marginalia">
+
+</head>
+<noscript>
+    <h1>Users of text-based browsers</h1>
+    <p>Consider using the old interface at <a href="https://old-search.marginalia.nu/">https://old-search.marginalia.nu/</a>,
+    as it uses fewer modern CSS tricks, and should work better than the new UI.  It's functionally nearly identical, but just renders it using a different layout.</p>
+    <hr>
+</noscript>
+
+<body class="min-h-screen bg-bgblue dark:bg-gray-900 dark:text-white font-sans " >
+<a class="sr-only" href="skipnav">Skip To Content</a>
+
+<header class="bg-margeblue text-white">
+    <div class="max-w-[1400px] mx-auto">
+        <nav>
+            <div class="px-4">
+                <div class="flex flex-row text-sm gap-1 xs:gap-2">
+                    
+
+                        <a href="/" class="has-[:checked]:underline py-2 px-2 hover:text-blue-200">
+                            
+                                <input type="checkbox" checked readonly class="hidden" tabindex="-1" />
+                            
+                            Search
+                        </a>
+
+                    
+
+                        <a href="/site" class="has-[:checked]:underline py-2 px-2 hover:text-blue-200">
+                            
+                            Sites
+                        </a>
+
+                    
+
+                        <a href="/explore" class="has-[:checked]:underline py-2 px-2 hover:text-blue-200">
+                            
+                            Explore
+                        </a>
+
+                    
+                    <div class="grow"></div>
+                    
+                        <a href="https://about.marginalia-search.com/" class="has-[:checked]:underline  py-2 px-2 hover:text-blue-200">
+                            
+                            About
+                        </a>
+                    
+                </div>
+            </div>
+        </nav>
+    </div>
+</header>
+
+
+<header class="border-b border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-md">
+    <div class="max-w-[1400px] mx-auto px-4 py-2 sm:py-4">
+        <div class="flex items-center">
+            <div class="hidden sm:block md:w-32 md:mr-16 md:ml-16"><h1 class="text-md sm:text-xl mr-8 font-serif whitespace-nowrap"><a href="/">Marginalia Search</a></h1></div>
+            <div class="w-full p-2 border-none backdrop-blur-sm">
+                
+
+<form id="search-form" class="flex-1 max-w-2xl" action="/search" method="get">
+
+    <div class="flex">
+        
+            <input type="text"
+                   class="shadow-inner flex-1 dark:bg-black dark:text-gray-100 bg-gray-50 border dark:border-gray-600 border-gray-300 text-gray-900 text-sm rounded-sm block w-full p-2.5"
+                   value="sqlite wal checkpoint"
+                   placeholder="Search the web!"
+                   autocomplete="off"
+                   name="query"
+                   id="searchInput" />
+        
+
+        <div aria-hidden="true" id="searchSuggestions" class="text-sm absolute top-3 mt-10 w-96 bg-white dark:bg-black border dark:border-gray-600 border-gray-300 rounded-lg shadow-lg hidden"></div>
+
+        <button class="px-4 py-2 bg-margeblue text-white ml-2 rounded whitespace-nowrap active:text-slate-200">
+            <i class="fas fa-search text-sm sm:mr-3"></i>
+            Search
+        </button>
+
+    </div>
+
+    
+    
+    
+    
+    
+    
+    
+    
+    <input type="hidden" name="profile" value="corpo">
+
+</form>
+
+            </div>
+            <div class="grow"></div>
+            <button class="fixed bottom-10 right-5 finepointer:hidden md:hidden text-sm bg-margeblue text-white p-4 rounded-xl active:text-slate-200" id="filter-button">
+                <i class="fas fa-filter mr-3"></i>
+                Filters
+            </button>
+            <button class="fixed bottom-10 left-5 finepointer:hidden md:hidden text-sm bg-margeblue text-white p-4 rounded-xl active:text-slate-200" id="language-button">
+                <i class="fas fa-globe mr-3"></i>
+                Language
+            </button>
+        </div>
+    </div>
+</header>
+
+<div class="max-w-[1400px] mx-auto flex">
+    
+    
+<aside class="md:w-48 py-4 shrink-0  lg:mx-4 hidden md:block finepointer:block">
+    <div class="space-y-6 sticky top-4">
+        <div class="bg-white dark:bg-gray-800 p-2 border dark:border-gray-600 border-gray-300">
+            <h2 class="font-medium mb-3 flex items-center font-serif hidden md:block">
+                <i class="fas fa-filter text-sm mr-2"></i> Filter
+            </h2>
+            <div class="space-y-2">
+                
+                    
+                        <label class="flex items-center">
+                            <button title="All" onclick="document.location='/search?query=sqlite+wal+checkpoint&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" checked class="hidden" aria-checked="true" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-globe mr-3"></i>
+                                    <span class="hidden md:inline">All</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Blogs" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=blogosphere&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=blogosphere&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-blog mr-3"></i>
+                                    <span class="hidden md:inline">Blogs</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Academia" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=academia&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=academia&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-university mr-3"></i>
+                                    <span class="hidden md:inline">Academia</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Vintage" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=vintage&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=vintage&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-clock-rotate-left mr-3"></i>
+                                    <span class="hidden md:inline">Vintage</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Small Web" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=modern&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=modern&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-minus mr-3"></i>
+                                    <span class="hidden md:inline">Small Web</span></a>
+                            </button>
+                        </label>
+                
+                    <div class="[&:not(:last-child)]:border-b hidden md:block dark:border-gray-800 dark:pb-2"></div>
+                
+                    
+                        <label class="flex items-center">
+                            <button title="Wikis" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=wiki&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=wiki&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-book mr-3"></i>
+                                    <span class="hidden md:inline">Wikis</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Forums" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=forum&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=forum&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-comments mr-3"></i>
+                                    <span class="hidden md:inline">Forums</span></a>
+                            </button>
+                        </label>
+                
+                        <label class="flex items-center">
+                            <button title="Recipes" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=food&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=food&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-utensils mr-3"></i>
+                                    <span class="hidden md:inline">Recipes</span></a>
+                            </button>
+                        </label>
+                
+                    <div class="[&:not(:last-child)]:border-b hidden md:block dark:border-gray-800 dark:pb-2"></div>
+                
+                    
+                        <label class="flex items-center">
+                            <button title="Custom Filter" onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=custom&newfilter=true'" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=custom&newfilter=true" class="text-sm md:text-xs lg:text-sm" href="#">
+                                    <i class="fas fa-pencil mr-3"></i>
+                                    <span class="hidden md:inline">Custom Filter</span></a>
+                            </button>
+                        </label>
+                
+                    <div class="[&:not(:last-child)]:border-b hidden md:block dark:border-gray-800 dark:pb-2"></div>
+                
+            </div>
+        </div>
+    </div>
+</aside>
+
+    
+<aside id="language-menu" class="fixed inset-0 z-50 flex justify-center bg-white/90 dark:bg-black/90 backdrop-blur-sm hidden">
+    <button id="hide-language-button" class="fixed bottom-10 right-5 text-sm bg-margeblue text-white p-4 rounded-xl active:text-slate-200">
+        <i class="fas fa-close mr-4"></i> Close
+    </button>
+    <div class="flex mx-auto flex-col my-10 px-4 max-w-xl">
+        <div class="text-xl my-4"><i class="fas fa-globe-europe mr-2 text-margeblue dark:text-slate-200"></i>Search Language</div>
+        <ol>
+        
+            <li>
+                <a href="/search?query=sqlite+wal+checkpoint&amp;newfilter=true" class="flex-1 p-2 my-1 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                    
+                        <input type="checkbox" checked class="hidden" aria-checked="true" />
+                    
+                    English
+                </a>
+            </li>
+        
+            <li>
+                <a href="/search?query=sqlite+wal+checkpoint&amp;lang=sv&amp;newfilter=true" class="flex-1 p-2 my-1 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                    
+                        <input type="checkbox" class="hidden" aria-checked="false" />
+                    
+                    Swedish
+                </a>
+            </li>
+        
+            <li>
+                <a href="/search?query=sqlite+wal+checkpoint&amp;lang=fr&amp;newfilter=true" class="flex-1 p-2 my-1 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                    
+                        <input type="checkbox" class="hidden" aria-checked="false" />
+                    
+                    French
+                </a>
+            </li>
+        
+            <li>
+                <a href="/search?query=sqlite+wal+checkpoint&amp;lang=de&amp;newfilter=true" class="flex-1 p-2 my-1 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                    
+                        <input type="checkbox" class="hidden" aria-checked="false" />
+                    
+                    German
+                </a>
+            </li>
+        
+        </ol>
+        <div class="my-4 text-xs">
+            Multiple language support is currently in a public testing phase,
+            and does not yet work as well as the English portion of the search engine
+            and the non-English index is at this phase very small.
+            The UI will also be streamlined when the functionality starts to work better.
+            <p class="py-2"></p>
+            Please report any issues at the <a class="underline text-liteblue dark:text-blue-200" href="https://github.com/MarginaliaSearch/MarginaliaSearch/issues">GitHub issue tracker</a>,
+            or by emailing <a class="underline text-liteblue dark:text-blue-200" href="mailto:contact@marginalia-search.com">contact@marginalia-search.com</a>,
+            or by visiting the <a class="underline text-liteblue dark:text-blue-200" href="https://chat.marginalia.nu">project discord</a>.
+            <p class="py-2"></p>
+            If you speak languages other than English and Swedish, know a bit of programming and grammar, then help is also welcome!
+        </div>
+        <div class="flex-grow"></div>
+    </div>
+</aside>
+
+    <div id="skipnav"></div>
+
+    
+    <main class="py-4 p-2 sm:p-4 space-y-4 flex-grow">
+
+        
+
+        
+        
+
+        <div>
+            <h1 class="sr-only"> Results </h1>
+
+            <div class="space-y-4 sm:space-y-6">
+                
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.jvt.me/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+            <line
+                    x1="34.90568314839864"
+                    y1="18.320532858450385"
+                    x2="36.89310756818512"
+                    y2="18.096603906243768"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.jvt.me/posts/2025/07/29/sqlite-wal-sync/" rel="noopener noreferrer" dir="auto">Syncing the WAL with SQLite ·<wbr> Jamie Tanna |<wbr> Software Engineer</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.jvt.me/posts/2025/07/29/sqlite-wal-sync/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>jvt.<wbr>me/<wbr>posts/<wbr>2<wbr>0<wbr>2<wbr>5<wbr>/<wbr>0<wbr>7<wbr>/<wbr>2<wbr>9<wbr>/<wbr>sqlite-<wbr>wal-<wbr>sync/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    To do this, we need to perform an SQLite WAL checkpoint, which can be triggered i.e, via. sqlite3 dmd.db PRAGMA wal_checkpoint, FULL, ', output not relevant. This then takes your WAL'd database, and will sync the data from the WAL to the...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.jvt.me" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.jvt.me/posts/2025/07/29/sqlite-wal-sync/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.stackoverflow.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.stackoverflow.com/questions/71009893" rel="noopener noreferrer" dir="auto">Is it possible to perform Core<wbr>Data WAL checkpoint to "<wbr>merge"<wbr> everything into a single SQLite file?<wbr></a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.stackoverflow.com/questions/71009893"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>stackoverflow.<wbr>com/<wbr>questions/<wbr>7<wbr>1<wbr>0<wbr>0<wbr>9<wbr>8<wbr>9<wbr>3<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    Is it possible to perform CoreData WAL checkpoint to, merge, everything into a single SQLite file. 3 files are generated when using CoreData. xxx.sqlite xxx.sqlite-shm xxx.sqlite-wal. Since our app has a feature, to export the SQLite file, we...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.stackoverflow.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.stackoverflow.com/questions/71009893"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+            <div class="flex mt-2 text-sm flex flex-col space-y-2">
+                <p class="text-black dark:text-white bg-gray-100 dark:bg-gray-900  p-1 rounded break-words hyphens-auto">Also from www.stackoverflow.com:</p>
+
+                <ul class="pl-2 mt-2 text-liteblue dark:text-blue-200">
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.stackoverflow.com/questions/58105392" class="underline" rel="noopener noreferrer" dir="auto">SQLite WAL with the C#<wbr> Entity Framework</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.stackoverflow.com/questions/68572090" class="underline" rel="noopener noreferrer" dir="auto">Why data is lost in SQLite database with WAL mode on when connection is not closed properly?<wbr></a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.stackoverflow.com/questions/22673833" class="underline" rel="noopener noreferrer" dir="auto">SQLite WAL mode,<wbr> checkpoint on background thread,<wbr> wal-<wbr>journal never shrinks</a>
+                        </li>
+                    
+                </ul>
+            </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Awww.stackoverflow.com">57 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.sqlite.org/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.sqlite.org/wal.html" rel="noopener noreferrer" dir="auto">Write-<wbr>Ahead Logging</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.sqlite.org/wal.html"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>sqlite.<wbr>org/<wbr>wal.<wbr>html</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    By default, SQLite does a checkpoint automatically when the WAL file reaches a threshold size of 1000 pages. The. SQLITE_DEFAULT_WAL_AUTOCHECKPOINT.<wbr> compile-time option can be used to specify a different default. Applications using WAL do not...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.sqlite.org" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.sqlite.org/wal.html"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+            <div class="flex mt-2 text-sm flex flex-col space-y-2">
+                <p class="text-black dark:text-white bg-gray-100 dark:bg-gray-900  p-1 rounded break-words hyphens-auto">Also from www.sqlite.org:</p>
+
+                <ul class="pl-2 mt-2 text-liteblue dark:text-blue-200">
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.sqlite.org/c3ref/wal_checkpoint_v2.html" class="underline" rel="noopener noreferrer" dir="auto">Checkpoint a database</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.sqlite.org/fileformat2.html" class="underline" rel="noopener noreferrer" dir="auto">Database File Format</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.sqlite.org/capi3ref.html" class="underline" rel="noopener noreferrer" dir="auto">C/<wbr>C+<wbr>+<wbr> Interface For SQLite Version 3<wbr></a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://www.sqlite.org/pragma.html" class="underline" rel="noopener noreferrer" dir="auto">Pragma statements supported by SQLite</a>
+                        </li>
+                    
+                </ul>
+            </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Awww.sqlite.org">34 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/sqlite.org/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://sqlite.org/forum/forumpost/fd0f19d229156939" rel="noopener noreferrer" dir="auto">SQLite User Forum:<wbr> Manual checkpoint fails after setting WAL mode on new database and no writes performed</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://sqlite.org/forum/forumpost/fd0f19d229156939"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>sqlite.<wbr>org/<wbr>forum/<wbr>forumpost/<wbr>fd0<wbr>f1<wbr>9<wbr>d2<wbr>2<wbr>9<wbr>1<wbr>5<wbr>6<wbr>9<wbr>3<wbr>9<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    1, meaning the checkpoint could not run due to an error or because the database is not in WAL mode. After writing to the database from a secondary connection, the checkpoint still fails. If you write once from the first // SQLite version: 3.36.0
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/sqlite.org" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://sqlite.org/forum/forumpost/fd0f19d229156939"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Asqlite.org">46 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/wiki.wellorder.net/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://wiki.wellorder.net/wiki/nostr-rs-relay/" rel="noopener noreferrer" dir="auto">Well Ordered Wiki</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://wiki.wellorder.net/wiki/nostr-rs-relay/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>wiki.<wbr>wellorder.<wbr>net/<wbr>wiki/<wbr>nostr-<wbr>rs-<wbr>relay/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    Normal SQLite commits will invoke a passive checkpoint automatically when the WAL file exceeds 1, 000 pages. Readers or writers can block the completion of a checkpoint however, so it is common for this to passive attempt to fail
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/wiki.wellorder.net" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://wiki.wellorder.net/wiki/nostr-rs-relay/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/avi.im/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://avi.im/blag/2025/sqlite-fsync/" rel="noopener noreferrer" dir="auto">SQLite commits are not durable under default settings -<wbr> blag</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://avi.im/blag/2025/sqlite-fsync/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>avi.<wbr>im/<wbr>blag/<wbr>2<wbr>0<wbr>2<wbr>5<wbr>/<wbr>sqlite-<wbr>fsync/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    SQLite with WAL. SQLite also has a WAL mode, and youre likely using it if you want higher write throughput. The. synchronous // the WAL file is synchronized before each checkpoint and the database file is synchronized after each completed...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/avi.im" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://avi.im/blag/2025/sqlite-fsync/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Aavi.im">1 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/litestream.io/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://litestream.io/tips/" rel="noopener noreferrer" dir="auto">Tips &amp; Caveats -<wbr> Litestream</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://litestream.io/tips/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>litestream.<wbr>io/<wbr>tips/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    tens of thousands per second, the applications SQLite instance can perform a checkpoint in between Litestream-initiated checkpoints and cause Litestream to miss a WAL file. When Litestream notices this it will force a new generation and take...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/litestream.io" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://litestream.io/tips/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+            <div class="flex mt-2 text-sm flex flex-col space-y-2">
+                <p class="text-black dark:text-white bg-gray-100 dark:bg-gray-900  p-1 rounded break-words hyphens-auto">Also from litestream.io:</p>
+
+                <ul class="pl-2 mt-2 text-liteblue dark:text-blue-200">
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://litestream.io/v0.3/how-it-works/" class="underline" rel="noopener noreferrer" dir="auto">How it works -<wbr> Litestream</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://litestream.io/guides/wal-truncate-threshold/" class="underline" rel="noopener noreferrer" dir="auto">WAL Truncate Threshold Configuration -<wbr> Litestream</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://litestream.io/how-it-works/" class="underline" rel="noopener noreferrer" dir="auto">How it works -<wbr> Litestream</a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://litestream.io/guides/docker/" class="underline" rel="noopener noreferrer" dir="auto">Running in a Docker container -<wbr> Litestream</a>
+                        </li>
+                    
+                </ul>
+            </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Alitestream.io">6 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.eyrie.org/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.eyrie.org/~eagle/software/inn/docs/ovsqlite.html" rel="noopener noreferrer" dir="auto">ovsqlite</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.eyrie.org/~eagle/software/inn/docs/ovsqlite.html"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>eyrie.<wbr>org/<wbr>~<wbr>eagle/<wbr>software/<wbr>inn/<wbr>docs/<wbr>ovsqlite.<wbr>html</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    walmode If this parameter is true, ovsqlite will use SQLite's WAL, Write-Ahead Logging, journal mode instead of PERSIST // walcheckpointthreshold The WAL page count at which ovsqlite-server forces a checkpoint. When the WAL grows beyond this many...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.eyrie.org" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.eyrie.org/~eagle/software/inn/docs/ovsqlite.html"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/victoria.dev/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://victoria.dev/posts/sqlite-in-production-with-wal/" rel="noopener noreferrer" dir="auto">SQLite in Production with WAL |<wbr> victoria.<wbr>dev</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://victoria.dev/posts/sqlite-in-production-with-wal/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>victoria.<wbr>dev/<wbr>posts/<wbr>sqlite-<wbr>in-<wbr>production-<wbr>with-<wbr>wal/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    The checkpoint is the WAL version of the atomic commit. In WAL mode, write transactions are performed faster than in the // For medium-sized, read-heavy applications, SQLite with WAL mode represents exactly this kind of appropriate technology...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/victoria.dev" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://victoria.dev/posts/sqlite-in-production-with-wal/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/flaviocopes.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://flaviocopes.com/courses/sqlite/wal-mode/" rel="noopener noreferrer" dir="auto">Use write-<wbr>ahead logging when it helps</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://flaviocopes.com/courses/sqlite/wal-mode/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>flaviocopes.<wbr>com/<wbr>courses/<wbr>sqlite/<wbr>wal-<wbr>mode/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    SQLite normally checkpoints automatically once the WAL grows past about 1000 pages. You can request a non-blocking checkpoint with:. PRAGMA wal_checkpoint, PASSIVE. 0. 55. 55. The three numbers report whether the checkpoint was blocked, the WALs...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/flaviocopes.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://flaviocopes.com/courses/sqlite/wal-mode/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Aflaviocopes.com">1 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/dev.guardianproject.info/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://dev.guardianproject.info/issues/555/" rel="noopener noreferrer" dir="auto">Bug #<wbr>5<wbr>5<wbr>5<wbr>:<wbr> SQLite WAL grows without bound when sqlfs under heavy load -<wbr> IOCipher -<wbr> Guardian Project Dev (<wbr>ARCHIVED SITE)<wbr></a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://dev.guardianproject.info/issues/555/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>dev.<wbr>guardianproject.<wbr>info/<wbr>issues/<wbr>5<wbr>5<wbr>5<wbr>/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    Bug #555 SQLite WAL grows without bound when sqlfs under heavy load. Status: New Start date: 01/24/2013 Priority: Normal Due // The WAL is pretty much working as documented, it's just never getting a chance to completely checkpoint because the...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/dev.guardianproject.info" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://dev.guardianproject.info/issues/555/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/filext.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://filext.com/file-extension/SQLITEDB-WAL" rel="noopener noreferrer" dir="auto">SQLITEDB-<wbr>WAL File Extension -<wbr> What is it?<wbr> How to open an SQLITEDB-<wbr>WAL file?<wbr></a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://filext.com/file-extension/SQLITEDB-WAL"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>filext.<wbr>com/<wbr>file-<wbr>extension/<wbr>SQLITEDB-<wbr>WAL</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    In this mode, instead of updating the main database file directly, new changes are appended to the WAL file until they // SQLite The .SQLITEDB-WAL file is a crucial component of SQLite's write-ahead logging, WAL, mechanism
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/filext.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://filext.com/file-extension/SQLITEDB-WAL"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+            <div class="flex mt-2 text-sm flex flex-col space-y-2">
+                <p class="text-black dark:text-white bg-gray-100 dark:bg-gray-900  p-1 rounded break-words hyphens-auto">Also from filext.com:</p>
+
+                <ul class="pl-2 mt-2 text-liteblue dark:text-blue-200">
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://filext.com/file-extension/SQLITE3-WAL" class="underline" rel="noopener noreferrer" dir="auto">SQLITE3<wbr>-<wbr>WAL File Extension -<wbr> What is it?<wbr> How to open an SQLITE3<wbr>-<wbr>WAL file?<wbr></a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://filext.com/file-extension/EDB-WAL" class="underline" rel="noopener noreferrer" dir="auto">EDB-<wbr>WAL File Extension -<wbr> What is it?<wbr> How to open an EDB-<wbr>WAL file?<wbr></a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://filext.com/file-extension/RDB-WAL" class="underline" rel="noopener noreferrer" dir="auto">RDB-<wbr>WAL File Extension -<wbr> What is it?<wbr> How to open an RDB-<wbr>WAL file?<wbr></a>
+                        </li>
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://filext.com/file-extension/WORKDB-WAL" class="underline" rel="noopener noreferrer" dir="auto">WORKDB-<wbr>WAL File Extension -<wbr> What is it?<wbr> How to open a WORKDB-<wbr>WAL file?<wbr></a>
+                        </li>
+                    
+                </ul>
+            </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/prahladyeri.github.io/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://prahladyeri.github.io/guides/sqlite-crash-course.html" rel="noopener noreferrer" dir="auto">SQLite Crash Course</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://prahladyeri.github.io/guides/sqlite-crash-course.html"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>prahladyeri.<wbr>github.<wbr>io/<wbr>guides/<wbr>sqlite-<wbr>crash-<wbr>course.<wbr>html</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    SQLite allows multiple concurrent reader connections in WAL mode. Multiple Processes Reading and Writing // default, checkpoint after every 1000 WAL pages. High-Read Web Application, SQLite as primary DB. For apps like. Litestream Fly.io. setups:
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/prahladyeri.github.io" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://prahladyeri.github.io/guides/sqlite-crash-course.html"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/pocketarc.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://pocketarc.com/databases" rel="noopener noreferrer" dir="auto">Production SQLite:<wbr> what you need to know ·<wbr> Pocket<wbr>Ar<wbr>C</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://pocketarc.com/databases"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>pocketarc.<wbr>com/<wbr>databases</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    When you hit a checkpoint, SQLite will copy the WAL's pages into the main database, but it. The writer will just start overwriting the file from the beginning, overwriting is faster than appending. So the file will remain at its high-water...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/pocketarc.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://pocketarc.com/databases"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.bartoszsypytkowski.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.bartoszsypytkowski.com/db-backup-point-in-time-recovery/" rel="noopener noreferrer" dir="auto">How does continuous backup and point-<wbr>in-<wbr>time recovery work in databases</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2023-12-08 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.bartoszsypytkowski.com/db-backup-point-in-time-recovery/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>bartoszsypytkowski.<wbr>com/<wbr>db-<wbr>backup-<wbr>point-<wbr>in-<wbr>time-<wbr>recovery/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    to a WAL file and requesting SQLite for a checkpoint. Can you see already where are we going. Backing up the WAL. Old fashioned database backups were just about copying a database file/folder aside. This usually required a period of technical...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.bartoszsypytkowski.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.bartoszsypytkowski.com/db-backup-point-in-time-recovery/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/fly.io/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://fly.io/blog/sqlite-internals-wal/" rel="noopener noreferrer" dir="auto">How SQLite Scales Read Concurrency ·<wbr> The Fly Blog</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://fly.io/blog/sqlite-internals-wal/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>fly.<wbr>io/<wbr>blog/<wbr>sqlite-<wbr>internals-<wbr>wal/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    as the first 4 bytes of a SQLite WAL file. Next, the. 0x002de218. is the WAL format version. This is the big-endian integer // This naive approach can be problematic on databases that constantly have open transactions as SQLite will not force a...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/fly.io" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://fly.io/blog/sqlite-internals-wal/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Afly.io">3 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/dzx.fr/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://dzx.fr/blog/understanding-sqlite/" rel="noopener noreferrer" dir="auto">Understanding SQLite -<wbr> dzx.<wbr>fr</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://dzx.fr/blog/understanding-sqlite/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>dzx.<wbr>fr/<wbr>blog/<wbr>understanding-<wbr>sqlite/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    sqlite PRAGMA journal_mode WAL wal. You only need to do it once, as this setting is saved to the database // Note that during a checkpoint, SQLite also calls. fsync. which provides a way to initiate a manual synchronization. Handle database locking
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/dzx.fr" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://dzx.fr/blog/understanding-sqlite/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/docs.fluentbit.io/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://docs.fluentbit.io/manual/1.8/pipeline/inputs/tail" rel="noopener noreferrer" dir="auto">Tail |<wbr> 1<wbr>.<wbr>8<wbr> |<wbr> Fluent Bit:<wbr> Official Manual</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://docs.fluentbit.io/manual/1.8/pipeline/inputs/tail"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>docs.<wbr>fluentbit.<wbr>io/<wbr>manual/<wbr>1<wbr>.<wbr>8<wbr>/<wbr>pipeline/<wbr>inputs/<wbr>tail</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    Fluent Bit keep the state or checkpoint of each file through using a SQLite database file, so if the service is // WAL. This allows to improve performance of read and write operations to disk. When enabled, you will see in your file system...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/docs.fluentbit.io" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://docs.fluentbit.io/manual/1.8/pipeline/inputs/tail"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Adocs.fluentbit.io">1 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/jeremywsherman.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://jeremywsherman.com/blog/2018/12/01/google-room-and-the-definitive-guide-to-sqlite/" rel="noopener noreferrer" dir="auto">Google Room and The Definitive Guide to SQLite
+ -<wbr> Jeremy W.<wbr> Sherman</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2018-12-01 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://jeremywsherman.com/blog/2018/12/01/google-room-and-the-definitive-guide-to-sqlite/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>jeremywsherman.<wbr>com/<wbr>blog/<wbr>2<wbr>0<wbr>1<wbr>8<wbr>/<wbr>1<wbr>2<wbr>/<wbr>0<wbr>1<wbr>/<wbr>google-<wbr>room-<wbr>and-<wbr>the-<wbr>definitive-<wbr>guide-<wbr>to-<wbr>sqlite/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    Why read a book on SQLite. The short answer: Because I needed to write a migration for a Google Room database. Limited past exposure. Ive mostly worked on Mac, iOS apps: iOS: The data all lives server-side, and // WAL vs rollback journal tradeoffs
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/jeremywsherman.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://jeremywsherman.com/blog/2018/12/01/google-room-and-the-definitive-guide-to-sqlite/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/matduggan.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://matduggan.com/sqlite-for-a-rest-api-database/" rel="noopener noreferrer" dir="auto">matduggan.<wbr>com</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2025-12-12 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://matduggan.com/sqlite-for-a-rest-api-database/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>matduggan.<wbr>com/<wbr>sqlite-<wbr>for-<wbr>a-<wbr>rest-<wbr>api-<wbr>database/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    I had vaguely heard of SQLite, WAL, but my understanding of WAL is more in the context of shipping WAL between database // &gt; Periodically checkpoint to main DB. synchronous, NORMAL. So here you have 4 options to toggle for how often SQLite syncs...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/matduggan.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://matduggan.com/sqlite-for-a-rest-api-database/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/www.avanderlee.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://www.avanderlee.com/swift/write-ahead-logging-wal/" rel="noopener noreferrer" dir="auto">Write-<wbr>Ahead Logging (<wbr>WAL)<wbr> disabled to force commits in Core Data</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2020-08-25 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://www.avanderlee.com/swift/write-ahead-logging-wal/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>www.<wbr>avanderlee.<wbr>com/<wbr>swift/<wbr>write-<wbr>ahead-<wbr>logging-<wbr>wal/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    With the WAL mode, Core Data keeps the main SQLite store file untouched and keeps track of data transactions in a. -wal // By using the traditional rollback journaling mode we can force Core Data to perform a checkpoint operation for...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/www.avanderlee.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://www.avanderlee.com/swift/write-ahead-logging-wal/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/mjtsai.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://mjtsai.com/blog/2026/08/14/sqlite-wal-reset-bug/" rel="noopener noreferrer" dir="auto">Michael Tsai -<wbr> Blog  -<wbr>  SQLite WAL-<wbr>Reset Bug</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://mjtsai.com/blog/2026/08/14/sqlite-wal-reset-bug/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>mjtsai.<wbr>com/<wbr>blog/<wbr>2<wbr>0<wbr>2<wbr>6<wbr>/<wbr>0<wbr>8<wbr>/<wbr>1<wbr>4<wbr>/<wbr>sqlite-<wbr>wal-<wbr>reset-<wbr>bug/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    SQLite. The bug is likely present in all version of SQLite from 3.7.0, 2010-07-21, through 3.51.2, 2026-01-09. It is fixed in version 3.51.3, 2026-03-13, and later. Backports of the fix are // which exercised the WAL insert and checkpoint code
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/mjtsai.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://mjtsai.com/blog/2026/08/14/sqlite-wal-reset-bug/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+                <span>
+                <a class="text-liteblue dark:text-blue-200 underline" href="/search?query=sqlite+wal+checkpoint+site%3Amjtsai.com">2 more</a>
+                </span>
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/forum.syncthing.net/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-purple-800 dark:text-purple-200 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://forum.syncthing.net/t/dealing-with-checkpoint-starvation/26121" rel="noopener noreferrer" dir="auto">Dealing with checkpoint starvation -<wbr> Development -<wbr> Syncthing Community Forum</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2026-02-06 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://forum.syncthing.net/t/dealing-with-checkpoint-starvation/26121"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>forum.<wbr>syncthing.<wbr>net/<wbr>t/<wbr>dealing-<wbr>with-<wbr>checkpoint-<wbr>starvation/<wbr>2<wbr>6<wbr>1<wbr>2<wbr>1<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    A checkpoint can only write back stuff from the WAL that no reader/writer needs anymore. If a transaction is open for hours, we cant remove pages written to the WAL after its start // We dont disable the auto checkpoint functionality of sqlite
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/forum.syncthing.net" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://forum.syncthing.net/t/dealing-with-checkpoint-starvation/26121"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+                <span class="px-1 bg-blue-100 text-blue-700 dark:border dark:border-blue-600 dark:text-blue-400 dark:bg-black  rounded">Forum</span>
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/developer.apple.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://developer.apple.com/library/archive/qa/qa1809/_index.html" rel="noopener noreferrer" dir="auto">Technical Q&amp;A QA1<wbr>8<wbr>0<wbr>9<wbr>:<wbr> New default journaling mode for Core Data SQLite stores in i<wbr>OS 7<wbr> and OS X Mavericks</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://developer.apple.com/library/archive/qa/qa1809/_index.html"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>developer.<wbr>apple.<wbr>com/<wbr>library/<wbr>archive/<wbr>qa/<wbr>qa1<wbr>8<wbr>0<wbr>9<wbr>/<wbr>_<wbr>index.<wbr>html</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    A: The failure occurs because the default journaling mode for Core Data SQLite stores was changed to Write-Ahead Logging // This is actually the Core Data way to perform a checkpoint operation. On the other hand, if the. -wal
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/developer.apple.com" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://developer.apple.com/library/archive/qa/qa1809/_index.html"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+            <div class="flex mt-2 text-sm flex flex-col space-y-2">
+                <p class="text-black dark:text-white bg-gray-100 dark:bg-gray-900  p-1 rounded break-words hyphens-auto">Also from developer.apple.com:</p>
+
+                <ul class="pl-2 mt-2 text-liteblue dark:text-blue-200">
+                    
+                        <li class="-indent-4 pl-4 mb-1 break-words hyphens-auto">
+                            
+                            <a href="https://developer.apple.com/videos/play/wwdc2019/419/" class="underline" rel="noopener noreferrer" dir="auto">Optimizing Storage in Your App -<wbr> WWDC1<wbr>9<wbr> -<wbr> Videos -<wbr> Apple Developer</a>
+                        </li>
+                    
+                </ul>
+            </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains JavaScript">JS</span>
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+                    
+<div class="bg-white dark:bg-gray-800 dark:text-white p-4 border dark:border-gray-600 border-gray-300 flex rounded">
+    <div class="flex flex-col grow">
+        <div class="flex space-x-0">
+            <div class="flex flex-col grow" >
+                <div class="flex flex-row space-x-2 place-items-center">
+                    <div class="flex-0" title="Match density">
+                        
+<svg width="40" height="40"
+     style="background-image: url('/site/jacob.gold/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+</svg>
+                    </div>
+                    <div class="flex grow justify-between items-start">
+                        <div class="flex-1">
+                            <h2 class="text-md sm:text-xl text-blue-950 dark:text-blue-50 font-serif mr-4 break-words hyphens-auto">
+                                <a href="https://jacob.gold/posts/go-sqlite-best-practices/" rel="noopener noreferrer" dir="auto">Go +<wbr> SQLite Best Practices |<wbr> Jake Gold</a>
+                            </h2>
+
+                            <div class="text-sm mt-1">
+                                
+                                   2025-08-24 &middot;
+                                
+
+                                
+                                <a class="text-liteblue dark:text-blue-200 underline break-all" href="https://jacob.gold/posts/go-sqlite-best-practices/"
+                                   rel="noopener noreferrer" tabindex="-1">https:<wbr>/<wbr>/<wbr>jacob.<wbr>gold/<wbr>posts/<wbr>go-<wbr>sqlite-<wbr>best-<wbr>practices/<wbr></a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="overflow-auto flex-1">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
+                    SQLite is amazing. Most developers already know SQLite is great. If you have not tried it, you are missing out // WAL mode is what enables high concurrency because readers do not block writers and writers append to the WAL then...
+                </p>
+                </div>
+
+            </div>
+            
+                <div class="flex flex-col ml-5 content-center items-center space-y-2">
+                    <a href="/site/jacob.gold" class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue" title="About this domain">
+                        <i class="fas fa-info text-sm"></i>
+                    </a>
+                    <a href="https://web.archive.org/web/*/https://jacob.gold/posts/go-sqlite-best-practices/"
+                       class="p-1.5 dark:text-gray-200 dark:hover:text-gray-400 text-gray-600 hover:text-gray-900 rounded-xl active:outline outline-1 outline-margeblue"
+                       title="Wayback Machine">
+                        <i class="fas fa-clock-rotate-left text-sm"></i>
+                    </a>
+                </div>
+            
+        </div>
+        
+
+        <span class="flex space-x-1 flex-row text-xs mt-4">
+            
+
+            <div class="grow"></div>
+            
+            
+            
+            
+
+            
+
+            
+
+            
+
+            
+
+            
+
+        </span>
+    </div>
+
+</div>
+                
+            </div>
+        </div>
+
+        
+        
+            <div class="mt-8 flex justify-center space-x-2 font-mono text-md">
+                
+
+                
+                
+                    <a href="/search?query=sqlite+wal+checkpoint" class="px-2 py-1 border dark:border-gray-600 border-gray-400 bg-gray-200 dark:bg-gray-900">Page 1 of 6</a>
+                
+                
+                    <a href="/search?query=sqlite+wal+checkpoint&amp;page=2" class="px-2 py-1 bg-white border dark:border-gray-600 border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-900">Next</a>
+                
+            </div>
+        
+    </main>
+
+    
+<aside class="peer-checked:md:w-64 py-4 lg:mx-4 shrink-0 hidden md:block finepointer:block">
+    <input id="toggle-settings" name="toggle-settings" tabindex="-1" type="checkbox" aria-checked="true" class="peer hidden" />
+    <label title="Toggle Search Settings" for="toggle-settings" class="lg:hidden peer-checked:hidden bg-white dark:bg-gray-800 flex-1 py-2 pl-2 rounded flex space-x-2 dark:peer-has-[:checked]:bg-gray-950 peer-has-[:checked]:bg-gray-300 peer-has-[:checked]:text-slate-900 dark:peer-has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+        <i class="fas fa-cog mr-3"></i>
+    </label>
+
+    <div class="space-y-6 sticky top-4 hidden peer-checked:block lg:block">
+        <div class="bg-white dark:bg-gray-800 p-2 border dark:border-gray-600 border-gray-300">
+
+            <h2 class="font-medium mb-3 flex items-center font-serif hidden md:block gap-1">
+                <i class="fas fa-cog text-sm mr-2"></i>
+                Search Settings
+            </h2>
+            <div class="space-y-2">
+                
+                    <label class="flex items-center">
+                            <button title="Search In Title" onclick="document.location='/search?query=sqlite+wal+checkpoint&searchTitle=title&newfilter=true'" class="flex-1 py-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a href="/search?query=sqlite+wal+checkpoint&searchTitle=title&newfilter=true" class="flex place-items-baseline text-sm md:text-xs lg:text-sm pr-1" href="#">
+                                    
+                                        <i class="far fa-circle mr-3"></i>
+                                    
+
+                                    <span class="hidden md:inline">Search In Title</span>
+                                </a>
+                            </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                            <button title="Recent Results" onclick="document.location='/search?query=sqlite+wal+checkpoint&recent=recent&newfilter=true'" class="flex-1 py-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a href="/search?query=sqlite+wal+checkpoint&recent=recent&newfilter=true" class="flex place-items-baseline text-sm md:text-xs lg:text-sm pr-1" href="#">
+                                    
+                                        <i class="far fa-circle mr-3"></i>
+                                    
+
+                                    <span class="hidden md:inline">Recent Results</span>
+                                </a>
+                            </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                            <button title="Remove JS" onclick="document.location='/search?query=sqlite+wal+checkpoint&js=no-js&newfilter=true'" class="flex-1 py-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a href="/search?query=sqlite+wal+checkpoint&js=no-js&newfilter=true" class="flex place-items-baseline text-sm md:text-xs lg:text-sm pr-1" href="#">
+                                    
+                                        <i class="far fa-circle mr-3"></i>
+                                    
+
+                                    <span class="hidden md:inline">Remove JS</span>
+                                </a>
+                            </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                            <button title="Reduce Adtech" onclick="document.location='/search?query=sqlite+wal+checkpoint&adtech=reduce&newfilter=true'" class="flex-1 py-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a href="/search?query=sqlite+wal+checkpoint&adtech=reduce&newfilter=true" class="flex place-items-baseline text-sm md:text-xs lg:text-sm pr-1" href="#">
+                                    
+                                        <i class="far fa-circle mr-3"></i>
+                                    
+
+                                    <span class="hidden md:inline">Reduce Adtech</span>
+                                </a>
+                            </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                            <button title="Reduce NSFW" onclick="document.location='/search?query=sqlite+wal+checkpoint&nsfw=smut&newfilter=true'" class="flex-1 py-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                                
+                                    <input tabindex="-1" type="checkbox" class="hidden" aria-checked="false" />
+                                
+
+
+                                <a href="/search?query=sqlite+wal+checkpoint&nsfw=smut&newfilter=true" class="flex place-items-baseline text-sm md:text-xs lg:text-sm pr-1" href="#">
+                                    
+                                        <i class="far fa-circle mr-3"></i>
+                                    
+
+                                    <span class="hidden md:inline">Reduce NSFW</span>
+                                </a>
+                            </button>
+                    </label>
+                
+                <div class="[&:not(:last-child)]:border-b hidden md:block dark:border-gray-800 dark:pb-2"></div>
+                <label class="flex items-center">
+                    <button title="Language" id="language-button-sidebar"  class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                        <span></span>
+                        <span class="text-sm md:text-xs lg:text-sm">
+                            <i class="fas fa-globe-europe mr-3"></i>
+                            <span class="hidden md:inline">Language</span>
+                        </span>
+                    </button>
+                </label>
+                <div class="[&:not(:last-child)]:border-b hidden md:block dark:border-gray-800 dark:pb-2"></div>
+                <label class="flex items-center lg:hidden">
+                    <label title="Close" for="toggle-settings" class="flex-1 py-2 pl-2 rounded flex space-x-2 dark:has-[:checked]:bg-gray-950 has-[:checked]:bg-gray-300 has-[:checked]:text-slate-900 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-950 bg-white dark:bg-gray-900 dark:border dark:border-gray-600 text-margeblue dark:text-slate-200 outline-1 active:outline">
+                        <span></span>
+                        <span class="text-sm md:text-xs lg:text-sm">
+                            <i class="fas fa-close mr-3"></i>
+                            <span class="hidden md:inline">Close</span>
+                        </span>
+                    </label>
+                </label>
+            </div>
+        </div>
+    </div>
+</aside>
+
+</div>
+
+<footer>
+    <h1 class="sr-only">Search Help</h1>
+    <div class="max-w-[1400px] mx-auto text-slate-900 dark:text-slate-100 bg-white dark:bg-gray-800 p-5 text-sm border-gray-300 border dark:border-gray-600 rounded flex my-5 md:flex-row flex-col leading-6 gap-2">
+        <div class="flex space-y-4 flex-col flex-1">
+            <h2 class="text-base"><i class="fas fa-book mr-2 text-margeblue dark:text-slate-200"></i>Syntax</h2>
+            <h2>This is a keyword-based search engine. When entering multiple search terms, the search engine will attempt to match them against documents where the terms occur in close proximity.</h2>
+            <h2>Search terms can be excluded with a hyphen.</h2>
+            <h2>While the search engine at present does not allow full text search, quotes can be used to specifically search for names or terms in the title. Using quotes will also cause the search engine to be as literal as possible in interpreting the query.</h2>
+            <h2>Parentheses can be used to add terms to the query without giving weight to the terms when ranking the search results.</h2>
+
+            <h2>Samples</h2>
+            <dl>
+                <dt class="font-mono text-red-800 dark:text-red-200">soup -chicken</dt>
+                <dd class="ml-4">Look for keywords that contain <span class="font-mono text-red-800 dark:text-red-200">soup</span>, but not
+                    <span class="font-mono text-red-800 dark:text-red-200">chicken</span>.</dd>
+                <dt class="font-mono text-red-800 dark:text-red-200">"keyboard"</dt>
+                <dd class="ml-4">Look for pages containing the exact word
+                    <span class="font-mono text-red-800 dark:text-red-200">keyboard</span>, not <span class="font-mono text-red-800 dark:text-red-200">keyboards</span> or the like.</dd>
+                <dt class="font-mono text-red-800 dark:text-red-200">"steve mcqueen"</dt>
+                <dd class="ml-4">Look for pages containing the exact words <span class="font-mono text-red-800 dark:text-red-200">steve mcqueen</span>
+                    in that order, with no words in between.</dd>
+                <dt class="font-mono text-red-800 dark:text-red-200">apology (plato)</dt>
+                <dd class="ml-4">Look for pages containing <span class="font-mono text-red-800 dark:text-red-200">apology</span> and <span class="font-mono text-red-800 dark:text-red-200">plato</span>, but only rank them
+                    based on their relevance to <span class="font-mono text-red-800 dark:text-red-200">apology</span></dd>
+            </dl>
+            <h2 class="text-base"><i class="fas fa-coffee mr-2 text-margeblue dark:text-slate-200"></i>Match Indicator</h2>
+            <h2>The "coffee stain" indicator next to the search results illustrates the locations in a document the keywords appear.
+                It operates a bit like a clock, starting at the top and working its way around clockwise.</h2>
+
+            <div class="flex gap-4 place-items-middle">
+                
+<svg width="40" height="40"
+     style="background-image: url('/site/example.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+            <line
+                    x1="21.67946714154962"
+                    y1="5.094316851601361"
+                    x2="21.903396093756232"
+                    y2="3.1068924318148774"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="24.954185929327508"
+                    y1="5.841750045374486"
+                    x2="25.614744053237843"
+                    y2="3.953983384757752"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="26.50825608676337"
+                    y1="6.485466981463713"
+                    x2="27.376023564998487"
+                    y2="4.683529245658875"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="29.352347027881002"
+                    y1="8.272527762979554"
+                    x2="30.59932663159847"
+                    y2="6.708864798043493"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+</svg>
+                <div>This is by the beginning</div>
+            </div>
+            <div class="flex gap-4 place-items-middle">
+                
+<svg width="40" height="40"
+     style="background-image: url('/site/example.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+            <line
+                    x1="21.67946714154962"
+                    y1="34.90568314839864"
+                    x2="21.903396093756236"
+                    y2="36.89310756818512"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="18.320532858450385"
+                    y1="34.90568314839864"
+                    x2="18.096603906243768"
+                    y2="36.89310756818512"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="16.662185990655292"
+                    y1="34.62391868272736"
+                    x2="16.217144122742663"
+                    y2="36.573774507091"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="13.491743913236629"
+                    y1="33.514533018536284"
+                    x2="12.623976435001513"
+                    y2="35.316470754341125"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+</svg>
+                <div>This is in the middle</div>
+            </div>
+            <div class="flex gap-4 place-items-middle">
+                
+<svg width="40" height="40"
+     style="background-image: url('/site/example.com/favicon'); background-repeat: no-repeat; background-size: 16px 16px; background-position: center; ">
+    <circle
+            cx="20"
+            cy="20"
+            r="16"
+            fill="none"
+            stroke="#eee"
+            stroke-width="2"
+    />
+
+            <line
+                    x1="8.272527762979552"
+                    y1="10.647652972119"
+                    x2="6.708864798043491"
+                    y2="9.400673368401533"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+            <line
+                    x1="10.647652972118994"
+                    y1="8.272527762979555"
+                    x2="9.400673368401527"
+                    y2="6.708864798043495"
+                    stroke="#444"
+                    stroke-width="2"
+            />
+
+</svg>
+                <div>This is toward the end</div>
+            </div>
+
+            <h2 class="text-base"><i class="fas fa-flag mr-2 text-margeblue dark:text-slate-200"></i>Language Limitations</h2>
+            <h2>The search engine currently does not support any languages other than English. </h2>
+            <h2> Support for other languages is planned,
+                but not available right now.  Adding support for additional languages and making it work well is somewhat time-consuming,
+                meanwhile having bad support for a language won't make anyone happy.
+            </h2>
+            <h2 class="text-base"><i class="fas fa-server mr-2 text-margeblue dark:text-slate-200"></i>Webmaster Information</h2>
+            <h2>If you wish to add your website to the index, follow the instructions in this <a class="underline text-liteblue dark:text-blue-200"  href="https://github.com/MarginaliaSearch/submit-site-to-marginalia-search">git repository</a>,
+                if you do not want to mess with git, you can also email <a class="underline text-liteblue dark:text-blue-200" href="mailto:contact@marginalia-search.com">contact@marginalia-search.com</a> with the domain name.</h2>
+            <h2>The search engine's crawler uses the user-agent string <span class="font-mono text-red-800 dark:text-red-200">search.marginalia.nu</span>, and requests come from the IPs indicated in
+                <a class="underline text-liteblue dark:text-blue-200" href="https://search.marginalia.nu/crawler-ips.txt">https://search.marginalia.nu/crawler-ips.txt</a>.</h2>
+            <h2>If you do not want your website to be crawled, the search engine respects robots.txt.  In case of questions, bug reports or concerns, email <a class="underline text-liteblue dark:text-blue-200" href="mailto:contact@marginalia-search.com">contact@marginalia-search.com</a>.
+            </h2>
+        </div>
+        <div class="flex space-y-4 flex-col flex-1">
+            <h2 class="text-base"><i class="fas fa-code mr-2 text-margeblue dark:text-slate-200"></i>Special Keywords</h2>
+            <table class="overflow-scroll">
+                <thead>
+                <tr><th>Keyword</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+
+                <tr><td>site:<em>example.com</em></td><td>Display site information about <em>example.com</em></td></tr>
+                <tr><td>site:<em>example.com</em> <em>keyword</em></td><td>Search <em>example.com</em> for <em>keyword</em></td></tr>
+                <tr><td>site:<em>*.example.com</em> <em>keyword</em></td><td>Search <em>example.com</em> and its subdomains for <em>keyword</em></td></tr>
+                <tr><td>browse:<em>example.com</em></td><td>Show similar websites to <em>example.com</em></td></tr>
+                <tr><td>ip:<em>127.0.0.1</em></td><td>Search documents hosted at <em>127.0.0.1</em></td></tr>
+                <tr><td>links:<em>example.com</em></td><td>Search documents linking to <em>example.com</em></td></tr>
+
+                <tr><td>tld:<em>edu</em> <em>keyword</em></td><td>Search documents with the top level domain <em>edu</em>.</td></tr>
+                <tr><td>?tld:<em>edu</em> <em>keyword</em></td><td>Prefer but do not require results with the top level domain <em>edu</em>.
+                        This syntax is also possible for links:..., ip:... and site:...</td></tr>
+
+                <tr><td>q&gt;5</td><td>The amount of javascript and modern features is at least 5 (on a scale 0 to 25)</td></tr>
+                <tr><td>q&lt;5</td><td>The amount of javascript and modern features is at most 5 (on a scale 0 to 25)</td></tr>
+
+                <tr><td>year&gt;2005</td><td>(beta) The document was ostensibly published in or after 2005</td></tr>
+                <tr><td>year=2005</td><td>(beta) The document was ostensibly published in 2005</td></tr>
+                <tr><td>year&lt;2005</td><td>(beta) The document was ostensibly published in or before 2005</td></tr>
+
+                <tr><td>rank&gt;50</td><td>The ranking of the website is at least 50 in a span of 1 - 255</td></tr>
+                <tr><td>rank&lt;50</td><td>The ranking of the website is at most 50 in a span of 1 - 255</td></tr>
+
+                <tr><td>format:html5</td><td>Filter documents using the HTML5 standard. This is typically modern websites.</td></tr>
+                <tr><td>format:xhtml</td><td>Filter documents using the XHTML standard</td></tr>
+                <tr><td>format:html123</td><td>Filter documents using the HTML standards 1, 2, and 3. This is typically very old websites. </td></tr>
+
+                <tr><td>generator:wordpress</td><td>Filter documents with the specified generator, in this case wordpress</td></tr>
+
+                <tr><td>file:zip</td><td>Filter documents containing a link to a zip file (most file-endings work)</td></tr>
+                <tr><td>file:audio</td><td>Filter documents containing a link to an audio file</td></tr>
+                <tr><td>file:video</td><td>Filter documents containing a link to a video file</td></tr>
+                <tr><td>file:archive</td><td>Filter documents containing a link to a compressed archive</td></tr>
+                <tr><td>file:document</td><td>Filter documents containing a link to a document</td></tr>
+
+                <tr><td>-special:media</td><td>Filter out documents with audio or video tags</td></tr>
+                <tr><td>-special:scripts</td><td>Filter out documents with javascript</td></tr>
+                <tr><td>-special:affiliate</td><td>Filter out documents with likely Amazon affiliate links</td></tr>
+                <tr><td>-special:tracking</td><td>Filter out documents with analytics or tracking code</td></tr>
+                <tr><td>-special:cookies</td><td>Filter out documents with cookies</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</footer>
+
+<footer>
+    <h1 class="sr-only">Policy Information</h1>
+    <div class="max-w-[1400px] mx-auto dark:bg-gray-800 bg-white p-5 text-sm border-gray-300 border dark:border-gray-600 rounded flex my-5 md:flex-row flex-col gap-2">
+        <div class="flex space-y-4 flex-col">
+            <h2 class="text-base"><i class="fas fa-briefcase mr-2 text-margeblue dark:text-slate-200"></i>Policies</h2>
+            <span class="text-sm text-slate-900 dark:text-white">
+            This website complies with the GDPR by not collecting any personal information,
+            and with the EU Cookie Directive by not using cookies for any purpose other than
+            to provide service functionality.
+            </span>
+            <span>
+            Access logs containing IP-addresses are retained for up to 24 hours;
+            anonymized logs with source addresses removed are sometimes kept longer
+            to help diagnose bugs.
+            </span>
+        </div>
+        <div class="flex space-y-4 flex-col">
+            <h2 class="text-base"><i class="fas fa-envelope mr-2 text-margeblue dark:text-slate-200"></i>Contact</h2>
+            <span class="text-sm text-slate-900 dark:text-white">
+                You can reach the webmaster of the search engine at <a class="underline text-liteblue dark:text-blue-200" href="mailto:contact@marginalia-search.com">contact@marginalia-search.com</a>.
+            </span>
+            <div class="text-base"><i class="fas fa-gear mr-2 text-margeblue dark:text-slate-200"></i>Sources</div>
+            <span class="text-sm text-slate-900 dark:text-white">
+            The search engine is open source with an AGPL license. The sources can be perused at
+                <a class="underline text-liteblue dark:text-blue-200" rel="external noopener nofollow" href="https://git.marginalia.nu/">https://git.marginalia.nu/</a>.
+            </span>
+        </div>
+        <div class="flex space-y-4 flex-col">
+            <h2 class="text-base"><i class="fas fa-database mr-2 text-margeblue dark:text-slate-200"></i>Data</h2>
+            <span class="text-sm text-slate-900 dark:text-white">
+            IP geolocation is sourced from the IP2Location LITE data available from
+                <a rel="external noopener nofollow" class="underline  text-liteblue dark:text-blue-200" href="https://lite.ip2location.com/">https://lite.ip2location.com/</a>
+            under
+            <a rel="external noopener nofollow" class="underline text-liteblue dark:text-blue-200" href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA&nbsp;4.0</a>.
+            </span>
+        </div>
+    </div>
+</footer>
+
+
+
+
+
+<aside id="mobile-menu" class="fixed inset-0 z-50 flex justify-center bg-white/90 dark:bg-black/90 backdrop-blur-sm hidden">
+    <button id="hide-filter-button" class="fixed bottom-10 right-5 text-sm bg-margeblue text-white p-4 rounded-xl active:text-slate-200">
+        <i class="fas fa-close mr-4"></i> Close
+    </button>
+    <div class="flex mx-auto flex-col my-10 px-4">
+        <div class="text-xl my-4"><i class="fas fa-filter mr-2 text-margeblue dark:text-slate-200"></i>Filters</div>
+        <div class="grid grid-cols-3 gap-4">
+            
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" checked class="hidden" tabindex="-1" aria-checked="true" />
+                            
+                            <i class="fas fa-globe text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&newfilter=true" class="text-sm" href="#">All</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=blogosphere&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-blog text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=blogosphere&newfilter=true" class="text-sm" href="#">Blogs</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=academia&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-university text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=academia&newfilter=true" class="text-sm" href="#">Academia</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=vintage&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-clock-rotate-left text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=vintage&newfilter=true" class="text-sm" href="#">Vintage</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=modern&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-minus text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=modern&newfilter=true" class="text-sm" href="#">Small Web</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+            
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=wiki&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-book text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=wiki&newfilter=true" class="text-sm" href="#">Wikis</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=forum&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-comments text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=forum&newfilter=true" class="text-sm" href="#">Forums</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=food&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-utensils text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=food&newfilter=true" class="text-sm" href="#">Recipes</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+            
+                
+                    <label class="flex items-center">
+                        <button onclick="document.location='/search?query=sqlite+wal+checkpoint&profile=custom&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                            
+                                <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                            
+                            <i class="fas fa-pencil text-xl"></i>
+                            <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&profile=custom&newfilter=true" class="text-sm" href="#">Custom Filter</a>
+                            <div class="grow"></div>
+                        </button>
+                    </label>
+                
+            
+        </div>
+
+        <div class="text-xl my-4"><i class="fas fa-cog mr-2 text-margeblue dark:text-slate-200"></i>Advanced Options</div>
+        <div class="grid grid-cols-3 gap-4">
+            
+                <label class="flex items-center">
+                    <button onclick="document.location='/search?query=sqlite+wal+checkpoint&searchTitle=title&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                        
+                            <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                        
+                        <i class="fas fa-angle-up text-xl"></i>
+                        <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&searchTitle=title&newfilter=true" class="text-sm" href="#">Search In Title</a>
+                        <div class="grow"></div>
+                    </button>
+                </label>
+            
+                <label class="flex items-center">
+                    <button onclick="document.location='/search?query=sqlite+wal+checkpoint&recent=recent&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                        
+                            <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                        
+                        <i class="fas fa-baby text-xl"></i>
+                        <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&recent=recent&newfilter=true" class="text-sm" href="#">Recent Results</a>
+                        <div class="grow"></div>
+                    </button>
+                </label>
+            
+                <label class="flex items-center">
+                    <button onclick="document.location='/search?query=sqlite+wal+checkpoint&js=no-js&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                        
+                            <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                        
+                        <i class="fas fa-wrench text-xl"></i>
+                        <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&js=no-js&newfilter=true" class="text-sm" href="#">Remove JS</a>
+                        <div class="grow"></div>
+                    </button>
+                </label>
+            
+                <label class="flex items-center">
+                    <button onclick="document.location='/search?query=sqlite+wal+checkpoint&adtech=reduce&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                        
+                            <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                        
+                        <i class="fas fa-dumpster-fire text-xl"></i>
+                        <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&adtech=reduce&newfilter=true" class="text-sm" href="#">Reduce Adtech</a>
+                        <div class="grow"></div>
+                    </button>
+                </label>
+            
+                <label class="flex items-center">
+                    <button onclick="document.location='/search?query=sqlite+wal+checkpoint&nsfw=smut&newfilter=true'" class="flex-1 p-2 rounded flex flex-col place-items-center has-[:checked]:bg-gray-100 has-[:checked]:text-slate-900 dark:has-[:checked]:bg-gray-800 dark:has-[:checked]:text-slate-100 hover:bg-gray-50 dark:hover:bg-gray-800 text-margeblue dark:text-slate-200 outline-1 active:outline border border-gray-700">
+                        
+                            <input type="checkbox" class="hidden" tabindex="-1" aria-checked="false" />
+                        
+                        <i class="fas fa-face-kiss text-xl"></i>
+                        <a tabindex="-1" href="/search?query=sqlite+wal+checkpoint&nsfw=smut&newfilter=true" class="text-sm" href="#">Reduce NSFW</a>
+                        <div class="grow"></div>
+                    </button>
+                </label>
+            
+        </div>
+    </div>
+</aside>
+
+</body>
+<script lang="javascript" src="js/mobile-button.js"></script>
+<script lang="javascript" src="js/language-button.js"></script>
+<script lang="javascript" src="js/typeahead.js"></script>
+
+</html>

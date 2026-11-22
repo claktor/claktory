@@ -4,6 +4,10 @@
 //! <yyyy-mm-dd>/<name>`, for the agent to move where it belongs. While it
 //! comes in, a file is kept in `uploads/.partial/`; an upload whose connection
 //! dropped resumes from what's there as long as the backend runs.
+//!
+//! The same chunks carry ink blobs (`UploadPurpose::Ink`, `crate::ink`): for
+//! no agent, staged in `<home>/annotations/staging/` and kept by their
+//! SHA-256, which their FinishUpload must carry.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -32,7 +36,9 @@ pub(crate) struct Uploads {
 
 /// An upload under way.
 struct Active {
+    /// Empty for ink.
     agent: String,
+    ink: bool,
     name: String,
     size: u64,
     mime: String,
@@ -99,7 +105,7 @@ pub(crate) fn available(path: &Path) -> Option<u64> {
 }
 
 /// "2026-11-20": today, here.
-fn today() -> String {
+pub(crate) fn today() -> String {
     // SAFETY: time and localtime_r only write the values they're given.
     let now = unsafe { libc::time(std::ptr::null_mut()) };
     let mut local: libc::tm = unsafe { std::mem::zeroed() };
@@ -139,16 +145,29 @@ impl Factory {
         if id.is_empty() {
             return Err(RequestError::Empty("upload_id"));
         }
-        if self.lock().config.agent(&request.agent_id).is_none() {
+        let ink = request.purpose() == v1::UploadPurpose::Ink;
+        if ink {
+            if !request.agent_id.is_empty() {
+                return Err(refused("Ink is uploaded for no agent: leave agent_id empty."));
+            }
+        } else if self.lock().config.agent(&request.agent_id).is_none() {
             return Err(RequestError::UnknownAgent(request.agent_id));
         }
         let Some(name) = file_name(&request.name) else { return Err(refused("The file needs a name.")) };
         if request.size > MAX_SIZE {
             return Err(refused(format!("{name} is {}; files can be up to 2 GB.", gb(request.size))));
         }
+        if ink {
+            let limit = crate::ink::limit(&request.mime).map_err(refused)?;
+            if request.size == 0 || request.size > limit {
+                return Err(refused(format!("{name} is {} bytes; ink of this kind is 1 byte to {}.", request.size, crate::ink::mib(limit))));
+            }
+        }
         let mut active = self.uploads.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(upload) = active.get(&id)
             && upload.agent == request.agent_id
+            && upload.ink == ink
+            && upload.mime == request.mime
             && upload.name == name
             && upload.size == request.size
         {
@@ -157,8 +176,13 @@ impl Factory {
         if let Some(old) = active.remove(&id) {
             let _ = std::fs::remove_file(&old.partial);
         }
-        let partials = self.uploads_dir(&request.agent_id).join(".partial");
-        std::fs::create_dir_all(&partials)?;
+        let partials = if ink {
+            crate::ink::staging(&self.home)?
+        } else {
+            let partials = self.uploads_dir(&request.agent_id).join(".partial");
+            std::fs::create_dir_all(&partials)?;
+            partials
+        };
         sweep(&partials);
         if let Some(free) = available(&partials)
             && free < request.size + SPARE
@@ -171,10 +195,18 @@ impl Factory {
         }
         let file: String =
             id.chars().map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' }).collect();
-        let partial = partials.join(format!("{file}-{}", crate::transcript::now_ms()));
+        let partial = partials.join(format!("{file}-{}{}", crate::transcript::now_ms(), if ink { ".partial" } else { "" }));
         std::fs::File::create(&partial)?;
-        let upload =
-            Active { agent: request.agent_id, name, size: request.size, mime: request.mime, partial, received: 0, hash: Sha256::new() };
+        let upload = Active {
+            agent: request.agent_id,
+            ink,
+            name,
+            size: request.size,
+            mime: request.mime,
+            partial,
+            received: 0,
+            hash: Sha256::new(),
+        };
         active.insert(id.clone(), upload);
         Ok(v1::UploadProgress { upload_id: id, received: 0 })
     }
@@ -215,9 +247,24 @@ impl Factory {
         };
         let hash: String = upload.hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
         let expected = request.sha256.trim();
+        if upload.ink && expected.is_empty() {
+            let _ = std::fs::remove_file(&upload.partial);
+            return Err(refused("Ink needs its SHA-256 when it's finished; send it again."));
+        }
         if !expected.is_empty() && !expected.eq_ignore_ascii_case(&hash) {
             let _ = std::fs::remove_file(&upload.partial);
             return Err(refused(format!("{} arrived damaged (its SHA-256 differs); send it again.", upload.name)));
+        }
+        if upload.ink {
+            // Checked again on what arrived, not only what was declared.
+            let fits = crate::ink::limit(&upload.mime).is_ok_and(|limit| upload.received <= limit);
+            if !fits {
+                let _ = std::fs::remove_file(&upload.partial);
+                return Err(refused(format!("{} is too big for ink.", upload.name)));
+            }
+            crate::ink::keep(&self.home, &upload.partial, &hash, &upload.mime)?;
+            tracing::info!(sha = %hash, size = upload.size, "ink blob kept");
+            return Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: None, blob_sha256: hash });
         }
         let folder = self.uploads_dir(&upload.agent).join(today());
         std::fs::create_dir_all(&folder)?;
@@ -226,7 +273,7 @@ impl Factory {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         tracing::info!(agent = %upload.agent, path = %path.display(), size = upload.size, "file uploaded");
         let attachment = v1::Attachment { path: path.display().to_string(), name, size: upload.size, mime: upload.mime };
-        Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: Some(attachment) })
+        Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: Some(attachment), blob_sha256: String::new() })
     }
 
     /// Abandons an upload, deleting what came of it.

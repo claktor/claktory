@@ -70,6 +70,8 @@ app() {
     pkill -f "Factory Dev.app/Contents/MacOS/" || true
   fi
   take_build "$ROOT/app/build/macos/Build/Products/Debug/Factory.app" "$APP"
+  # The browser helper, in Contents/Helpers where the app looks for it.
+  add_browser_host "$APP" dev debug
   make_dev_app "$APP" DebugProfile.entitlements
   # -g: open in the background, never take focus from whoever is working.
   open -g "$APP"

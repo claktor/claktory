@@ -12,6 +12,7 @@ import 'mobile/presentation.dart' show confirmDiscard, guardSheet;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/platform_policy.dart';
+import 'notification_settings.dart' show notifyModeOptions;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -1635,6 +1636,9 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   /// The agent it reports to, as chosen here; empty for none.
   late var _lead = widget.agent.leadId;
 
+  /// Whether it notifies the person, as chosen here.
+  late var _notify = widget.agent.notify;
+
   /// The shape chosen here; empty for automatic.
   late var _shape = _shapeChoice(widget.agent);
   var _confirmingDelete = false;
@@ -1676,6 +1680,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     final lead = _leadIn(AppScope.of(context).workspace.workspace);
     if (lead != agent.leadId) update.leadId = lead;
     if (_shape != _shapeChoice(agent)) update.avatarShape = _shape;
+    if (_notify != agent.notify) update.notify = _notify;
     // One hint, or examples one per line, without blank lines.
     final placeholder = placeholderLines(_placeholder.text).join('\n');
     if (placeholder != agent.placeholder) update.placeholder = placeholder;
@@ -1691,7 +1696,8 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
         update.hasAvatarShape() ||
         update.hasPlaceholder() ||
         update.hasFolderId() ||
-        update.hasLeadId();
+        update.hasLeadId() ||
+        update.hasNotify();
     return changed ? update : null;
   }
 
@@ -1947,6 +1953,18 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                 // The default, shown while it's left empty.
                 placeholder:
                     'Message ${_name.text.trim().isEmpty ? agent.name : _name.text.trim()}',
+              ),
+            ),
+            Field(
+              label: 'Notify me',
+              note:
+                  'Always: every kind, even ones turned off in Settings → '
+                  'Notifications, except during quiet hours.',
+              child: Select(
+                title: 'Notify me',
+                value: _notify,
+                options: notifyModeOptions,
+                onChanged: (mode) => setState(() => _notify = mode),
               ),
             ),
             // Limited to a pipe, its secrets and extensions are off: why,

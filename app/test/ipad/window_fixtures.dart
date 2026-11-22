@@ -114,16 +114,15 @@ const windowFixtures = <WindowFixture>[
         '(Gelato, iPadOS 27.2)',
   ),
   // A mini's window narrowed in Windowed Apps (Gelato, iPadOS 27.2): the
-  // view ~1097 tall with a bottom inset of 10; the top inset wasn't
-  // recorded, so the heights take the full screen's 32. The idiom stays
-  // pad at every width.
+  // view ~1097 tall, its padding 32 top and 10 bottom at every width, so
+  // 1055 safe. The idiom stays pad at every width.
   WindowFixture(
     'mini-window-679',
     Size(679, 1055),
     tier: WorkbenchTier.focused,
     simulator: _mini,
     measured: true,
-    note: 'the last width with a regular horizontal size class',
+    note: 'regular horizontal size class (it turns compact under 668)',
   ),
   WindowFixture(
     'mini-window-662',
@@ -156,6 +155,34 @@ const windowFixtures = <WindowFixture>[
     simulator: _mini,
     measured: true,
     note: 'the narrowest a window gets (a 320 target stopped here)',
+  ),
+  // A Pro 13's windows (Gelato, iPadOS 27.2): upright ~1340 tall, on its
+  // side 1032, with insets of 32 top and 10 bottom upright, 32 and 20 on
+  // its side. The size class turns compact under 671 upright, under 669
+  // on its side.
+  WindowFixture(
+    'pro13-window-portrait-671',
+    Size(671, 1298),
+    tier: WorkbenchTier.focused,
+    simulator: _pro13,
+    measured: true,
+    note: 'regular horizontal size class; compact at 666 and narrower',
+  ),
+  WindowFixture(
+    'pro13-window-landscape-667',
+    Size(667, 980),
+    tier: WorkbenchTier.focused,
+    simulator: _pro13,
+    measured: true,
+    note: 'compact horizontal size class; regular at 669 and wider',
+  ),
+  WindowFixture(
+    'pro13-window-375',
+    Size(375, 1298),
+    tier: WorkbenchTier.compact,
+    simulator: _pro13,
+    measured: true,
+    note: 'the narrowest a window gets',
   ),
   WindowFixture(
     'air11-portrait-820',

@@ -1192,9 +1192,13 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
         ),
         const SizedBox(height: Space.s),
         Text(
-          "It unlocks your secrets if claktory.com can't be reached or your "
-          'account is gone. Keep it somewhere safe, such as your password '
-          'manager.',
+          'Your secrets open with two halves together: one on the computer '
+          'Claktory runs on and one at claktory.com. Neither can open them '
+          'alone. This key opens them by itself, if claktory.com can\'t be '
+          'reached, your account is gone or that computer\'s half is lost.\n\n'
+          'Keep it in a password manager, such as Passwords or 1Password, or '
+          'on paper kept somewhere safe. Never share it: anyone with it can '
+          'open your secrets.',
           style: type.body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.xl),

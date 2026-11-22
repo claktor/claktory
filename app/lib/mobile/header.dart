@@ -6,10 +6,14 @@ import '../selection.dart' show Unselectable;
 import 'metrics.dart';
 import 'platform_policy.dart';
 
+/// How large a [PhoneHeader]'s title grows with the person's text size.
+const phoneTitleTextScale = 1.6;
+
 /// A phone screen's header (docs/IDENTITY.md, "Phone"): at most one action
 /// at its start (Menu or Back), its title, and up to two at its end (More,
 /// Close), each a 44pt target. At least 44pt tall, and taller as the
-/// system's text grows, rather than cutting its title off.
+/// system's text grows (its title up to [phoneTitleTextScale]), rather
+/// than cutting its title off.
 class PhoneHeader extends StatelessWidget {
   const PhoneHeader({
     super.key,
@@ -55,9 +59,16 @@ class PhoneHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final heading = Padding(
-      padding: const EdgeInsets.symmetric(vertical: Space.xs),
-      child: Semantics(header: true, child: this.title),
+    // A bar's title grows only so far, as iOS's navigation bars' do (the
+    // page's own words grow in full): past that, a word as long as
+    // "Notifications" no longer fits a small iPhone's bar and would break
+    // in the middle.
+    final heading = MediaQuery.withClampedTextScaling(
+      maxScaleFactor: phoneTitleTextScale,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: Space.xs),
+        child: Semantics(header: true, child: this.title),
+      ),
     );
     Widget title = heading;
     if (onTitleTap case final onTap?) {

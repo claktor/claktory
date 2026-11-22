@@ -8,6 +8,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/sidebar.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -152,5 +153,40 @@ void main() {
     await settle(tester);
     expect(find.byType(MapView), findsNothing);
     expect(active('Map'), isFalse);
+  });
+
+  testWidgets('squeezed to 280, a page keeps 320 and scrolls sideways, its '
+      'cut edge fading', (tester) async {
+    // Settings as a 280pt pane, as Abbacchio's B6 pass had it.
+    final harness = Harness(snapshot(layout: beside('settings', '')));
+    harness.backend.appliesLayouts = true;
+    await harness.show(tester, size: const Size(848, 900));
+    await settle(tester);
+    final pane = find.byType(PageSideways);
+    expect(tester.getSize(pane).width, closeTo(280, 4));
+    expect(tester.getSize(find.byType(SettingsView)).width, pagePaneMinWidth);
+    PageSidewaysState fades() => tester.state<PageSidewaysState>(pane);
+    // More to the right: that edge fades, the left doesn't.
+    expect(fades().fadesRight, isTrue);
+    expect(fades().fadesLeft, isFalse);
+    expect(
+      find.descendant(of: pane, matching: find.byType(ShaderMask)),
+      findsOneWidget,
+    );
+
+    // Settings' own list scrolling down changes nothing sideways.
+    await tester.drag(find.byType(SettingsView), const Offset(0, -200));
+    await settle(tester);
+    expect(fades().fadesRight, isTrue);
+    expect(fades().fadesLeft, isFalse);
+
+    // Scrolled to the right end: the left edge fades instead.
+    // A sideways scroll (a trackpad's, or Shift and the wheel).
+    final mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(tester.getCenter(pane)));
+    await tester.sendEventToBinding(mouse.scroll(const Offset(100, 0)));
+    await settle(tester);
+    expect(fades().fadesRight, isFalse);
+    expect(fades().fadesLeft, isTrue);
   });
 }

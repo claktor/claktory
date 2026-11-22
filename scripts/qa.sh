@@ -7,6 +7,9 @@
 #   scripts/qa.sh up                    a sandbox on main's HEAD
 #   scripts/qa.sh --rev factory/me up   on another branch or commit
 #   scripts/qa.sh send qa1 CreateProject '{"name":"Site"}'
+#   scripts/qa.sh up --speech ~/.factory-dev/models/speech/parakeet-tdt-0.6b-v3-Q8_0.gguf
+#                                       speech recognition ready (claktory-speech
+#                                       built once per commit, the model copied in)
 #
 # --container runs the same commands inside a Linux container instead
 # (podman): claktory-qa, its sandboxes and their agents' tools all run in
@@ -111,7 +114,13 @@ EOF
   elif [[ "$("$ENGINE" container inspect "$NAME" --format '{{.State.Running}}')" != true ]]; then
     "$ENGINE" start "$NAME" >/dev/null
   fi
-  [[ $# -gt 0 ]] || exec "$ENGINE" exec -e CLAKTORY_QA_ROOT=/qa -e CLAKTORY_QA_COMMIT="$COMMIT" "$NAME" /opt/claktory-qa/claktory-qa
+  for arg in "$@"; do
+    if [[ "$arg" == "--speech" ]]; then
+      echo '{"ok":false,"error":"usage","message":"--speech runs only outside the container: its claktory-speech and model are this Mac'\''s."}'
+      exit 2
+    fi
+  done
+  [[ $# -gt 0 ]] || exec "$ENGINE" exec -e CLAKTORY_QA_ROOT=/qa -e CLAKTORY_QA_COMMIT="$COMMIT" -e CLAKTORY_QA_REPO="$REPO" -e CLAKTORY_QA_OWNER="${CLAKTORY_QA_OWNER:-}" "$NAME" /opt/claktory-qa/claktory-qa
   # The paths a command's JSON names (log, mail, model_script) are container
   # paths: pull copies one out to this Mac.
   if [[ "$1" == "pull" ]]; then
@@ -143,7 +152,7 @@ EOF
       args[i]="$inside"
     fi
   done
-  exec "$ENGINE" exec -e CLAKTORY_QA_ROOT=/qa -e CLAKTORY_QA_COMMIT="$COMMIT" "$NAME" /opt/claktory-qa/claktory-qa "${args[@]}"
+  exec "$ENGINE" exec -e CLAKTORY_QA_ROOT=/qa -e CLAKTORY_QA_COMMIT="$COMMIT" -e CLAKTORY_QA_REPO="$REPO" -e CLAKTORY_QA_OWNER="${CLAKTORY_QA_OWNER:-}" "$NAME" /opt/claktory-qa/claktory-qa "${args[@]}"
 fi
 
 # A commit's binaries are reused only when its build vouched for them:
@@ -151,6 +160,32 @@ fi
 # compiled in that build (below). Folders without it, such as those built
 # before this check, are built again.
 BIN="$ROOT/bin/$COMMIT"
+# The cache prunes itself as it grows (the shared disk once filled up):
+# before each new commit's build, it drops other commits' binaries older
+# than CLAKTORY_QA_KEEP_HOURS (4) that no running process uses, and when
+# the shared target is over CLAKTORY_QA_TARGET_GB (25), its incremental
+# state, then all of it (the next build is a cold one). Called holding the
+# build lock.
+prune_cache() {
+  local running dir commit kb
+  running="$(ps -axo command= 2>/dev/null | grep -oE "$ROOT/bin/[0-9a-f]+/" | sort -u || true)"
+  while IFS= read -r dir; do
+    commit="$(basename "$dir")"
+    [[ "$commit" != "$COMMIT" ]] || continue
+    grep -qF "$ROOT/bin/$commit/" <<<"$running" && continue
+    rm -rf "$dir"
+  done < <(find "$ROOT/bin" -mindepth 1 -maxdepth 1 -type d -mmin +$((${CLAKTORY_QA_KEEP_HOURS:-4} * 60)) 2>/dev/null)
+  [[ -d "$ROOT/target" ]] || return 0
+  kb="$(du -sk "$ROOT/target" 2>/dev/null | cut -f1)"
+  if ((kb > ${CLAKTORY_QA_TARGET_GB:-25} * 1024 * 1024)); then
+    rm -rf "$ROOT/target/debug/incremental"
+    kb="$(du -sk "$ROOT/target" 2>/dev/null | cut -f1)"
+    if ((kb > ${CLAKTORY_QA_TARGET_GB:-25} * 1024 * 1024)); then
+      echo "claktory-qa: the shared build cache is over ${CLAKTORY_QA_TARGET_GB:-25} GB; starting it afresh" >&2
+      rm -rf "$ROOT/target"
+    fi
+  fi
+}
 built() { [[ -x "$BIN/claktory-qa" && "$(cat "$BIN/commit" 2>/dev/null)" == "$COMMIT" ]]; }
 if ! built; then
   # One build at a time in the shared target, from cargo to the copy out
@@ -171,6 +206,7 @@ if ! built; then
   echo $$ >"$LOCK/pid"
   trap 'rm -rf "$LOCK"' EXIT
   if ! built; then
+    prune_cache
     SRC="$ROOT/src/$COMMIT"
     rm -rf "$SRC" "$BIN"
     mkdir -p "$SRC"
@@ -211,5 +247,55 @@ if ! built; then
   trap - EXIT
 fi
 
-export CLAKTORY_QA_ROOT="$ROOT" CLAKTORY_QA_COMMIT="$COMMIT"
+# `up --speech MODEL` also needs the commit's claktory-speech, which builds
+# transcribe.cpp (ggml) from source: minutes, so only when a sandbox asks
+# for it, once per commit, vouched for the same way.
+speech=""
+if [[ "${1:-}" == "up" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == "--speech" ]]; then speech=1; fi
+  done
+fi
+if [[ -n "$speech" && ! -x "$BIN/claktory-speech" ]]; then
+  LOCK="$ROOT/build.lock"
+  waited=""
+  until mkdir "$LOCK" 2>/dev/null; do
+    holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCK"
+      continue
+    fi
+    [[ -n "$waited" ]] || echo "claktory-qa: waiting for another build ($LOCK)" >&2
+    waited=1
+    sleep 1
+  done
+  echo $$ >"$LOCK/pid"
+  trap 'rm -rf "$LOCK"' EXIT
+  if [[ ! -x "$BIN/claktory-speech" ]]; then
+    SRC="$ROOT/src/$COMMIT-speech"
+    rm -rf "$SRC"
+    mkdir -p "$SRC"
+    git -C "$REPO" archive "$COMMIT" | tar -xm -C "$SRC"
+    echo "claktory-qa: building claktory-speech at $COMMIT (once per commit; the first builds ggml and takes several minutes)" >&2
+    MESSAGES="$ROOT/src/$COMMIT-speech.json"
+    (cd "$SRC" && CARGO_TARGET_DIR="$ROOT/target" \
+      cargo build --quiet --message-format=json-render-diagnostics -p claktory-speech) >"$MESSAGES"
+    ours="$(grep '"reason":"compiler-artifact"' "$MESSAGES" | grep -F "\"package_id\":\"path+file://$SRC/" || true)"
+    stale="$(grep -F '"fresh":true' <<<"$ours" | sed -E 's/.*"package_id":"path\+file:\/\/[^"]*\/([^"#\/]+)#.*/\1/' | sort -u | tr '\n' ' ' || true)"
+    grep -F '"fresh":false' <<<"$ours" | grep -qF "\"executable\":\"$ROOT/target/debug/claktory-speech\"" ||
+      stale="${stale}claktory-speech(not built) "
+    if [[ -n "$stale" ]]; then
+      echo "{\"ok\":false,\"error\":\"stale_build\",\"message\":\"The build of claktory-speech at $COMMIT reused what another commit built: ${stale% }. Nothing was kept; its cargo messages are in $MESSAGES.\"}"
+      rm -rf "$SRC"
+      exit 1
+    fi
+    cp "$ROOT/target/debug/claktory-speech" "$BIN/claktory-speech.tmp"
+    mv "$BIN/claktory-speech.tmp" "$BIN/claktory-speech"
+    rm -rf "$SRC" "$MESSAGES"
+  fi
+  rm -rf "$LOCK"
+  trap - EXIT
+fi
+
+export CLAKTORY_QA_ROOT="$ROOT" CLAKTORY_QA_COMMIT="$COMMIT" CLAKTORY_QA_REPO="$REPO"
 exec "$BIN/claktory-qa" "$@"

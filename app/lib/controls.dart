@@ -243,16 +243,23 @@ class _ButtonState extends State<Button> {
                 color: _focused ? palette.signal : const Color(0x00000000),
               ),
             ),
-            // As wide as its label, wherever it's placed.
+            // As wide as its label, wherever it's placed. On a phone its
+            // words grow only to 2×, so a long one ("notification") still
+            // fits a 320pt screen whole rather than breaking mid-word.
             child: Center(
               widthFactor: 1,
-              child: Text(
-                widget.label,
-                maxLines: phone ? null : 1,
-                textAlign: TextAlign.center,
-                style: (phone ? PhoneType.label : TextStyles.label).copyWith(
-                  color: foreground,
-                  fontWeight: phone && widget.primary ? FontWeight.w600 : null,
+              child: MediaQuery.withClampedTextScaling(
+                maxScaleFactor: phone ? 2 : double.infinity,
+                child: Text(
+                  widget.label,
+                  maxLines: phone ? null : 1,
+                  textAlign: TextAlign.center,
+                  style: (phone ? PhoneType.label : TextStyles.label).copyWith(
+                    color: foreground,
+                    fontWeight: phone && widget.primary
+                        ? FontWeight.w600
+                        : null,
+                  ),
                 ),
               ),
             ),
@@ -778,6 +785,10 @@ class Select<T> extends StatefulWidget {
   State<Select<T>> createState() => _SelectState<T>();
 }
 
+/// A Select menu's height at most, and each of its rows'.
+const _menuHeight = 280.0;
+const _rowHeight = 28.0;
+
 class _SelectState<T> extends State<Select<T>> {
   final _menu = OverlayPortalController();
   final _link = LayerLink();
@@ -785,10 +796,12 @@ class _SelectState<T> extends State<Select<T>> {
   late final _focusNode = FocusNode(onKeyEvent: _onKey);
   var _highlighted = 0;
   var _hovered = false;
+  ScrollController? _scroll;
 
   @override
   void dispose() {
     _focusNode.dispose();
+    _scroll?.dispose();
     super.dispose();
   }
 
@@ -806,6 +819,13 @@ class _SelectState<T> extends State<Select<T>> {
       return;
     }
     _focusNode.requestFocus();
+    // Opens at what's chosen (21:30 in a day of half hours), in the
+    // middle of the menu where it can be.
+    final shown = _menuHeight - 2 * Space.xs - 2;
+    final most = math.max(0.0, widget.options.length * _rowHeight - shown);
+    final at = (_selectedIndex + 0.5) * _rowHeight - shown / 2;
+    _scroll?.dispose();
+    _scroll = ScrollController(initialScrollOffset: at.clamp(0.0, most));
     setState(() => _highlighted = _selectedIndex);
     _menu.show();
   }
@@ -948,7 +968,10 @@ class _SelectState<T> extends State<Select<T>> {
           groupId: _tapRegion,
           child: Container(
             width: width,
-            constraints: const BoxConstraints(maxHeight: 280, minWidth: 200),
+            constraints: const BoxConstraints(
+              maxHeight: _menuHeight,
+              minWidth: 200,
+            ),
             padding: const EdgeInsets.all(Space.xs),
             decoration: BoxDecoration(
               color: palette.sidebar,
@@ -957,7 +980,9 @@ class _SelectState<T> extends State<Select<T>> {
               boxShadow: floatingShadow,
             ),
             child: ListView.builder(
+              controller: _scroll,
               shrinkWrap: true,
+              itemExtent: _rowHeight,
               itemCount: widget.options.length,
               itemBuilder: (context, index) {
                 final option = widget.options[index];
@@ -968,7 +993,7 @@ class _SelectState<T> extends State<Select<T>> {
                   child: GestureDetector(
                     onTap: () => _pick(index),
                     child: Container(
-                      height: 28,
+                      height: _rowHeight,
                       padding: const EdgeInsets.symmetric(horizontal: Space.s),
                       decoration: BoxDecoration(
                         color: index == _highlighted
@@ -2232,11 +2257,36 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'chart-column': _drawChartColumn,
   'upload': _drawUpload,
   'inbox': _drawInbox,
+  'bell': _drawBell,
   'message-circle-question': _drawMessageCircleQuestion,
   'shield-alert': _drawShieldAlert,
   'maximize-2': _drawMaximize2,
   'minimize-2': _drawMinimize2,
+  'layout-grid': _drawLayoutGrid,
+  'pin': _drawPin,
+  'pin-off': _drawPinOff,
 };
+
+final _drawLayoutGrid = _paths(const [
+  'M4 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z',
+  'M15 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z',
+  'M15 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z',
+  'M4 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z',
+]);
+
+final _drawPin = _paths(const [
+  'M12 17v5',
+  'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1'
+      'h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76'
+      'V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
+]);
+
+final _drawPinOff = _paths(const [
+  'M12 17v5',
+  'M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89',
+  'm2 2 20 20',
+  'M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11',
+]);
 
 final _drawMaximize2 = _paths(const [
   'M15 3h6v6',
@@ -2278,6 +2328,13 @@ final _drawInbox = _paths(const [
   'M22 12h-6l-2 3h-4l-2-3H2',
   'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
       'A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z',
+]);
+
+final _drawBell = _paths(const [
+  'M10.268 21a2 2 0 0 0 3.464 0',
+  'M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673'
+      'C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8'
+      'c0 4.499-1.411 5.956-2.738 7.326',
 ]);
 
 final _drawMenu = _paths(const ['M4 12h16', 'M4 18h16', 'M4 6h16']);

@@ -1,0 +1,495 @@
+import 'package:flutter/widgets.dart';
+
+import 'avatar.dart';
+import 'backend.dart';
+import 'characters/character.dart';
+import 'controls.dart';
+import 'decision.dart' show DecisionComment;
+import 'extensions.dart' show dayLabel, logTime;
+import 'forms.dart' show rivetIn;
+import 'identity.dart';
+import 'mobile/lines.dart';
+import 'mobile/metrics.dart';
+import 'pipes.dart' show PortalGlyph, pipeColor;
+import 'protocol/factory/v1/factory.pb.dart';
+import 'scope.dart';
+import 'selection.dart' show SelectableArea;
+import 'tool_views.dart' show ShowMore;
+
+/// What the card and Needs you ask, in a line: "Give Mike access to Direct
+/// messages?".
+String appGrantSummary(AppGrantProposal grant, Workspace workspace) =>
+    'Give ${_agentName(grant, workspace)} access to ${grant.appName}?';
+
+String _agentName(AppGrantProposal grant, Workspace workspace) =>
+    workspace.agents
+        .where((agent) => agent.id == grant.agentId)
+        .firstOrNull
+        ?.name ??
+    grant.agentId;
+
+/// The scope that lets the agent send messages as the person.
+const appGrantSend = 'dm.send';
+
+/// What the warning says when the agent it would give access to has read
+/// messages from another Claktory; more when it could send as the person.
+String appGrantReadPipes(String name, {required bool sends}) => sends
+    ? '$name has read messages from another Claktory. Whoever wrote them '
+          'could try to get $name to send messages as you. Approve only '
+          'if you trust them.'
+    : '$name has read messages from another Claktory.';
+
+/// Whether the app gave [resources] names of their own: until it does,
+/// each label is only its id, which the person never sees.
+bool appGrantNamed(List<AppGrantResource> resources) => resources.every(
+  (resource) => resource.label.isNotEmpty && resource.label != resource.id,
+);
+
+/// What a grant reaches, counted when the app gives no names: "In 2
+/// conversations".
+String appGrantReach(List<AppGrantResource> resources) {
+  final counts = <String, int>{};
+  for (final resource in resources) {
+    final kind = resource.kind.isEmpty ? 'item' : resource.kind;
+    counts[kind] = (counts[kind] ?? 0) + 1;
+  }
+  final parts = [
+    for (final MapEntry(key: kind, value: n) in counts.entries)
+      '$n $kind${n == 1 ? '' : 's'}',
+  ];
+  return 'In ${parts.join(' and ')}';
+}
+
+/// When the access would end: "Until you take it back." or "Until Mon 17
+/// Nov, 14:32." ("Until today, 14:32." on the day).
+String appGrantUntil(int expiresMs, {DateTime? now}) {
+  if (expiresMs <= 0) return 'Until you take it back.';
+  now ??= DateTime.now();
+  final at = DateTime.fromMillisecondsSinceEpoch(expiresMs);
+  final day = dayLabel(at, now);
+  final clock =
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}';
+  final named = day == 'Today' || day == 'Yesterday' ? day.toLowerCase() : day;
+  return 'Until $named, $clock.';
+}
+
+/// Rivet's proposal to give an agent access to an app kept at the person's
+/// claktory.com account, such as their direct messages
+/// (AppGrantProposal): what the agent could do there and reach, for how
+/// long and why (in Rivet's words), with Decline (and a comment for Rivet,
+/// if they like) and Approve. Approved, the account makes the grant before
+/// the backend answers, so the card says it's on its way meanwhile; while
+/// the account can't be reached, the refusal shows and it can be approved
+/// again. A sibling of the proposal card, in Rivet's color. The backend
+/// sends the entry back decided; the card keeps nothing but the comment
+/// being typed.
+class AppGrantCard extends StatefulWidget {
+  const AppGrantCard(
+    this.grant, {
+    super.key,
+    required this.agentId,
+    required this.seq,
+  });
+
+  final AppGrantProposal grant;
+
+  /// Whose conversation shows it: Rivet's.
+  final String agentId;
+
+  /// The entry's seq in that conversation.
+  final int seq;
+
+  @override
+  State<AppGrantCard> createState() => _AppGrantCardState();
+}
+
+class _AppGrantCardState extends State<AppGrantCard> {
+  final _comment = TextEditingController();
+
+  /// Which decision is on its way: approving waits for the account.
+  bool? _approving;
+  String? _error;
+
+  @override
+  void dispose() {
+    _comment.dispose();
+    super.dispose();
+  }
+
+  Future<void> _decide({required bool approve}) async {
+    if (_approving != null) return;
+    final backend = AppScope.of(context);
+    setState(() {
+      _approving = approve;
+      _error = null;
+    });
+    try {
+      await backend.decideAppGrant(
+        widget.agentId,
+        widget.seq,
+        approve: approve,
+        comment: _comment.text.trim(),
+      );
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _approving = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) => _card(context, store.workspace),
+    );
+  }
+
+  Widget _card(BuildContext context, Workspace workspace) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final grant = widget.grant;
+    final rivet =
+        workspace.agents.where((a) => a.id == widget.agentId).firstOrNull ??
+        rivetIn(workspace);
+    final color = agentColor(rivet?.color ?? 'blue');
+    final rivetName = rivet?.name ?? 'Rivet';
+    final name = _agentName(grant, workspace);
+    final pending = grant.state == AppGrantState.APP_GRANT_STATE_PENDING;
+    final muted = grant.state == AppGrantState.APP_GRANT_STATE_DECLINED;
+    final card = Container(
+      padding: const EdgeInsets.all(Space.l),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.06),
+        border: Border.all(
+          color: color.withValues(alpha: pending ? 0.55 : 0.25),
+        ),
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              if (rivet != null) ...[
+                AgentCharacter(agent: rivet, size: 20),
+                const SizedBox(width: Space.xs + 2),
+              ],
+              Flexible(
+                child: Text(
+                  '$rivetName suggests',
+                  style: type.caption.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Space.s),
+          Text(
+            appGrantSummary(grant, workspace),
+            style: type.emphasis.copyWith(
+              color: muted ? palette.textMuted : palette.text,
+            ),
+          ),
+          // Before anything else it gives: whom it would give it to has
+          // read another Claktory's messages (Fugo's condition).
+          if (grant.granteeReadPipes) ...[
+            const SizedBox(height: Space.s),
+            _ReadPipes(
+              name: name,
+              sends: grant.scopes.any((scope) => scope.id == appGrantSend),
+            ),
+          ],
+          const SizedBox(height: Space.s),
+          ..._access(palette, type, name),
+          // After Claktory's own facts, set apart as Rivet's.
+          if (grant.reason.trim().isNotEmpty) ...[
+            const SizedBox(height: Space.m),
+            _Reason(
+              rivetName: rivetName,
+              reason: grant.reason.trim(),
+              color: color,
+            ),
+          ],
+          const SizedBox(height: Space.m),
+          if (pending)
+            ..._pending(palette, type, name, rivetName)
+          else
+            ..._decided(palette, type, color, name, rivetName),
+        ],
+      ),
+    );
+    // As the ask card: the conversation's to select in it, its own in
+    // Needs you.
+    if (SelectionContainer.maybeOf(context) != null ||
+        Overlay.maybeOf(context) == null) {
+      return card;
+    }
+    return SelectableArea(child: card);
+  }
+
+  /// What the agent could do, where, and until when: the backend's words.
+  List<Widget> _access(Palette palette, TypeScale type, String name) {
+    final grant = widget.grant;
+    final line = type.body.copyWith(color: palette.text);
+    final faint = type.caption.copyWith(color: palette.textFaint);
+    return [
+      if (grant.scopes.isNotEmpty) ...[
+        Text(
+          '$name could:',
+          style: type.caption.copyWith(
+            color: palette.textMuted,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 2),
+        for (final scope in grant.scopes)
+          Padding(
+            padding: const EdgeInsets.only(left: Space.xs, top: 2),
+            child: Text(
+              '•  ${scope.label.isEmpty ? scope.id : scope.label}',
+              style: line,
+            ),
+          ),
+      ],
+      if (grant.resources.isNotEmpty) ...[
+        const SizedBox(height: Space.s),
+        if (appGrantNamed(grant.resources)) ...[
+          Text(
+            'Only in:',
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          for (final resource in grant.resources)
+            Padding(
+              padding: const EdgeInsets.only(left: Space.xs, top: 2),
+              child: Text('•  ${resource.label}', style: line),
+            ),
+        ] else
+          Text(appGrantReach(grant.resources), style: line),
+      ],
+      const SizedBox(height: Space.s),
+      Text(appGrantUntil(grant.expiresMs.toInt()), style: faint),
+    ];
+  }
+
+  List<Widget> _pending(
+    Palette palette,
+    TypeScale type,
+    String name,
+    String rivetName,
+  ) {
+    final busy = _approving != null;
+    return [
+      ActionLine(
+        lead: Text(
+          _error ??
+              (_approving == true
+                  ? 'Giving $name access…'
+                  : 'Approving gives $name this access through your '
+                        'claktory.com account.'),
+          style: type.caption.copyWith(
+            color: _error == null ? palette.textFaint : palette.danger,
+          ),
+        ),
+        action: ControlsLine(
+          children: [
+            Button(
+              label: 'Decline',
+              onPressed: busy ? null : () => _decide(approve: false),
+            ),
+            Button(
+              label: 'Approve',
+              primary: true,
+              onPressed: busy ? null : () => _decide(approve: true),
+            ),
+          ],
+        ),
+      ),
+      // The shared Add a comment, with either answer. No Enter: access is
+      // approved only with the button.
+      const SizedBox(height: Space.xs),
+      DecisionComment(controller: _comment, agent: rivetName, enabled: !busy),
+    ];
+  }
+
+  List<Widget> _decided(
+    Palette palette,
+    TypeScale type,
+    Color color,
+    String name,
+    String rivetName,
+  ) {
+    final grant = widget.grant;
+    final decided = grant.decidedMs.toInt();
+    final failed = grant.state == AppGrantState.APP_GRANT_STATE_FAILED;
+    final (String said, Color tone) = switch (grant.state) {
+      AppGrantState.APP_GRANT_STATE_GRANTED => (
+        'Approved · $name has access',
+        color,
+      ),
+      AppGrantState.APP_GRANT_STATE_FAILED => (
+        "Approved, but couldn't give $name access",
+        palette.danger,
+      ),
+      _ => ('Declined', palette.textMuted),
+    };
+    return [
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const PersonAvatar(size: 16),
+          const SizedBox(width: Space.xs + 2),
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: said,
+                    style: TextStyle(color: tone, fontWeight: FontWeight.w500),
+                  ),
+                  if (decided > 0)
+                    TextSpan(
+                      text:
+                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                      style: TextStyle(color: palette.textFaint),
+                    ),
+                ],
+              ),
+              style: type.caption,
+            ),
+          ),
+        ],
+      ),
+      if (failed && grant.error.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        Text(grant.error, style: type.body.copyWith(color: palette.textMuted)),
+      ],
+      if (grant.comment.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        Text(
+          grant.comment,
+          style: type.body.copyWith(color: palette.textMuted),
+        ),
+      ],
+    ];
+  }
+}
+
+/// Rivet's reason, set apart as its words, never as Claktory's: under
+/// "Rivet's reason", plain text (no Markdown or links, so nothing in it
+/// can look like the card's own lines or controls) beside a bar in
+/// Rivet's color, four lines and then Show more (Fugo's rule).
+class _Reason extends StatelessWidget {
+  const _Reason({
+    required this.rivetName,
+    required this.reason,
+    required this.color,
+  });
+
+  final String rivetName;
+  final String reason;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          "$rivetName's reason",
+          style: type.caption.copyWith(color: palette.textFaint),
+        ),
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.only(left: Space.s),
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(color: color.withValues(alpha: 0.5), width: 2),
+            ),
+          ),
+          child: ShowMore(
+            child: Text(
+              reason,
+              style: type.body.copyWith(color: palette.textMuted),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The agent it would give access to has read a pipe: a line after the
+/// portal, as cards say where a request may come from; when the grant
+/// would let it send as the person, a `danger` box of its own instead.
+class _ReadPipes extends StatelessWidget {
+  const _ReadPipes({required this.name, required this.sends});
+
+  final String name;
+  final bool sends;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final words = appGrantReadPipes(name, sends: sends);
+    if (!sends) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: ExcludeSemantics(
+              child: PortalGlyph(color: pipeColor, size: 12),
+            ),
+          ),
+          const SizedBox(width: Space.xs + 2),
+          Expanded(
+            child: Text(
+              words,
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ),
+        ],
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.all(Space.s),
+      decoration: BoxDecoration(
+        color: palette.danger.withValues(alpha: 0.08),
+        border: Border.all(color: palette.danger.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: ExcludeSemantics(
+              child: PortalGlyph(color: palette.danger, size: 14),
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Expanded(
+            child: Text(
+              words,
+              style: type.body.copyWith(
+                color: palette.text,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

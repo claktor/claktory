@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "native_to_dart",
+  "method": "ready",
+  "arguments": {
+    "surface": "blank",
+    "source_sha256": null,
+    "sha256_verified": false,
+    "page_count": 1,
+    "pages": [
+      {
+        "page_1based": null,
+        "width": 1024.0,
+        "height": 768.0
+      }
+    ],
+    "drawing_space": "blank_canvas",
+    "handwriting": {
+      "available": true,
+      "min_os": "27.0",
+      "recognition_version": 9,
+      "supported_languages": [
+        "de",
+        "en",
+        "es",
+        "fr",
+        "hi-Latn",
+        "pt"
+      ]
+    }
+  }
+}

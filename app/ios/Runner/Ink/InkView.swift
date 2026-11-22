@@ -5,6 +5,7 @@
 // chose Draw with finger.
 
 import Flutter
+import ImageIO
 import PencilKit
 import UIKit
 
@@ -18,6 +19,8 @@ final class InkView: InkSurface {
   /// Document units per drawing unit (drawing_to_document's scale).
   private(set) var documentScale: CGFloat = 1
   private var zoomedByPerson = false
+  /// An image's pixels as stored, and its EXIF orientation (1–8).
+  private var stored: (width: Int, height: Int, orientation: Int)?
 
   override init(frame: CGRect, params: InkParams, channel: InkEvents) {
     super.init(frame: frame, params: params, channel: channel)
@@ -47,6 +50,7 @@ final class InkView: InkSurface {
         // UIImage applies the EXIF orientation: its size is the oriented
         // image's, the space the region and drawing are in.
         let image = data.flatMap(UIImage.init(data:))
+        let stored = data.flatMap(Self.stored)
         DispatchQueue.main.async {
           guard let self else { return }
           guard let actual, let image else {
@@ -58,6 +62,7 @@ final class InkView: InkSurface {
               "expected_sha256": expected, "actual_sha256": actual,
             ])
           }
+          self.stored = stored
           self.show(image: image, sha256: actual)
         }
       }
@@ -70,7 +75,7 @@ final class InkView: InkSurface {
       underlay.addSubview(label)
       label.frame = underlay.bounds
       label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-      ready(sha256: params.sourceSha256, space: "excerpt_rendition")
+      ready(sha256: sourceSha256, space: "excerpt_rendition")
     default:
       let blank = params.document["blank"] as? [String: Any] ?? [:]
       size = CGSize(
@@ -78,7 +83,7 @@ final class InkView: InkSurface {
         height: (blank["height"] as? NSNumber)?.doubleValue ?? 768)
       // A sketch is saved as a PNG at twice its points (layer_blank_sketch).
       documentScale = 2
-      ready(sha256: params.sourceSha256, space: "blank_canvas")
+      ready(sha256: sourceSha256, space: "blank_canvas")
     }
   }
 
@@ -93,8 +98,25 @@ final class InkView: InkSurface {
     ready(sha256: sha256, space: "oriented_image")
   }
 
+  override var statusText: (label: String, page: Int)? {
+    switch params.surface {
+    case "image":
+      let path = params.source["path"] as? String ?? ""
+      return (path.isEmpty ? "Image" : (path as NSString).lastPathComponent, 0)
+    case "excerpt": return ("Quote", 0)
+    default: return ("Sketch", 0)
+    }
+  }
+
+  /// An excerpt's words are read after the status; an image or a sketch
+  /// has nothing more to read.
+  override func readingOrder() -> [Any] {
+    underlay.subviews.compactMap { $0 as? InkExcerptView }
+  }
+
   private func ready(sha256: String?, space: String) {
     fit()
+    refreshStatus()
     send(
       "ready",
       [
@@ -107,6 +129,7 @@ final class InkView: InkSurface {
           ]
         ],
         "drawing_space": space,
+        "handwriting": handwritingJSON,
       ])
   }
 
@@ -155,8 +178,62 @@ final class InkView: InkSurface {
 
   override func drawingSize(page: Int) -> CGSize { size }
 
+  override func zoom(at point: CGPoint) -> CGFloat { canvas.zoomScale }
+
   override func setActive(_ active: Bool) {
     canvas.isUserInteractionEnabled = active
+  }
+
+  /// An image's pixels as stored and its EXIF orientation, before
+  /// UIImage turns it.
+  private static func stored(_ data: Data) -> (width: Int, height: Int, orientation: Int)? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+      let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+    else { return nil }
+    let o = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    return (w, h, (1...8).contains(o) ? o : 1)
+  }
+
+  /// The drawing in the document's own units (layer_image_exif.json,
+  /// layer_excerpt.json, layer_blank_sketch.json).
+  override func layerGeometry(page: Int) -> LayerGeometry? {
+    guard page == 0, size.width > 0, size.height > 0 else { return nil }
+    let w = Double(size.width), h = Double(size.height)
+    let k = Double(documentScale)
+    switch params.surface {
+    case "image":
+      guard image != nil else { return nil }
+      let s = stored ?? (Int(w), Int(h), 1)
+      return LayerGeometry(
+        coordinateSpace: [
+          "kind": "image", "oriented_width": Int(w.rounded()), "oriented_height": Int(h.rounded()),
+          "stored_width": s.width, "stored_height": s.height, "exif_orientation": s.orientation,
+          "units": "px",
+        ],
+        space: "oriented_image", drawingToDocument: [1, 0, 0, 1, 0, 0], size: size, rotation: 0)
+    case "excerpt":
+      let excerpt = params.document["excerpt"] as? [String: Any] ?? [:]
+      return LayerGeometry(
+        coordinateSpace: [
+          "kind": "excerpt_rendition", "width": w, "height": h, "units": "pt",
+          "text": excerpt["text"] as? String ?? "",
+          "rendition": (excerpt["rendition"] as? [String: Any] ?? [:]).filter {
+            ["font", "font_size", "line_height", "padding"].contains($0.key)
+          },
+        ],
+        space: "excerpt_rendition", drawingToDocument: [1, 0, 0, 1, 0, 0], size: size, rotation: 0)
+    default:
+      // The sketch's PNG is [documentScale] pixels per point.
+      let pw = Int((w * k).rounded()), ph = Int((h * k).rounded())
+      return LayerGeometry(
+        coordinateSpace: [
+          "kind": "image", "oriented_width": pw, "oriented_height": ph, "stored_width": pw,
+          "stored_height": ph, "exif_orientation": 1, "units": "px",
+        ],
+        space: "blank_canvas", drawingToDocument: [k, 0, 0, k, 0, 0], size: size, rotation: 0)
+    }
   }
 
   override func exportComposite(_ args: [String: Any], _ result: @escaping FlutterResult) {
@@ -165,7 +242,7 @@ final class InkView: InkSurface {
     }
     let request = InkExport.Request(args)
     let drawing = layers[0]?.drawing ?? PKDrawing()
-    let source = params.sourceSha256
+    let source = sourceSha256
     let under = InkExport.Underlay(
       size: size, image: image, paper: params.paper, view: image == nil ? underlay : nil,
       documentScale: documentScale)
@@ -218,6 +295,9 @@ final class InkExcerptView: UIView {
     super.init(frame: CGRect(origin: .zero, size: size))
     backgroundColor = .clear
     contentMode = .redraw
+    isAccessibilityElement = true
+    accessibilityLabel = text
+    accessibilityTraits = .staticText
   }
 
   required init?(coder: NSCoder) { nil }

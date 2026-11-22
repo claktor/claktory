@@ -1,7 +1,10 @@
-//! web_search: each query goes to the first engine that's healthy and
-//! answers, paced and budgeted for the whole Factory, since every agent
-//! shares one IP. A block is never retried: the engine cools down and the
-//! query falls through to the next one. Whether an engine may be asked is
+//! web_search: each query goes to the healthiest engine free to answer, and
+//! falls through to the next while engines block, break or find nothing,
+//! paced and budgeted for the whole Claktory, since every agent shares one
+//! IP. Engines that have been answering lately go first, and among those
+//! the least asked this hour, so the load is spread. A block is never
+//! retried: the engine cools down, and when its cooldown ends it's asked
+//! once (a probe, after the healthy ones) before it's back in rotation. Whether an engine may be asked is
 //! settled in its turn, after the wait, so requests queued behind a block
 //! or the hour's last one don't go out; the same search asked by several
 //! callers at once goes out once (a flight), and is dropped when no one
@@ -108,6 +111,11 @@ pub(crate) struct Health {
     pub(crate) strikes: u32,
     /// When it was asked, over the last hour.
     pub(crate) asked: VecDeque<i64>,
+    /// How often it failed lately, from 0 (never) to 1 (every time): each
+    /// answer moves it 30% of the way to 0 or 1.
+    pub(crate) failing: f64,
+    /// Answers about something else in a row (soft blocks): two cool it down.
+    pub(crate) degraded: u32,
 }
 
 impl Health {
@@ -126,18 +134,46 @@ impl Health {
         None
     }
 
+    /// Whether its cooldown is over but it hasn't answered since: its next
+    /// request is a probe.
+    pub(crate) fn probing(&self, now: i64) -> bool {
+        self.cooling_until != 0 && now >= self.cooling_until
+    }
+
+    /// When it can be asked again: now, or the end of its cooldown or of
+    /// its hour's budget.
+    fn free_at(&self, policy: &Policy, now: i64) -> i64 {
+        let budget = if self.asked.len() >= policy.per_hour { self.asked.front().map_or(now, |time| time + HOUR) } else { now };
+        budget.max(self.cooling_until).max(now)
+    }
+
     /// Records what an answer said, and how long to leave the engine alone.
     pub(crate) fn record(&mut self, policy: &Policy, outcome: &Result<Outcome, String>, now: i64) {
+        let answered = matches!(outcome, Ok(Outcome::Results(_) | Outcome::NoResults));
+        self.failing = self.failing * 0.7 + if answered { 0.0 } else { 0.3 };
+        if !matches!(outcome, Ok(Outcome::Blocked(Block::Degraded))) {
+            self.degraded = 0;
+        }
         let doubled = |max: i64| (HOUR << self.strikes.min(16)).min(max);
         let (cooldown, why) = match outcome {
             Ok(Outcome::Results(_) | Outcome::NoResults) => {
                 self.strikes = 0;
+                self.cooling_until = 0;
+                self.why.clear();
                 return;
             }
             Ok(Outcome::Blocked(Block::Challenge)) => (doubled(policy.challenge_max_ms), "asked for a CAPTCHA"),
             Ok(Outcome::Blocked(Block::RateLimited)) => (doubled(policy.limited_max_ms), "rate-limited this computer"),
             Ok(Outcome::Blocked(Block::Denied)) => (HOUR, "denied access"),
-            Ok(Outcome::Blocked(Block::Degraded)) => (HOUR, "returned results that don't match (a soft block)"),
+            // Some engines give a scraper's long queries unrelated results:
+            // once may be the query, twice in a row is the engine.
+            Ok(Outcome::Blocked(Block::Degraded)) => {
+                self.degraded += 1;
+                if self.degraded < 2 {
+                    return;
+                }
+                (10 * MINUTE, "returned results that don't match (a soft block)")
+            }
             Ok(Outcome::Broken(_)) => (HOUR, "returned a page Claktory can't read"),
             Err(_) => (MINUTE, "couldn't be reached"),
         };
@@ -172,8 +208,8 @@ struct Found {
     hits: Vec<Hit>,
     /// Why there are no results, when no engine could answer.
     unavailable: Option<String>,
-    /// What to tell the person, when an engine challenged this computer.
-    notice: Option<String>,
+    /// The engines that challenged this computer, for the person.
+    challenged: Vec<&'static str>,
 }
 
 /// A search on its way: everyone asking the same waits for the one request.
@@ -272,18 +308,27 @@ impl Searcher {
         let mut answers = Vec::new();
         let mut blocked = Vec::new();
         for query in queries {
-            let (answer, notice) = self.one(agent, query, options).await;
+            let (answer, challenged) = self.one(agent, query, options).await;
             answers.push(answer);
-            if let Some(notice) = notice
-                && !blocked.contains(&notice)
-            {
-                blocked.push(notice);
+            for engine in challenged {
+                if !blocked.contains(&engine) {
+                    blocked.push(engine);
+                }
             }
         }
-        (answers, blocked)
+        let notice = match blocked.as_slice() {
+            [] => None,
+            [one] => Some(format!("{one} is challenging this computer's IP")),
+            [rest @ .., last] => Some(format!("{} and {last} are challenging this computer's IP", rest.join(", "))),
+        };
+        let notices = notice
+            .map(|notice| format!("{notice}; the person's own searches there may show a CAPTCHA for about an hour."))
+            .into_iter()
+            .collect();
+        (answers, notices)
     }
 
-    async fn one(&self, agent: &str, query: &str, options: &Options) -> (Answer, Option<String>) {
+    async fn one(&self, agent: &str, query: &str, options: &Options) -> (Answer, Vec<&'static str>) {
         let key = Key { query: normalized(query), domains: options.domains.clone(), recency: options.recency };
         let answer = |found: &Found| Answer {
             q: query.to_owned(),
@@ -298,14 +343,14 @@ impl Searcher {
             if let Some((time, found)) = state.cache.get(&key)
                 && now - time < fresh_for(found)
             {
-                return (answer(found), None);
+                return (answer(found), Vec::new());
             }
             if state.waiting.get(agent).copied().unwrap_or(0) >= PER_AGENT {
-                return (busy(format!("you already have {PER_AGENT} searches waiting; wait for them")), None);
+                return (busy(format!("you already have {PER_AGENT} searches waiting; wait for them")), Vec::new());
             }
             let waiters: usize = state.flights.values().map(|flight| flight.waiters).sum();
             if waiters >= MAX_WAITERS || (!state.flights.contains_key(&key) && state.flights.len() >= MAX_FLIGHTS) {
-                return (busy("too many searches are waiting; try again in a minute".to_owned()), None);
+                return (busy("too many searches are waiting; try again in a minute".to_owned()), Vec::new());
             }
             *state.waiting.entry(agent.to_owned()).or_default() += 1;
             match state.flights.get_mut(&key) {
@@ -331,8 +376,8 @@ impl Searcher {
             Err(_) => None,
         };
         match found {
-            Some(found) => (answer(&found), found.notice.clone()),
-            None => (busy("the search stopped before it finished".to_owned()), None),
+            Some(found) => (answer(&found), found.challenged.clone()),
+            None => (busy("the search stopped before it finished".to_owned()), Vec::new()),
         }
     }
 }
@@ -398,48 +443,116 @@ async fn fly(shared: Arc<Shared>, key: Key, id: u64, query: String, options: Opt
     let _ = done.send(Some(found));
 }
 
-/// Tries each engine until one answers. An empty answer is an answer: the
-/// next engine isn't asked.
+/// The engines to try for `options`, best first: those answering lately
+/// (by how often they failed, in steps of a tenth), then the least asked
+/// this hour for its budget, then `engines::ORDER`; engines whose cooldown
+/// ended and haven't answered since come after all of those. Engines that
+/// can't be asked now are left out.
+fn order(shared: &Shared, options: &Options, now: i64) -> Vec<Engine> {
+    let mut state = shared.state();
+    let mut ranked: Vec<(bool, i64, usize, usize, Engine)> = Vec::new();
+    for (index, engine) in engines::ORDER.into_iter().enumerate() {
+        if !engine.supports(options) {
+            continue;
+        }
+        let policy = (shared.pace)(engine);
+        let health = state.health.entry(engine).or_default();
+        if health.unavailable(engine, &policy, now).is_some() {
+            continue;
+        }
+        let load = health.asked.len() * 1000 / policy.per_hour.max(1);
+        ranked.push((health.probing(now), (health.failing * 10.0).round() as i64, load, index, engine));
+    }
+    ranked.sort_by_key(|(probing, failing, load, index, _)| (*probing, *failing, *load, *index));
+    ranked.into_iter().map(|(.., engine)| engine).collect()
+}
+
+/// Tries engines in turn (`order`) until one gives results that match the
+/// query. A block, a page it can't read or results about something else
+/// move on to the next; so does one engine finding nothing, but two
+/// finding nothing is the answer.
 async fn ask_engines(shared: &Shared, query: &str, options: &Options) -> Found {
-    let mut reasons = Vec::new();
-    let mut notice = None;
-    for engine in engines::ORDER {
+    let mut reasons: Vec<(Engine, String)> = Vec::new();
+    let mut challenged = Vec::new();
+    let mut nothing: Option<String> = None;
+    for engine in order(shared, options, now_ms()) {
         let outcome = match dispatch(shared, engine, query, options).await {
             Ok(outcome) => outcome,
             Err(why) => {
-                reasons.push(why);
+                reasons.push((engine, why));
                 continue;
             }
         };
         let name = engine.name().to_owned();
         match outcome {
             Ok(Outcome::Results(hits)) => {
-                return Found { engine: name, hits: keep(hits, &options.domains), unavailable: None, notice };
+                return Found { engine: name, hits: keep(hits, &options.domains), unavailable: None, challenged };
             }
-            Ok(Outcome::NoResults) => return Found { engine: name, hits: Vec::new(), unavailable: None, notice },
+            Ok(Outcome::NoResults) => {
+                if nothing.is_some() {
+                    return Found { engine: name, hits: Vec::new(), unavailable: None, challenged };
+                }
+                nothing = Some(name);
+            }
             Ok(Outcome::Blocked(block)) => {
                 tracing::warn!(engine = engine.name(), ?block, "a search engine blocked this computer");
                 if block == Block::Challenge {
-                    notice = Some(format!(
-                        "{} is challenging this computer's IP; the person's own searches there may show a CAPTCHA for about an hour.",
-                        engine.name()
-                    ));
+                    challenged.push(engine.name());
                 }
                 let state = shared.state();
                 let health = &state.health[&engine];
-                reasons.push(format!("{} {} (trying again after {})", engine.name(), health.why, clock(health.cooling_until)));
+                let why = if health.why.is_empty() { "returned results that don't match" } else { health.why.as_str() };
+                reasons.push((engine, format!("{} {why}", engine.name())));
             }
             Ok(Outcome::Broken(start)) => {
                 tracing::warn!(engine = engine.name(), start, "a search engine's page couldn't be read; its layout may have changed");
-                reasons.push(format!("{} returned a page Claktory can't read", engine.name()));
+                reasons.push((engine, format!("{} returned a page Claktory can't read", engine.name())));
             }
             Err(error) => {
                 tracing::warn!(engine = engine.name(), %error, "a search engine couldn't be reached");
-                reasons.push(format!("{} couldn't be reached ({error})", engine.name()));
+                reasons.push((engine, format!("{} couldn't be reached ({error})", engine.name())));
             }
         }
     }
-    Found { engine: String::new(), hits: Vec::new(), unavailable: Some(reasons.join(", ")), notice }
+    if let Some(engine) = nothing {
+        return Found { engine, hits: Vec::new(), unavailable: None, challenged };
+    }
+    Found { engine: String::new(), hits: Vec::new(), unavailable: Some(unavailable(shared, options, &reasons)), challenged }
+}
+
+/// Why no engine could answer, for the agent: when to try again, and what
+/// each engine did.
+fn unavailable(shared: &Shared, options: &Options, reasons: &[(Engine, String)]) -> String {
+    let now = now_ms();
+    let mut state = shared.state();
+    let free_at = engines::ORDER
+        .into_iter()
+        .filter(|engine| engine.supports(options))
+        .map(|engine| state.health.entry(engine).or_default().free_at(&(shared.pace)(engine), now))
+        .min()
+        .unwrap_or(now);
+    let offline = !reasons.is_empty() && reasons.iter().all(|(_, reason)| reason.contains("couldn't be reached"));
+    // Engines that weren't asked, and why.
+    let mut details: Vec<String> = reasons.iter().map(|(_, reason)| reason.clone()).collect();
+    for engine in engines::ORDER.into_iter().filter(|engine| engine.supports(options)) {
+        if reasons.iter().any(|(asked, _)| *asked == engine) {
+            continue;
+        }
+        if let Some(why) = state.health.entry(engine).or_default().unavailable(engine, &(shared.pace)(engine), now) {
+            details.push(why);
+        }
+    }
+    let details = details.join("; ");
+    if offline {
+        return format!("no search engine could be reached from this computer; check its internet connection ({details})");
+    }
+    let wait = if free_at <= now + MINUTE {
+        "in a minute".to_owned()
+    } else {
+        let minutes = (free_at - now + MINUTE - 1) / MINUTE;
+        format!("in {minutes} minute{} (after {})", if minutes == 1 { "" } else { "s" }, clock(free_at))
+    };
+    format!("every search engine is busy or blocking searches from this computer; try again {wait} ({details})")
 }
 
 /// Asks one engine, in its turn: Err says why it wasn't asked. Whether it
@@ -490,8 +603,15 @@ fn browser() -> Wire {
         Box::pin(async move {
             let client = clients[&engine].get_or_init(|| client(engine)).clone()?;
             let response = engine.request(&client, &query, &options).send().await.map_err(|error| error.to_string())?;
-            let (status, url) = (response.status(), response.url().to_string());
-            let body = response.text().await.map_err(|error| error.to_string())?;
+            let (mut status, mut url) = (response.status(), response.url().to_string());
+            let mut body = response.text().await.map_err(|error| error.to_string())?;
+            // A wait page: waited out, then its link followed, once.
+            if let Some((wait, next)) = engines::follow(engine, &body) {
+                tokio::time::sleep(wait).await;
+                let response = client.get(&next).header("Referer", &url).send().await.map_err(|error| error.to_string())?;
+                (status, url) = (response.status(), response.url().to_string());
+                body = response.text().await.map_err(|error| error.to_string())?;
+            }
             Ok(engine.parse(status, &url, &body))
         })
     })
@@ -781,6 +901,10 @@ mod tests {
             self.asked.lock().expect("lock").iter().filter(|(asked, _)| *asked == engine).count()
         }
 
+        fn total(&self) -> usize {
+            self.asked.lock().expect("lock").len()
+        }
+
         fn dropped(&self) -> usize {
             self.dropped.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -833,7 +957,7 @@ mod tests {
             let (answers, _) = task.await.expect("search");
             assert_eq!((answers[0].engine.as_str(), answers[0].results.len()), ("DuckDuckGo", 8));
         }
-        assert_eq!(fake.asked(Engine::DuckDuckGo), 1);
+        assert_eq!(fake.total(), 1);
         assert!(searcher.shared.state().waiting.is_empty() && searcher.shared.state().flights.is_empty());
 
         // A different limit is a slice of the same answer; spacing doesn't
@@ -841,10 +965,10 @@ mod tests {
         let options = Options { limit: 3, ..Options::default() };
         let (answers, _) = searcher.search("a", &["  tokio   select ".to_owned()], &options).await;
         assert_eq!((answers[0].q.as_str(), answers[0].results.len()), ("  tokio   select ", 3));
-        assert_eq!(fake.asked(Engine::DuckDuckGo), 1);
+        assert_eq!(fake.total(), 1);
         searcher.search("a", &["Tokio select".to_owned()], &options).await;
         searcher.search("a", &["\"tokio select\"".to_owned()], &options).await;
-        assert_eq!(fake.asked(Engine::DuckDuckGo), 3);
+        assert_eq!(fake.total(), 3);
     }
 
     #[tokio::test]
@@ -869,41 +993,132 @@ mod tests {
         // Asked again, it goes out again, and the engine's turn is free.
         fake.let_go();
         let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
-        assert_eq!(answers[0].engine, "DuckDuckGo");
-        assert_eq!(fake.asked(Engine::DuckDuckGo), 2);
+        assert!(!answers[0].engine.is_empty() && answers[0].unavailable.is_none(), "{answers:?}");
+        assert_eq!(fake.total(), 2);
+    }
+
+    /// Only DuckDuckGo, 3 an hour; every other engine is out.
+    fn only_duckduckgo(engine: Engine) -> Policy {
+        Policy { per_hour: if engine == Engine::DuckDuckGo { 3 } else { 0 }, ..quick(engine) }
     }
 
     #[tokio::test]
     async fn requests_waiting_behind_a_block_or_the_hours_last_dont_go_out() {
-        // A CAPTCHA while two more wait their turn: they go to Brave.
+        // A CAPTCHA while two more wait their turn: they don't go out.
         let fake = Fake::new(|engine, query| match (engine, query) {
             (Engine::DuckDuckGo, "first") => Ok(Outcome::Blocked(Block::Challenge)),
             _ => Ok(Outcome::Results(results(query))),
         });
-        let searcher = Arc::new(Searcher::with(fake.wire(), quick, None));
+        let searcher = Arc::new(Searcher::with(fake.wire(), only_duckduckgo, None));
         let first = search(&searcher, "a", "first");
         until("the first is asked", || fake.asked(Engine::DuckDuckGo) == 1).await;
         let others = [search(&searcher, "b", "second"), search(&searcher, "c", "third")];
         until("two wait their turn", || queued(&searcher) == 3).await;
         fake.let_go();
         let (answers, notices) = first.await.expect("search");
-        assert_eq!(answers[0].engine, "Brave");
+        assert!(answers[0].unavailable.as_deref().is_some_and(|why| why.starts_with("every search engine is busy or blocking")), "{answers:?}");
         assert!(notices[0].starts_with("DuckDuckGo is challenging this computer's IP"), "{notices:?}");
         for other in others {
-            assert_eq!(other.await.expect("search").0[0].engine, "Brave");
+            let (answers, _) = other.await.expect("search");
+            assert!(answers[0].unavailable.as_deref().is_some_and(|why| why.contains("DuckDuckGo asked for a CAPTCHA")), "{answers:?}");
         }
-        assert_eq!((fake.asked(Engine::DuckDuckGo), fake.asked(Engine::Brave)), (1, 3));
+        assert_eq!(fake.total(), 1);
 
-        // Five wait while the hour has room for 3: the rest go to Brave.
+        // Five wait while the hour has room for 3: the rest don't go out.
         let fake = Fake::new(|_, query| Ok(Outcome::Results(results(query))));
-        let searcher = Arc::new(Searcher::with(fake.wire(), quick, None));
+        let searcher = Arc::new(Searcher::with(fake.wire(), only_duckduckgo, None));
         let tasks: Vec<_> = (0..5).map(|n| search(&searcher, &format!("agent{n}"), &format!("query {n}"))).collect();
         until("all five wait", || queued(&searcher) == 5).await;
         fake.let_go();
+        let mut answered = 0;
         for task in tasks {
-            task.await.expect("search");
+            let (answers, _) = task.await.expect("search");
+            match &answers[0].unavailable {
+                None => answered += 1,
+                Some(why) => assert!(why.contains("DuckDuckGo has had its 3 searches this hour"), "{why}"),
+            }
         }
-        assert_eq!((fake.asked(Engine::DuckDuckGo), fake.asked(Engine::Brave)), (3, 2));
+        assert_eq!((answered, fake.total()), (3, 3));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_search_moves_on_to_the_next_engine_and_the_load_is_spread() {
+        let fake = Fake::new(|engine, query| match engine {
+            Engine::DuckDuckGo => Ok(Outcome::Blocked(Block::Challenge)),
+            Engine::Bing => Ok(Outcome::Results(vec![hit("Tokyo travel guide", "https://example.com/tokyo"); 5])),
+            _ => Ok(Outcome::Results(results(query))),
+        });
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick, None);
+        let options = Options { limit: 8, ..Options::default() };
+        // DuckDuckGo's CAPTCHA, then Bing's results about something else:
+        // Yahoo answers, in the same call.
+        let (answers, notices) = searcher.search("a", &["tokio select cancellation safety".to_owned()], &options).await;
+        assert_eq!((answers[0].engine.as_str(), answers[0].results.len()), ("Yahoo", 8), "{answers:?}");
+        assert_eq!(notices.len(), 1);
+        // The next search starts with an engine not asked yet this hour.
+        let (answers, _) = searcher.search("a", &["sqlite wal checkpoint".to_owned()], &options).await;
+        assert_eq!(answers[0].engine, "DuckDuckGo Lite");
+        // One soft block doesn't cool Bing down; it's asked again.
+        let health = |engine: Engine| searcher.shared.state().health.get(&engine).map(|health| (health.cooling_until > 0, health.failing > 0.0));
+        assert_eq!(health(Engine::Bing), Some((false, true)));
+        assert_eq!(health(Engine::DuckDuckGo), Some((true, true)));
+    }
+
+    #[tokio::test]
+    async fn engines_answering_lately_go_first_and_a_cooled_one_is_probed_last() {
+        let fake = Fake::new(|_, query| Ok(Outcome::Results(results(query))));
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick, None);
+        let now = now_ms();
+        {
+            let mut state = searcher.shared.state();
+            // DuckDuckGo failed lately; Bing's cooldown just ended.
+            state.health.insert(Engine::DuckDuckGo, Health { failing: 0.5, ..Health::default() });
+            state.health.insert(Engine::Bing, Health { cooling_until: now - 1, why: "asked for a CAPTCHA".into(), ..Health::default() });
+        }
+        let ranked = order(&searcher.shared, &Options::default(), now);
+        assert_eq!(ranked.first(), Some(&Engine::Yahoo));
+        let expected = [Engine::Yahoo, Engine::DuckDuckGoLite, Engine::Ecosia, Engine::Brave, Engine::Marginalia, Engine::DuckDuckGo, Engine::Bing];
+        assert_eq!(ranked, expected, "failing lately goes after the healthy ones");
+        assert_eq!(ranked.last(), Some(&Engine::Bing), "probed after every healthy engine");
+        // Its probe answers: it's back, its cooldown gone.
+        let mut health = Health { cooling_until: now - 1, ..Health::default() };
+        health.record(&quick(Engine::Bing), &Ok(Outcome::Results(vec![])), now);
+        assert!(!health.probing(now) && health.cooling_until == 0);
+        // Asking for this week leaves out the engines that can't.
+        let recent = Options { recency: Some(Recency::Week), ..Options::default() };
+        assert!(!order(&searcher.shared, &recent, now).contains(&Engine::Ecosia));
+    }
+
+    #[tokio::test]
+    async fn when_no_engine_can_answer_it_says_so_and_when_to_try_again() {
+        let fake = Fake::new(|engine, _| match engine {
+            Engine::Bing | Engine::Yahoo => Ok(Outcome::Blocked(Block::RateLimited)),
+            _ => Ok(Outcome::Blocked(Block::Challenge)),
+        });
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick, None);
+        let (answers, notices) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
+        let why = answers[0].unavailable.clone().expect("unavailable");
+        assert!(why.starts_with("every search engine is busy or blocking searches from this computer; try again in 60 minutes (after "), "{why}");
+        assert!(why.contains("DuckDuckGo asked for a CAPTCHA") && why.contains("Bing rate-limited this computer"), "{why}");
+        assert_eq!(fake.total(), engines::ORDER.len(), "each asked once");
+        assert_eq!(
+            notices,
+            ["DuckDuckGo, DuckDuckGo Lite, Ecosia, Brave and Marginalia are challenging this computer's IP; the person's own searches there may show a CAPTCHA for about an hour."],
+        );
+        // Asked again: nothing goes out.
+        searcher.search("a", &["other".to_owned()], &Options::default()).await;
+        assert_eq!(fake.total(), engines::ORDER.len());
+
+        // Offline: it says so.
+        let fake = Fake::new(|_, _| Err("connection refused".to_owned()));
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick, None);
+        let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
+        let why = answers[0].unavailable.clone().expect("unavailable");
+        assert!(why.starts_with("no search engine could be reached from this computer; check its internet connection"), "{why}");
     }
 
     #[tokio::test]
@@ -911,17 +1126,18 @@ mod tests {
         let path = std::env::temp_dir().join(format!("factoryd-search-{}-{}.json", std::process::id(), now_ms()));
         let fake = Fake::new(|engine, query| match engine {
             Engine::DuckDuckGo => Ok(Outcome::Blocked(Block::Challenge)),
-            Engine::Brave => Ok(Outcome::Results(results(query))),
+            _ => Ok(Outcome::Results(results(query))),
         });
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, Some(path.clone()));
-        assert_eq!(searcher.search("a", &["first".to_owned()], &Options::default()).await.0[0].engine, "Brave");
+        assert_eq!(searcher.search("a", &["first".to_owned()], &Options::default()).await.0[0].engine, "Bing");
+        assert_eq!(fake.asked(Engine::DuckDuckGo), 1);
         drop(searcher);
 
         let fake = Fake::new(|_, query| Ok(Outcome::Results(results(query))));
         fake.let_go();
         let again = Searcher::with(fake.wire(), quick, Some(path.clone()));
-        assert_eq!(again.search("a", &["second".to_owned()], &Options::default()).await.0[0].engine, "Brave");
+        assert_ne!(again.search("a", &["second".to_owned()], &Options::default()).await.0[0].engine, "DuckDuckGo");
         assert_eq!(fake.asked(Engine::DuckDuckGo), 0, "still cooling down");
         let _ = std::fs::remove_file(path);
     }
@@ -932,11 +1148,12 @@ mod tests {
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, None);
         let (answers, _) = searcher.search("a", &["zxqv nothing".to_owned()], &Options::default()).await;
-        assert_eq!((answers[0].engine.as_str(), answers[0].results.len(), answers[0].unavailable.is_none()), ("DuckDuckGo", 0, true));
-        assert_eq!(fake.asked(Engine::Brave), 0, "Brave's budget is spared");
+        assert_eq!((answers[0].engine.as_str(), answers[0].results.len(), answers[0].unavailable.is_none()), ("Bing", 0, true));
+        assert_eq!((fake.asked(Engine::DuckDuckGo), fake.asked(Engine::Bing), fake.total()), (1, 1, 2), "a second opinion, no more");
         searcher.search("b", &["zxqv nothing".to_owned()], &Options::default()).await;
-        assert_eq!(fake.asked(Engine::DuckDuckGo), 1, "kept for a minute");
+        assert_eq!(fake.total(), 2, "kept for a minute");
     }
+
 
     /// One real search on each engine, by hand when results look wrong:
     /// `cargo test -p factoryd -- --ignored web_live`. Never loop it: a
@@ -944,22 +1161,126 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn web_live_search() {
+        let mut failed = Vec::new();
         for engine in engines::ORDER {
             let client = client(engine).expect("client");
             let options = Options { limit: 8, ..Options::default() };
             let response = engine.request(&client, "sqlite wal checkpoint", &options).send().await.expect("sent");
             let (status, url) = (response.status(), response.url().to_string());
             let outcome = engine.parse(status, &url, &response.text().await.expect("body"));
-            eprintln!("{}: {status} {outcome:?}", engine.name());
+            match &outcome {
+                Outcome::Results(hits) => eprintln!("{}: {status}, {} results, first {:?}", engine.name(), hits.len(), hits.first()),
+                other => eprintln!("{}: {status} {other:?}", engine.name()),
+            }
             // A block is read right but means this IP is flagged (Brave holds
             // a flag for most of an hour): try again much later, not now.
-            assert!(
-                matches!(outcome, Outcome::Results(ref hits) if hits.len() >= 5),
-                "{}: {outcome:?}; if it's a block, wait an hour before trying again",
-                engine.name()
-            );
+            if !matches!(outcome, Outcome::Results(ref hits) if hits.len() >= 5) {
+                failed.push(engine.name());
+            }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+        assert!(failed.is_empty(), "{failed:?}; if it's a block, wait an hour before trying again");
+    }
+
+    /// The acceptance run, against the real engines from this computer, at
+    /// an agent's pace: batches of 1 to 4 searches, 15 to 40 s apart, for
+    /// `WEB_RELIABILITY_MINUTES` (80) or until the queries in
+    /// tests/fixtures/web/queries.txt run out. Writes each search to
+    /// `WEB_RELIABILITY_OUT` (/tmp/web-reliability.csv) and prints the
+    /// success rate, which engine answered and how long it took. Starts
+    /// with no health kept, as a new Claktory does.
+    #[tokio::test]
+    #[ignore]
+    async fn web_live_reliability() {
+        use std::io::Write;
+        let minutes: u64 = std::env::var("WEB_RELIABILITY_MINUTES").ok().and_then(|text| text.parse().ok()).unwrap_or(80);
+        let out = std::env::var("WEB_RELIABILITY_OUT").unwrap_or_else(|_| "/tmp/web-reliability.csv".to_owned());
+        let health = std::env::temp_dir().join(format!("web-reliability-health-{}.json", now_ms()));
+        let searcher = Searcher::new(Some(health.clone()));
+        let mut queries: Vec<(String, Options)> = engines::tests::fixture("queries.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let mut parts = line.split('|').map(str::trim);
+                let query = parts.next().unwrap_or_default().to_owned();
+                let domains = parts.next().filter(|domains| !domains.is_empty()).map(|domain| vec![domain.to_owned()]).unwrap_or_default();
+                let recency = match parts.next() {
+                    Some("day") => Some(Recency::Day),
+                    Some("week") => Some(Recency::Week),
+                    Some("month") => Some(Recency::Month),
+                    Some("year") => Some(Recency::Year),
+                    _ => None,
+                };
+                (query, Options { domains, recency, limit: 8 })
+            })
+            .collect();
+        // Shuffled, so each run asks in another order.
+        let mut seed = now_ms() as u64 | 1;
+        let mut random = move |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below.max(1)
+        };
+        for index in (1..queries.len()).rev() {
+            queries.swap(index, random(index as u64 + 1) as usize);
+        }
+        let mut csv = std::fs::File::create(&out).expect("output");
+        writeln!(csv, "time,query,engine,results,ok,latency_ms,why").expect("write");
+        let started = std::time::Instant::now();
+        let mut rows: Vec<(String, bool, u128, String, String)> = Vec::new();
+        let mut next = queries.into_iter();
+        'run: while started.elapsed() < Duration::from_secs(minutes * 60) {
+            for _ in 0..=random(4) {
+                let Some((query, options)) = next.next() else { break 'run };
+                let began = std::time::Instant::now();
+                let (answers, notices) = searcher.search("measure", std::slice::from_ref(&query), &options).await;
+                let latency = began.elapsed().as_millis();
+                let answer = &answers[0];
+                let ok = answer.unavailable.is_none() && !answer.results.is_empty();
+                let why = answer.unavailable.clone().unwrap_or_default();
+                let clean = |text: &str| text.replace(['"', '\n'], " ");
+                writeln!(csv, "{},\"{}\",{},{},{ok},{latency},\"{}\"", clock(now_ms()), clean(&query), answer.engine, answer.results.len(), clean(&why))
+                    .expect("write");
+                csv.flush().expect("flush");
+                eprintln!(
+                    "{} {:>5}ms {:<16} {:>2} {query}{}{}",
+                    if ok { "ok  " } else { "FAIL" },
+                    latency,
+                    answer.engine,
+                    answer.results.len(),
+                    if why.is_empty() { String::new() } else { format!(" — {why}") },
+                    notices.first().map(|notice| format!(" [{notice}]")).unwrap_or_default()
+                );
+                rows.push((query, ok, latency, answer.engine.clone(), why));
+            }
+            tokio::time::sleep(Duration::from_secs(15 + random(26))).await;
+        }
+        let total = rows.len();
+        let ok = rows.iter().filter(|row| row.1).count();
+        let mut latencies: Vec<u128> = rows.iter().filter(|row| row.1).map(|row| row.2).collect();
+        latencies.sort_unstable();
+        let at = |fraction: f64| latencies.get(((latencies.len() as f64 - 1.0) * fraction).round() as usize).copied().unwrap_or(0);
+        let mut by_engine: HashMap<String, usize> = HashMap::new();
+        for row in rows.iter().filter(|row| row.1) {
+            *by_engine.entry(row.3.clone()).or_default() += 1;
+        }
+        let mut by_engine: Vec<_> = by_engine.into_iter().collect();
+        by_engine.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        let summary = format!(
+            "{ok} of {total} searches answered ({:.1}%) in {:.0} minutes; latency p50 {} ms, p90 {} ms, max {} ms; answered by {by_engine:?}; failed: {:?}; health at the end: {}",
+            100.0 * ok as f64 / total.max(1) as f64,
+            started.elapsed().as_secs_f64() / 60.0,
+            at(0.5),
+            at(0.9),
+            latencies.last().copied().unwrap_or(0),
+            rows.iter().filter(|row| !row.1).map(|row| (&row.0, &row.4)).collect::<Vec<_>>(),
+            std::fs::read_to_string(&health).unwrap_or_default(),
+        );
+        eprintln!("{summary}");
+        std::fs::write(format!("{out}.summary.txt"), &summary).expect("summary");
+        let _ = std::fs::remove_file(health);
     }
 
     /// What a fingerprinting service sees of each client, after every primp
@@ -967,12 +1288,14 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn web_live_fingerprints() {
-        let expected = |engine: Engine| match engine {
-            Engine::DuckDuckGo => ("t13d1717h2_5b57614c22b0", "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s"),
-            Engine::Brave => ("_8daaf6152771_", "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"),
-        };
         let os = if cfg!(target_os = "macos") { "Macintosh" } else { "Linux" };
         for engine in engines::ORDER {
+            let firefox = engine.profile().browser == primp::Impersonate::FirefoxV151;
+            let (ja4, akamai) = if firefox {
+                ("t13d1717h2_5b57614c22b0", "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s")
+            } else {
+                ("_8daaf6152771_", "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p")
+            };
             let client = client(engine).expect("client");
             let request = match engine {
                 Engine::DuckDuckGo => client
@@ -981,21 +1304,23 @@ mod tests {
                     .header("Referer", "https://html.duckduckgo.com/")
                     .header("Sec-Fetch-Site", "same-origin")
                     .form(&[("q", "x")]),
-                Engine::Brave => client.get("https://tls.peet.ws/api/all"),
+                _ => client.get("https://tls.peet.ws/api/all"),
             };
             let seen: serde_json::Value = request.send().await.expect("sent").json().await.expect("json");
-            let (ja4, akamai) = expected(engine);
             let got = seen["tls"]["ja4"].as_str().unwrap_or_default();
             assert!(got.contains(ja4) || got.starts_with(ja4), "{}: {got}", engine.name());
             assert_eq!(seen["http2"]["akamai_fingerprint"].as_str(), Some(akamai), "{}", engine.name());
             assert!(seen["user_agent"].as_str().unwrap_or_default().contains(os), "{}: {}", engine.name(), seen["user_agent"]);
+            // No cookie or referrer of one engine's goes to another.
+            let headers = seen["http2"]["sent_frames"].to_string().to_lowercase();
             if engine == Engine::DuckDuckGo {
-                let headers = seen["http2"]["sent_frames"].to_string().to_lowercase();
                 for header in
                     ["sec-fetch-site: same-origin", "origin: https://html.duckduckgo.com", "referer: https://html.duckduckgo.com/"]
                 {
                     assert!(headers.contains(header), "{header}");
                 }
+            } else {
+                assert!(!headers.contains("cookie:") && !headers.contains("referer:"), "{}: {headers}", engine.name());
             }
         }
     }

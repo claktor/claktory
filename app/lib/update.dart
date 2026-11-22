@@ -132,6 +132,58 @@ bool restartsBackend(Workspace workspace) => isNewer(
   workspace.version,
 );
 
+/// What Update does, in the banner and in Settings: installs
+/// [Workspace.latestRelease]. An app older than it is replaced too ([app]):
+/// on a Claktory on another machine the app first fetches the release's own,
+/// with [onProgress] saying how far (null once it's done). Says whether
+/// this app is being replaced, so it should quit now; throws what went
+/// wrong, with nothing changed.
+Future<bool> installLatest(
+  AppScope scope,
+  Workspace workspace, {
+  void Function(UpdateProgress?)? onProgress,
+  bool app = true,
+}) async {
+  final build = scope.appBuild;
+  final latest = workspace.latestRelease;
+  // Only an app older than the release is replaced; the backend updates
+  // itself whenever it's older. Without [app] (a phone, whose app isn't
+  // Claktory's to replace), only the backend.
+  final appOlder = app && isNewer(latest, build.version);
+  final remote = scope.backend.target != null;
+  StagedApp? staged;
+  try {
+    if (remote && appOlder) {
+      // A Factory on another machine can't reach this app's bundle, so
+      // the app fetches the release's own, checks it and swaps itself.
+      staged = await build.updater.stage(
+        fetch: scope.backend.fetchApp,
+        version: latest,
+        bundlePath: build.bundlePath,
+        onProgress: (progress) => onProgress?.call(progress),
+      );
+      onProgress?.call(null);
+    }
+    await scope.backend.installUpdate(
+      !remote && appOlder ? build.bundlePath : '',
+    );
+    if (staged != null) {
+      await build.updater.replace(staged, app: build.bundlePath);
+    }
+  } on Exception {
+    if (staged != null) build.updater.discard(staged);
+    rethrow;
+  }
+  return appOlder;
+}
+
+/// Why an update failed, in the person's words.
+String updateFailureText(Exception failure) => switch (failure) {
+  RequestFailure(:final message) => message,
+  UpdateFailure(:final message) => message,
+  _ => '$failure',
+};
+
 /// Says a new release is ready and installs it. Shown while the backend or
 /// this app is older than the latest release; it can't be dismissed.
 class UpdateBanner extends StatefulWidget {
@@ -178,57 +230,34 @@ class _UpdateBannerState extends State<UpdateBanner> {
 
   Future<void> _update(Workspace workspace) async {
     final scope = AppScope.scope(context);
-    final build = scope.appBuild;
-    final latest = workspace.latestRelease;
-    // Only an app older than the release is replaced; the backend updates
-    // itself whenever it's older.
-    final appOlder = isNewer(latest, build.version);
-    final remote = scope.backend.target != null;
     final restarts = restartsBackend(workspace);
     setState(() {
       _updating = true;
       _failure = null;
       _progress = null;
     });
-    StagedApp? staged;
+    final bool appReplaced;
     try {
-      if (remote && appOlder) {
-        // A Factory on another machine can't reach this app's bundle, so
-        // the app fetches the release's own, checks it and swaps itself.
-        staged = await build.updater.stage(
-          fetch: scope.backend.fetchApp,
-          version: latest,
-          bundlePath: build.bundlePath,
-          onProgress: (progress) {
-            if (mounted) setState(() => _progress = progress);
-          },
-        );
-        if (mounted) setState(() => _progress = null);
-      }
-      await scope.backend.installUpdate(
-        !remote && appOlder ? build.bundlePath : '',
+      appReplaced = await installLatest(
+        scope,
+        workspace,
+        onProgress: (progress) {
+          if (mounted) setState(() => _progress = progress);
+        },
       );
-      if (staged != null) {
-        await build.updater.replace(staged, app: build.bundlePath);
-      }
     } on Exception catch (failure) {
-      if (staged != null) build.updater.discard(staged);
       if (!mounted) return;
       setState(() {
         _updating = false;
         _progress = null;
-        _failure = switch (failure) {
-          RequestFailure(:final message) => message,
-          UpdateFailure(:final message) => message,
-          _ => '$failure',
-        };
+        _failure = updateFailureText(failure);
       });
       return;
     }
-    if (appOlder) {
+    if (appReplaced) {
       // This app's bundle is replaced once it's gone, then reopened: by the
       // backend on this Mac, or by the swap it just started.
-      build.quit();
+      scope.appBuild.quit();
     } else if (!restarts) {
       if (mounted) setState(() => _updating = false);
     } else {

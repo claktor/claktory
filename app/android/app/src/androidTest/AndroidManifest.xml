@@ -17,5 +17,10 @@
             android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyFloatingActivity"
             android:exported="false"
             tools:node="merge" />
+        <!-- tools/backup_exclusion_check.sh wakes its control with it. -->
+        <receiver
+            android:name="com.claktory.app.BackupControlWaker"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
     </application>
 </manifest>

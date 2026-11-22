@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use claktory_account::server::{self, Config, Secrets, Service, mail};
+use claktory_account::server::{self, Config, Secrets, Service, UserApps, mail};
 use factory_protocol::v1::{self, ClaktoryAccountState as AccountState, ErrorCode, client_message::Body as Request, server_message::Body};
 
 use crate::common::{Client, create_agent, last_workspace, send_message, start, temp_dir};
@@ -24,11 +24,18 @@ pub(crate) struct Instance {
     pub(crate) secrets: ([u8; 32], [u8; 32]),
     /// What it serves as its root's word for its key (F-OK1), if anything.
     pub(crate) statement: Option<claktory_account::protocol::SignedStatement>,
+    /// The user-apps worker it forwards `/v1/apps/…` to, if any.
+    user_apps: Option<UserApps>,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
 impl Instance {
     pub(crate) async fn start(dir: &Path) -> Instance {
+        Instance::start_with_apps(dir, None).await
+    }
+
+    /// One that forwards its apps' calls to the worker at `user_apps`.
+    pub(crate) async fn start_with_apps(dir: &Path, user_apps: Option<UserApps>) -> Instance {
         let secrets = Secrets::generate();
         let kept = (*secrets.k_share, secrets.signing_key.to_bytes());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
@@ -41,6 +48,7 @@ impl Instance {
             ahead: Arc::default(),
             secrets: kept,
             statement: None,
+            user_apps,
             server: tokio::spawn(async { Ok(()) }),
         };
         instance.serve(listener);
@@ -57,7 +65,7 @@ impl Instance {
         };
         let ahead = self.ahead.clone();
         let clock: server::Clock = Arc::new(move || jiff::Timestamp::now().as_second() + ahead.load(Ordering::SeqCst));
-        let config = Config { service_key_statement: self.statement.clone(), ..Config::default() };
+        let config = Config { service_key_statement: self.statement.clone(), user_apps: self.user_apps.clone(), ..Config::default() };
         let service = Service::new(&self.db, secrets, config, self.mail.clone(), clock).expect("the service");
         self.server = tokio::spawn(server::serve(listener, service));
     }
@@ -99,7 +107,7 @@ impl Instance {
         self.statement = Some(claktory_account::protocol::SignedStatement { text, signature: format!("test-root:{signature}") });
     }
 
-    fn last_code(&self, email: &str) -> String {
+    pub(crate) fn last_code(&self, email: &str) -> String {
         let mail = self.mail.sent().into_iter().rev().find(|mail| mail.to == email).expect("an email");
         mail.subject.rsplit(' ').next().expect("a code").to_owned()
     }

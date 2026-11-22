@@ -18,6 +18,7 @@
 //! (FileChanged), and its threads are placed again and sent (ThreadList).
 
 pub(crate) mod anchor;
+pub(crate) mod ink;
 mod region;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -111,6 +112,8 @@ pub(crate) const CHANGED: &str = "The text changed; select it again.";
 pub(crate) struct State {
     seen: Mutex<HashMap<String, Seen>>,
     work: Mutex<()>,
+    /// SendComments one at a time, so a repeated client_batch_id is seen.
+    sending: Mutex<()>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,8 +189,8 @@ fn is_markdown(path: &str) -> bool {
     lower.ends_with(".md") || lower.ends_with(".markdown")
 }
 
-/// `path` as threads keep it: "~" expanded, links resolved.
-fn absolute(path: &str) -> Result<String, RequestError> {
+/// `path` as threads and ink layers keep it: "~" expanded, links resolved.
+pub(crate) fn absolute(path: &str) -> Result<String, RequestError> {
     let path = path.trim();
     if path.is_empty() {
         return Err(RequestError::Empty("path"));
@@ -209,6 +212,8 @@ enum Kind {
     Markdown,
     Image,
     Video,
+    /// A region on a PDF's page.
+    Pdf,
 }
 
 impl Kind {
@@ -218,7 +223,10 @@ impl Kind {
             "markdown" => Ok(Kind::Markdown),
             "image" => Ok(Kind::Image),
             "video" => Ok(Kind::Video),
-            other => Err(RequestError::Comments(format!("kind is \"text\", \"markdown\", \"image\" or \"video\"; got \"{other}\""))),
+            "pdf" => Ok(Kind::Pdf),
+            other => {
+                Err(RequestError::Comments(format!("kind is \"text\", \"markdown\", \"image\", \"video\" or \"pdf\"; got \"{other}\"")))
+            }
         }
     }
 
@@ -228,6 +236,7 @@ impl Kind {
             Kind::Markdown => "markdown",
             Kind::Image => "image",
             Kind::Video => "video",
+            Kind::Pdf => "pdf",
         }
     }
 
@@ -374,7 +383,7 @@ impl Comment {
         })
     }
 
-    fn to_proto(&self) -> v1::ThreadComment {
+    fn to_proto(&self, ink: Option<v1::InkItem>) -> v1::ThreadComment {
         v1::ThreadComment {
             id: format!("c-{}", self.id),
             author_agent_id: self.author.clone(),
@@ -382,6 +391,7 @@ impl Comment {
             created_ms: self.created,
             edited_ms: self.edited.unwrap_or(0),
             draft: self.draft,
+            ink,
         }
     }
 }
@@ -404,13 +414,16 @@ fn thread(db: &Connection, id: i64) -> rusqlite::Result<Option<Thread>> {
 }
 
 fn threads_on(db: &Connection, path: &str) -> rusqlite::Result<Vec<Thread>> {
-    let mut statement = db.prepare(&format!("SELECT {THREAD_COLUMNS} FROM threads WHERE path = ?1 ORDER BY id"))?;
-    statement.query_map([path], Thread::read)?.collect()
+    crate::store::query(db, &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE path = ?1 ORDER BY id"), [path], Thread::read)
 }
 
 fn comments_of(db: &Connection, thread: i64) -> rusqlite::Result<Vec<Comment>> {
-    let mut statement = db.prepare(&format!("SELECT {COMMENT_COLUMNS} FROM thread_comments WHERE thread = ?1 ORDER BY id"))?;
-    statement.query_map([thread], Comment::read)?.collect()
+    crate::store::query(
+        db,
+        &format!("SELECT {COMMENT_COLUMNS} FROM thread_comments WHERE thread = ?1 ORDER BY id"),
+        [thread],
+        Comment::read,
+    )
 }
 
 fn has_threads(db: &Connection, path: &str) -> rusqlite::Result<bool> {
@@ -531,7 +544,8 @@ fn selector(json: Value) -> v1::Selector {
 /// A thread for clients, placed on `doc` (the file's text now, which its
 /// place refers to; None when the file is gone).
 fn to_proto(db: &Connection, thread: &Thread, doc: Option<&Doc>) -> rusqlite::Result<v1::Thread> {
-    let comments = comments_of(db, thread.id)?.iter().map(Comment::to_proto).collect();
+    let mut inks = ink::of_thread(db, thread.id)?;
+    let comments = comments_of(db, thread.id)?.iter().map(|comment| comment.to_proto(inks.remove(&comment.id))).collect();
     let mut proto = v1::Thread {
         id: thread.name(),
         agent_id: thread.agent.clone(),
@@ -621,8 +635,8 @@ impl Factory {
     pub(crate) fn create_thread(self: &Arc<Self>, request: &v1::CreateThread) -> Result<v1::Thread, RequestError> {
         self.known_agent(&request.agent_id)?;
         let body = request.body.trim();
-        // A suggested change needs no words: its comment may be empty.
-        if body.is_empty() && request.suggestion.is_none() {
+        // A suggested change or ink needs no words: its comment may be empty.
+        if body.is_empty() && request.suggestion.is_none() && request.ink.is_none() {
             return Err(RequestError::Empty("body"));
         }
         let kind = Kind::parse(&request.kind)?;
@@ -635,6 +649,8 @@ impl Factory {
             let db = self.store.db();
             let now = now_ms();
             let place = place(&db, &path, kind, &request.version_sha256, &request.selectors)?;
+            let ink =
+                request.ink.as_ref().map(|item| ink::check(&self.home, &db, &path, &place.version, kind.is_text(), item)).transpose()?;
             let (start, end) = place.range.clone().map_or((None, None), |range| (Some(range.start as i64), Some(range.end as i64)));
             db.execute(
                 "INSERT INTO threads (agent, path, kind, version, range_start, range_end, quote, selectors, status, anchor, original, created, updated)
@@ -665,6 +681,9 @@ impl Factory {
                 params![thread, body, now, !request.send_now],
             )?;
             let comment = db.last_insert_rowid();
+            if let Some(item) = &ink {
+                ink::insert(&db, comment, thread, item)?;
+            }
             let (list, _) = list(&db, &path)?;
             self.send(Body::ThreadList(list.clone()));
             let made = list.threads.into_iter().find(|made| made.id == format!("t-{thread}"));
@@ -699,18 +718,27 @@ impl Factory {
     /// ReplyThread: the person replies (and so reopens it).
     pub(crate) fn reply_thread(self: &Arc<Self>, request: &v1::ReplyThread) -> Result<(), RequestError> {
         let body = request.body.trim();
-        if body.is_empty() {
+        if body.is_empty() && request.ink.is_none() {
             return Err(RequestError::Empty("body"));
         }
         let (agent, comment) = {
             let _work = self.comments_lock();
             let db = self.store.db();
             let thread = find_thread(&db, &request.thread_id)?;
+            // A second review item on the thread: on the version it's on.
+            let ink = request
+                .ink
+                .as_ref()
+                .map(|item| ink::check(&self.home, &db, &thread.path, &thread.version, thread.is_text(), item))
+                .transpose()?;
             db.execute(
                 "INSERT INTO thread_comments (thread, author, body, created, draft) VALUES (?1, '', ?2, ?3, ?4)",
                 params![thread.id, body, now_ms(), !request.send_now],
             )?;
             let comment = db.last_insert_rowid();
+            if let Some(item) = &ink {
+                ink::insert(&db, comment, thread.id, item)?;
+            }
             db.execute("UPDATE threads SET status = 'open' WHERE id = ?1", [thread.id])?;
             touch(&db, thread.id)?;
             self.broadcast_threads(&db, &thread.path)?;
@@ -740,12 +768,13 @@ impl Factory {
     /// EditComment.
     pub(crate) fn edit_comment(&self, request: &v1::EditComment) -> Result<(), RequestError> {
         let body = request.body.trim();
-        if body.is_empty() {
-            return Err(RequestError::Empty("body"));
-        }
         let _work = self.comments_lock();
         let db = self.store.db();
         let (comment, thread) = Self::own_comment(&db, &request.comment_id)?;
+        // Ink says something without words.
+        if body.is_empty() && ink::of_comment(&db, comment.id)?.is_none() {
+            return Err(RequestError::Empty("body"));
+        }
         db.execute("UPDATE thread_comments SET body = ?2, edited = ?3 WHERE id = ?1", params![comment.id, body, now_ms()])?;
         touch(&db, thread.id)?;
         self.broadcast_threads(&db, &thread.path)?;
@@ -758,6 +787,7 @@ impl Factory {
         let db = self.store.db();
         let (comment, thread) = Self::own_comment(&db, &request.comment_id)?;
         db.execute("DELETE FROM thread_comments WHERE id = ?1", [comment.id])?;
+        ink::forget(&db, comment.id)?;
         if comments_of(&db, thread.id)?.is_empty() {
             db.execute("DELETE FROM threads WHERE id = ?1", [thread.id])?;
         } else {
@@ -793,7 +823,9 @@ impl Factory {
 
     /// DecideSuggestion: the person accepts a suggested change (Claktory
     /// makes it in the file) or rejects it; either resolves the thread.
+    /// The person's comment reaches the agent told, as theirs.
     pub(crate) fn decide_suggestion(self: &Arc<Self>, request: &v1::DecideSuggestion) -> Result<(), RequestError> {
+        let comment = crate::decisions::comment(&request.comment)?;
         let person = self.lock().config.person_capitalized().to_owned();
         let tell = {
             let _work = self.comments_lock();
@@ -839,13 +871,19 @@ impl Factory {
                     format!("{person} made the change they suggested in {} on {file} themselves.", thread.name()),
                     format!("{change}\nThe file has it now: {}", thread.path),
                 )),
+                // Their own otherwise: the agent it's for hears only their comment.
+                (true, accept) if !comment.is_empty() && !thread.agent.is_empty() => Some((
+                    thread.agent.clone(),
+                    format!("{person} {decision} the change they suggested in {} on {file}.", thread.name()),
+                    if accept { format!("{change}\nThe file has it now: {}", thread.path) } else { change.clone() },
+                )),
                 _ => None,
             }
         };
         if let Some((agent, summary, details)) = tell
             && self.lock().config.agent(&agent).is_some()
         {
-            let text = format!("{summary}\n{details}");
+            let text = format!("{summary}\n{details}{}", crate::decisions::note(&person, comment));
             let event = host_event(summary);
             self.deliver_event(&agent, text, event);
         }
@@ -896,33 +934,56 @@ impl Factory {
         Ok(())
     }
 
-    /// SendComments: the person's drafts on a file (or every file) to the
-    /// agent they're addressed to.
+    /// SendComments: the person's drafts on a file (or every file, or only
+    /// some threads) to the agent they're addressed to. A repeated
+    /// client_batch_id sends nothing.
     pub(crate) fn send_comments(self: &Arc<Self>, request: &v1::SendComments) -> Result<(), RequestError> {
         self.known_agent(&request.agent_id)?;
+        let batch = ink::batch_id(&request.client_batch_id)?;
         let path = if request.path.trim().is_empty() { None } else { Some(absolute(&request.path)?) };
+        let _sending = guard(&self.annotations.sending);
         let drafts: Vec<i64> = {
             let db = self.store.db();
+            if let Some(batch) = batch
+                && ink::sent(&db, batch)?
+            {
+                return Ok(());
+            }
+            let mut only = BTreeSet::new();
+            for id in &request.thread_ids {
+                let thread = find_thread(&db, id)?;
+                if thread.agent != request.agent_id {
+                    return Err(RequestError::Comments("That comment is for another agent.".to_owned()));
+                }
+                only.insert(thread.id);
+            }
             let mut statement = db.prepare(
-                "SELECT c.id FROM thread_comments c JOIN threads t ON t.id = c.thread
+                "SELECT c.id, c.thread FROM thread_comments c JOIN threads t ON t.id = c.thread
                  WHERE c.draft = 1 AND t.agent = ?1 AND (?2 IS NULL OR t.path = ?2) ORDER BY c.id",
             )?;
-            statement.query_map(params![request.agent_id, path], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
+            let rows = statement.query_map(params![request.agent_id, path], crate::store::row2::<i64, i64>)?;
+            let rows: Vec<(i64, i64)> = rows.collect::<rusqlite::Result<_>>()?;
+            rows.into_iter().filter(|(_, thread)| only.is_empty() || only.contains(thread)).map(|(comment, _)| comment).collect()
         };
         if drafts.is_empty() {
             return Err(RequestError::Comments("There are no comments to send.".to_owned()));
         }
-        self.send_comments_now(&request.agent_id, &drafts)
+        self.send_comments_now(&request.agent_id, &drafts)?;
+        if let Some(batch) = batch {
+            ink::record(&self.store.db(), batch, &request.agent_id, &drafts)?;
+        }
+        Ok(())
     }
 
     /// Gives `agent` the person's comments `ids` as one event, and marks
-    /// them sent.
+    /// them sent. Their ink is published to the agent now, and only now.
     fn send_comments_now(self: &Arc<Self>, agent: &str, ids: &[i64]) -> Result<(), RequestError> {
         let (person, tools) = {
             let inner = self.lock();
             let Some(config) = inner.config.agent(agent) else { return Err(RequestError::UnknownAgent(agent.to_owned())) };
             (inner.config.person_capitalized().to_owned(), crate::extensions::enabled(config, crate::extensions::comments::ID))
         };
+        let sight = ink::sight(self, agent);
         let (text, summary) = {
             let _work = self.comments_lock();
             let db = self.store.db();
@@ -934,6 +995,10 @@ impl Factory {
             let mut paths = BTreeSet::new();
             let mut docs: HashMap<String, Option<Doc>> = HashMap::new();
             let mut sections = Vec::new();
+            let mut published: HashMap<i64, v1::InkItem> = HashMap::new();
+            // The threads with review items, and the version the first is on.
+            let mut inked: Vec<String> = Vec::new();
+            let mut version = None;
             for (number, comments) in &by_thread {
                 let Some(thread) = thread(&db, *number)? else { continue };
                 if !docs.contains_key(&thread.path) {
@@ -945,8 +1010,28 @@ impl Factory {
                     docs.insert(thread.path.clone(), doc);
                 }
                 let thread = self::thread(&db, *number)?.unwrap_or(thread);
+                let on = ink::On {
+                    thread: &thread.name(),
+                    path: &thread.path,
+                    kind: thread.kind.name(),
+                    selectors: if thread.is_text() {
+                        json!([{"type": "TextQuoteSelector", "exact": thread.quote.exact, "prefix": thread.quote.prefix, "suffix": thread.quote.suffix}])
+                    } else {
+                        serde_json::from_str(&thread.selectors).unwrap_or_default()
+                    },
+                    quote: if thread.is_text() { &thread.quote.exact } else { "" },
+                };
+                for comment in comments {
+                    if let Some(item) = ink::publish(&self.home, &db, agent, &on, comment.id, &comment.body)? {
+                        published.insert(comment.id, item);
+                        if !inked.contains(&thread.name()) {
+                            inked.push(thread.name());
+                        }
+                        version.get_or_insert_with(|| thread.version.clone());
+                    }
+                }
                 let first = comments_of(&db, thread.id)?.first().map(|comment| comment.id);
-                sections.push(event_section(&thread, docs.get(&thread.path).and_then(Option::as_ref), comments, first));
+                sections.push(event_section(&thread, docs.get(&thread.path).and_then(Option::as_ref), comments, first, &published));
                 paths.insert(thread.path.clone());
             }
             for id in ids {
@@ -961,16 +1046,28 @@ impl Factory {
                 [one] => one.clone(),
                 many => format!("{} files", many.len()),
             };
-            let summary = match count {
-                1 => format!("{person} commented on {place}."),
-                _ => format!("{person} left {count} comments on {place}."),
+            let items = published.len();
+            let version = match (names.len(), version) {
+                (1, Some(version)) if items > 0 => format!(" (version {})", version.get(..8).unwrap_or(&version)),
+                _ => String::new(),
+            };
+            let summary = match (items, count - items) {
+                (0, 1) => format!("{person} commented on {place}."),
+                (0, _) => format!("{person} left {count} comments on {place}."),
+                (items, 0) => format!("{person} sent {} on {place}{version}.", counted(items, "review item")),
+                (items, plain) => {
+                    format!("{person} sent {} and {} on {place}{version}.", counted(items, "review item"), counted(plain, "comment"))
+                }
             };
             let mut text = format!("{summary}\n");
             for section in sections {
                 text.push('\n');
                 text.push_str(&section);
             }
-            if tools {
+            if items > 0 {
+                text.push('\n');
+                text.push_str(&ink::closing(sight, &inked, tools));
+            } else if tools {
                 text.push_str("\nAnswer on a thread with comments_reply and its id, and close it with comments_resolve once it's dealt with. Edit the file with your usual tools: the comments stay with their text.");
             }
             (text, summary)
@@ -979,6 +1076,11 @@ impl Factory {
         self.deliver_event(agent, text, event);
         Ok(())
     }
+}
+
+/// "1 review item", "3 review items".
+fn counted(count: usize, what: &str) -> String {
+    if count == 1 { format!("1 {what}") } else { format!("{count} {what}s") }
 }
 
 /// Writes a file whole or not at all, keeping its permissions.
@@ -1026,6 +1128,13 @@ fn location(thread: &Thread, doc: Option<&Doc>) -> String {
 /// 0:31–0:45, in a region of the frame, …" (or "on a spot in the frame") in
 /// a video.
 fn media_place(thread: &Thread) -> String {
+    if thread.kind == Kind::Pdf {
+        let selectors: Vec<Value> = serde_json::from_str(&thread.selectors).unwrap_or_default();
+        return match region::page_region(&selectors) {
+            Ok(place) => region::describe_page(&place),
+            Err(_) => format!("a part of the PDF: {}", thread.selectors),
+        };
+    }
     if thread.kind == Kind::Video {
         let region = region::describe(&thread.selectors, None).map(|place| match place.spot {
             true => format!(", on a spot in the frame, {}", place.words),
@@ -1047,14 +1156,25 @@ fn media_place(thread: &Thread) -> String {
     }
 }
 
-/// What a thread that isn't on text is on: "image" or "video".
+/// What a thread that isn't on text is on: "image", "video" or "PDF".
 fn media(thread: &Thread) -> &'static str {
-    if thread.kind == Kind::Video { "video" } else { "image" }
+    match thread.kind {
+        Kind::Video => "video",
+        Kind::Pdf => "PDF",
+        _ => "image",
+    }
 }
 
 /// One thread's part of the event: where it is, what it quotes, and the
-/// person's new comments on it.
-fn event_section(thread: &Thread, doc: Option<&Doc>, comments: &[Comment], first: Option<i64>) -> String {
+/// person's new comments on it, with the copies of their ink sent
+/// (`published`, by comment).
+fn event_section(
+    thread: &Thread,
+    doc: Option<&Doc>,
+    comments: &[Comment],
+    first: Option<i64>,
+    published: &HashMap<i64, v1::InkItem>,
+) -> String {
     let mut section = format!("[{}] {}", thread.name(), location(thread, doc));
     if thread.is_text() {
         let _ = write!(section, ": “{}”", shown(&thread.quote.exact));
@@ -1070,13 +1190,36 @@ fn event_section(thread: &Thread, doc: Option<&Doc>, comments: &[Comment], first
     if let Some(suggestion) = thread.suggestion.as_ref().filter(|suggestion| suggestion.by.is_empty()) {
         let _ = write!(section, ", suggesting “{}” instead", shown(&suggestion.replacement));
     }
+    if let Some(item) = first.and_then(|first| published.get(&first)).filter(|_| comments.iter().any(|comment| Some(comment.id) == first)) {
+        let _ = write!(section, "; ink revision {}.", item.layer_revision);
+    }
     section.push('\n');
-    for comment in comments.iter().filter(|comment| !comment.body.trim().is_empty()) {
-        if Some(comment.id) != first {
-            section.push_str("Reply: ");
+    for comment in comments {
+        let body = comment.body.trim();
+        let item = published.get(&comment.id);
+        match (Some(comment.id) == first, item) {
+            (_, None) if body.is_empty() => {}
+            (true, None) => {
+                let _ = writeln!(section, "{body}");
+            }
+            (false, None) => {
+                let _ = writeln!(section, "Reply: {body}");
+            }
+            (true, Some(_)) if body.is_empty() => {}
+            (true, Some(_)) => {
+                let _ = writeln!(section, "Question: {body}");
+            }
+            (false, Some(item)) if body.is_empty() => {
+                let _ = writeln!(section, "Reply with ink revision {}.", item.layer_revision);
+            }
+            (false, Some(item)) => {
+                let _ = writeln!(section, "Reply with ink revision {}: {body}", item.layer_revision);
+            }
         }
-        section.push_str(comment.body.trim());
-        section.push('\n');
+        if let Some(item) = item {
+            let _ = writeln!(section, "Context image: {}", item.published_context_path);
+            let _ = writeln!(section, "Manifest: {}", item.published_manifest_path);
+        }
     }
     section
 }
@@ -1124,9 +1267,13 @@ fn place(db: &Connection, path: &str, kind: Kind, version: &str, selectors: &[v1
     let (content, _) = refresh(db, path)?;
     if !kind.is_text() {
         let Some(sha) = content.sha() else { return Err(RequestError::Comments(format!("Can't read {path}."))) };
-        if parsed.is_empty() {
+        if parsed.is_empty() && kind != Kind::Pdf {
             let needs = if kind == Kind::Video { "A video's comment needs a time." } else { "An image's comment needs a region." };
             return Err(RequestError::Comments(needs.to_owned()));
+        }
+        // A page and a region on it, checked; page numbers are never remapped.
+        if kind == Kind::Pdf {
+            region::page_region(&parsed).map_err(RequestError::Comments)?;
         }
         // Kept on the version it was made on, which may be an earlier one.
         let anchor = if version == sha { v1::AnchorState::Anchored } else { v1::AnchorState::Outdated };
@@ -1266,13 +1413,13 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
     };
     let _work = factory.comments_lock();
     let db = factory.store.db();
-    let paths: Vec<String> = {
-        let mut statement = db
-            .prepare("SELECT DISTINCT path FROM threads WHERE agent = ?1 AND (?2 IS NULL OR path = ?2) ORDER BY path")
-            .map_err(|error| error.to_string())?;
-        let rows = statement.query_map(params![agent, path], |row| row.get(0)).map_err(|error| error.to_string())?;
-        rows.collect::<rusqlite::Result<_>>().map_err(|error| error.to_string())?
-    };
+    let paths: Vec<String> = crate::store::query(
+        &db,
+        "SELECT DISTINCT path FROM threads WHERE agent = ?1 AND (?2 IS NULL OR path = ?2) ORDER BY path",
+        params![agent, path],
+        |row| row.get(0),
+    )
+    .map_err(|error| error.to_string())?;
     let mut out = String::new();
     let mut count = 0;
     for path in paths {
@@ -1296,6 +1443,7 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
                 (false, v1::AnchorState::Moved) => "open, the text changed since",
                 (false, v1::AnchorState::Detached) => "open, no longer in the file",
                 (false, v1::AnchorState::Outdated) if thread.kind == Kind::Video => "open, the video changed since",
+                (false, v1::AnchorState::Outdated) if thread.kind == Kind::Pdf => "open, the PDF changed since",
                 (false, v1::AnchorState::Outdated) => "open, the image changed since",
                 _ => "open",
             };
@@ -1315,7 +1463,13 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
                 };
                 let _ = writeln!(out, "  {who} suggested “{}” instead ({state})", shown(&suggestion.replacement));
             }
-            for comment in comments.iter().filter(|comment| !comment.body.trim().is_empty()) {
+            // Sent ink only: drafts were left out above.
+            let inks = ink::of_thread(&db, thread.id).map_err(|error| error.to_string())?;
+            for comment in comments {
+                let image = inks.get(&comment.id).map(|item| item.published_context_path.as_str()).filter(|path| !path.is_empty());
+                if comment.body.trim().is_empty() && image.is_none() {
+                    continue;
+                }
                 let who = if comment.author.is_empty() {
                     person.clone()
                 } else if comment.author == agent {
@@ -1323,7 +1477,17 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
                 } else {
                     names.get(&comment.author).cloned().unwrap_or_else(|| comment.author.clone())
                 };
-                let _ = writeln!(out, "  {who}: {}", comment.body.trim());
+                match image {
+                    Some(image) if comment.body.trim().is_empty() => {
+                        let _ = writeln!(out, "  {who}, in ink: context image {image}");
+                    }
+                    Some(image) => {
+                        let _ = writeln!(out, "  {who}: {} (in ink: context image {image})", comment.body.trim());
+                    }
+                    None => {
+                        let _ = writeln!(out, "  {who}: {}", comment.body.trim());
+                    }
+                }
             }
         }
     }

@@ -73,11 +73,16 @@ async fn claktory(dir: &Path) -> (std::sync::Arc<factoryd::Factory>, std::net::S
     let home = dir.join("home");
     assert_eq!(checkout(&home), "home/builder");
     std::fs::write(home.join("auth.json"), "{\"scripted\": {}}").expect("write");
-    for left_out in ["bin", "releases", "models/speech", "trash"] {
+    for left_out in ["bin", "releases", "models/speech", "trash", "dm"] {
         std::fs::create_dir_all(home.join(left_out)).expect("mkdir");
         std::fs::write(home.join(left_out).join("big"), "not moved").expect("write");
     }
     std::fs::write(home.join("factoryd.log"), "log").expect("write");
+    // Ink: kept blobs move as they are; what's still coming in doesn't.
+    std::fs::create_dir_all(home.join("annotations/blobs")).expect("mkdir");
+    std::fs::create_dir_all(home.join("annotations/staging")).expect("mkdir");
+    std::fs::write(home.join(format!("annotations/blobs/{}", "b".repeat(64))), "drawing").expect("write");
+    std::fs::write(home.join("annotations/staging/u1-1.partial"), "half a drawing").expect("write");
     (factory, addr, repo)
 }
 
@@ -127,7 +132,8 @@ async fn a_live_export_carries_the_claktory_its_folders_and_checkouts_and_change
             .to_string_lossy()
             .starts_with("segment-"))
     );
-    for gone in ["bin", "releases", "models", "trash", "trees", "factoryd.log", "factory.db-wal", "factory.db-shm"] {
+    assert_eq!(std::fs::read_to_string(home.join(format!("annotations/blobs/{}", "b".repeat(64)))).unwrap(), "drawing");
+    for gone in ["bin", "releases", "models", "trash", "dm", "trees", "factoryd.log", "factory.db-wal", "factory.db-shm", "annotations/staging"] {
         assert!(!home.join(gone).exists(), "{gone} isn't moved");
     }
 

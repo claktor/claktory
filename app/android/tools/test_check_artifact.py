@@ -230,5 +230,62 @@ class RealEngine(unittest.TestCase):
         self.assertIn("ships debug info", problems[0])
 
 
+def ndk_clang():
+    """The pinned NDK's clang for arm64 at the app's minSdk, or None."""
+    sdk = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
+    toolchain = ca.read_toolchain(os.path.join(ca.ANDROID, "toolchain.properties"))
+    for host in ("darwin-x86_64", "linux-x86_64"):
+        clang = os.path.join(sdk, "ndk", toolchain["android.ndk"], "toolchains", "llvm", "prebuilt", host,
+                             "bin", f"aarch64-linux-android{toolchain['android.minSdk']}-clang")
+        if os.path.exists(clang):
+            return clang
+    return None
+
+
+class RealNdkLink(unittest.TestCase):
+    """The negative fixture from a real linker, not only the synthetic
+    writer: the pinned NDK links the same library at 4 KiB and at 16 KiB
+    pages, and only the 16 KiB one loads on a 16 KiB-page phone."""
+
+    def link(self, tmp, page):
+        source = os.path.join(tmp, "x.c")
+        with open(source, "w") as f:
+            f.write("int claktory_page_probe(int x) { static int calls; calls += x; return calls; }\n")
+        out = os.path.join(tmp, f"libprobe{page}.so")
+        subprocess.run([ndk_clang(), "-shared", "-fPIC", "-O2", "-s", f"-Wl,-z,max-page-size={page}",
+                        "-o", out, source], check=True, capture_output=True)
+        with open(out, "rb") as f:
+            return f.read()
+
+    def problems(self, data):
+        problems, _ = ca.check_elf("lib/arm64-v8a/libprobe.so", data, policy(), abi="arm64-v8a",
+                                   siblings={"libclaktory_tunnel.so", "libflutter.so", "libapp.so"})
+        return problems
+
+    def test_a_4k_linked_library_is_refused_and_a_16k_one_passes(self):
+        if ndk_clang() is None:
+            self.skipTest("no pinned NDK")
+        with tempfile.TemporaryDirectory() as tmp:
+            four = self.problems(self.link(tmp, 4096))
+            sixteen = self.problems(self.link(tmp, 16384))
+        self.assertTrue(any("aligned to 4096 bytes, not 16384" in p for p in four), four)
+        self.assertEqual(sixteen, [])
+
+    def test_a_4k_library_in_an_apk_fails_the_whole_check(self):
+        if ndk_clang() is None:
+            self.skipTest("no pinned NDK")
+        with tempfile.TemporaryDirectory() as tmp:
+            four = self.link(tmp, 4096)
+            libs = fx.good_libs()
+            libs["libprobe.so"] = four
+            path = os.path.join(tmp, "app.apk")
+            with open(path, "wb") as f:
+                f.write(fx.good_apk(libs=libs))
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                status = ca.main([path])
+        self.assertNotEqual(status, 0)
+        self.assertIn("libprobe.so: LOAD segment", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

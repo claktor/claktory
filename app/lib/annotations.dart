@@ -10,6 +10,7 @@ import 'package:flutter/widgets.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'identity.dart';
 import 'mobile/comment_editor.dart';
 import 'mobile/drawer.dart' show largeText;
@@ -814,7 +815,11 @@ class CommentsController extends ChangeNotifier {
   /// Accepts [thread]'s suggested change, which Claktory makes in the
   /// file, or rejects it. The person's own, never sent, is taken back
   /// instead: deleting its comments deletes it.
-  Future<void> decide(Thread thread, {required bool accept}) {
+  Future<void> decide(
+    Thread thread, {
+    required bool accept,
+    String comment = '',
+  }) {
     final own = thread.suggestion.authorAgentId.isEmpty;
     if (!accept && own && thread.comments.every((c) => c.draft)) {
       return _run(() async {
@@ -823,7 +828,10 @@ class CommentsController extends ChangeNotifier {
         }
       });
     }
-    return _run(() => backend.decideSuggestion(thread.id, accept: accept));
+    return _run(
+      () =>
+          backend.decideSuggestion(thread.id, accept: accept, comment: comment),
+    );
   }
 
   Future<void> send(String agentId) =>
@@ -1960,38 +1968,76 @@ class _Suggestion extends StatelessWidget {
   }
 }
 
-/// A suggestion not decided yet: the agent's to accept or reject, the
-/// person's own to apply or take back. Accepting needs the text as it was.
-class _Decide extends StatelessWidget {
+/// A suggestion not decided yet: the agent's to accept or reject, with a
+/// comment for it either way; the person's own to apply or take back.
+/// Accepting needs the text as it was.
+class _Decide extends StatefulWidget {
   const _Decide({required this.controller, required this.thread});
 
   final CommentsController controller;
   final Thread thread;
 
   @override
+  State<_Decide> createState() => _DecideState();
+}
+
+class _DecideState extends State<_Decide> {
+  final _comment = TextEditingController();
+
+  @override
+  void dispose() {
+    _comment.dispose();
+    super.dispose();
+  }
+
+  void _decide({required bool accept}) => widget.controller.decide(
+    widget.thread,
+    accept: accept,
+    comment: _comment.text.trim(),
+  );
+
+  @override
   Widget build(BuildContext context) {
+    final thread = widget.thread;
+    final controller = widget.controller;
     final own = thread.suggestion.authorAgentId.isEmpty;
     final canAccept =
         thread.anchor == AnchorState.ANCHOR_STATE_ANCHORED &&
         controller.located.containsKey(thread.id);
+    final agent = own
+        ? null
+        : controller.backend.workspace.agent(thread.suggestion.authorAgentId);
+    final buttons = Wrap(
+      spacing: Space.xs,
+      runSpacing: Space.xs,
+      children: [
+        Button(
+          label: own ? 'Apply' : 'Accept',
+          primary: true,
+          onPressed: canAccept ? () => _decide(accept: true) : null,
+        ),
+        Button(
+          label: own ? 'Discard' : 'Reject',
+          onPressed: () => _decide(accept: false),
+        ),
+      ],
+    );
     return Unselectable(
-      child: Wrap(
-        spacing: Space.xs,
-        runSpacing: Space.xs,
-        children: [
-          Button(
-            label: own ? 'Apply' : 'Accept',
-            primary: true,
-            onPressed: canAccept
-                ? () => controller.decide(thread, accept: true)
-                : null,
-          ),
-          Button(
-            label: own ? 'Discard' : 'Reject',
-            onPressed: () => controller.decide(thread, accept: false),
-          ),
-        ],
-      ),
+      child: own
+          ? buttons
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: buttons,
+                ),
+                DecisionComment(
+                  controller: _comment,
+                  agent: agent?.name ?? 'The agent',
+                ),
+              ],
+            ),
     );
   }
 }

@@ -591,10 +591,11 @@ async fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, Ap
     if form.get("confirm") != "yes" {
         return Ok(delete_confirm(form.get("csrf")));
     }
-    db::delete_account(&mut service.db(), &account)?;
+    db::delete_account(&mut service.db(), &account, service.config.user_apps.is_some(), service.now())?;
     tracing::info!("deleted: account {}", account.id);
-    // Its calls no longer authenticate; now its user-level apps forget it.
-    super::apps::purge_account(service, &account.id).await;
+    // Its calls no longer authenticate; now its user-level apps forget it,
+    // or will once the worker answers.
+    super::apps::purge_account(service, &account.id, 0).await;
     let mut reply = sign_in_page("<p class=\"notice\">Your account was deleted.</p>", "", Next::Account);
     reply.headers.push(clear_cookie());
     Ok(reply)

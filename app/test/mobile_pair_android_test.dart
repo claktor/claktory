@@ -1,7 +1,9 @@
-// Pairing an Android phone (the first friend build): no camera to scan
-// with, so the screen opens on pasting, and its words name no iPhone or
-// Mac: the code comes from a device already connected, or from where the
-// Claktory was set up (a server, often). The iPhone keeps its own words.
+// Pairing an Android phone: it scans the code when it has a camera the app
+// may use, and opens on pasting when it has none; either way its words name
+// no iPhone or Mac: the code comes from a device already connected, or from
+// where the Claktory was set up (a server, often). The iPhone keeps its own
+// words.
+import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:flutter/foundation.dart';
@@ -10,21 +12,27 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 
-Future<void> _show(WidgetTester tester, TargetPlatform platform) async {
+Future<Harness> _show(
+  WidgetTester tester,
+  TargetPlatform platform, {
+  CameraAccess? camera,
+}) async {
   debugDefaultTargetPlatformOverride = platform;
   addTearDown(() => debugDefaultTargetPlatformOverride = null);
   final harness = Harness(Workspace(), localBackend: false);
-  harness.camera.state = platform == TargetPlatform.android
-      ? CameraAccess.unavailable
-      : CameraAccess.granted;
+  harness.camera.state =
+      camera ??
+      (platform == TargetPlatform.android
+          ? CameraAccess.unavailable
+          : CameraAccess.granted);
   await harness.show(tester, size: const Size(393, 852));
   await pumpFrames(tester);
+  return harness;
 }
 
 void main() {
-  testWidgets('on Android: straight to pasting, in words for a server', (
-    tester,
-  ) async {
+  testWidgets('on Android with no camera: straight to pasting, in words '
+      'for a server', (tester) async {
     await _show(tester, TargetPlatform.android);
     expect(find.textContaining('Paste the code for this phone'), findsOne);
     expect(find.textContaining('iPhone'), findsNothing);
@@ -41,6 +49,82 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('on Android with the camera allowed: scanning, in words for '
+      'a server, with pasting a tap away', (tester) async {
+    await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
+    expect(find.textContaining('Scan the code for this phone'), findsOne);
+    expect(find.textContaining('iPhone'), findsNothing);
+    expect(find.textContaining('Mac'), findsNothing);
+    expect(find.byType(EditableText), findsNothing);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(find.byType(EditableText), findsOneWidget);
+  });
+
+  test(
+    "on Android, a scanned code that isn't Claktory's says which to scan",
+    () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      expect(
+        pairingProblem('WIFI:S:home;;', scanned: true),
+        "That isn't a Claktory code. Scan the one shown for this phone in "
+        'Settings → Devices → Add a device.',
+      );
+    },
+  );
+
+  testWidgets('on Android, a first no asks again; a second sends the '
+      'person to Settings', (tester) async {
+    final harness = await _show(
+      tester,
+      TargetPlatform.android,
+      camera: CameraAccess.undetermined,
+    );
+    harness.camera
+      ..granting = false
+      ..afterRefusal = CameraAccess.undetermined;
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 1);
+    expect(find.text('Scan code'), findsOneWidget);
+    expect(find.text('Open Settings'), findsNothing);
+
+    harness.camera.afterRefusal = CameraAccess.denied;
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 2);
+    expect(find.text('Open Settings'), findsOneWidget);
+    expect(find.text('Scan code'), findsNothing);
+  });
+
+  testWidgets('on an iPhone, a no sends the person to Settings at once', (
+    tester,
+  ) async {
+    final harness = await _show(
+      tester,
+      TargetPlatform.iOS,
+      camera: CameraAccess.undetermined,
+    );
+    harness.camera.granting = false;
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 1);
+    expect(find.text('Open Settings'), findsOneWidget);
+  });
+
+  testWidgets('on Android with the camera refused: Settings, in its words', (
+    tester,
+  ) async {
+    await _show(tester, TargetPlatform.android, camera: CameraAccess.denied);
+    expect(
+      find.text('To scan, allow Claktory to use the camera in Settings.'),
+      findsOneWidget,
+    );
+    expect(find.text('Open Settings'), findsOneWidget);
+    expect(find.textContaining('Mac'), findsNothing);
   });
 
   testWidgets('on iPhone: its own words, scanning first', (tester) async {

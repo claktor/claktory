@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Claktory",
+  "description": "Lets an agent in Claktory read a tab you choose, after you confirm it on your Mac.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "157",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": {"service_worker": "sw.js", "type": "module"},
+  "action": {
+    "default_title": "Claktory",
+    "default_popup": "popup.html",
+    "default_icon": {"16": "icons/icon-16.png", "32": "icons/icon-32.png"}
+  },
+  "icons": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"},
+  "externally_connectable": {"ids": []},
+  "incognito": "not_allowed",
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"}
+}

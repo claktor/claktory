@@ -1,0 +1,355 @@
+# Queries for the live reliability run (search.rs, web_live_reliability):
+# what agents search for, one per line. "| domains | recency" after a query
+# sets those options.
+sqlite wal checkpoint
+tokio select cancellation safety
+rust borrow checker error E0502
+how to undo last git commit keep changes
+python asyncio gather vs wait
+postgres jsonb index performance
+kubernetes pod crashloopbackoff debug
+react useEffect cleanup function
+typescript satisfies operator example
+nginx reverse proxy websocket config
+docker compose healthcheck depends_on
+flutter riverpod vs provider
+swiftui navigationstack programmatic navigation
+macos launchd plist keepalive
+rust serde rename_all camelCase
+cargo workspace inherit dependencies
+openssl generate ed25519 key
+ssh agent forwarding security risks
+http2 vs http3 performance
+grpc streaming backpressure
+protobuf field numbering rules
+sqlite foreign key on delete cascade not working
+git rebase onto another branch
+git bisect run script
+vim search and replace across files
+bash set -euo pipefail explained
+zsh vs bash differences macos
+homebrew install specific version
+python virtualenv vs venv vs conda
+pip install from git repository branch
+numpy broadcasting rules
+pandas groupby multiple columns aggregate
+matplotlib subplots shared x axis
+scikit-learn train test split stratify
+pytorch cuda out of memory fix
+huggingface transformers tokenizer padding
+llm context window explained
+retrieval augmented generation chunk size
+vector database comparison pgvector
+redis pub sub vs streams
+kafka consumer group rebalancing
+rabbitmq dead letter queue
+aws s3 presigned url expiration
+aws lambda cold start reduce
+terraform state lock dynamodb
+cloudflare workers kv limits
+github actions cache cargo
+gitlab ci rules if changes
+jenkins pipeline parallel stages
+prometheus histogram vs summary
+grafana loki query examples
+opentelemetry rust tracing exporter
+jwt refresh token rotation best practice
+oauth2 pkce flow explained
+webauthn passkeys implementation
+csrf protection same site cookies
+content security policy nonce
+cors preflight request explained
+tls 1.3 handshake steps
+dns over https setup
+ipv6 link local address
+wireguard vs openvpn speed
+tailscale exit node setup
+raspberry pi 5 power supply requirements
+arduino interrupt debounce
+esp32 deep sleep current
+linux find files larger than
+linux check open ports
+systemd timer vs cron
+journalctl follow service logs
+rsync exclude directories
+tar extract to specific directory
+ffmpeg convert mov to mp4
+imagemagick resize keep aspect ratio
+pdf merge command line mac
+regex lookahead lookbehind
+unicode normalization nfc nfd
+utf-8 bom problems
+floating point precision javascript
+javascript array sort numbers
+node.js event loop phases
+deno vs bun vs node
+npm workspaces monorepo
+pnpm vs yarn
+webpack vs vite build speed
+css grid auto fit vs auto fill
+css container queries browser support
+tailwind dark mode class strategy
+html dialog element accessibility
+aria live region polite assertive
+web vitals cls fix
+service worker cache strategies
+indexeddb vs localstorage
+websocket reconnect exponential backoff
+server sent events vs websockets
+graphql n+1 problem dataloader
+rest api pagination cursor vs offset
+idempotency key api design
+rate limiting token bucket algorithm
+consistent hashing explained
+raft consensus algorithm explained
+crdt text editing
+event sourcing pros and cons
+domain driven design aggregates
+clean architecture vs hexagonal
+solid principles examples
+dependency injection rust
+rust async trait stable
+rust pin explained
+rust lifetimes in structs
+rust error handling anyhow thiserror
+rust arc mutex deadlock
+rust rayon parallel iterator
+rust wasm bindgen tutorial
+wasmtime component model
+webassembly wasi preview 2
+go goroutine leak detection
+go context cancellation
+java virtual threads performance
+kotlin coroutines flow vs channel
+swift actors data race
+c++ smart pointers unique_ptr shared_ptr
+c undefined behavior signed overflow
+assembly x86 calling convention
+llvm optimization passes
+compiler bootstrapping explained
+garbage collection generational
+memory leak detection valgrind
+profiling rust flamegraph
+benchmarking criterion rust
+unit testing mocking best practices
+property based testing examples
+fuzzing cargo fuzz
+code review checklist
+semantic versioning rules
+keep a changelog format
+open source license comparison mit apache
+gpl compatibility apache 2.0
+how to write a good commit message
+technical debt management
+agile vs waterfall
+scrum sprint planning
+kanban wip limits
+okrs examples engineering
+one on one meeting questions
+how to give feedback to a colleague
+remote work productivity tips
+pomodoro technique effectiveness
+deep work cal newport summary
+best mechanical keyboard switches for typing
+ergonomic office chair recommendations
+standing desk benefits research
+monitor arm vesa compatibility
+macbook pro battery life
+iphone release date
+android new features
+pixel vs iphone camera comparison
+best noise cancelling headphones
+kindle vs kobo
+e-ink monitor review
+how does gps work
+how do vaccines work
+how does a heat pump work
+solar panel efficiency by type
+electric car battery degradation
+lithium ion battery storage tips
+how to calculate compound interest
+index funds vs etfs
+what is inflation
+interest rates effect on housing market
+how to start a budget
+emergency fund how much
+credit score factors
+how to negotiate salary
+cover letter tips
+resume action verbs
+interview questions for software engineers
+system design interview tips
+leetcode dynamic programming patterns
+big o notation cheat sheet
+binary search edge cases
+dijkstra algorithm explained
+a star pathfinding
+bloom filter false positive rate
+skip list vs balanced tree
+b tree vs lsm tree
+mvcc postgres explained
+database normalization forms
+sql window functions examples
+sql left join vs inner join
+mysql vs postgres
+mongodb schema design patterns
+elasticsearch mapping types
+time series database comparison
+data lake vs data warehouse
+apache spark partitioning
+airflow dag best practices
+dbt incremental models
+etl vs elt
+machine learning overfitting regularization
+gradient descent learning rate
+transformer attention mechanism explained
+diffusion models explained
+reinforcement learning q learning
+bayes theorem example
+p value explained
+central limit theorem
+linear regression assumptions
+correlation vs causation examples
+monte carlo simulation python
+history of the roman empire
+causes of world war 1
+french revolution timeline
+industrial revolution inventions
+cold war summary
+apollo 11 mission facts
+history of the internet
+who invented the telephone
+printing press impact
+ancient egypt pyramids construction
+great wall of china length
+silk road trade goods
+renaissance artists list
+baroque music characteristics
+beethoven symphony 9 history
+how to learn guitar chords
+music theory circle of fifths
+best way to learn a language
+spanish subjunctive rules
+japanese hiragana chart
+french pronunciation tips
+german cases explained
+latin phrases meaning
+etymology of the word salary
+shakespeare sonnet 18 analysis
+1984 orwell themes
+to kill a mockingbird summary
+the great gatsby symbolism
+best science fiction novels
+how to write a novel outline
+poetry meter iambic pentameter
+photography rule of thirds
+aperture shutter speed iso explained
+best lens for portrait photography
+how to edit raw photos
+video editing software free
+color grading basics
+blender beginner tutorial
+3d printing pla vs petg
+woodworking joints types
+how to fix a leaking tap
+how to unclog a drain without chemicals
+paint finish types eggshell satin
+how to grow tomatoes in pots
+composting at home
+indoor plants low light
+how to care for a fiddle leaf fig
+sourdough starter feeding schedule
+how to make pizza dough
+best way to cook rice
+cast iron pan seasoning
+vegetarian protein sources
+mediterranean diet benefits
+intermittent fasting research
+how much water should i drink a day
+sleep hygiene tips
+how to fall asleep faster
+benefits of walking daily
+strength training for beginners
+running 5k training plan
+stretching before or after exercise
+how to improve posture
+symptoms of vitamin d deficiency
+caffeine half life
+how to reduce stress
+meditation for beginners
+climate change causes and effects
+carbon footprint reduction tips
+renewable energy statistics
+ocean acidification explained
+deforestation amazon
+recycling plastic numbers meaning
+how do earthquakes happen
+volcano types
+tornado vs hurricane
+how rainbows form
+why is the sky blue
+black hole explained
+james webb telescope discoveries
+mars rover perseverance findings
+how far is the moon
+speed of light in vacuum
+quantum entanglement explained simply
+theory of relativity summary
+periodic table groups
+photosynthesis process steps
+dna replication steps
+how the immune system works
+human brain facts
+evolution natural selection examples
+dinosaur extinction theories
+largest animal ever
+how do bees make honey
+octopus intelligence
+dog training positive reinforcement
+cat behavior meanings
+best travel destinations europe autumn
+tokyo travel tips first time
+iceland ring road itinerary
+how to get cheap flights
+travel insurance worth it
+packing list carry on only
+jet lag how to recover
+visa requirements schengen
+learn to swim as an adult
+chess opening principles
+sudoku solving techniques
+rubik's cube beginner method
+board games for two players
+how to start a podcast
+youtube algorithm explained
+seo basics for beginners
+google search operators list
+email marketing best practices
+small business accounting software
+how to register a trademark
+gdpr compliance checklist
+cookie consent requirements eu
+accessibility wcag 2.2 changes
+privacy policy generator
+how to write a business plan
+startup equity vesting explained
+venture capital vs angel investors
+product market fit definition
+user interview questions
+a b testing sample size
+net promoter score explained
+customer churn analysis
+pricing strategy saas
+open source business models
+sqlite wal mode | sqlite.org
+tokio runtime | docs.rs
+flutter list view performance | docs.flutter.dev
+rust release notes | blog.rust-lang.org
+python new features | docs.python.org
+security advisory openssl | | month
+rust news | | week
+apple developer news | | month
+kubernetes release | | year
+javascript framework news | | month
+macos update | | week
+postgres release notes | | year

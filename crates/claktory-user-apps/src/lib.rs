@@ -8,6 +8,8 @@
 pub mod ipc;
 
 #[cfg(feature = "worker")]
+pub mod dms;
+#[cfg(feature = "worker")]
 pub mod grants;
 #[cfg(feature = "worker")]
 pub mod worker;

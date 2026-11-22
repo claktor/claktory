@@ -136,6 +136,8 @@ impl NotificationsConfig {
             quiet_end: self.quiet_end,
             urgent_breaks_quiet: self.urgent_breaks_quiet,
             relay: self.relay.clone(),
+            time_zone: jiff::tz::TimeZone::system().iana_name().unwrap_or_default().to_owned(),
+            utc_offset_minutes: jiff::ZonedDateTime::now().offset().seconds() / 60,
         }
     }
 
@@ -169,6 +171,38 @@ impl NotificationsConfig {
             urgent_breaks_quiet: settings.urgent_breaks_quiet,
             relay: settings.relay.trim().to_owned(),
         }
+    }
+
+    /// UpdateSettings.notification_change: `self` with the fields that are
+    /// set changed.
+    pub(crate) fn changed(&self, change: &v1::NotificationSettingsChange) -> NotificationsConfig {
+        let mut settings = self.clone();
+        let flags = [
+            (change.needs_you, &mut settings.needs_you),
+            (change.alerts, &mut settings.alerts),
+            (change.replies, &mut settings.replies),
+            (change.desktop_replies, &mut settings.desktop_replies),
+            (change.quiet_hours, &mut settings.quiet_hours),
+            (change.urgent_breaks_quiet, &mut settings.urgent_breaks_quiet),
+        ];
+        for (value, setting) in flags {
+            if let Some(value) = value {
+                *setting = value;
+            }
+        }
+        if change.preview.is_some() {
+            settings.preview = Preview::from_proto(change.preview());
+        }
+        if let Some(start) = change.quiet_start {
+            settings.quiet_start = start;
+        }
+        if let Some(end) = change.quiet_end {
+            settings.quiet_end = end;
+        }
+        if let Some(relay) = &change.relay {
+            relay.trim().clone_into(&mut settings.relay);
+        }
+        settings
     }
 
     /// Quiet hours hold at `minute` (after midnight).
@@ -255,6 +289,9 @@ pub(crate) struct State {
     pub(crate) push: push::State,
     /// The settings, once read from factory.db.
     settings: Mutex<Option<NotificationsConfig>>,
+    /// Held while the settings are read, changed and saved, so two changes
+    /// at once both stay.
+    editing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -271,6 +308,9 @@ struct Data {
     pipes: HashMap<String, BTreeSet<u64>>,
     /// Chats whose conversations are loaded, as last seen.
     chats: HashMap<String, BTreeSet<u64>>,
+    /// Agents' direct messages waiting for review, by proposal id, as last
+    /// seen.
+    dm_sends: BTreeSet<String>,
     /// The first Workspace was seen: what waits then isn't new.
     started: bool,
     /// How many items wait for the person, as last seen: a push's badge.
@@ -535,13 +575,27 @@ fn save(factory: &Factory, settings: NotificationsConfig) -> Result<(), RequestE
 
 /// UpdateSettings.notifications.
 pub(crate) fn update(factory: &Factory, request: &v1::NotificationSettings) -> Result<(), RequestError> {
+    let _editing = factory.notify.editing.lock().unwrap_or_else(PoisonError::into_inner);
     let settings = settings(factory).updated(request);
     settings.check()?;
     save(factory, settings)
 }
 
+/// UpdateSettings.notification_change: only the settings it names.
+pub(crate) fn change(factory: &Factory, change: &v1::NotificationSettingsChange) -> Result<(), RequestError> {
+    let _editing = factory.notify.editing.lock().unwrap_or_else(PoisonError::into_inner);
+    let old = settings(factory);
+    let settings = old.changed(change);
+    settings.check()?;
+    if settings == old {
+        return Ok(());
+    }
+    save(factory, settings)
+}
+
 /// UpdateAgent.notify: `agent`'s "Notify me".
 pub(crate) fn set_mode(factory: &Factory, agent: &str, mode: Mode) -> Result<(), RequestError> {
+    let _editing = factory.notify.editing.lock().unwrap_or_else(PoisonError::into_inner);
     let mut settings = settings(factory);
     if settings.mode(agent) == mode {
         return Ok(());
@@ -560,7 +614,8 @@ pub(crate) fn observe(factory: &Factory, inner: &Inner, workspace: &v1::Workspac
         data.started = true;
         let waiting = workspace.agents.iter().map(|agent| agent.waiting_seqs.len()).sum::<usize>()
             + workspace.pipes.iter().map(|pipe| pipe.waiting_seqs.len()).sum::<usize>()
-            + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>();
+            + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>()
+            + workspace.dm_sends.len();
         data.badge = u32::try_from(waiting).unwrap_or(u32::MAX);
         notes
     };
@@ -647,6 +702,21 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
         chats.insert(chat.id.clone(), waiting);
     }
     data.chats = chats;
+
+    // An agent's direct message waiting for review: in Claktory's own words,
+    // never the message or a name the friend chose.
+    let dm_sends: BTreeSet<String> = workspace.dm_sends.iter().map(|waiting| waiting.proposal_id.clone()).collect();
+    if data.started {
+        for waiting in workspace.dm_sends.iter().filter(|waiting| !data.dm_sends.contains(&waiting.proposal_id)) {
+            let Some(agent) = workspace.agents.iter().find(|agent| agent.id == waiting.agent_id) else { continue };
+            let mut note = Note::new(Kind::NeedsYou, format!("agent:{}", agent.id), agent.name.clone());
+            note.agent_id = agent.id.clone();
+            note.mode = settings.mode(&agent.id);
+            note.what = "Wants to send a message to a friend".to_owned();
+            notes.push(note);
+        }
+    }
+    data.dm_sends = dm_sends;
     notes
 }
 

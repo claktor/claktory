@@ -82,8 +82,14 @@ impl Factory {
             if let Err(error) = crate::extensions::ask::cleared(&self.store, id) {
                 tracing::warn!(agent = %id, %error, "could not dismiss its questions");
             }
+            // So did Rivet's proposals of app access.
+            if let Err(error) = crate::user_apps::cleared(&self.store, id) {
+                tracing::warn!(agent = %id, %error, "could not decline its proposals of app access");
+            }
             self.broadcast_workspace(&inner);
         }
+        // Its browser sessions were the old conversation's.
+        self.browser_forget(id, "agent_changed");
         let dir = self.home.agent_dir(id);
         archive(&dir).await?;
         let (transcript, persist) = Transcript::cleared(dir, id.to_owned())?;

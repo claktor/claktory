@@ -2,4 +2,5 @@
 //! flutter_rust_bridge_codegen generate).
 
 pub mod account;
+pub mod dm;
 pub mod tunnel;

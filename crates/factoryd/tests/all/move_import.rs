@@ -79,10 +79,33 @@ pub(crate) async fn source() -> Source {
     .expect("task");
     db.execute("INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, delivered) VALUES ('writer', 'person', '', '', '', 'Hi', 0, 0)", [])
         .expect("a message");
+    // A drawing on a file in the project.
+    db.execute(
+        "INSERT INTO ink_layers (path, source_sha256, source_mime, source_size, surface, space, conflict_of, revision, created) VALUES (?1, ?2, 'application/pdf', 7, 'page:1', x'', '', 1, 0)",
+        [repo.join("paper.pdf").display().to_string(), GOOD_BLOB.to_owned()],
+    )
+    .expect("a layer");
+    // A review item sent to Writer: its copies in Writer's uploads.
+    let uploads = home.agent_dir("writer").join("uploads/2026-11-21");
+    db.execute(
+        "INSERT INTO ink_items (comment, thread, layer, layer_revision, context_sha256, context_bytes, context_width, context_height, context_transform, excerpt_text, published_context_path, published_manifest_path, created) VALUES (1, 1, 'layer-1', 1, ?1, 7, 1, 1, '[]', '', ?2, ?3, 0)",
+        [GOOD_BLOB.to_owned(), uploads.join("t-1-c1-context.png").display().to_string(), uploads.join("t-1-c1.json").display().to_string()],
+    )
+    .expect("an item");
+    // Ink: a blob, one whose bytes aren't what its name says, and a file
+    // that isn't a blob's.
+    let blobs = home.root().join("annotations/blobs");
+    std::fs::create_dir_all(&blobs).expect("blobs");
+    std::fs::write(blobs.join(GOOD_BLOB), "drawing").expect("blob");
+    std::fs::write(blobs.join("b".repeat(64)), "tampered").expect("blob");
+    std::fs::write(blobs.join("notes.txt"), "not a blob").expect("blob");
     let pairing = std::fs::read_to_string(home.root().join("remote/local-pairing")).expect("local pairing");
     let token = pairing.split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("a token").to_owned();
     Source { dir, home, user, repo, token }
 }
+
+/// SHA-256 of "drawing".
+const GOOD_BLOB: &str = "27f3282691613a41f159fe0fb8f3791f3b99fa00fc62df29edeeafe496eb0fdd";
 
 /// Every file under `from`, as bundle paths under `prefix`, but the
 /// records' WAL; databases as snapshots.
@@ -230,6 +253,19 @@ async fn a_claktory_moves_with_its_paths_folders_checkouts_vault_and_devices() {
         db.query_row("SELECT log, status FROM tasks WHERE task = 'task-1'", [], |row| Ok((row.get(0)?, row.get(1)?))).expect("task");
     assert!(log.starts_with(&here.root().display().to_string()) && status == "stopped by the move", "{log} {status}");
     assert_eq!(std::fs::read_to_string(here.root().join("move-epoch")).expect("epoch").trim(), "3");
+    let layer: String = db.query_row("SELECT path FROM ink_layers", [], |row| row.get(0)).expect("layer");
+    assert_eq!(layer, site.join("paper.pdf").display().to_string(), "a drawing stays on its file");
+    let (context, manifest): (String, String) = db
+        .query_row("SELECT published_context_path, published_manifest_path FROM ink_items", [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("item");
+    let uploads = here.agent_dir("writer").join("uploads/2026-11-21");
+    assert_eq!((context, manifest), (uploads.join("t-1-c1-context.png").display().to_string(), uploads.join("t-1-c1.json").display().to_string()));
+    // Ink comes as it is, but for blobs whose names lie.
+    let blobs: Vec<String> = std::fs::read_dir(here.root().join("annotations/blobs"))
+        .expect("blobs")
+        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(blobs, [GOOD_BLOB]);
 
     // The folder, with its uncommitted change, untracked files and remote.
     assert_eq!(run(&site, &["branch", "--show-current"]), "main");

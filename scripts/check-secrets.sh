@@ -70,7 +70,9 @@ git -C "$ROOT" log -m --format='commit %H%n%B' "$SHA" | scan stdin --report-path
 # Its files as they are, outside git: what anyone downloading it gets.
 mkdir "$WORK/tree"
 git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/tree"
-scan dir --report-path "$WORK/tree.txt" "$WORK/tree" || status=1
+# From inside it, so files are named as in the repository (crates/…), as in
+# the history scan: .gitleaks.toml's path exceptions are anchored there.
+(cd "$WORK/tree" && scan dir --report-path "$WORK/tree.txt" .) || status=1
 
 if ((status)); then
   echo "SECRET CHECK FAILED for $REV ($SHA): don't publish. Found:" >&2

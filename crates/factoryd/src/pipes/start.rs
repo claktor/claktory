@@ -199,7 +199,7 @@ pub(crate) fn started(tool: &str, is_error: bool, details: &serde_json::Value) -
     if !matches!(tool, "pipes_invite" | "pipes_accept" | "extension_call") || is_error {
         return None;
     }
-    let text = |key: &str| details.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let text = crate::transcript::text_fields(details);
     let id = details.get("pipe_start")?.as_str()?.to_owned();
     Some(v1::PipeStart {
         id,
@@ -284,6 +284,7 @@ pub(crate) fn done(factory: &Arc<Factory>, start: &str, record: &Record, named: 
 
 /// DismissPipeStart: the person closes the card; its agent is told.
 pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissPipeStart) -> Result<(), RequestError> {
+    let comment = crate::decisions::comment(&request.comment)?;
     let start = request.start_id.trim();
     match row(&factory.store, start) {
         Some(row) if row.agent == request.agent_id && row.state == State::Waiting => {}
@@ -292,13 +293,23 @@ pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissPipeStart) ->
     }
     let Some(row) = end(factory, start, State::Dismissed, "") else { return Ok(()) };
     let person = factory.lock().config.person_capitalized().to_owned();
-    tell_closed(factory, &row, &format!("{person} closed the card"));
+    tell_closed(factory, &row, &format!("{person} closed the card"), &crate::decisions::note(&person, comment));
     Ok(())
 }
 
-fn tell_closed(factory: &Arc<Factory>, row: &Row, summary: &str) {
+/// The agent whose card started the pipe, if a card did.
+pub(crate) fn agent_of(store: &Store, pipe: &str) -> Option<String> {
+    store
+        .db()
+        .query_row("SELECT agent FROM pipe_starts WHERE pipe = ?1 AND state = 'done' ORDER BY ended DESC LIMIT 1", [pipe], |row| row.get(0))
+        .optional()
+        .ok()
+        .flatten()
+}
+
+fn tell_closed(factory: &Arc<Factory>, row: &Row, summary: &str, note: &str) {
     let what = if row.kind == Kind::Accept { "connecting a pipe" } else { "making the invite" };
-    factory.deliver_event(&row.agent, format!("{summary} for {what}: nothing was made."), host_event(summary.to_owned()));
+    factory.deliver_event(&row.agent, format!("{summary} for {what}: nothing was made.{note}"), host_event(summary.to_owned()));
 }
 
 /// Ends a waiting card, shows it as it is now, and returns it; None if it
@@ -350,7 +361,7 @@ pub(crate) fn expire_before(factory: &Arc<Factory>, before: i64) {
     };
     for id in ids {
         if let Some(row) = end(factory, &id, State::Dismissed, "") {
-            tell_closed(factory, &row, "The card waited a day without being used, so it closed");
+            tell_closed(factory, &row, "The card waited a day without being used, so it closed", "");
         }
     }
 }

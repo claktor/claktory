@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'account_match.dart';
+import 'app_dock.dart';
 import 'backend.dart';
 import 'claktory_identity.dart';
 import 'connection.dart';
@@ -40,8 +42,12 @@ const railWidth = 40.0;
 /// shows of it, so switching between them is instant and nothing of one
 /// ever shows as another's.
 class Claktory {
-  Claktory({required this.target, required this.backend, required this.drafts})
-    : key = target?.code ?? '' {
+  Claktory({
+    required this.target,
+    required this.backend,
+    required this.drafts,
+    this.match,
+  }) : key = target?.code ?? '' {
     drafts.watch(backend.workspace);
   }
 
@@ -56,6 +62,17 @@ class Claktory {
 
   /// The unsent drafts in its agents' message boxes.
   final Drafts drafts;
+
+  /// Which Claktories are on the person's account; none in a window with
+  /// no rail.
+  final AccountMatch Function()? match;
+
+  /// What the person's Claktory account says of it, by the endpoint the
+  /// app dials it by; null until it's known (or with no rail).
+  AccountCheck? get account => match?.call().check(target?.endpointId);
+
+  /// Not shown to be the person's own: marked wherever it shows.
+  bool get offAccount => account?.marked ?? false;
 
   late final login = LoginLauncher(
     workspace: backend.workspace,
@@ -115,6 +132,7 @@ class Claktories extends ChangeNotifier {
               for (final claktory in _open.values) {
                 claktory.backend.resumed();
               }
+              unawaited(_accountMatch?.relist());
             },
           )
         : AppLifecycleListener(
@@ -122,6 +140,7 @@ class Claktories extends ChangeNotifier {
               for (final claktory in _open.values) {
                 claktory.backend.check();
               }
+              unawaited(_accountMatch?.relist());
             },
             // The screen unlocked (a Mac reports it as shown): checked
             // before the first frame after, so a connection that died
@@ -186,6 +205,18 @@ class Claktories extends ChangeNotifier {
   /// Shows [claktory] in the window.
   void select(Claktory claktory) => connections.use(claktory.target);
 
+  /// Which of them are on the person's Claktory account, read when first
+  /// asked.
+  AccountMatch get accountMatch => _accountMatch ??= AccountMatch(
+    remotes: () => [for (final target in connections.saved) target.endpointId],
+    changes: this,
+    account: connections.account,
+    theirs: () =>
+        connections.account.signedIn ? connections.account.claktories() : null,
+    whose: () => '${connections.account.service} ${connections.account.email}',
+  );
+  AccountMatch? _accountMatch;
+
   /// Whether [_sync] is running, and whether [connections] changed
   /// meanwhile.
   var _syncing = false;
@@ -234,6 +265,7 @@ class Claktories extends ChangeNotifier {
           target: target,
           backend: this.open(target),
           drafts: drafts.of(key),
+          match: () => accountMatch,
         );
       }
     }
@@ -243,6 +275,7 @@ class Claktories extends ChangeNotifier {
   @override
   void dispose() {
     _lifecycle.dispose();
+    _accountMatch?.dispose();
     connections.removeListener(_sync);
     for (final claktory in _open.values) {
       unawaited(claktory.close());
@@ -351,7 +384,15 @@ class _Glance {
     waiting = needsYouCount(workspace);
     connection = Connection(backend);
     problem = connection.problem ? connection.line : null;
+    offAccount = claktory.offAccount;
+    alarming = claktory.account?.alarming ?? false;
   }
+
+  /// Not shown to be on the person's Claktory account: marked.
+  late final bool offAccount;
+
+  /// Marked in `danger` (not signed out): its tile's ring.
+  late final bool alarming;
 
   late final bool connected;
   late final bool working;
@@ -374,7 +415,112 @@ class _Glance {
   static Listenable of(Claktory claktory) => Listenable.merge([
     claktory.backend.workspace,
     Connection.of(claktory.backend),
+    ?claktory.match?.call(),
   ]);
+}
+
+/// What a Claktory not shown to be the person's own is marked with: a
+/// short label and what it means (Trish's words).
+({String label, String meaning})? accountWords(AccountCheck? check) =>
+    switch (check) {
+      AccountCheck.notTheirs => (
+        label: 'Not on your Claktory account',
+        meaning:
+            "It may belong to someone else. If it's yours, sign it in to "
+            'your Claktory account.',
+      ),
+      AccountCheck.signedOut => (
+        label: "Can't check whose it is",
+        meaning:
+            'Sign in to your Claktory account on this device to check whose '
+            'it is.',
+      ),
+      AccountCheck.unreadable => (
+        label: "Can't check whose it is",
+        meaning:
+            "Claktory couldn't read your account to check. It tries again "
+            'when it can.',
+      ),
+      AccountCheck.theirs || null => null,
+    };
+
+/// [claktory]'s name as VoiceOver reads it: with its mark ("nixos, not on
+/// your Claktory account").
+String claktoryLabel(String name, Claktory claktory) {
+  final words = accountWords(claktory.account);
+  if (words == null) return name;
+  final label = words.label;
+  return '$name, ${label[0].toLowerCase()}${label.substring(1)}';
+}
+
+/// The mark of a Claktory not shown to be the person's own, wherever it
+/// shows by name (the rail's card, the phone's drawer and list, its form):
+/// a 12px shield-alert and the label in caption `danger` (`textMuted`
+/// while signed out), and, [explained],
+/// what it means under it in caption `textMuted`. Nothing for one that's
+/// theirs, or before the account's list is read.
+class OffAccountMark extends StatelessWidget {
+  const OffAccountMark({
+    super.key,
+    required this.claktory,
+    this.explained = false,
+  });
+
+  final Claktory claktory;
+  final bool explained;
+
+  @override
+  Widget build(BuildContext context) {
+    final match = claktory.match;
+    if (match == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: match(),
+      builder: (context, _) {
+        final check = claktory.account;
+        final words = accountWords(check);
+        if (words == null) return const SizedBox.shrink();
+        final palette = Palette.of(context);
+        // Signed out, nothing could be checked: neutral, not `danger`.
+        final color = check?.alarming == true
+            ? palette.danger
+            : palette.textMuted;
+        final caption = TypeScale.of(context).caption;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // The glyph on the label's first line, growing with the
+            // text; the label wraps, never cut short.
+            Text.rich(
+              TextSpan(
+                children: [
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: Padding(
+                      padding: const EdgeInsetsDirectional.only(end: Space.xs),
+                      child: ExtensionGlyph(
+                        icon: 'shield-alert',
+                        name: '!',
+                        color: color,
+                        size: 12,
+                      ),
+                    ),
+                  ),
+                  TextSpan(text: words.label),
+                ],
+              ),
+              style: caption.copyWith(color: color),
+            ),
+            if (explained)
+              Text(
+                words.meaning,
+                style: caption.copyWith(color: palette.textMuted),
+              ),
+          ],
+        );
+      },
+    );
+  }
 }
 
 /// Up to two letters for [name]: "mac-mini" is "MM", "nixos" "N".
@@ -457,6 +603,8 @@ class ClaktoryRail extends StatelessWidget {
                         ),
                       ),
                     ),
+                    // The shown Claktory's pinned apps, at the rail's foot.
+                    const AppDock(),
                   ],
                 ),
               ),
@@ -541,12 +689,16 @@ class _RailTile extends StatelessWidget {
                         color: palette.textFaint,
                       ),
                     ),
+                    if (glance.offAccount) ...[
+                      const SizedBox(height: Space.xs),
+                      OffAccountMark(claktory: claktory, explained: true),
+                    ],
                   ],
                 ),
                 child: Semantics(
                   button: true,
                   selected: selected,
-                  label: name,
+                  label: claktoryLabel(name, claktory),
                   child: Pressable(
                     onTap: selected ? null : onTap,
                     onSecondaryTap: () => showModal(
@@ -623,8 +775,12 @@ class _Tile extends StatelessWidget {
                     ? palette.hover
                     : null,
                 borderRadius: BorderRadius.circular(Radii.control),
+                // Not on the person's account: a `danger` ring, whatever
+                // else it shows.
                 border: Border.all(
-                  color: selected || own != null
+                  color: glance.alarming
+                      ? palette.danger
+                      : selected || own != null
                       ? const Color(0x00000000)
                       : palette.hairline,
                 ),
@@ -825,7 +981,10 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
       return FormFrame(
         title: name,
         body: 'Connect to $name to change its name or color.',
-        fields: const [],
+        fields: [
+          if (widget.claktory.offAccount)
+            OffAccountMark(claktory: widget.claktory, explained: true),
+        ],
         error: null,
         submitLabel: 'Done',
         onSubmit: widget.close,
@@ -837,6 +996,8 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     return FormFrame(
       title: name,
       fields: [
+        if (widget.claktory.offAccount)
+          OffAccountMark(claktory: widget.claktory, explained: true),
         Field(
           label: 'Name',
           note: 'Shown on every device connected to it.',
@@ -1027,11 +1188,17 @@ class PhoneConnectionWord extends StatelessWidget {
     return Semantics(
       button: true,
       label: connection.line,
+      hint: reconnectFirst(connection.link) ? reconnectAndShowHint : null,
       child: Pressable(
-        onTap: () => showModal(
-          context,
-          (context, close) => ConnectionDialog(backend: backend, close: close),
-        ),
+        onTap: () {
+          // Not connected: it reconnects at once too (#214).
+          if (reconnectFirst(connection.link)) backend.reconnectNow();
+          showModal(
+            context,
+            (context, close) =>
+                ConnectionDialog(backend: backend, close: close),
+          );
+        },
         builder: (context, hovered) => ExcludeSemantics(
           child: ConstrainedBox(
             // A finger's height, however short the word; a row's in the
@@ -1254,7 +1421,7 @@ class _PhoneRailTile extends StatelessWidget {
         return Semantics(
           button: true,
           selected: selected,
-          label: name,
+          label: claktoryLabel(name, claktory),
           child: GestureDetector(
             onLongPress: () => showModal(
               context,
@@ -1455,7 +1622,7 @@ class _ListRow extends StatelessWidget {
         return Semantics(
           button: true,
           selected: selected,
-          label: name,
+          label: claktoryLabel(name, claktory),
           child: GestureDetector(
             onLongPress: () => showModal(
               context,
@@ -1519,6 +1686,11 @@ class _ListRow extends StatelessWidget {
                                   : palette.textFaint,
                             ),
                           ),
+                          // Read out with the row's label already.
+                          if (glance.offAccount)
+                            ExcludeSemantics(
+                              child: OffAccountMark(claktory: claktory),
+                            ),
                         ],
                       ),
                     ),

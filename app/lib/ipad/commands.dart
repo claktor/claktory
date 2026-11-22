@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../layout.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import 'columns.dart';
+import 'document_host.dart' show DocumentPanel, documentKind;
 import 'workbench.dart';
 
 /// The workbench's keyboard commands: the sidebar, moving between panes and
@@ -62,6 +63,18 @@ List<WorkbenchCommand> workbenchCommands({
     };
   }
 
+  // The pane being read, when it's a PDF: Find… searches it.
+  final focused = agent == null
+      ? null
+      : leaves(layoutOf(agent))
+            .where(
+              (leaf) => leaf.id == focus.focusedIn(agent.id, layoutOf(agent)),
+            )
+            .firstOrNull;
+  final document = focused != null && focused.leaf.kind == documentKind
+      ? focused
+      : null;
+
   return [
     WorkbenchCommand(
       id: 'sidebar',
@@ -100,6 +113,16 @@ List<WorkbenchCommand> workbenchCommands({
       run: agent == null || leaves(layoutOf(agent)).length < 2
           ? null
           : showPanes,
+    ),
+    WorkbenchCommand(
+      id: 'find',
+      title: 'Find…',
+      keys: const SingleActivator(LogicalKeyboardKey.keyF, meta: true),
+      run: agent == null || document == null
+          ? null
+          : () => focus.documents
+                .of(agent.id, document)
+                .openPanel(DocumentPanel.search),
     ),
   ];
 }

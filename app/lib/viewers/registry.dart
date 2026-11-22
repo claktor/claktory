@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/widgets.dart';
 
 import '../annotations.dart';
@@ -13,6 +15,7 @@ import '../resources.dart' show formatBytes;
 import '../scope.dart';
 import '../selection.dart';
 import 'image.dart';
+import 'pdf.dart';
 import 'text.dart';
 import 'video.dart';
 
@@ -56,6 +59,23 @@ final _viewers = <Viewer>[
         ExtensionGlyph(icon: 'image', name: 'Image', color: color, size: 14),
     build: (context, leaf) =>
         ImageViewer(key: ValueKey(leaf.path), path: leaf.path),
+  ),
+  // A PDF: an iPad shows one in its document host, where the person draws
+  // on it (ipad/document_host.dart, ahead of this registry); a Mac and an
+  // iPhone in PDFKit's own view (pdf.dart), only to read; elsewhere the
+  // pane says so.
+  Viewer(
+    kind: 'pdf',
+    label: 'PDF',
+    icon: (color) => FileGlyph(color: color),
+    build: (context, leaf) =>
+        defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.iOS
+        ? PdfViewer(key: ValueKey(leaf.path), path: leaf.path)
+        : ViewerProblem(
+            'To see this PDF, open it on a Mac, iPhone or iPad.',
+            path: leaf.path,
+          ),
   ),
   Viewer(
     kind: 'video',

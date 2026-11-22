@@ -61,6 +61,7 @@ Workspace _workspace({List<AppInfo>? apps, VaultState? vault}) => Workspace(
   agents: [
     Agent(id: 'june', name: 'June', color: 'pink', modelAvailable: true),
     Agent(id: 'rivet', name: 'Rivet', color: 'blue', modelAvailable: true),
+    Agent(id: 'lea', name: 'Lea', color: 'teal', modelAvailable: true),
   ],
   selectedAgentId: 'june',
   settings: Settings(userName: 'Matt'),
@@ -201,6 +202,23 @@ void main() {
     expect(set.value, '123:abc');
   });
 
+  test("only Claktory's and verified publishers' names stand as who made "
+      'an app', () {
+    expect(publisherLine(AppTier.APP_TIER_CLAKTORY, 'claktory'), 'By claktory');
+    expect(publisherLine(AppTier.APP_TIER_VERIFIED, 'Acme'), 'By Acme');
+    for (final tier in [
+      AppTier.APP_TIER_COMMUNITY,
+      AppTier.APP_TIER_LOCAL,
+      AppTier.APP_TIER_UNSPECIFIED,
+    ]) {
+      expect(
+        publisherLine(tier, 'claktory'),
+        "Says it's by claktory",
+        reason: '$tier',
+      );
+    }
+  });
+
   testWidgets('installing from a file shows what it can reach, then installs '
       'the file reviewed', (tester) async {
     final harness = Harness(_workspace(apps: []));
@@ -233,6 +251,9 @@ void main() {
     expect(review.approve, isFalse);
     expect(find.text('Install Telegram?'), findsOneWidget);
     expect(find.textContaining("Claktory hasn't reviewed"), findsOneWidget);
+    // Unchecked, its publisher is only what it says (even "claktory").
+    expect(find.textContaining("Says it's by claktory"), findsOneWidget);
+    expect(find.textContaining('By claktory'), findsNothing);
     expect(find.text('api.telegram.org'), findsOneWidget);
     expect(find.text('Send you Telegram messages'), findsOneWidget);
     expect(find.text('A message you send the bot'), findsOneWidget);
@@ -382,5 +403,175 @@ void main() {
     );
     await _show(tester, harness, const SecretsSettings());
     expect(find.textContaining('Given to Telegram'), findsOneWidget);
+  });
+
+  group('data sources', () {
+    AppInfo charts({bool records = false, bool lea = false}) =>
+        _telegram().deepCopy()
+          ..id = 'charts'
+          ..name = 'Charts'
+          ..sources.addAll([
+            AppDataSource(
+              id: 'factory-records',
+              kind: AppDataKind.APP_DATA_KIND_FACTORY_RECORDS,
+              label: "Claktory's records",
+              reason: 'To chart your usage.',
+              granted: records,
+            ),
+            AppDataSource(
+              id: 'agent:lea',
+              kind: AppDataKind.APP_DATA_KIND_AGENT_DATABASE,
+              agentId: 'lea',
+              label: "Lea's database",
+              granted: lea,
+            ),
+          ]);
+
+    testWidgets('the install review lists them, granting nothing', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace(apps: []));
+      harness.backend.appPermissions = AppPermissions(
+        sha256: 'ab12',
+        id: 'charts',
+        name: 'Charts',
+        version: '1.0.0',
+        tier: AppTier.APP_TIER_CLAKTORY,
+        hosts: ['api.example.com', 'cdn.example.com'],
+        sources: [
+          AppDataSource(
+            id: 'factory-records',
+            label: "Claktory's records",
+            reason: 'To chart your usage.',
+          ),
+          AppDataSource(
+            id: 'agent:*',
+            agentId: '*',
+            label: "Agents' own databases (you choose which)",
+          ),
+        ],
+      );
+      appFilePicker = () async => [1];
+      await _show(tester, harness, const AppsSettings());
+      await tester.tap(find.text('Install from a file…'));
+      await pumpFrames(tester);
+      expect(find.text('It asks to read'), findsOneWidget);
+      expect(find.text("Claktory's records"), findsOneWidget);
+      // What each holds, plainly, and where the app can send it.
+      expect(
+        find.text(
+          "Charts can read all your agents' conversations, including your "
+          'answers to their questions, and their tasks, checklists, monitors '
+          'and usage.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Charts can read everything each agent you choose keeps in its '
+          'database.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Charts can send anything it reads to api.example.com and '
+          'cdn.example.com.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('To chart your usage.'), findsOneWidget);
+      expect(
+        find.text("Agents' own databases (you choose which)"),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Nothing is shared until you turn it on in Settings → Apps.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Install'));
+      await pumpFrames(tester);
+      expect(_sent(harness, (m) => m.hasGrantAppSource()), isEmpty);
+    });
+
+    testWidgets('each is turned on and off on its own in Settings', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace(apps: [charts()]));
+      await _show(tester, harness, const AppsSettings());
+      await tester.tap(_labeled('Charts'));
+      await pumpFrames(tester);
+      expect(find.text('It can read'), findsOneWidget);
+      expect(
+        find.text('Charts can read everything Lea keeps in its database.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Charts can send anything it reads to api.telegram.org.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text("Turn on what Charts can read. It can't read anything else."),
+        findsOneWidget,
+      );
+      Finder toggle(String label) =>
+          find.byWidgetPredicate((w) => w is Toggle && w.label == label);
+      expect(tester.widget<Toggle>(toggle("Lea's database")).value, isFalse);
+      await tester.tap(toggle("Lea's database"));
+      await pumpFrames(tester);
+      final grant = _sent(
+        harness,
+        (m) => m.hasGrantAppSource(),
+      ).single.grantAppSource;
+      expect(grant.appId, 'charts');
+      expect(grant.sourceId, 'agent:lea');
+      expect(grant.granted, isTrue);
+
+      // As the backend has it now: on, and turned off again.
+      await harness.apply(tester, _workspace(apps: [charts(lea: true)]));
+      expect(tester.widget<Toggle>(toggle("Lea's database")).value, isTrue);
+      expect(find.textContaining('Turn on what Charts'), findsNothing);
+      await tester.tap(toggle("Lea's database"));
+      await pumpFrames(tester);
+      expect(
+        _sent(
+          harness,
+          (m) => m.hasGrantAppSource(),
+        ).last.grantAppSource.granted,
+        isFalse,
+      );
+    });
+
+    testWidgets('giving the app to an agent says what it can then read', (
+      tester,
+    ) async {
+      final harness = Harness(
+        _workspace(apps: [charts(records: true, lea: true)]),
+      );
+      await _show(tester, harness, const AppsSettings());
+      await tester.tap(_labeled('Charts'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Give to an agent…'));
+      await pumpFrames(tester);
+      expect(
+        find.text(
+          "Through Charts, June can also read Claktory's records and "
+          "Lea's database.",
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('with nothing granted, giving it warns of nothing', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace(apps: [charts()]));
+      await _show(tester, harness, const AppsSettings());
+      await tester.tap(_labeled('Charts'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Give to an agent…'));
+      await pumpFrames(tester);
+      expect(find.textContaining('can also read'), findsNothing);
+    });
   });
 }

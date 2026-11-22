@@ -126,7 +126,8 @@ final class KeyboardEvents: NSObject, FlutterStreamHandler {
 ///   workbench keeps its toolbar at the status bar, as Apple's apps do.
 ///
 /// Nothing changes where there are no controls (an iPhone, iPadOS before
-/// 26).
+/// 26). An iPhone app run on an iPad gets the vertical adaptation too, so
+/// its screens start below the controls.
 final class WindowControls: UIView {
   private static var observer: NSObjectProtocol?
   private static var events: FlutterEventChannel?
@@ -171,13 +172,24 @@ final class WindowControls: UIView {
     }
   }
 
+  /// On an iPad: as an iPad app, or as an iPhone app run on one (never
+  /// on a Mac, whose iPhone apps may say "iPad" too: their controls are
+  /// in the title bar).
+  private static var onPad: Bool {
+    if ProcessInfo.processInfo.isiOSAppOnMac { return false }
+    return UIDevice.current.userInterfaceIdiom == .pad
+      || UIDevice.current.model.hasPrefix("iPad")
+  }
+
   /// Watches [window] from now on; once per window.
   private static func watch(_ window: UIWindow?) {
     // The app's own window only, never the keyboard's, an alert's or a
     // sheet's (UIKit's own root view controllers); and only on an iPad,
     // where windows have controls (an iPhone's landscape corners would
-    // otherwise count as such).
-    guard UIDevice.current.userInterfaceIdiom == .pad, let window,
+    // otherwise count as such). The iPhone app run on an iPad (the App
+    // Store's, built for iPhone only) has the phone's idiom there but an
+    // iPad's windows, controls and all.
+    guard onPad, let window,
       window.rootViewController is FlutterViewController,
       !window.subviews.contains(where: { $0 is WindowControls })
     else { return }

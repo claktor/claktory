@@ -202,6 +202,7 @@ fn comment(path: &str, exact: &str, body: &str, send_now: bool) -> client_messag
         body: body.into(),
         send_now,
         suggestion: None,
+        ink: None,
     })
 }
 

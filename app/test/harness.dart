@@ -39,6 +39,13 @@ class RecordingBackend extends Backend {
   /// When set, every request fails with this reason.
   String? refuse;
 
+  /// How many times the person asked to reconnect (a tap on Reconnecting…,
+  /// Reconnect): counted, not done, since nothing runs here.
+  var reconnectsAsked = 0;
+
+  @override
+  void reconnectNow() => reconnectsAsked++;
+
   /// Runs when a request is sent, before it's answered: what the backend
   /// would broadcast because of it.
   void Function(ClientMessage message)? onSend;
@@ -160,13 +167,26 @@ class RecordingBackend extends Backend {
       offset + data.length;
 
   @override
-  Future<Attachment> finishUpload(String uploadId) async {
+  Future<Attachment> finishUpload(String uploadId, {String sha256 = ''}) async {
+    await _record(
+      ClientMessage(
+        finishUpload: FinishUpload(uploadId: uploadId, sha256: sha256),
+      ),
+    );
     final (agentId, name, size, mime) = _uploads.remove(uploadId)!;
     return Attachment(
       path: '/uploads/$agentId/$name',
       name: name,
       size: Int64(size),
       mime: mime,
+    );
+  }
+
+  @override
+  Future<void> cancelUpload(String uploadId) {
+    _uploads.remove(uploadId);
+    return _record(
+      ClientMessage(cancelUpload: CancelUpload(uploadId: uploadId)),
     );
   }
 
@@ -256,6 +276,7 @@ class RecordingBackend extends Backend {
     String path, {
     int maxBytes = 0,
     int offset = 0,
+    String expectedSha256 = '',
   }) async {
     await _record(
       ClientMessage(
@@ -263,12 +284,17 @@ class RecordingBackend extends Backend {
           path: path,
           maxBytes: Int64(maxBytes),
           offset: Int64(offset),
+          expectedSha256: expectedSha256,
         ),
       ),
     );
     final file = files[path];
     if (file == null) {
       return FileContent(path: path, error: 'No such file: $path');
+    }
+    // Another version now than the one being read (ReadFile.expected_sha256).
+    if (expectedSha256.isNotEmpty && expectedSha256 != file.sha256) {
+      return FileContent(path: path, error: 'changed');
     }
     if (offset == 0 && maxBytes == 0) return file;
     // A backend from before ranged reads answers from the start.
@@ -462,15 +488,19 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> decideSuggestion(String threadId, {required bool accept}) =>
-      _record(
-        ClientMessage(
-          decideSuggestion: DecideSuggestion(
-            threadId: threadId,
-            accept: accept,
-          ),
-        ),
-      );
+  Future<void> decideSuggestion(
+    String threadId, {
+    required bool accept,
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decideSuggestion: DecideSuggestion(
+        threadId: threadId,
+        accept: accept,
+        comment: comment,
+      ),
+    ),
+  );
 
   @override
   Future<void> setRemoteAccess(bool on, {int port = 0, String? listen}) =>
@@ -483,6 +513,10 @@ class RecordingBackend extends Backend {
   @override
   Future<void> updateSettings(UpdateSettings update) =>
       _record(ClientMessage(updateSettings: update));
+
+  @override
+  Future<void> sendTestNotification() =>
+      _record(ClientMessage(sendTestNotification: SendTestNotification()));
 
   @override
   Future<void> startLogin(StartLogin start) =>
@@ -522,6 +556,10 @@ class RecordingBackend extends Backend {
   @override
   Future<void> clearBuildCache(String path) =>
       _record(ClientMessage(clearBuildCache: ClearBuildCache(path: path)));
+
+  @override
+  Future<void> checkForUpdates() =>
+      _record(ClientMessage(checkForUpdates: CheckForUpdates()));
 
   @override
   Future<void> installUpdate(String appPath) =>
@@ -689,7 +727,9 @@ class RecordingBackend extends Backend {
 
   @override
   Future<void> addGoal(String agentId, String text) => _record(
-    ClientMessage(addGoal: AddGoal(agentId: agentId, text: text)),
+    ClientMessage(
+      addGoal: AddGoal(agentId: agentId, text: text),
+    ),
   );
 
   @override
@@ -938,6 +978,99 @@ class RecordingBackend extends Backend {
     return usageReport;
   }
 
+  /// Browser control's log, newest first, as [listBrowserLog] pages
+  /// through it.
+  var browserLog = <BrowserLogEntry>[];
+
+  @override
+  Future<BrowserLog> listBrowserLog(ListBrowserLog ask) async {
+    await _record(ClientMessage(listBrowserLog: ask));
+    final matching = [
+      for (final entry in browserLog)
+        if ((ask.beforeMs == 0 ||
+                entry.atMs < ask.beforeMs ||
+                (entry.atMs == ask.beforeMs &&
+                    ask.beforeId != 0 &&
+                    entry.id < ask.beforeId)) &&
+            (ask.agentId.isEmpty || entry.agentId == ask.agentId))
+          entry,
+    ];
+    final limit = ask.limit == 0 ? 100 : ask.limit;
+    return BrowserLog(
+      entries: matching.take(limit),
+      more: matching.length > limit,
+    );
+  }
+
+  @override
+  Future<void> clearBrowserLog() async {
+    await _record(ClientMessage(clearBrowserLog: ClearBrowserLog()));
+    browserLog = [];
+  }
+
+  @override
+  Future<void> setDiagnostics(SetDiagnostics ask) =>
+      _record(ClientMessage(setDiagnostics: ask));
+
+  /// What [listNeedsYouHistory] answers: those matching the query (by
+  /// agent name, title or reply), as the backend would.
+  var needsYouHistory = <NeedsYouRecord>[];
+
+  /// Set, [listNeedsYouHistory] refuses with it.
+  String? refuseHistory;
+
+  @override
+  Future<NeedsYouHistory> listNeedsYouHistory(ListNeedsYouHistory ask) async {
+    await _record(ClientMessage(listNeedsYouHistory: ask));
+    if (refuseHistory case final why?) throw RequestFailure(why);
+    final query = ask.query.toLowerCase();
+    final matching = [
+      for (final record in needsYouHistory)
+        if ((ask.beforeMs == 0 || record.decidedMs < ask.beforeMs) &&
+            (query.isEmpty ||
+                record.agentName.toLowerCase().contains(query) ||
+                record.title.toLowerCase().contains(query) ||
+                record.reply.toLowerCase().contains(query)))
+          record,
+    ];
+    final limit = ask.limit == 0 ? 50 : ask.limit;
+    return NeedsYouHistory(
+      records: matching.take(limit),
+      more: matching.length > limit,
+    );
+  }
+
+  /// What [listQuietCopies] pages through, newest first, as the backend
+  /// would.
+  var quietCopies = <QuietCopy>[];
+
+  @override
+  Future<QuietCopies> listQuietCopies(
+    String agentId, {
+    int beforeId = 0,
+    int limit = 0,
+  }) async {
+    await _record(
+      ClientMessage(
+        listQuietCopies: ListQuietCopies(
+          agentId: agentId,
+          beforeId: Int64(beforeId),
+          limit: limit,
+        ),
+      ),
+    );
+    final older = [
+      for (final copy in quietCopies)
+        if (beforeId == 0 || copy.id.toInt() < beforeId) copy,
+    ];
+    final page = limit == 0 ? 20 : limit;
+    return QuietCopies(
+      agentId: agentId,
+      copies: older.take(page),
+      more: older.length > page,
+    );
+  }
+
   /// What [installLocalApp] answers before it's approved.
   var appPermissions = AppPermissions();
 
@@ -980,6 +1113,45 @@ class RecordingBackend extends Backend {
           grantApp: GrantApp(appId: appId, agentId: agentId, scopes: scopes),
         ),
       );
+
+  @override
+  Future<void> grantAppSource(
+    String appId,
+    String sourceId, {
+    required bool granted,
+  }) => _record(
+    ClientMessage(
+      grantAppSource: GrantAppSource(
+        appId: appId,
+        sourceId: sourceId,
+        granted: granted,
+      ),
+    ),
+  );
+
+  /// Changes the dock as the backend does: pinned at a place (moved if
+  /// there already; last when out of range), or taken off it.
+  @override
+  Future<void> pinApp(
+    String appId, {
+    bool pinned = true,
+    int position = -1,
+  }) async {
+    await _record(
+      ClientMessage(
+        pinApp: PinApp(appId: appId, pinned: pinned, position: position),
+      ),
+    );
+    final now = workspace.workspace.deepCopy();
+    final pins = now.pinnedApps..remove(appId);
+    if (pinned) {
+      pins.insert(
+        position < 0 || position > pins.length ? pins.length : position,
+        appId,
+      );
+    }
+    workspace.apply(now);
+  }
 
   @override
   Future<void> subscribeApp(
@@ -1098,9 +1270,17 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> dismissPipeStart(String agentId, String startId) => _record(
+  Future<void> dismissPipeStart(
+    String agentId,
+    String startId, {
+    String comment = '',
+  }) => _record(
     ClientMessage(
-      dismissPipeStart: DismissPipeStart(agentId: agentId, startId: startId),
+      dismissPipeStart: DismissPipeStart(
+        agentId: agentId,
+        startId: startId,
+        comment: comment,
+      ),
     ),
   );
 
@@ -1131,16 +1311,21 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> decidePipeMessage(String pipeId, int seq, bool allow) =>
-      _record(
-        ClientMessage(
-          decidePipeMessage: DecidePipeMessage(
-            pipeId: pipeId,
-            seq: Int64(seq),
-            allow: allow,
-          ),
-        ),
-      );
+  Future<void> decidePipeMessage(
+    String pipeId,
+    int seq,
+    bool allow, {
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decidePipeMessage: DecidePipeMessage(
+        pipeId: pipeId,
+        seq: Int64(seq),
+        allow: allow,
+        comment: comment,
+      ),
+    ),
+  );
 
   @override
   Future<void> loadPipeMessages(String pipeId) => _record(
@@ -1211,6 +1396,7 @@ class RecordingBackend extends Backend {
     int seq, {
     String text = '',
     bool dismiss = false,
+    List<Attachment> attachments = const [],
   }) => _record(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -1218,21 +1404,47 @@ class RecordingBackend extends Backend {
         seq: Int64(seq),
         text: text,
         dismiss: dismiss,
+        attachments: attachments,
       ),
     ),
   );
 
   @override
-  Future<void> decideSecretApproval(String agentId, int seq, bool allow) =>
-      _record(
-        ClientMessage(
-          decideSecretApproval: DecideSecretApproval(
-            agentId: agentId,
-            seq: Int64(seq),
-            allow: allow,
-          ),
-        ),
-      );
+  Future<void> decideSecretApproval(
+    String agentId,
+    int seq,
+    bool allow, {
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decideSecretApproval: DecideSecretApproval(
+        agentId: agentId,
+        seq: Int64(seq),
+        allow: allow,
+        comment: comment,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> sendBrowser(ClientMessage message) => _record(message);
+
+  @override
+  Future<void> decideAppGrant(
+    String agentId,
+    int seq, {
+    required bool approve,
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decideAppGrant: DecideAppGrant(
+        agentId: agentId,
+        seq: Int64(seq),
+        approve: approve,
+        comment: comment,
+      ),
+    ),
+  );
 
   // Chats (#213).
 
@@ -1530,6 +1742,10 @@ Finder askRivetButtons() => find.byWidgetPredicate(
 class FakeCamera implements Camera {
   CameraAccess state = CameraAccess.unavailable;
   bool granting = true;
+
+  /// What it says after a refusal: denied, as an iPhone's does at once;
+  /// undetermined, as Android's does after a first no.
+  CameraAccess afterRefusal = CameraAccess.denied;
   var asked = 0;
   var settingsOpened = 0;
   ValueChanged<String>? _onCode;
@@ -1540,7 +1756,7 @@ class FakeCamera implements Camera {
   @override
   Future<bool> request() async {
     asked++;
-    state = granting ? CameraAccess.granted : CameraAccess.denied;
+    state = granting ? CameraAccess.granted : afterRefusal;
     return granting;
   }
 

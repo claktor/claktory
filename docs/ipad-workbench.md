@@ -135,16 +135,18 @@ In the compact tier the routes are the conversation, with the focused leaf pushe
 
 ## 4. Window fixtures
 
-`app/test/ipad/window_fixtures.dart` has 36 windows: 320 and 375 compact; each tier's edges (599/600, 839/840, 1179/1180); the full-screen sizes of the mini, Air 11 and 13, and Pro 11 and 13, upright and on their side; Split View thirds, halves and two-thirds; a short Stage Manager window; a docked keyboard; xxxLarge, AX1, AX3 and AX5 text; and the iPhone upright, on its side, and the Pro Max on its side. Each fixture names a Simulator to run it on.
+`app/test/ipad/window_fixtures.dart` has 39 windows: 320 and 375 compact; each tier's edges (599/600, 839/840, 1179/1180); the full-screen sizes of the mini, Air 11 and 13, and Pro 11 and 13, upright and on their side; Split View thirds, halves and two-thirds; a short Stage Manager window; a docked keyboard; xxxLarge, AX1, AX3 and AX5 text; and the iPhone upright, on its side, and the Pro Max on its side. Each fixture names a Simulator to run it on.
 
 Device full-screen sizes are Apple's documented point sizes. **Split View, Slide Over and Stage Manager widths are estimates marked "to measure":** Gelato is recording real view sizes and idioms from a local, uncommitted family 1,2 Dev build, and the table gets corrected from those (`measured: true`).
 
 Measured so far (Gelato, iPad mini A17 Pro, iPadOS 27.2, Windowed Apps):
 - **Full screen:** the view is 744×1133 with safe insets 32 top and 20 bottom, so the safe size is 744×1081.
-- **Narrowed windows:** about 1097 tall, with a bottom inset of 10. The widths tracked live were 744, 706, 679, 662, 625, 554, 543, 480, 426 and 375. **375 is the narrowest a window gets.** The idiom stays pad at every width.
-- **Fixtures added:** `mini-window-679`, `-662`, `-625` (focused) and `-554`, `-375` (compact).
+- **Narrowed windows:** about 1097 tall, with insets of 32 top and 10 bottom at every width (1055 safe). The widths tracked live were 744, 706, 679, 662, 625, 554, 543, 480, 426 and 375. **375 is the narrowest a window gets.** The idiom stays pad at every width.
+- **iPad Pro 13 windows:** about 1340 tall upright (insets 32/10, so 1298 safe) and 1032 on its side (insets 32/20, so 980 safe). No window is narrower than 375 here either.
+- **Fixtures added:** `mini-window-679`, `-662`, `-625` (focused) and `-554`, `-375` (compact); `pro13-window-portrait-671` and `pro13-window-landscape-667` (focused) and `pro13-window-375` (compact).
+- The full spike is Gelato's `docs/ipad-ink-spike.md`.
 
-**Size classes and the 600 threshold.** UIKit's horizontal size class turns compact between 679 and 662, but the workbench stays focused down to 600. A focused window shows one pane with the toolbar, much as the phone's routes do. Its toolbar keeps the Sidebar, the switch and Panes, where the phone has its drawer and Back. So the 600–679 band gets a one-column layout that follows the HIG's compact width, with the iPad's own controls. I keep 600 because it's ipad.md §1's number, and because the size class isn't sent to the app (the composition comes from the window's size, not from UIKit). **Decided (Prosciutto):** 600 stays even once the flip is measured. It's the same line the wide iPad's popovers use (`popoverHere` is `!isPhoneLayout`), so one cut covers both. The flip's width is recorded here for reference only: between 662 and 679 on the mini, exact width and the Pro 13's still to measure.
+**Size classes and the 600 threshold.** UIKit's horizontal size class turns compact between 668 and 662, but the workbench stays focused down to 600. A focused window shows one pane with the toolbar, much as the phone's routes do. Its toolbar keeps the Sidebar, the switch and Panes, where the phone has its drawer and Back. So the 600–679 band gets a one-column layout that follows the HIG's compact width, with the iPad's own controls. I keep 600 because it's ipad.md §1's number, and because the size class isn't sent to the app (the composition comes from the window's size, not from UIKit). **Decided (Prosciutto):** 600 stays even once the flip is measured. It's the same line the wide iPad's popovers use (`popoverHere` is `!isPhoneLayout`), so one cut covers both. The flip's width is recorded here for reference only: on the mini, regular at 668 and wider and compact at 662 and narrower, the same going down and up (the window snaps in 2–6 pt steps, so that's as tight as the simulator gets). On the Pro 13 it's regular at 671 and compact at 666 upright, and regular at 669 and compact at 667 on its side: about 668 everywhere.
 
 Phase 1's screenshot plan comes from the same table. Each screenshot is named after its fixture and taken only after asserting the tier and the shown leaves (§7). Window sizes are set by rotating the Simulator or by a real Stage Manager resize, never by forcing app orientation. Each one gets visual inspection before any claim that nothing overflows.
 
@@ -163,6 +165,67 @@ These live in `app/test/ipad/fixtures/`. Every file is JSON with `schema_version
 - `evidence/`: §3's InkEvidence and anchors. The cases: a PDF page region (unrotated CropBox, normalized top-left `{x, y, w, h}` in 0..1, the same as annotations.dart's Region), a rotated page, an image with EXIF orientation, a text/Markdown excerpt (TextQuote, position and frozen rendition), a blank sketch, an OUTDATED source hash and a three-item review batch. Blob ids and hashes are placeholders; the backend assigns the real ones.
 - Matt's open decisions are parameters, not assumptions: `persistence: "online" | "journal"`, and each capability gate carries its `min_os` (PDF page overlays 16.0, stroke recognition 27.0).
 - **Frozen** means both of us agree, plus Omar for anything the backend will store. After that, changes need the same three. The document host (mine) passes the ink surface: the leaf id (stable across resizes), source `{path, sha256, mime}`, the drawing revision, `drawing_policy`, `persistence` and `active` (false while the projection hides the leaf, so the canvas can go while the committed revision stays).
+
+### What the document host takes from Gelato's spike (phase 2)
+
+These come from `docs/ipad-ink-spike.md` and constrain `document_host.dart` and the workbench around it:
+
+- **Moving a document between columns keeps its native view.** Keep each document leaf under a GlobalKey keyed by its leaf id, so a projection change (a tier change, Panes, the switch) moves the view rather than re-creating it, and the ink stays.
+- **A width change drops a stroke in progress silently.** Rotating, resizing a window or dragging a divider mid-stroke loses the stroke. Native reports strokeInterrupted with kept: false. The host says so in words rather than pretending, and the workbench doesn't start a divider drag while a stroke is down on that document. Gelato's bridge tells it with `strokeActive {page_1based, active}`: true when PencilKit's tool starts, false when it ends, always before the matching drawingChanged or strokeInterrupted (fixture `bridge/ev_stroke_active.json`, with the phase 2 bridge). It arrives a few ms after the touch, but a touch that starts on the canvas is the canvas's, so no divider drag can begin on it.
+- **Clipping doesn't clip touches.** A pane's rounded clip hides the native view's edge, but the view still takes touches there. Pane headers, dividers and popovers must sit outside the native view's bounds, or over it as Flutter widgets that take their own taps. The spike shows those do.
+- **PKToolPicker takes focus from text fields,** so the tools are Claktory's own controls, and the composer keeps the keyboard.
+- **The bar in a narrow pane (Prosciutto).** Every control is a whole 44pt target, 4pt apart, never cut. Below the full bar's width (about 433pt: five tools, the color, Undo, Redo, Draw with finger), pen, pencil and highlighter share one button showing the last in hand with a dot of its color (VoiceOver "Pen, Black"). A tap takes it; a tap while it's in hand opens a menu with the three tools, then that tool's colors. Eraser, lasso, Undo, Redo and Draw with finger stay as they are.
+- **Words (Trish's OK).** Tools: "Pen", "Pencil", "Highlighter", "Eraser", "Lasso", "Undo", "Redo", "More", "Draw with finger"; VoiceOver "Drawing tools" and "Color, Black". The status line's words are under "Keeping drawings" below; a stroke cut short says "Your last stroke was lost when the pane changed size. Draw it again."
+
+### The PDF pane and its review (phase 3)
+
+A "pdf" pane on an iPad is the document host. It reads the file in ranges from one version (contract §2) into the device's render cache, then hands it to Gelato's surface. On a Mac the viewers' PDF pane shows it without ink (viewers/pdf.dart); on an iPhone it's a page of its own, only to read (the same viewer, nothing drawing; Search in More opens a find bar at its foot); elsewhere the pane says "To see this PDF, open it on a Mac, iPhone or iPad." (Trish), and the review is answered from its card (and the iPhone's review bar). When an agent asks for a review of the PDF (#275), a bar at the pane's foot shows who asks and what, then Dismiss and Approve, with the shared comment control under them as on every card (decision.dart's DecisionComment). Either answer uploads each page with ink to the agent, whole with its ink, as `<stem>-p<page>.png` (long edge ≤ 2048, ≤ 3 MiB), and names them in AnswerAsk.attachments. They reach the agent only then. A backend that takes a PDF for review also takes the attachments, so no older backend ever sees them. What's under the page (the link offer, the status, the review) takes at most 60% of the pane and scrolls past it, so the page stays at the largest text. In a window narrowed to the phone's routes, an agent's PDF page is the host too, with its own review bar instead of the phone's.
+
+Words (Trish's OK):
+- Opening: "Opening…" and "Opening… 42%".
+- Problems:
+  - "This file changed while it was opening. Close it and open it again."
+  - "This file keeps changing while it opens. Try again once it stops changing."
+  - "To draw on PDFs here, update Claktory on the computer it runs on."
+  - "Drawing on PDFs needs iPadOS 16 or later."
+  - "Claktory can't open this file here."
+  - "Some drawings on this file can't be read."
+  - "This PDF has 2,400 pages, more than the 2,000 Claktory can open here." When the count is unknown: "This PDF is too long to open here."
+- A link in the PDF: "Open example.com?" or "Email june@example.com?", with "Not now" and "Open". Nothing opens by itself. While a finger draws (Draw with finger on) or with a Pencil, a tap draws, as in Apple's Markup (Prosciutto's call): Draw with finger is in the tool bar itself, lit while it's on, in place of More, so the person sees why a link doesn't open and turns it off.
+- The review:
+  - The phone's words: "Theo asks you to review this", Dismiss and Approve.
+  - The shared comment control (DecisionComment; Matt's rule: approve or dismiss, always with an optional comment): "Add a comment", the placeholder "A comment for Theo, if you like" and the note "Theo gets it with your answer." The comment goes with either answer.
+  - "Your drawing on 1 page goes with your answer." / "Your drawings on 3 pages go with your answer."
+  - "Sending your drawing…" / "Sending your drawings… 2 of 3"
+  - "Couldn't send your drawings, so your answer wasn't sent. Try again."
+
+### Handwriting into the comment (phase 4)
+
+On an iPad that reads handwriting (iPadOS 27+, as `ready` says), the review bar offers to turn what's drawn into the comment, under "Add a comment": native reads the lasso's strokes, or every drawn page, and the text goes after what the comment has, on a new line, opened to change, sent only with an answer. An answer the ink changed under (native's `stale`, or a stroke or lasso change while it read) is dropped without a word. Below 27 nothing shows. Only where there's a comment to fill: with no review waiting, a lasso selection offers nothing. Words (Trish): "Turn handwriting into a comment", "Turn selected handwriting into a comment", "Reading your handwriting…", "No handwriting to read.", "Couldn't read your handwriting. Try again."
+
+### A PDF that changes while open
+
+When the backend says the file changed on the machine (FileChanged, for a file in an agent's pane), the host fetches the new version into the render cache and hands it to native (reloadDocument), which shows it in place at the same page. Before that it draws out each page with ink as it is; afterwards, ink on pages native lists as outdated (changed or gone, saved or not) is set aside: no longer shown, never moved onto the new page, and its picture from the earlier version still goes with a review's answer (a page with new ink goes as it is now). Ink on pages that stayed the same stays. A version native can't show leaves the one shown, without a word, and the next change tries again; a search finds again in the new version. Words (Trish): "This PDF changed. Showing the new version." (until the person draws) and "This PDF changed. Your drawing on page 5 is from the earlier version." ("on pages 5 and 7"), which stays.
+
+### Search and contents
+
+The pane's header has Search and, when the PDF has its own outline, Contents (on a phone-width window, rows in its More menu); ⌘F ("Find…", in the system's menu and the ⌘-hold list) opens Search in the PDF being read. Either opens a panel at the page's start: in a pane at least 560 pt wide it's 320 pt and the page narrows beside it; narrower, it covers the page and going somewhere closes it. Search asks native once typing pauses (250 ms), drops an answer to an older query, and lists each match with its page and its line, the match in bold (a long one, such as a page PDFKit reads as one block, cut to the words around that match); native highlights them on the pages. Tapping a match or a contents entry goes there. Close, Esc, or switching to Contents ends the search and its highlights. Words (Trish): "Search", "Contents", "Search this PDF", "Searching…", "1 match" / "12 matches" / "No matches", "Over 200 matches · showing the first 200", "Page 3", "Close", and "Find…" in the menu.
+
+### A project's PDF
+
+A PDF opened from a project's Files on an iPad (no agent, so no review) opens in the same host, read only: drawing is off (`InkDrawingPolicy.none`), so the tool bar, Draw with finger and the save line don't show, while Search, Contents, reloading when the file changes and the header's page count all work. Its surface is keyed by path and released when its viewer closes. An iPhone keeps the phone's PDF viewer.
+
+### Keeping drawings
+
+What's drawn is kept on the backend as ink layers (contract §3–§4) by Gelato's `InkLayerSync` (ink_sync.dart), one per surface, made once the file is here. The host tells it what native says: `ready` on every ready (it loads what the backend keeps of the version shown, or, for a view made again, what it holds), `changed` on every drawingChanged (saved at once as the page's next revision), `reloaded` once a new version shows (ink on pages that changed is the earlier version's; the rest is carried onto the new one), `flush` when the pane is hidden, and on closing, the last save finishes before the sync and the controller go. Which pages have ink, and each page's layer for a composite, come from the sync, restored and followed ink included; the earlier version's pictures stay in the host for a review's answer. A view made again opens the version shown now, with the drawing policy as the tools have it. A project's PDF, only to read, shows what's kept and says nothing about it. A pane closed for good (even the last, leaving only the conversation) drops its surface once its host goes, so its sync stops; what wasn't saved stays in the journal.
+
+The line under the page, the most urgent first (Trish's words, the Claktory's name as `claktoryName` gives it):
+- "Page 3 was saved on another device first. Your drawing on it isn't saved yet." / "Pages 3 and 5 were saved on another device first. Your drawings on them aren't saved yet.", with **Keep both**, which puts the other device's drawing under the person's and saves both as the page's next revision, so every device shows both.
+- Not saved: "Not connected to Studio. Your drawing is kept on this iPad and saves the next time this PDF is open and Studio is back." (Gelato's journal keeps a page's unsaved drawing in the app, closed or quit, until the save is confirmed; the PDF opened again while connected saves it); "Not saved. To keep drawings, update Claktory on the computer it runs on." (a backend from before ink layers); "Not saved. <the backend's words>", such as "This page's drawing is too large to keep. Erase some of it to save it."; "Couldn't save your drawing. Claktory tries again the next time you draw."
+- "This PDF changed. Your drawing on page 5 is from the earlier version." ("on pages 5 and 7"), then "This PDF changed. Showing the new version." until the person draws.
+- "Saving your drawing…" / "Saving your drawings…", then "Saved to Studio".
+
+Its changelog line waits for the change that ships the iPad app (Bruno's call; Trish's words): "- Added: On iPad, draw on PDFs with Apple Pencil or your finger. Your drawings save to your Claktory as you draw, and are there on any of your iPads. Drawn while you're not connected, they're kept on the iPad until they can save. When an agent asks you to review a PDF, it gets a picture of each page you drew on."
 
 ## 7. IDENTITY.md's iPad section (draft, for Mike and Hana)
 

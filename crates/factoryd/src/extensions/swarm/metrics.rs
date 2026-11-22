@@ -155,12 +155,49 @@ pub(crate) struct Traffic {
     /// The busiest agent, and the shares of the messages touching it, touching
     /// another lead (an agent someone reports to), and between the rest.
     pub hub: String,
-    /// What the hub was sent, and by how many agents.
+    /// What the hub sent, what it was sent, and by how many agents.
+    pub hub_sent: i64,
     pub hub_received: i64,
     pub hub_senders: i64,
     pub via_hub: f64,
     pub via_leads: f64,
     pub between_peers: f64,
+    /// Where messages stand (#285), for those recorded with it; None when
+    /// the records have no such columns.
+    pub provenance: Option<Provenance>,
+}
+
+/// Of the team's agent messages recorded with provenance: how many, in how
+/// many sends, how many say which message they answer (as their sender
+/// said, checked), how many were sent as handoffs, and the quiet copies to
+/// leads. Messages a run read before sending are context, never counted as
+/// answered.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct Provenance {
+    pub recorded: i64,
+    pub sends: i64,
+    pub answers: i64,
+    pub handoffs: i64,
+    pub quiet_copies: i64,
+}
+
+const PROVENANCE: &str = "
+SELECT COUNT(*), COUNT(DISTINCT send_id), COALESCE(SUM(reply_to != '[]'), 0), COALESCE(SUM(intent = 'handoff'), 0) FROM messages
+WHERE source = 'agent' AND send_id IS NOT NULL AND created >= ?1 AND created < ?2
+  AND agent IN (SELECT value FROM json_each(?3)) AND sender_id IN (SELECT value FROM json_each(?3))";
+
+const QUIET_COPIES: &str = "
+SELECT COUNT(*) FROM quiet_copies WHERE created >= ?1 AND created < ?2
+  AND agent IN (SELECT value FROM json_each(?3)) AND sender_id IN (SELECT value FROM json_each(?3))";
+
+/// `Provenance` over the window; None from records before it.
+fn provenance(db: &Connection, team: &Team, window: Window) -> Option<Provenance> {
+    let ids = team.ids();
+    let (recorded, sends, answers, handoffs) = db
+        .query_row(PROVENANCE, params![window.t0, window.t1, ids], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .ok()?;
+    let quiet_copies = db.query_row(QUIET_COPIES, params![window.t0, window.t1, ids], |row| row.get(0)).ok()?;
+    Some(Provenance { recorded, sends, answers, handoffs, quiet_copies })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -183,7 +220,7 @@ pub(crate) fn traffic(db: &Connection, team: &Team, window: Window) -> rusqlite:
         statement.query_map(params![window.t0, window.t1, team.ids()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
     let messages: i64 = pairs.iter().map(|(_, _, count)| count).sum();
     if messages == 0 {
-        return Ok(Traffic::default());
+        return Ok(Traffic { provenance: provenance(db, team, window), ..Traffic::default() });
     }
     let mut by_agent: HashMap<&str, (i64, i64)> = HashMap::new();
     for (from, to, count) in &pairs {
@@ -194,8 +231,10 @@ pub(crate) fn traffic(db: &Connection, team: &Team, window: Window) -> rusqlite:
         .into_iter()
         .map(|(agent, (sent, received))| Share { agent: agent.to_owned(), sent, received, share: (sent + received) as f64 / messages as f64 })
         .collect();
-    agents.sort_by(|a, b| b.share.total_cmp(&a.share).then_with(|| a.agent.cmp(&b.agent)));
+    // A tie goes to the one sent more: a hub is who the others write to.
+    agents.sort_by(|a, b| b.share.total_cmp(&a.share).then_with(|| b.received.cmp(&a.received)).then_with(|| a.agent.cmp(&b.agent)));
     let hub = agents[0].agent.clone();
+    let hub_sent = agents[0].sent;
     let lead = |id: &str| team.members.iter().any(|member| member.id == id && member.leads);
     let (mut via_hub, mut via_leads) = (0, 0);
     let (mut hub_received, mut hub_senders) = (0, 0);
@@ -215,11 +254,13 @@ pub(crate) fn traffic(db: &Connection, team: &Team, window: Window) -> rusqlite:
         messages,
         agents,
         hub,
+        hub_sent,
         hub_received,
         hub_senders,
         via_hub: share(via_hub),
         via_leads: share(via_leads),
         between_peers: share(messages - via_hub - via_leads),
+        provenance: provenance(db, team, window),
     })
 }
 
@@ -406,7 +447,11 @@ pub(crate) struct Cards {
     /// Questions and proposals raised in the window.
     pub raised: i64,
     pub per_day: f64,
+    /// Of those, the ones the person answered, approved or dismissed by now.
+    /// Questions the agent's /clear closed unseen (state `cleared`) are
+    /// neither decided nor dismissed: the person never saw them.
     pub decided: i64,
+    /// Of the decided, the ones the person dismissed.
     pub dismissed: i64,
     pub decided_p50_min: Option<f64>,
     pub decided_p90_min: Option<f64>,
@@ -427,7 +472,11 @@ pub(crate) fn cards(db: &Connection, team: &Team, window: Window, now: i64) -> r
         .query_map(params![window.t0, window.t1, team.ids()], |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
         .collect::<Result<_, _>>()?;
     let in_window: Vec<_> = rows.iter().filter(|(_, _, created, _)| *created >= window.t0 && *created < window.t1).collect();
-    let mut times: Vec<i64> = in_window.iter().filter_map(|(_, _, created, decided)| decided.map(|decided| decided - created)).collect();
+    let mut times: Vec<i64> = in_window
+        .iter()
+        .filter(|(_, state, _, _)| state != "cleared")
+        .filter_map(|(_, _, created, decided)| decided.map(|decided| decided - created))
+        .collect();
     times.sort_unstable();
     let raised = in_window.len() as i64;
     let mut pending: Vec<(String, f64)> = rows

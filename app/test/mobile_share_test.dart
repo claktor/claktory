@@ -1,6 +1,8 @@
-// The system's share sheet for text (an invite code): on an iPhone or an
-// iPad it asks factory/device to share, pointing at the button on an iPad;
-// elsewhere there's none, and nothing is asked.
+// The system's share sheet for text (an invite code): on a touch device
+// (an iPhone, an iPad, an Android phone) it asks factory/device to share,
+// pointing at the button on an iPad; on a Mac there's none, and nothing is
+// asked.
+import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/mobile/share.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -48,15 +50,46 @@ void main() {
     });
   });
 
-  testWidgets('elsewhere: no sheet, nothing asked', (tester) async {
-    for (final platform in [TargetPlatform.android, TargetPlatform.macOS]) {
-      debugDefaultTargetPlatformOverride = platform;
-      final c = await context(tester);
-      expect(canShare(c), isFalse);
-      expect(await shareText(c, 'code'), isFalse);
-    }
-    debugDefaultTargetPlatformOverride = null;
+  testWidgets('on Android: the same call, with the text', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final saved = PhonePlatformPolicy.debugAndroidPolicy;
+    PhonePlatformPolicy.debugAndroidPolicy = true;
+    addTearDown(() => PhonePlatformPolicy.debugAndroidPolicy = saved);
+    final c = await context(tester);
+    expect(canShare(c), isTrue);
+    expect(await shareText(c, 'claktory-pipe://x'), isTrue);
+    expect(calls.single.method, 'share');
+    expect(calls.single.arguments, {'text': 'claktory-pipe://x'});
+  });
+
+  testWidgets('on a Mac: no sheet, nothing asked', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final c = await context(tester);
+    expect(canShare(c), isFalse);
+    expect(await shareText(c, 'code'), isFalse);
     expect(calls, isEmpty);
+  });
+
+  testWidgets('nothing to share: nothing asked', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final c = await context(tester);
+    expect(await shareText(c, ''), isFalse);
+    expect(calls, isEmpty);
+  });
+
+  testWidgets('a share the system refuses says no', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          channel,
+          (call) async => throw PlatformException(code: 'failed'),
+        );
+    final c = await context(tester);
+    expect(await shareText(c, 'code'), isFalse);
   });
 
   testWidgets('an app built before share says no', (tester) async {

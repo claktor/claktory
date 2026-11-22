@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:factory_app/annotations.dart';
 import 'package:factory_app/controls.dart';
+import 'package:factory_app/decision.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
@@ -603,6 +604,28 @@ void main() {
       await tester.tap(button('Reject'));
       await settle(tester);
       expect(harness.backend.sent.last.decideSuggestion.accept, isFalse);
+
+      // A comment for the agent goes with either.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Commented),
+          matching: find.text('Add a comment'),
+        ),
+      );
+      await settle(tester);
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(DecisionComment),
+          matching: find.byType(EditableText),
+        ),
+        'Keep the old word.',
+      );
+      await tester.tap(button('Reject'));
+      await settle(tester);
+      expect(
+        harness.backend.sent.last.decideSuggestion.comment,
+        'Keep the old word.',
+      );
     });
 
     testWidgets('once its text changed it can only be rejected', (

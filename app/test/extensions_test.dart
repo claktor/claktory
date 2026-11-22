@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 
 final agentsExtension = Extension(
   id: 'agents',
@@ -189,6 +190,28 @@ void main() {
     expect(star.right, closeTo(22, 0.1));
     expect(star.top, closeTo(2, 0.1));
     expect(star.bottom, closeTo(22, 0.1));
+  });
+
+  testWidgets("the bar is a finger's width where touch comes first", (
+    tester,
+  ) async {
+    // A Mac's: 40.
+    await showWith(tester, workspace());
+    expect(tester.getSize(find.byType(ExtensionBar)).width, extensionBarWidth);
+    // An iPad's or an Android tablet's: its 44pt glyph buttons fit whole.
+    asIPad();
+    await tester.pumpWidget(
+      const Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(height: 400, child: ExtensionBar(agent: null)),
+        ),
+      ),
+    );
+    final bar = tester.element(find.byType(ExtensionBar));
+    expect(extensionBarWidthOf(bar), 44);
+    expect(tester.getSize(find.byType(ExtensionBar)).width, 44);
   });
 
   testWidgets('the bar shows the selected agent\'s extensions and opens one', (

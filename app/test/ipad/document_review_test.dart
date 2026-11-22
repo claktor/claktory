@@ -1,0 +1,421 @@
+// A review an agent asks of a PDF, on an iPad (ipad/document_review.dart):
+// the document pane's foot says who asks and what, and how many pages are
+// drawn on; Approve and Dismiss send each drawn page, whole with its ink,
+// as an upload to the agent, named in the answer, with the comment, if
+// one was added.
+import 'dart:async';
+
+import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/ipad/document_review.dart';
+import 'package:factory_app/ipad/ink_surface.dart';
+import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'as_ipad.dart';
+import 'document_native.dart';
+
+void main() {
+  testWidgets('the pane says who asks and what; Approve sends each drawn '
+      'page with the comment', (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    final harness = await showDocument(tester);
+    expect(find.text('Builder asks you to review this'), findsOneWidget);
+    expect(find.text('Check the figures on page 3'), findsOneWidget);
+    // Nothing drawn: nothing said about drawings.
+    expect(find.textContaining('go with your answer'), findsNothing);
+
+    await native.drew(3, 2);
+    await native.drew(1, 1);
+    await native.drew(5, 0); // drawn, then all erased
+    await settle(tester);
+    expect(
+      find.text('Your drawings on 2 pages go with your answer.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+    await tester.enterText(find.byType(EditableText).last, 'Looks right');
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+
+    // The pages in order, whole (no region), with their ink.
+    final exports = [
+      for (final call in native.calls)
+        if (call.method == 'exportComposite')
+          (call.arguments as Map).cast<String, Object?>(),
+    ];
+    expect([for (final e in exports) e['page_1based']], [1, 3]);
+    expect(exports.first.containsKey('region'), isFalse);
+    // The page's layer as the backend keeps it.
+    final kept = native.ink.layers.values.singleWhere(
+      (l) => l.space.page1based == 1,
+    );
+    expect(
+      (exports.first['ink_layer_id'], exports.first['layer_revision']),
+      (kept.id, kept.revision),
+    );
+    expect(exports.first['include_ink'], isTrue);
+
+    final uploads = sentOf(harness, (m) => m.hasStartUpload());
+    expect(
+      [for (final u in uploads) u.startUpload.name],
+      ['paper-p1.png', 'paper-p3.png'],
+    );
+    expect(uploads.every((u) => u.startUpload.agentId == 'a1'), isTrue);
+    expect(uploads.first.startUpload.mime, 'image/png');
+
+    final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+    expect(answer.seq, Int64(7));
+    expect(answer.text, 'Looks right');
+    expect(answer.dismiss, isFalse);
+    expect(
+      [for (final a in answer.attachments) a.name],
+      ['paper-p1.png', 'paper-p3.png'],
+    );
+  });
+
+  testWidgets('Dismiss sends the drawings and the comment too', (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    final harness = await showDocument(tester);
+    await native.drew(2, 4);
+    await settle(tester);
+    expect(
+      find.text('Your drawing on 1 page goes with your answer.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(find.byType(EditableText).last, 'Not this week');
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+    expect(answer.dismiss, isTrue);
+    expect(answer.text, 'Not this week');
+    expect([for (final a in answer.attachments) a.name], ['paper-p2.png']);
+  });
+
+  testWidgets('the bar stays above the home indicator', (tester) async {
+    asIPad();
+    DocumentNative();
+    tester.view.padding = const FakeViewPadding(bottom: 40);
+    addTearDown(tester.view.resetPadding);
+    await showDocument(tester);
+    final bar = tester.getRect(find.byKey(const ValueKey('document-review')));
+    expect(bar.bottom, lessThanOrEqualTo(1024 - 20));
+  });
+
+  testWidgets('at the largest text in a short window the page keeps its '
+      'share, and what is under it scrolls', (tester) async {
+    asIPad();
+    DocumentNative();
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await showDocument(tester, size: const Size(1133, 560));
+    // The panes are tabs at this size: the paper's.
+    await tester.tap(find.text('paper.pdf'));
+    await settle(tester);
+    expect(tester.takeException(), isNull);
+    expect(tester.getSize(find.byType(InkSurface)).height, greaterThan(100));
+    // Approve is a scroll away.
+    final approve = find.descendant(
+      of: find.byKey(const ValueKey('document-review')),
+      matching: find.text('Approve'),
+    );
+    await tester.ensureVisible(approve);
+    await settle(tester);
+    expect(tester.getRect(approve).bottom, lessThanOrEqualTo(560));
+  });
+
+  for (final (reason, lost) in [
+    ('resize', true),
+    ('rotate', true),
+    ('hidden', false),
+    ('undo', false),
+  ]) {
+    testWidgets('a stroke cut by "$reason" ${lost ? 'says' : "doesn't say"} '
+        'it was lost', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester, asking: false);
+      await native.cut(reason);
+      await settle(tester);
+      expect(
+        find.text(
+          'Your last stroke was lost when the pane changed size. '
+          'Draw it again.',
+        ),
+        lost ? findsOneWidget : findsNothing,
+      );
+    });
+  }
+
+  testWidgets('no question waiting on the file: no bar', (tester) async {
+    asIPad();
+    DocumentNative();
+    await showDocument(tester, asking: false);
+    expect(find.text('Builder asks you to review this'), findsNothing);
+    expect(find.byKey(const ValueKey('document-review')), findsNothing);
+  });
+
+  testWidgets('a page that can\'t be drawn out: nothing is answered, and '
+      'the bar says so', (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    readComposite = (file) async => throw StateError('gone');
+    final harness = await showDocument(tester);
+    await native.drew(1, 1);
+    await settle(tester);
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+    expect(
+      find.text(
+        "Couldn't send your drawings, so your answer wasn't sent. Try again.",
+      ),
+      findsOneWidget,
+    );
+    // Still there to try again.
+    expect(find.text('Dismiss'), findsOneWidget);
+  });
+
+  group('handwriting into the comment', () {
+    Finder offer(String text) => find.descendant(
+      of: find.byKey(const ValueKey('document-review')),
+      matching: find.text(text),
+    );
+    const all = 'Turn handwriting into a comment';
+    const selected = 'Turn selected handwriting into a comment';
+
+    List<Map<String, Object?>> reads(DocumentNative native) => [
+      for (final call in native.calls)
+        if (call.method == 'recognizeText')
+          (call.arguments as Map).cast<String, Object?>(),
+    ];
+
+    String comment(WidgetTester tester) => tester
+        .widget<EditableText>(find.byType(EditableText).last)
+        .controller
+        .text;
+
+    testWidgets('below iPadOS 27, or from a native that doesn\'t say: '
+        'nothing at all', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.drew(3, 2);
+      for (final handwriting in [false, null]) {
+        await native.ready(handwriting: handwriting);
+        await native.lasso(3, 2);
+        await settle(tester);
+        expect(find.textContaining('handwriting'), findsNothing);
+      }
+      expect(reads(native), isEmpty);
+    });
+
+    testWidgets('nothing drawn: no offer', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await settle(tester);
+      expect(find.textContaining('handwriting'), findsNothing);
+    });
+
+    testWidgets('every drawn page is read into the comment, which opens to '
+        'be changed and is sent only with an answer', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      final harness = await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(3, 2);
+      await native.drew(1, 1);
+      await settle(tester);
+      final reading = Completer<void>();
+      native.recognize = (arguments) async {
+        await reading.future;
+        return {
+          'available': true,
+          'page_1based': arguments['page_1based'],
+          'text': '  why page ${arguments['page_1based']}?\n',
+        };
+      };
+      await tester.tap(offer(all));
+      await tester.pump();
+      expect(offer('Reading your handwriting…'), findsOneWidget);
+      expect(offer(all), findsNothing);
+      reading.complete();
+      await settle(tester);
+
+      expect(reads(native), [
+        {'page_1based': 1, 'scope': 'all'},
+        {'page_1based': 3, 'scope': 'all'},
+      ]);
+      expect(comment(tester), 'why page 1?\nwhy page 3?');
+      expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+      expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+      // Offered again, for more.
+      expect(offer(all), findsOneWidget);
+
+      await tester.enterText(
+        find.byType(EditableText).last,
+        '${comment(tester)} and the axis',
+      );
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+      expect(answer.text, 'why page 1?\nwhy page 3? and the axis');
+    });
+
+    testWidgets('"Add a comment" and the offer are each a 44 pt target, '
+        'apart', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(1, 2);
+      await settle(tester);
+      Rect target(String text) => tester.getRect(
+        find.ancestor(of: offer(text), matching: find.byType(Pressable)).first,
+      );
+      final add = target('Add a comment');
+      final read = target(all);
+      expect(add.height, greaterThanOrEqualTo(44));
+      expect(read.height, greaterThanOrEqualTo(44));
+      expect(add.overlaps(read), isFalse);
+      expect(read.top, greaterThanOrEqualTo(add.bottom));
+      // A tap at the offer's top edge (clear of the divider's grab zone)
+      // is the offer's, not the comment's.
+      await tester.tapAt(Offset(read.left + 24, read.top + 1));
+      await settle(tester);
+      expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+      expect(comment(tester), 'why page 1?');
+    });
+
+    testWidgets('a lasso selection is read alone, on a new line after what '
+        'the comment has', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(3, 5);
+      await native.drew(4, 1);
+      await native.lasso(3, 2);
+      await settle(tester);
+      expect(offer(selected), findsOneWidget);
+      expect(offer(all), findsNothing);
+
+      await tester.tap(find.text('Add a comment'));
+      await settle(tester);
+      await tester.enterText(find.byType(EditableText).last, 'Two things:');
+      await tester.tap(offer(selected));
+      await settle(tester);
+      expect(reads(native), [
+        {'page_1based': 3, 'scope': 'selection'},
+      ]);
+      expect(comment(tester), 'Two things:\nwhy page 3?');
+
+      // The lasso let go: the whole drawing again.
+      await native.lasso(3, 0);
+      await settle(tester);
+      expect(offer(all), findsOneWidget);
+    });
+
+    testWidgets('an answer the ink changed under is dropped without a word', (
+      tester,
+    ) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(2, 1);
+      await settle(tester);
+
+      // Native says so.
+      native.recognize = (arguments) => {
+        'available': true,
+        'stale': true,
+        'page_1based': 2,
+        'text': null,
+      };
+      await tester.tap(offer(all));
+      await settle(tester);
+      expect(find.text('Add a comment'), findsOneWidget);
+      expect(find.textContaining('read your handwriting'), findsNothing);
+      expect(find.text('No handwriting to read.'), findsNothing);
+
+      // A stroke while it read: what it read is out of date.
+      final reading = Completer<void>();
+      native.recognize = (arguments) async {
+        await reading.future;
+        return {'available': true, 'page_1based': 2, 'text': 'old words'};
+      };
+      await tester.tap(offer(all));
+      await tester.pump();
+      await native.drew(2, 2);
+      reading.complete();
+      await settle(tester);
+      expect(find.text('Add a comment'), findsOneWidget);
+      expect(find.textContaining('old words'), findsNothing);
+      expect(offer(all), findsOneWidget);
+    });
+
+    testWidgets('no text read, or the reading failed: the bar says so', (
+      tester,
+    ) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(1, 3);
+      await settle(tester);
+
+      native.recognize = (arguments) => {
+        'available': true,
+        'page_1based': 1,
+        'text': '  ',
+      };
+      await tester.tap(offer(all));
+      await settle(tester);
+      expect(offer('No handwriting to read.'), findsOneWidget);
+      expect(find.text('Add a comment'), findsOneWidget);
+      // Gone once the drawing changes.
+      await native.drew(1, 4);
+      await settle(tester);
+      expect(offer('No handwriting to read.'), findsNothing);
+
+      native.recognize = (arguments) =>
+          throw PlatformException(code: 'recognition_failed');
+      await tester.tap(offer(all));
+      await settle(tester);
+      expect(
+        offer("Couldn't read your handwriting. Try again."),
+        findsOneWidget,
+      );
+      expect(offer(all), findsOneWidget);
+    });
+
+    testWidgets('an iPad that turns out not to read handwriting: the offer '
+        'goes, nothing said', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      await showDocument(tester);
+      await native.ready(handwriting: true);
+      await native.drew(1, 3);
+      await settle(tester);
+      native.recognize = (arguments) => {
+        'available': false,
+        'reason': 'os_too_old',
+        'min_os': '27.0',
+      };
+      await tester.tap(offer(all));
+      await settle(tester);
+      expect(find.textContaining('handwriting'), findsNothing);
+    });
+  });
+}

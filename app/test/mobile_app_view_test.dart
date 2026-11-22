@@ -3,6 +3,7 @@
 // knows it, never only the title the app chose.
 
 import 'package:factory_app/app_views/app_view.dart';
+import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/panes.dart' show appKind;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/foundation.dart';
@@ -63,6 +64,21 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester, const Duration(seconds: 1));
     expect(find.byType(AppView), findsNothing);
+  });
+
+  testWidgets('showPane pushes a pane already in the layout, as the app '
+      "strip's chips do", (tester) async {
+    final harness = await _phone(tester);
+    final routes = tester
+        .widget<PhoneRoutesScope>(find.byType(PhoneRoutesScope))
+        .routes;
+    expect(routes.showPane('nobody', 'v1'), isFalse);
+    expect(routes.showPane('a1', 'v1'), isTrue);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(find.byType(AppView), findsOneWidget);
+    expect(find.text('Charts · Days'), findsWidgets);
+    // The agent showed already: nothing asked of the backend.
+    expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
   });
 
   testWidgets("an app Claktory doesn't know is This app", (tester) async {

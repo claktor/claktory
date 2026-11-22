@@ -77,8 +77,8 @@ ViewNode viewerLeaf(String path, {String? kind}) => ViewNode(
   ),
 );
 
-/// The viewer that shows [path]: images and videos by their extension,
-/// else text (the text viewer says when a file isn't text).
+/// The viewer that shows [path]: images, videos and PDFs by their
+/// extension, else text (the text viewer says when a file isn't text).
 String viewerKindFor(String path) {
   final dot = path.lastIndexOf('.');
   final extension = dot < 0 ? '' : path.substring(dot + 1).toLowerCase();
@@ -86,6 +86,7 @@ String viewerKindFor(String path) {
     return 'image';
   }
   if (const {'mp4', 'm4v', 'mov'}.contains(extension)) return 'video';
+  if (extension == 'pdf') return 'pdf';
   return 'text';
 }
 

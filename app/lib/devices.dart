@@ -12,6 +12,7 @@ import 'connections.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'links.dart' show pairingFingerprint;
 import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/metrics.dart' show TypeScale;
@@ -584,10 +585,36 @@ class _PairingInstructionsState extends State<PairingInstructions> {
     final body = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     final device = widget.device;
     final code = widget.code;
-    final qr = Center(
-      child: code == null
-          ? SizedBox.square(dimension: widget.qrSize)
-          : QrCode(key: ValueKey(code), text: code, size: widget.qrSize),
+    final target = code == null ? null : parsePairingCode(code);
+    final qr = Column(
+      children: [
+        Center(
+          child: code == null
+              ? SizedBox.square(dimension: widget.qrSize)
+              : QrCode(key: ValueKey(code), text: code, size: widget.qrSize),
+        ),
+        // What the other device shows before it connects, to compare.
+        if (target != null) ...[
+          const SizedBox(height: Space.s),
+          Text.rich(
+            TextSpan(
+              children: [
+                const TextSpan(text: 'Its code: '),
+                TextSpan(
+                  text: pairingFingerprint(target),
+                  style: TextStyle(
+                    fontFamily: TextStyles.mono,
+                    color: palette.text,
+                  ),
+                ),
+              ],
+            ),
+            textAlign: TextAlign.center,
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+        ],
+      ],
     );
     final paste = Text(
       'In Claktory on $device, click Add a Claktory and paste this code.',

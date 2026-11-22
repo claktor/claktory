@@ -38,19 +38,19 @@ The person sees Claktory in its app. `highlight` makes parts of the app glow for
 - settings, marketplace: the buttons at the bottom of the sidebar (no id)
 Add a short `text` to say what to look at. It changes nothing; use it sparingly.
 
-`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, apps, defaults, voice, devices, resources, display; none for the top), map, usage, marketplace, changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
+`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, apps, defaults, voice, devices, resources, display, checklist; none for the top), map, usage, marketplace, changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
 ";
 
 const DESCRIPTION: &str = "Make parts of the app glow for a moment so the person sees them. targets: [{kind, id}], kind agent, project, checklist_item (\"<agent>#<n>\"), extension (\"<agent>/<extension>\"), settings or marketplace (no id). text: an optional short caption.";
 
 const KINDS: [&str; 6] = ["agent", "project", "checklist_item", "extension", "settings", "marketplace"];
 
-const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, apps, defaults, devices, resources or display; none for the top), map, usage, marketplace, changelog, agent (id: an agent's id, its conversation) or agent_settings (id: an agent's id). Says on which device it opened, or that none did.";
+const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, apps, defaults, devices, resources, display or checklist; none for the top), map, usage, marketplace, changelog, agent (id: an agent's id, its conversation) or agent_settings (id: an agent's id). Says on which device it opened, or that none did.";
 
 const SCREENS: [&str; 7] = ["settings", "map", "usage", "marketplace", "changelog", "agent", "agent_settings"];
 
 /// The sections of Settings an agent can open, as the app names them.
-const SECTIONS: [(&str, &str); 11] = [
+const SECTIONS: [(&str, &str); 12] = [
     ("profile", "Profile"),
     ("general", "General"),
     ("account", "Account"),
@@ -62,6 +62,7 @@ const SECTIONS: [(&str, &str); 11] = [
     ("devices", "Devices"),
     ("resources", "Resources"),
     ("display", "Display"),
+    ("checklist", "Checklist"),
 ];
 
 /// How long `show_screen` waits for the apps to say whether they opened it.
@@ -95,7 +96,7 @@ impl Extension for Highlight {
             "additionalProperties": false,
         });
         let handler: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = super::live(factory)?;
             let args: Args = serde_json::from_value(args)?;
             let text = show(&factory, &agent, args).map_err(factory_agent::Error::Other)?;
             Ok(ToolResult::text(text, json!({})))
@@ -110,7 +111,7 @@ impl Extension for Highlight {
             "additionalProperties": false,
         });
         let screen: factory_agent::Handler = super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = super::live(factory)?;
             let args: ScreenArgs = serde_json::from_value(args)?;
             let text = open_screen(&factory, &agent, args).await.map_err(factory_agent::Error::Other)?;
             Ok(ToolResult::text(text, json!({})))

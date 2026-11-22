@@ -396,6 +396,21 @@ impl Registry {
         Some((resolved.source, resolved.auth.api_key?))
     }
 
+    /// Changes the first stored account with this id under the store's lock;
+    /// a missing account leaves the store untouched.
+    async fn modify_account(&self, id: &str, account: String, change: impl FnOnce(&mut Account) + Send) -> Result<(), Error> {
+        let changed = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| async move {
+                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
+                change(stored);
+                Ok(Some(accounts))
+            })
+            .await;
+        credential_result(changed, "modify", id).map(drop)
+    }
+
     /// Changes an account's limit state (the pool `fable` names) and credit
     /// state, stored or not; returns the provider's accounts then.
     async fn set_state(
@@ -415,17 +430,11 @@ impl Registry {
             return self.candidates(id).await;
         }
         let account = account.to_owned();
-        let changed = self
-            .inner
-            .store
-            .modify_accounts(id, |mut accounts| async move {
-                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
-                let until = if fable { &mut stored.fable_exhausted_until } else { &mut stored.exhausted_until };
-                change(until, &mut stored.out_of_credit_since);
-                Ok(Some(accounts))
-            })
-            .await;
-        credential_result(changed, "modify", id)?;
+        self.modify_account(id, account, move |stored| {
+            let until = if fable { &mut stored.fable_exhausted_until } else { &mut stored.exhausted_until };
+            change(until, &mut stored.out_of_credit_since);
+        })
+        .await?;
         self.candidates(id).await
     }
 
@@ -433,16 +442,7 @@ impl Registry {
     /// provider: skipped until it's signed in to again.
     async fn refuse(&self, id: &str, account: &str) -> Result<(), Error> {
         let account = account.to_owned();
-        let changed = self
-            .inner
-            .store
-            .modify_accounts(id, |mut accounts| async move {
-                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
-                stored.refused_since = now_ms();
-                Ok(Some(accounts))
-            })
-            .await;
-        credential_result(changed, "modify", id).map(drop)
+        self.modify_account(id, account, |stored| stored.refused_since = now_ms()).await
     }
 
     /// Forgets that one of the provider's accounts (None: all of them) is at
@@ -487,16 +487,7 @@ impl Registry {
                 return Err(models_error("auth", "A key from the environment is named by its variable", None));
             }
             let (wanted, label) = (account.to_owned(), label.trim().to_owned());
-            let renamed = self
-                .inner
-                .store
-                .modify_accounts(id, |mut accounts| async move {
-                    let Some(stored) = accounts.iter_mut().find(|stored| stored.id == wanted) else { return Ok(None) };
-                    stored.label = label;
-                    Ok(Some(accounts))
-                })
-                .await;
-            credential_result(renamed, "modify", id)?;
+            self.modify_account(id, wanted, move |stored| stored.label = label).await?;
         }
         if retry {
             self.set_state(id, account, false, |_, since| *since = 0).await?;
@@ -583,20 +574,14 @@ impl Registry {
 
     async fn name_account(&self, id: &str, account: &str, identity: crate::limits::Identity) -> Result<(), Error> {
         let account = account.to_owned();
-        let named = self
-            .inner
-            .store
-            .modify_accounts(id, |mut accounts| async move {
-                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
-                // Named meanwhile (the person renamed it while this asked): theirs stays.
-                if stored.label.is_empty() {
-                    stored.label = identity.label;
-                }
-                stored.identity = identity.key;
-                Ok(Some(accounts))
-            })
-            .await;
-        credential_result(named, "modify", id).map(|_| ())
+        self.modify_account(id, account, move |stored| {
+            // Named meanwhile (the person renamed it while this asked): theirs stays.
+            if stored.label.is_empty() {
+                stored.label = identity.label;
+            }
+            stored.identity = identity.key;
+        })
+        .await
     }
 
     /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.

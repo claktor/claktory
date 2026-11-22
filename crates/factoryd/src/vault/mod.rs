@@ -17,6 +17,7 @@ pub(crate) mod asks;
 pub mod backup;
 pub(crate) mod connections;
 pub(crate) mod crypto;
+pub(crate) mod dm;
 pub(crate) mod env;
 pub(crate) mod generate;
 pub mod handoff;
@@ -34,6 +35,7 @@ use factory_protocol::v1;
 use rusqlite::{Connection, OptionalExtension, params};
 use zeroize::Zeroizing;
 
+use crate::store::query;
 use crate::transcript::now_ms;
 use crypto::Key;
 
@@ -950,10 +952,7 @@ impl Vault {
         if Self::kind_of(&transaction, &id)? == connections::KIND_CONNECTION {
             return Err(VaultError::Invalid(format!("To remove {name}, disconnect it.")));
         }
-        let agents = transaction
-            .prepare("SELECT agent FROM grants WHERE secret = ?1 ORDER BY granted")?
-            .query_map([&id], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
+        let agents = query(&transaction, "SELECT agent FROM grants WHERE secret = ?1 ORDER BY granted", [&id], |row| row.get(0))?;
         for table in ["variables", "grants"] {
             transaction.execute(&format!("DELETE FROM {table} WHERE secret = ?1"), [&id])?;
         }
@@ -986,8 +985,7 @@ impl Vault {
                 "Agents can't be given {name} itself. Make a secret from it with only the access the work needs, and give that."
             )));
         }
-        let variables: Vec<String> =
-            db.prepare("SELECT name FROM variables WHERE secret = ?1")?.query_map([&id], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        let variables: Vec<String> = query(db, "SELECT name FROM variables WHERE secret = ?1", [&id], |row| row.get(0))?;
         for (alias, variable) in aliases {
             if !valid_variable(alias) {
                 return Err(VaultError::Invalid(format!(
@@ -1033,10 +1031,12 @@ impl Vault {
     pub(crate) fn forget_agent(&self, agent: &str) -> Result<Vec<String>, VaultError> {
         let mut inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
-        let names = db
-            .prepare("SELECT secrets.name FROM grants JOIN secrets ON secrets.id = grants.secret WHERE grants.agent = ?1")?
-            .query_map([agent], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
+        let names = query(
+            db,
+            "SELECT secrets.name FROM grants JOIN secrets ON secrets.id = grants.secret WHERE grants.agent = ?1",
+            [agent],
+            |row| row.get(0),
+        )?;
         db.execute("DELETE FROM grants WHERE agent = ?1", [agent])?;
         db.execute("DELETE FROM requests WHERE agent = ?1", [agent])?;
         db.execute("DELETE FROM connect_proposals WHERE agent = ?1", [agent])?;
@@ -1092,11 +1092,11 @@ impl Vault {
         let inner = self.lock();
         let db = Self::db(&inner)?;
         let limit = if limit == 0 { 100 } else { limit.min(1000) };
-        let mut statement = db.prepare(
+        Ok(query(
+            db,
             "SELECT secret, secret_name, time, kind, agent, task, detail FROM uses WHERE ?1 = '' OR secret = ?1 ORDER BY id DESC LIMIT ?2",
-        )?;
-        let uses = statement
-            .query_map(params![id, limit], |row| {
+            params![id, limit],
+            |row| {
                 Ok(v1::SecretUse {
                     secret_id: row.get(0)?,
                     secret_name: row.get(1)?,
@@ -1106,9 +1106,8 @@ impl Vault {
                     task_id: row.get(5)?,
                     detail: row.get(6)?,
                 })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(uses)
+            },
+        )?)
     }
 
     /// The vault as clients see it: never values. `running` says whether an

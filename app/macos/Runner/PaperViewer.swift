@@ -1,0 +1,271 @@
+// The Mac's PDF viewer (pane kind "pdf"): PDFKit's own view in the pane,
+// so pages scroll and zoom with the trackpad and their text is selected
+// and copied as anywhere on the Mac. Only a viewer: no drawing, forms only
+// shown, links never opened here (Dart offers them), no scripts.
+//
+// The same channels and messages as the iPad's ink surfaces
+// (app/ios/Runner/Ink, fixtures in app/test/ipad/fixtures/bridge), less
+// the ink: platform view "claktory/ink" (app/lib/ipad/ink_surface.dart's
+// AppKitView on a Mac), one channel per view "claktory/ink/<id>" with
+// attach, goToPage, search; ready, pageChanged, linkTapped, error. Mac
+// only: findRequested {forward}, when ⌘F (⌘G, ⇧⌘G) is pressed with the
+// page focused, for Dart's find field. The app-wide "claktory/ink" channel
+// is the render cache (PaperCache.swift).
+
+import Cocoa
+import FlutterMacOS
+import PDFKit
+
+enum Paper {
+  static let viewType = "claktory/ink"
+
+  static func register(with registrar: FlutterPluginRegistrar) {
+    let messenger = registrar.messenger
+    registrar.register(PaperFactory(messenger: messenger), withId: viewType)
+    let channel = FlutterMethodChannel(name: viewType, binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in cache(call, result) }
+    appChannel = channel
+  }
+
+  private static var appChannel: FlutterMethodChannel?
+
+  /// The render cache on the app's channel, as InkRenderCache on the iPad.
+  static func cache(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+    let cache = PaperCache.shared
+    let args = call.arguments as? [String: Any] ?? [:]
+    func bad(_ what: String) -> FlutterError {
+      FlutterError(code: "bad_request", message: what, details: nil)
+    }
+    func file() -> URL? {
+      cache.file(
+        backend: args["backend"] as? String, sha256: args["sha256"] as? String,
+        name: args["name"] as? String)
+    }
+    switch call.method {
+    case "cacheBegin":
+      guard let url = file(), let sha = args["sha256"] as? String else {
+        return result(bad("backend, sha256 and name"))
+      }
+      do { result(["token": try cache.begin(url, sha256: sha)]) } catch {
+        result(FlutterError(code: "io", message: error.localizedDescription, details: nil))
+      }
+    case "cacheAppend":
+      guard let token = args["token"] as? String, let bytes = args["bytes"] as? FlutterStandardTypedData,
+        cache.append(token, bytes.data)
+      else { return result(bad("token and bytes")) }
+      result(["written": bytes.data.count])
+    case "cacheFinish":
+      guard let token = args["token"] as? String else { return result(bad("token")) }
+      cache.finish(token) { outcome in
+        switch outcome {
+        case .success(let url): result(["file": url.path])
+        case .failure(let error):
+          result(FlutterError(code: error.code, message: error.message, details: error.details))
+        }
+      }
+    case "cacheCancel":
+      if let token = args["token"] as? String { cache.cancel(token) }
+      result(nil)
+    case "cacheLookup":
+      guard let url = file() else { return result(bad("backend, sha256 and name")) }
+      result(cache.lookup(url).map { ["file": $0.path] })
+    case "cacheClear":
+      cache.clear(backend: args["backend"] as? String)
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+}
+
+final class PaperFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+  }
+
+  func createArgsCodec() -> (FlutterMessageCodec & NSObjectProtocol)? {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
+    let channel = FlutterMethodChannel(
+      name: "\(Paper.viewType)/\(viewId)", binaryMessenger: messenger)
+    return PaperPane(params: args as? [String: Any] ?? [:], channel: channel)
+  }
+}
+
+/// One viewer: the PDFView, its channel and the document once opened.
+final class PaperPane: NSView, PDFViewDelegate {
+  let pdf = PaperPDFView()
+  private let channel: FlutterMethodChannel
+  private let params: [String: Any]
+  private var attached = false
+  private var queued: [(String, Any?)] = []
+  private var notes: [NSObjectProtocol] = []
+  private var url: URL?
+  private let searching = DispatchQueue(label: "claktory.paper.search", qos: .userInitiated)
+  private var searches = 0
+
+  init(params: [String: Any], channel: FlutterMethodChannel) {
+    self.params = params
+    self.channel = channel
+    super.init(frame: .zero)
+    pdf.frame = bounds
+    pdf.autoresizingMask = [.width, .height]
+    pdf.displayMode = .singlePageContinuous
+    pdf.displayDirection = .vertical
+    pdf.autoScales = true
+    pdf.backgroundColor = NSColor(white: 0.93, alpha: 1)
+    pdf.delegate = self
+    pdf.onFind = { [weak self] forward in
+      self?.send("findRequested", ["forward": forward.map { $0 as Any } ?? NSNull()])
+    }
+    addSubview(pdf)
+    notes.append(
+      NotificationCenter.default.addObserver(
+        forName: .PDFViewPageChanged, object: pdf, queue: .main
+      ) { [weak self] _ in self?.pageChanged() })
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else { return result(nil) }
+      self.handle(call, result)
+    }
+    open()
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  deinit {
+    notes.forEach(NotificationCenter.default.removeObserver)
+    channel.setMethodCallHandler(nil)
+  }
+
+  // MARK: Events
+
+  /// Sent once Dart has attached; until then they wait.
+  private func send(_ method: String, _ arguments: Any?) {
+    if attached {
+      channel.invokeMethod(method, arguments: arguments)
+    } else {
+      queued.append((method, arguments))
+    }
+  }
+
+  // MARK: Opening
+
+  /// Opens the cached copy once its hash is the version the backend named.
+  private func open() {
+    let document = params["document"] as? [String: Any] ?? [:]
+    let source = params["source"] as? [String: Any] ?? [:]
+    guard let path = document["file"] as? String else {
+      return send("error", ["code": "document_unreadable", "recoverable": false])
+    }
+    let expected = document["sha256"] as? String ?? source["sha256"] as? String
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let opened = PaperCore.open(path: path, expected: expected)
+      DispatchQueue.main.async {
+        guard let self else { return }
+        switch opened {
+        case .failure(let refusal):
+          self.send("error", refusal.fields)
+        case .success(let (document, sha256)):
+          self.url = URL(fileURLWithPath: path)
+          PaperCore.readOnlyForms(document)
+          self.pdf.document = document
+          if let page = (self.params["initial"] as? [String: Any])?["page_1based"] as? Int,
+            let target = document.page(at: page - 1)
+          {
+            self.pdf.go(to: target)
+          }
+          self.send("ready", PaperCore.describe(document, sha256: sha256))
+          self.pageChanged()
+        }
+      }
+    }
+  }
+
+  // MARK: Commands
+
+  private func handle(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+    let args = call.arguments as? [String: Any] ?? [:]
+    switch call.method {
+    case "attach":
+      attached = true
+      let waiting = queued
+      queued = []
+      for (method, arguments) in waiting { channel.invokeMethod(method, arguments: arguments) }
+      result(nil)
+    case "goToPage":
+      let n = args["page_1based"] as? Int ?? 1
+      if let page = pdf.document?.page(at: n - 1) {
+        if let region = PaperCore.region(args["region"]) {
+          pdf.go(to: PaperCore.pageRect(region, on: page), on: page)
+        } else {
+          pdf.go(to: page)
+        }
+      }
+      result(["page_1based": currentPage])
+    case "search":
+      search(args, result)
+    case "setActive":
+      result(["active": args["active"] as? Bool ?? true, "pending_flushed": false])
+    default:
+      // Drawing, tools and ink: not on a Mac.
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private var currentPage: Int {
+    guard let doc = pdf.document, let page = pdf.currentPage else { return 1 }
+    return doc.index(for: page) + 1
+  }
+
+  private func pageChanged() {
+    guard let doc = pdf.document else { return }
+    send("pageChanged", ["page_1based": currentPage, "page_count": doc.pageCount])
+  }
+
+  /// Finds the text in a copy of the document of its own, off the main
+  /// thread, then highlights the matches; an older search's answer says
+  /// it was overtaken.
+  private func search(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    searches += 1
+    let generation = searches
+    let query = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let limit = max(1, min(args["max_results"] as? Int ?? 200, 1000))
+    guard !query.isEmpty, let url else {
+      pdf.highlightedSelections = nil
+      return result(["query": query, "matches": [], "truncated": false])
+    }
+    searching.async { [weak self] in
+      let found = PDFDocument(url: url).map { PaperCore.search($0, query: query, limit: limit) }
+      DispatchQueue.main.async {
+        guard let self else { return }
+        guard generation == self.searches else {
+          return result(["query": query, "matches": [], "truncated": false, "superseded": true])
+        }
+        let matches = found?.matches ?? []
+        self.pdf.highlightedSelections = matches.compactMap { m in
+          guard let page = self.pdf.document?.page(at: m.page),
+            let selection = page.selection(for: m.range)
+          else { return nil }
+          selection.color = NSColor.systemYellow.withAlphaComponent(0.5)
+          return selection
+        }
+        result(PaperCore.searchJSON(query: query, matches: matches, truncated: found?.truncated ?? false))
+      }
+    }
+  }
+
+  // MARK: PDFViewDelegate
+
+  /// A link out of the PDF never opens by itself: Dart offers it. Links
+  /// within it go to their page, as PDFKit does.
+  func pdfViewWillClick(onLink sender: PDFView, with url: URL) {
+    send("linkTapped", ["url": url.absoluteString])
+  }
+
+  /// A link into another PDF file: not followed.
+  func pdfViewOpenPDF(_ sender: PDFView, forRemoteGoToAction action: PDFActionRemoteGoTo) {}
+}

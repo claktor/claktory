@@ -9,6 +9,10 @@
 // - "post" (from the app) {id, title, body, thread, urgent, target}: shows
 //   it; one with an id already shown replaces it. The system asks the
 //   person the first time.
+// - "permission" (from the app): whether macOS lets Claktory notify,
+//   "not_determined", "denied" or "allowed"; "ask" asks the person (once:
+//   macOS answers at once after that), then answers the same.
+// - "openSettings" (from the app): System Settings → Notifications.
 // - "using" (to the app) Bool: the app is active, its window key and on
 //   screen, and the screen awake and unlocked; sent as it changes.
 // - "clicked" (to the app) target: a notification was clicked; the window
@@ -54,6 +58,20 @@ final class Notifications: NSObject, UNUserNotificationCenterDelegate {
         self.clicks.removeAll()
       case "post":
         self.post(call.arguments as? [String: Any] ?? [:])
+        result(nil)
+      case "permission":
+        Notifications.permission(result)
+      case "ask":
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) {
+          _, _ in Notifications.permission(result)
+        }
+      case "openSettings":
+        // System Settings → Notifications, at Claktory when it can say so.
+        let id = Bundle.main.bundleIdentifier ?? ""
+        let url =
+          URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)")
+          ?? URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!
+        NSWorkspace.shared.open(url)
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -127,6 +145,20 @@ final class Notifications: NSObject, UNUserNotificationCenterDelegate {
   @objc private func screenUnlocked() {
     locked = false
     changed()
+  }
+
+  /// Whether macOS lets Claktory notify: "not_determined", "denied" or
+  /// "allowed", answered on the main thread.
+  private static func permission(_ result: @escaping FlutterResult) {
+    UNUserNotificationCenter.current().getNotificationSettings { settings in
+      let answer: String
+      switch settings.authorizationStatus {
+      case .notDetermined: answer = "not_determined"
+      case .denied: answer = "denied"
+      default: answer = "allowed"
+      }
+      DispatchQueue.main.async { result(answer) }
+    }
   }
 
   private func post(_ notification: [String: Any]) {

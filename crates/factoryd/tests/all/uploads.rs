@@ -17,6 +17,7 @@ fn start(id: &str, agent: &str, name: &str, size: u64, mime: &str) -> client_mes
         name: name.into(),
         size,
         mime: mime.into(),
+        ..Default::default()
     })
 }
 

@@ -1,0 +1,25 @@
+/* Claktory's look (docs/IDENTITY.md): graphite or white, hairlines, one
+   signal colour for what's live. */
+:root {
+  color-scheme: light dark;
+  --canvas: #FFFFFF; --hairline: #E4E4E7; --text: #18181B; --muted: #52525B; --signal: #E5480F; --danger: #C8193C;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --canvas: #0E0E10; --hairline: #232327; --text: #EDEDEF; --muted: #A1A1AA; --signal: #FF5B1F; --danger: #FF5C7A; }
+}
+html, body { margin: 0; background: var(--canvas); color: var(--text); }
+body { width: 320px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+main { padding: 14px 16px 16px; }
+h1 { font-size: 15px; font-weight: 600; margin: 0 0 6px; overflow-wrap: anywhere; }
+p { margin: 0 0 10px; color: var(--muted); overflow-wrap: anywhere; }
+.code { font: 600 28px/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 0.08em; color: var(--text); text-align: center; margin: 8px 0 12px; }
+.note { font-style: italic; }
+dl { margin: 0 0 12px; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--hairline); background: transparent; color: var(--text); cursor: pointer; }
+button.primary { background: var(--signal); border-color: var(--signal); color: #FFFFFF; }
+button.stop { background: var(--danger); border-color: var(--danger); color: #FFFFFF; }
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }

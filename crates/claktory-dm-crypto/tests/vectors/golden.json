@@ -1,0 +1,36 @@
+{
+ "about": "claktory-dm-crypto's formats as first written (E1). Never edit a case: a new format is a new case beside the old.",
+ "storage": {
+  "seal_key": "claktory golden seal key 32 byte",
+  "group_id": "golden group",
+  "key": "4f776e4c6561664e6f6465496e6465787b2276616c7565223a7b22766563223a5b3130332c3131312c3130382c3130302c3130312c3131302c33322c3130332c3131342c3131312c3131372c3131325d7d7d0001",
+  "grp": "7b2276616c7565223a7b22766563223a5b3130332c3131312c3130382c3130302c3130312c3131302c33322c3130332c3131342c3131312c3131372c3131325d7d7d",
+  "sealed": "0107070707070707070707070707070707070707070707070762851cf764e57fae57a74203ad10891755",
+  "own_leaf_index": 5
+ },
+ "content": [
+  {
+   "client_message_id": "golden-client-message-id-01",
+   "text": "Hello, Ana 👋 \"quoted\"\nnew line",
+   "encoded": "{\"v\":1,\"kind\":\"text\",\"client_message_id\":\"golden-client-message-id-01\",\"text\":\"Hello, Ana 👋 \\\"quoted\\\"\\nnew line\",\"padding\":\"                                                                                                                              \"}"
+  },
+  {
+   "client_message_id": "golden-client-message-id-01",
+   "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "by_agent": {
+    "claktory_id": "c-golden",
+    "agent_id": "mike",
+    "incarnation": "inc-1",
+    "name": "Mike"
+   },
+   "encoded": "{\"v\":1,\"kind\":\"text\",\"client_message_id\":\"golden-client-message-id-01\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"by_agent\":{\"claktory_id\":\"c-golden\",\"agent_id\":\"mike\",\"incarnation\":\"inc-1\",\"name\":\"Mike\"},\"padding\":\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              \"}"
+  }
+ ],
+ "envelope": {
+  "json": {
+   "bytes": "AAEABQABAAEgJ-2gppQ72veOhCGQPZId_ygzc4hT_1_3Ixg5-B9i8Fcgr8gLmZSWK9pLwc_gImCltIqWLm-3jvCEiZan3HaRdGsgJ1aicFXv7WfjselpEM0r4lj63eeVx1TCJT_Hb7UzbjMAAQZBcm5vbGQCAAEOAAEAAgADAAQABQAGAAcAAAIAAQEAAAAAZAHWfwAAAABl4wn_AEBAmGmX2nCW5puiionUhzjrMLsXOvQHaMC9UjOInvGsQp5uAAMOiS2TlxngNAyJ1O2gyz1qCpEzBnDmhBiJcIwFCwBAQG7P6gHJOHO-tmlfAQxAyxNeN-1bJ1ik-MUXykwD1sEtMsSOUIRHl-HSit2uo4SbZK2mRrCAVH_Kut8ekQpY9Qc",
+   "format": 2
+  },
+  "digest": "961844018c73b8bfb5fc5576a3b45dc8fe2dc1057ff50c51acb3b7f5ea1d19d9"
+ }
+}

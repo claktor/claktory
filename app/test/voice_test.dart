@@ -11,6 +11,7 @@ import 'package:factory_app/voice.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show EditableText, Scrollable;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show workspace;
@@ -22,6 +23,10 @@ class FakeRecorder implements VoiceRecorder {
 
   MicAccess granted;
   bool allow;
+
+  /// What it says after a refusal: denied, as a Mac's or an iPhone's does
+  /// at once; undetermined, as Android's does after a first no.
+  MicAccess afterRefusal = MicAccess.denied;
   final requests = <bool>[];
   String? recordingInto;
   var cancelled = 0;
@@ -42,7 +47,7 @@ class FakeRecorder implements VoiceRecorder {
   @override
   Future<bool> request() async {
     requests.add(allow);
-    if (allow) granted = MicAccess.granted;
+    granted = allow ? MicAccess.granted : afterRefusal;
     return allow;
   }
 
@@ -511,12 +516,78 @@ void main() {
   });
 
   test('with the microphone refused, it says where to allow it', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final voice = VoiceRecording(
       recorder: FakeRecorder(granted: MicAccess.undetermined, allow: false),
     );
     expect(await voice.start(), isFalse);
     expect(voice.error, contains('Privacy & Security → Microphone'));
     expect(voice.recording, isFalse);
+  });
+
+  test('refused for good, each platform says where to allow it', () {
+    final said = {
+      for (final platform in TargetPlatform.values)
+        platform: () {
+          debugDefaultTargetPlatformOverride = platform;
+          try {
+            return micRefusedForGood();
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        }(),
+    };
+    expect(
+      said[TargetPlatform.macOS],
+      "Claktory can't use the microphone. Allow it in System Settings → "
+      'Privacy & Security → Microphone.',
+    );
+    expect(
+      said[TargetPlatform.iOS],
+      'To record, allow microphone access in Settings → Claktory.',
+    );
+    expect(
+      said[TargetPlatform.android],
+      'To record, allow Claktory to use the microphone in Settings.',
+    );
+    expect(
+      said[TargetPlatform.linux],
+      "Claktory can't use the microphone. Allow it in this device's settings.",
+    );
+  });
+
+  test('a first no on Android asks again on the next tap; a second is for '
+      'good', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final mic = FakeRecorder(granted: MicAccess.undetermined, allow: false)
+      ..afterRefusal = MicAccess.undetermined;
+    final voice = VoiceRecording(recorder: mic);
+    expect(await voice.start(), isFalse);
+    expect(
+      voice.error,
+      'Claktory needs the microphone to record. Tap the microphone again to '
+      'allow it.',
+    );
+    mic.afterRefusal = MicAccess.denied;
+    expect(await voice.start(), isFalse);
+    expect(mic.requests, [false, false]);
+    expect(
+      voice.error,
+      'To record, allow Claktory to use the microphone in Settings.',
+    );
+  });
+
+  test("restrictions say so, with nothing to allow", () async {
+    final voice = VoiceRecording(
+      recorder: FakeRecorder(granted: MicAccess.restricted),
+    );
+    expect(await voice.start(), isFalse);
+    expect(
+      voice.error,
+      "This device's restrictions don't allow Claktory to use the microphone.",
+    );
   });
 
   test("a microphone that won't start says why", () async {

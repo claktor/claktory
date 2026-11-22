@@ -265,6 +265,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
         summary,
         transient: false,
         pipe_seqs: Vec::new(),
+        provenance: None,
     };
     // The fire carries what its creator had read of pipes when it was set
     // (kept with the monitor, so clearing the creator's conversation doesn't

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "recognizeText",
+  "arguments": {
+    "page_1based": 3,
+    "scope": "region",
+    "region": {
+      "x": 0.15,
+      "y": 0.8,
+      "w": 0.3,
+      "h": 0.07
+    }
+  },
+  "result": {
+    "available": true,
+    "stale": false,
+    "page_1based": 3,
+    "ink_layer_id": "layer-paper-p3",
+    "base_revision": 2,
+    "local_seq": null,
+    "drawing_sha256": "31dce1ce4d14082f603559233e71bfd901d08b83787297e80f0001d6c7050b82",
+    "stroke_count": 3,
+    "text": "LSTM?",
+    "languages": [
+      "en-US"
+    ],
+    "recognition_version": 1
+  }
+}

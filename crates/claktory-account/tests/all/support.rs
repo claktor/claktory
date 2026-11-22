@@ -22,6 +22,7 @@ pub struct Instance {
     pub relay_bearer: String,
     pub service_key: VerifyingKey,
     pub db: std::path::PathBuf,
+    pub service: Arc<claktory_account::server::Service>,
     client: reqwest::Client,
     _dir: tempfile::TempDir,
 }
@@ -93,9 +94,9 @@ pub async fn start_with(config: Config) -> Instance {
         Service::new(&db, secrets, config, mail.clone(), Arc::new(move || clock_time.load(Ordering::SeqCst))).expect("the service");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
     let url = format!("http://{}", listener.local_addr().expect("an address"));
-    tokio::spawn(server::serve(listener, service));
+    tokio::spawn(server::serve(listener, service.clone()));
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("a client");
-    Instance { url, mail, time, k_share, relay_bearer, service_key, db, client, _dir: dir }
+    Instance { url, mail, time, k_share, relay_bearer, service_key, db, service, client, _dir: dir }
 }
 
 /// A Claktory as the service sees it: its id, backend key and, once signed

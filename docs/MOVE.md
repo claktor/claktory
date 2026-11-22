@@ -302,7 +302,7 @@ claktory-move://?e=<endpoint id>&s=<secret: 64 hex>&m=<machine>&v=<version>&o=<o
 
 1. S→T `plan {manifest, map: [[from, to]…], tools: [name…]}`:
    - `manifest` is the manifest it would write;
-   - `map` holds the folder destinations: by default the source's user home to the target's, and its home to the target's;
+   - `map` holds the folder destinations: by default the source's user home to the target's, and its home to the target's; then each project folder outside both, under the target's user home in `moved-from-<source machine>/` (lowercase letters, digits and dashes, so commands that name it need no quoting), keeping its whole path: `/Volumes/Data/Assets` to `~/moved-from-matts-mac/Volumes/Data/Assets`. So a move over the network never stops at a folder outside the home folder; `skip` (move_claktory's, or `factoryd move --skip`) leaves one out;
    - `tools` are the commands its agents' tasks used (`cargo`, `flutter`…).
 2. T→S `checked {problems: [sentence…], map: [[from, to]…], missing: [tool…], free_bytes}`:
    - `problems` are import's own checks: the version, folder destinations free, disk against `requires.disk_bytes`, a local disk, this export_id not imported already. Empty means go.

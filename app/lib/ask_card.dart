@@ -5,6 +5,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'decision.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
@@ -67,7 +68,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
       await AppScope.of(context).answerAsk(
         widget.agentId,
         widget.seq,
-        text: dismiss ? '' : text,
+        // Dismissed, what's typed goes too, as the person's comment.
+        text: text,
         dismiss: dismiss,
       );
     } on RequestFailure catch (failure) {
@@ -167,21 +169,23 @@ class _AskPersonCardState extends State<AskPersonCard> {
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
     final wantsText = widget.ask.wantsText;
     return [
-      CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.enter): () =>
-              _answer(dismiss: false),
-        },
-        child: TextField(
-          controller: _text,
-          placeholder: wantsText
-              ? 'Your answer'
-              : 'A comment for $name, if you like',
-          minLines: 1,
-          maxLines: 8,
+      // A written answer has its box; an approval, a comment under its
+      // buttons for either.
+      if (wantsText) ...[
+        CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.enter): () =>
+                _answer(dismiss: false),
+          },
+          child: TextField(
+            controller: _text,
+            placeholder: 'Your answer',
+            minLines: 1,
+            maxLines: 8,
+          ),
         ),
-      ),
-      const SizedBox(height: Space.s),
+        const SizedBox(height: Space.s),
+      ],
       // On a phone at large text the buttons go under the words.
       ActionLine(
         lead: Text(
@@ -214,6 +218,13 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ],
         ),
       ),
+      if (!wantsText)
+        DecisionComment(
+          controller: _text,
+          agent: name,
+          enabled: !_busy,
+          onSubmitted: () => _answer(dismiss: false),
+        ),
     ];
   }
 
@@ -260,9 +271,15 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ),
         ],
       ),
-      if (!dismissed && ask.answer.isNotEmpty) ...[
+      // The answer, or the comment it was dismissed with.
+      if (ask.answer.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
-        Text(ask.answer, style: type.body.copyWith(color: palette.text)),
+        Text(
+          ask.answer,
+          style: type.body.copyWith(
+            color: dismissed ? palette.textMuted : palette.text,
+          ),
+        ),
       ],
     ];
   }

@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'audio.dart';
@@ -22,6 +23,20 @@ import 'recorder.dart';
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow;
+
+/// Where to allow the microphone once it's refused for good, on this
+/// platform: the Settings page Open Settings opens beside it.
+String micRefusedForGood() => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS =>
+    "Claktory can't use the microphone. Allow it in System Settings → "
+        'Privacy & Security → Microphone.',
+  TargetPlatform.iOS =>
+    'To record, allow microphone access in Settings → Claktory.',
+  TargetPlatform.android =>
+    'To record, allow Claktory to use the microphone in Settings.',
+  _ =>
+    "Claktory can't use the microphone. Allow it in this device's settings.",
+};
 
 /// One recording in an agent's message box, from the mic button: asked
 /// for the microphone, then recording, its loudness kept for the waveform,
@@ -73,7 +88,12 @@ class VoiceRecording extends ChangeNotifier {
     try {
       var access = await _mic.access();
       if (access == MicAccess.undetermined) {
-        access = await _mic.request() ? MicAccess.granted : MicAccess.denied;
+        // Refused, it's asked again rather than assumed for good: Android
+        // can still ask after a first no (undetermined), and only a
+        // second one, or an iPhone's or a Mac's, is for good (denied).
+        access = await _mic.request()
+            ? MicAccess.granted
+            : await _mic.access();
       }
       switch (access) {
         case MicAccess.granted:
@@ -81,12 +101,18 @@ class VoiceRecording extends ChangeNotifier {
         case MicAccess.unavailable:
           _error = "This device can't record voice messages.";
           return false;
-        case MicAccess.denied:
-        case MicAccess.restricted:
         case MicAccess.undetermined:
           _error =
-              "Claktory can't use the microphone. Allow it in System "
-              'Settings → Privacy & Security → Microphone.';
+              'Claktory needs the microphone to record. Tap the microphone '
+              'again to allow it.';
+          return false;
+        case MicAccess.restricted:
+          _error =
+              "This device's restrictions don't allow Claktory to use the "
+              'microphone.';
+          return false;
+        case MicAccess.denied:
+          _error = micRefusedForGood();
           return false;
       }
       _levels.clear();

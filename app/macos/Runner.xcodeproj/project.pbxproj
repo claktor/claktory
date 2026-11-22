@@ -31,12 +31,19 @@
 		FAC700012B3C4D5E6F700001 /* SandboxMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC700022B3C4D5E6F700002 /* SandboxMigration.swift */; };
 		C0EC71002B3C4D5E6F700011 /* ConnectionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700012 /* ConnectionStore.swift */; };
 		C0EC71002B3C4D5E6F700021 /* VideoPlayers.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700022 /* VideoPlayers.swift */; };
+		6E1A70002B3C4D5E6F700001 /* PaperCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E1A70002B3C4D5E6F700002 /* PaperCore.swift */; };
+		6E1A70002B3C4D5E6F700101 /* PaperCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E1A70002B3C4D5E6F700102 /* PaperCache.swift */; };
+		6E1A70002B3C4D5E6F700201 /* PaperViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E1A70002B3C4D5E6F700202 /* PaperViewer.swift */; };
 		C0EC71002B3C4D5E6F700031 /* Setup.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700032 /* Setup.swift */; };
 		C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700042 /* Recorder.swift */; };
 		C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */; };
 		C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */; };
 		C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700062 /* SetupLink.swift */; };
 		C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700072 /* Notifications.swift */; };
+		B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */; };
+		B4A0B4A02B3C4D5E6F700003 /* BrowserBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */; };
+		B5B0B5B02B3C4D5E6F700001 /* BrowserReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B0B5B02B3C4D5E6F700002 /* BrowserReview.swift */; };
+		B5B0B5B02B3C4D5E6F700003 /* BrowserReviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B0B5B02B3C4D5E6F700004 /* BrowserReviewPanel.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 /* End PBXBuildFile section */
 
@@ -85,12 +92,19 @@
 		FAC700022B3C4D5E6F700002 /* SandboxMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SandboxMigration.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700012 /* ConnectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStore.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700022 /* VideoPlayers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayers.swift; sourceTree = "<group>"; };
+		6E1A70002B3C4D5E6F700002 /* PaperCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperCore.swift; sourceTree = "<group>"; };
+		6E1A70002B3C4D5E6F700102 /* PaperCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperCache.swift; sourceTree = "<group>"; };
+		6E1A70002B3C4D5E6F700202 /* PaperViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperViewer.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700032 /* Setup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Setup.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700042 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPath.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700062 /* SetupLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupLink.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700072 /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
+		B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBroker.swift; sourceTree = "<group>"; };
+		B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridge.swift; sourceTree = "<group>"; };
+		B5B0B5B02B3C4D5E6F700002 /* BrowserReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserReview.swift; sourceTree = "<group>"; };
+		B5B0B5B02B3C4D5E6F700004 /* BrowserReviewPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserReviewPanel.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
 		33CEB47422A05771004F2AC0 /* Flutter-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Release.xcconfig"; sourceTree = "<group>"; };
 		33CEB47722A0578A004F2AC0 /* Flutter-Generated.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "Flutter-Generated.xcconfig"; path = "ephemeral/Flutter-Generated.xcconfig"; sourceTree = "<group>"; };
@@ -192,12 +206,19 @@
 				FAC700022B3C4D5E6F700002 /* SandboxMigration.swift */,
 				C0EC71002B3C4D5E6F700012 /* ConnectionStore.swift */,
 				C0EC71002B3C4D5E6F700022 /* VideoPlayers.swift */,
+				6E1A70002B3C4D5E6F700002 /* PaperCore.swift */,
+				6E1A70002B3C4D5E6F700102 /* PaperCache.swift */,
+				6E1A70002B3C4D5E6F700202 /* PaperViewer.swift */,
 				C0EC71002B3C4D5E6F700032 /* Setup.swift */,
 				C0EC71002B3C4D5E6F700042 /* Recorder.swift */,
 				C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */,
 				C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */,
 				C0EC71002B3C4D5E6F700062 /* SetupLink.swift */,
 				C0EC71002B3C4D5E6F700072 /* Notifications.swift */,
+				B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */,
+				B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */,
+				B5B0B5B02B3C4D5E6F700002 /* BrowserReview.swift */,
+				B5B0B5B02B3C4D5E6F700004 /* BrowserReviewPanel.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -389,12 +410,19 @@
 				FAC700012B3C4D5E6F700001 /* SandboxMigration.swift in Sources */,
 				C0EC71002B3C4D5E6F700011 /* ConnectionStore.swift in Sources */,
 				C0EC71002B3C4D5E6F700021 /* VideoPlayers.swift in Sources */,
+				6E1A70002B3C4D5E6F700001 /* PaperCore.swift in Sources */,
+				6E1A70002B3C4D5E6F700101 /* PaperCache.swift in Sources */,
+				6E1A70002B3C4D5E6F700201 /* PaperViewer.swift in Sources */,
 				C0EC71002B3C4D5E6F700031 /* Setup.swift in Sources */,
 				C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */,
 				C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */,
 				C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */,
 				C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */,
 				C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */,
+				B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */,
+				B4A0B4A02B3C4D5E6F700003 /* BrowserBridge.swift in Sources */,
+				B5B0B5B02B3C4D5E6F700001 /* BrowserReview.swift in Sources */,
+				B5B0B5B02B3C4D5E6F700003 /* BrowserReviewPanel.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);

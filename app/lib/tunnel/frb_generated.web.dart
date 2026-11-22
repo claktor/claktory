@@ -7,6 +7,7 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/account.dart';
+import 'api/dm.dart';
 import 'api/tunnel.dart';
 
 import 'dart:async';
@@ -25,6 +26,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_DmDevicePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_DmHandoffPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff;
+
+  CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_ForwardHandlePtr => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle;
 
@@ -34,6 +43,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  DmDevice
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  );
+
+  @protected
+  DmHandoff
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  );
 
   @protected
   ForwardHandle
@@ -48,6 +69,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmDevice
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  );
+
+  @protected
+  DmHandoff
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  );
+
+  @protected
   ForwardHandle
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     dynamic raw,
@@ -56,6 +89,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   TunnelHandle
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
+    dynamic raw,
+  );
+
+  @protected
+  DmDevice
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  );
+
+  @protected
+  DmHandoff
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
     dynamic raw,
   );
 
@@ -78,6 +123,102 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  DmDevice
+  dco_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  );
+
+  @protected
+  DmByAgent dco_decode_box_autoadd_dm_by_agent(dynamic raw);
+
+  @protected
+  DmContent dco_decode_box_autoadd_dm_content(dynamic raw);
+
+  @protected
+  DmDeviceList dco_decode_box_autoadd_dm_device_list(dynamic raw);
+
+  @protected
+  DmGroupKind dco_decode_box_autoadd_dm_group_kind(dynamic raw);
+
+  @protected
+  DmMembers dco_decode_box_autoadd_dm_members(dynamic raw);
+
+  @protected
+  DmMessage dco_decode_box_autoadd_dm_message(dynamic raw);
+
+  @protected
+  DmPin dco_decode_box_autoadd_dm_pin(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  DmByAgent dco_decode_dm_by_agent(dynamic raw);
+
+  @protected
+  DmCommit dco_decode_dm_commit(dynamic raw);
+
+  @protected
+  DmContent dco_decode_dm_content(dynamic raw);
+
+  @protected
+  DmDeviceList dco_decode_dm_device_list(dynamic raw);
+
+  @protected
+  DmGroup dco_decode_dm_group(dynamic raw);
+
+  @protected
+  DmGroupKind dco_decode_dm_group_kind(dynamic raw);
+
+  @protected
+  DmGroupType dco_decode_dm_group_type(dynamic raw);
+
+  @protected
+  DmHandoffDone dco_decode_dm_handoff_done(dynamic raw);
+
+  @protected
+  DmHandoffSealed dco_decode_dm_handoff_sealed(dynamic raw);
+
+  @protected
+  DmLeafKind dco_decode_dm_leaf_kind(dynamic raw);
+
+  @protected
+  DmListed dco_decode_dm_listed(dynamic raw);
+
+  @protected
+  DmMember dco_decode_dm_member(dynamic raw);
+
+  @protected
+  DmMembers dco_decode_dm_members(dynamic raw);
+
+  @protected
+  DmMessage dco_decode_dm_message(dynamic raw);
+
+  @protected
+  DmOutcome dco_decode_dm_outcome(dynamic raw);
+
+  @protected
+  DmPin dco_decode_dm_pin(dynamic raw);
+
+  @protected
+  DmProcessed dco_decode_dm_processed(dynamic raw);
+
+  @protected
+  DmSafety dco_decode_dm_safety(dynamic raw);
+
+  @protected
+  DmSetUp dco_decode_dm_set_up(dynamic raw);
+
+  @protected
+  DmStatus dco_decode_dm_status(dynamic raw);
+
+  @protected
+  DmUnsent dco_decode_dm_unsent(dynamic raw);
+
+  @protected
+  DmView dco_decode_dm_view(dynamic raw);
+
+  @protected
   ForwardError dco_decode_forward_error(dynamic raw);
 
   @protected
@@ -90,13 +231,61 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<DmGroup> dco_decode_list_dm_group(dynamic raw);
+
+  @protected
+  List<DmListed> dco_decode_list_dm_listed(dynamic raw);
+
+  @protected
+  List<DmMember> dco_decode_list_dm_member(dynamic raw);
+
+  @protected
+  List<DmMessage> dco_decode_list_dm_message(dynamic raw);
+
+  @protected
+  List<DmUnsent> dco_decode_list_dm_unsent(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  DmDevice?
+  dco_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    dynamic raw,
+  );
+
+  @protected
+  DmByAgent? dco_decode_opt_box_autoadd_dm_by_agent(dynamic raw);
+
+  @protected
+  DmDeviceList? dco_decode_opt_box_autoadd_dm_device_list(dynamic raw);
+
+  @protected
+  DmMembers? dco_decode_opt_box_autoadd_dm_members(dynamic raw);
+
+  @protected
+  DmMessage? dco_decode_opt_box_autoadd_dm_message(dynamic raw);
+
+  @protected
+  DmPin? dco_decode_opt_box_autoadd_dm_pin(dynamic raw);
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
   PairingIds dco_decode_pairing_ids(dynamic raw);
@@ -120,6 +309,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_u_32(dynamic raw);
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
 
   @protected
@@ -130,6 +322,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  DmDevice
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmHandoff
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ForwardHandle
@@ -144,6 +348,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmDevice
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmHandoff
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ForwardHandle
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     SseDeserializer deserializer,
@@ -152,6 +368,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   TunnelHandle
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmDevice
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmHandoff
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
     SseDeserializer deserializer,
   );
 
@@ -174,6 +402,106 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  DmDevice
+  sse_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmByAgent sse_decode_box_autoadd_dm_by_agent(SseDeserializer deserializer);
+
+  @protected
+  DmContent sse_decode_box_autoadd_dm_content(SseDeserializer deserializer);
+
+  @protected
+  DmDeviceList sse_decode_box_autoadd_dm_device_list(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmGroupKind sse_decode_box_autoadd_dm_group_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmMembers sse_decode_box_autoadd_dm_members(SseDeserializer deserializer);
+
+  @protected
+  DmMessage sse_decode_box_autoadd_dm_message(SseDeserializer deserializer);
+
+  @protected
+  DmPin sse_decode_box_autoadd_dm_pin(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  DmByAgent sse_decode_dm_by_agent(SseDeserializer deserializer);
+
+  @protected
+  DmCommit sse_decode_dm_commit(SseDeserializer deserializer);
+
+  @protected
+  DmContent sse_decode_dm_content(SseDeserializer deserializer);
+
+  @protected
+  DmDeviceList sse_decode_dm_device_list(SseDeserializer deserializer);
+
+  @protected
+  DmGroup sse_decode_dm_group(SseDeserializer deserializer);
+
+  @protected
+  DmGroupKind sse_decode_dm_group_kind(SseDeserializer deserializer);
+
+  @protected
+  DmGroupType sse_decode_dm_group_type(SseDeserializer deserializer);
+
+  @protected
+  DmHandoffDone sse_decode_dm_handoff_done(SseDeserializer deserializer);
+
+  @protected
+  DmHandoffSealed sse_decode_dm_handoff_sealed(SseDeserializer deserializer);
+
+  @protected
+  DmLeafKind sse_decode_dm_leaf_kind(SseDeserializer deserializer);
+
+  @protected
+  DmListed sse_decode_dm_listed(SseDeserializer deserializer);
+
+  @protected
+  DmMember sse_decode_dm_member(SseDeserializer deserializer);
+
+  @protected
+  DmMembers sse_decode_dm_members(SseDeserializer deserializer);
+
+  @protected
+  DmMessage sse_decode_dm_message(SseDeserializer deserializer);
+
+  @protected
+  DmOutcome sse_decode_dm_outcome(SseDeserializer deserializer);
+
+  @protected
+  DmPin sse_decode_dm_pin(SseDeserializer deserializer);
+
+  @protected
+  DmProcessed sse_decode_dm_processed(SseDeserializer deserializer);
+
+  @protected
+  DmSafety sse_decode_dm_safety(SseDeserializer deserializer);
+
+  @protected
+  DmSetUp sse_decode_dm_set_up(SseDeserializer deserializer);
+
+  @protected
+  DmStatus sse_decode_dm_status(SseDeserializer deserializer);
+
+  @protected
+  DmUnsent sse_decode_dm_unsent(SseDeserializer deserializer);
+
+  @protected
+  DmView sse_decode_dm_view(SseDeserializer deserializer);
+
+  @protected
   ForwardError sse_decode_forward_error(SseDeserializer deserializer);
 
   @protected
@@ -186,13 +514,69 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<DmGroup> sse_decode_list_dm_group(SseDeserializer deserializer);
+
+  @protected
+  List<DmListed> sse_decode_list_dm_listed(SseDeserializer deserializer);
+
+  @protected
+  List<DmMember> sse_decode_list_dm_member(SseDeserializer deserializer);
+
+  @protected
+  List<DmMessage> sse_decode_list_dm_message(SseDeserializer deserializer);
+
+  @protected
+  List<DmUnsent> sse_decode_list_dm_unsent(SseDeserializer deserializer);
 
   @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  DmDevice?
+  sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmByAgent? sse_decode_opt_box_autoadd_dm_by_agent(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmDeviceList? sse_decode_opt_box_autoadd_dm_device_list(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmMembers? sse_decode_opt_box_autoadd_dm_members(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmMessage? sse_decode_opt_box_autoadd_dm_message(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmPin? sse_decode_opt_box_autoadd_dm_pin(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   PairingIds sse_decode_pairing_ids(SseDeserializer deserializer);
@@ -216,6 +600,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer);
 
   @protected
@@ -227,6 +614,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
     SseSerializer serializer,
   );
 
@@ -246,6 +647,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     ForwardHandle self,
     SseSerializer serializer,
@@ -255,6 +670,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
     TunnelHandle self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    DmHandoff self,
     SseSerializer serializer,
   );
 
@@ -279,6 +708,127 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void
+  sse_encode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_by_agent(
+    DmByAgent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_content(
+    DmContent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_device_list(
+    DmDeviceList self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_group_kind(
+    DmGroupKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_members(
+    DmMembers self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_message(
+    DmMessage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_pin(DmPin self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_dm_by_agent(DmByAgent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_commit(DmCommit self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_content(DmContent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_device_list(DmDeviceList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_group(DmGroup self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_group_kind(DmGroupKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_group_type(DmGroupType self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_handoff_done(DmHandoffDone self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_handoff_sealed(
+    DmHandoffSealed self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_dm_leaf_kind(DmLeafKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_listed(DmListed self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_member(DmMember self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_members(DmMembers self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_message(DmMessage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_outcome(DmOutcome self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_pin(DmPin self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_processed(DmProcessed self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_safety(DmSafety self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_set_up(DmSetUp self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_status(DmStatus self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_unsent(DmUnsent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_view(DmView self, SseSerializer serializer);
+
+  @protected
   void sse_encode_forward_error(ForwardError self, SseSerializer serializer);
 
   @protected
@@ -294,7 +844,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_group(List<DmGroup> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_listed(List<DmListed> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_member(List<DmMember> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_message(
+    List<DmMessage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_dm_unsent(List<DmUnsent> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
@@ -302,6 +873,55 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void
+  sse_encode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    DmDevice? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_by_agent(
+    DmByAgent? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_device_list(
+    DmDeviceList? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_members(
+    DmMembers? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_message(
+    DmMessage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_pin(DmPin? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
     SseSerializer serializer,
   );
 
@@ -327,6 +947,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
 
   @protected
@@ -340,6 +963,38 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
 class RustLibWire implements BaseWire {
   RustLibWire.fromExternalLibrary(ExternalLibrary lib);
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+        ptr,
+      );
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+        ptr,
+      );
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+        ptr,
+      );
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+        ptr,
+      );
 
   void
   rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
@@ -380,6 +1035,26 @@ external RustLibWasmModule get wasmModule;
 @JS()
 @anonymous
 extension type RustLibWasmModule._(JSObject _) implements JSObject {
+  external void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    int ptr,
+  );
+
+  external void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+    int ptr,
+  );
+
+  external void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    int ptr,
+  );
+
+  external void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    int ptr,
+  );
+
   external void
   rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     int ptr,

@@ -18,3 +18,4 @@ key.properties
 # Python bytecode from tools/, and Kotlin compiler state.
 __pycache__/
 .kotlin/
+/build/

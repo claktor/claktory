@@ -384,6 +384,7 @@ void main() {
           'id': 'bad',
           'component': 'Chart',
           'kind': 'timeseries',
+          'label': 'Tokens by agent',
           'data': {'@path': '/nothing'},
         },
         {
@@ -404,6 +405,8 @@ void main() {
       },
     );
     expect(find.text("Can't show this chart."), findsOneWidget);
+    // Under its label, so a dashboard says which one.
+    expect(find.text('Tokens by agent'), findsOneWidget);
     expect(find.text('Runs'), findsOneWidget);
     expect(find.text('Nothing to show.'), findsOneWidget);
     expect(find.text("Can't show this table."), findsOneWidget);
@@ -474,5 +477,157 @@ void main() {
     expect(find.text('June · 75%'), findsOneWidget);
     expect(find.text('Kai · 25%'), findsOneWidget);
     expect(find.byType(ScatterChart), findsOneWidget);
+  });
+
+  testWidgets("bars' categories read in the table's order, a millisecond "
+      'time as a time', (tester) async {
+    final at = [
+      for (final hour in [12, 15, 18]) DateTime(2026, 11, 20, hour),
+    ].map((time) => time.millisecondsSinceEpoch).toList();
+    await _show(
+      tester,
+      [
+        _root(['bars']),
+        {
+          'id': 'bars',
+          'component': 'Chart',
+          'kind': 'stackedBars',
+          'data': {'@path': '/runs'},
+          'x': 'hour',
+          'seriesBy': 'agent',
+        },
+      ],
+      {
+        // Kai's first run comes after June's last bucket: still in order.
+        'runs': _table(
+          ['hour', 'agent', 'runs'],
+          [
+            [at[0], 'June', 1],
+            [at[1], 'June', 2],
+            [at[1], 'Kai', 3],
+            [at[2], 'Kai', 4],
+          ],
+        ),
+      },
+    );
+    final bars = tester.widget<BarChart>(find.byType(BarChart));
+    expect(bars.data.barGroups, hasLength(3));
+    // The last bucket holds only Kai's 4: it comes last, not before his 3.
+    expect(bars.data.barGroups.last.barRods.single.toY, 4);
+    expect(find.text('20 Nov 12:00'), findsOneWidget);
+    expect(find.textContaining('1,7'), findsNothing, reason: 'no raw ms');
+  });
+
+  testWidgets("a half-width pie on a phone fits beside its legend", (
+    tester,
+  ) async {
+    await _show(
+      tester,
+      [
+        {
+          'id': 'root',
+          'component': 'Row',
+          'children': ['pie', 'other'],
+        },
+        {
+          'id': 'pie',
+          'component': 'Chart',
+          'kind': 'pie',
+          'data': {'@path': '/models'},
+          'weight': 1,
+        },
+        {'id': 'other', 'component': 'Text', 'text': 'Beside it', 'weight': 1},
+      ],
+      {
+        'models': _table(
+          ['model', 'tokens'],
+          [
+            ['Opus', 300],
+            ['Sonnet', 100],
+          ],
+        ),
+      },
+      size: const Size(390, 844),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.text('Opus · 75%'), findsOneWidget);
+  });
+
+  testWidgets("a dashboard's weighted stats go one under another on a "
+      'phone, side by side on a Mac; an unweighted child keeps its width', (
+    tester,
+  ) async {
+    final components = [
+      {
+        'id': 'root',
+        'component': 'Column',
+        'children': ['grid', 'pair'],
+      },
+      {
+        'id': 'grid',
+        'component': 'Row',
+        'children': ['s1', 's2', 's3', 's4'],
+      },
+      for (final id in ['s1', 's2', 's3', 's4'])
+        {
+          'id': id,
+          'component': 'Text',
+          'text': 'Tokens this week',
+          'weight': 3,
+        },
+      {
+        'id': 'pair',
+        'component': 'Row',
+        'children': ['wide', 'tag'],
+      },
+      {'id': 'wide', 'component': 'Text', 'text': 'Wide', 'weight': 1},
+      {'id': 'tag', 'component': 'Text', 'text': 'Tag'},
+    ];
+    await _show(tester, components, null, size: const Size(390, 844));
+    final stats = find.text('Tokens this week');
+    final tops = {
+      for (final element in stats.evaluate())
+        tester.getTopLeft(find.byWidget(element.widget)).dy,
+    };
+    expect(tops, hasLength(4), reason: 'one under another');
+    // Beside a weighted one, not a sliver of its width.
+    expect(tester.getSize(find.text('Tag')).width, greaterThan(40));
+
+    await _show(tester, components, null);
+    final wide = {
+      for (final element in stats.evaluate())
+        tester.getTopLeft(find.byWidget(element.widget)).dy,
+    };
+    expect(wide, hasLength(1), reason: 'side by side');
+  });
+
+  testWidgets('chips are as wide as their words, several to a line', (
+    tester,
+  ) async {
+    await _show(
+      tester,
+      [
+        _root(['show']),
+        {
+          'id': 'show',
+          'component': 'ChoicePicker',
+          'label': 'Show as',
+          'variant': 'mutuallyExclusive',
+          'displayStyle': 'chips',
+          'options': [
+            for (final word in ['Bars', 'Lines', 'Pie'])
+              {'label': word, 'value': word.toLowerCase()},
+          ],
+          'value': {'@path': '/show'},
+        },
+      ],
+      {
+        'show': ['bars'],
+      },
+    );
+    final bars = tester.getRect(find.text('Bars'));
+    final lines = tester.getRect(find.text('Lines'));
+    expect(lines.top, bars.top, reason: 'on one line');
+    expect(lines.left, greaterThan(bars.right));
   });
 }

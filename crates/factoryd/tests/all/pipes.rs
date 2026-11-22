@@ -117,7 +117,7 @@ async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
     let sent = messages.last().expect("a message").clone();
     assert_eq!((sent.state(), sent.text.as_str()), (v1::PipeMessageState::Held, "Launch is Friday."));
     assert_eq!(pipe_of(&view, &pipe).waiting_seqs, [sent.seq]);
-    let discard = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: sent.seq, allow: false };
+    let discard = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: sent.seq, allow: false, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(discard)).await;
     let discarded = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.seq == sent.seq).expect("it");
     assert_eq!(discarded.state(), v1::PipeMessageState::Discarded);
@@ -185,7 +185,7 @@ async fn an_agent_that_read_a_pipe_needs_the_person_for_each_secret() {
     assert_eq!(asked.1.state(), v1::SecretApprovalState::Pending);
     assert!(view.agent("bo").waiting_seqs.contains(&asked.0));
 
-    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq: asked.0, allow: true };
+    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq: asked.0, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecideSecretApproval(allow)).await;
     view.follow(&mut client, |view| {
         view.entries.iter().any(
@@ -228,7 +228,7 @@ async fn agents_talking_on_their_own_pause_the_pipe_and_a_flood_is_held() {
 
     // The person lets a held one in. (Continuing is pipes_between.rs's: it tells the other side.)
     let held = messages.iter().find(|message| message.state() == v1::PipeMessageState::HeldIncoming).expect("a held one");
-    let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: held.seq, allow: true };
+    let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: held.seq, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(allow)).await;
     let now = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.seq == held.seq).expect("it");
     assert_eq!(now.state(), v1::PipeMessageState::Received);
@@ -280,7 +280,7 @@ async fn hostile_an_allowance_is_not_bound_to_the_command_shown() {
             _ => None,
         })
         .expect("asked");
-    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq: asked, allow: true };
+    let allow = v1::DecideSecretApproval { agent_id: "bo".into(), seq: asked, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecideSecretApproval(allow)).await;
     view.follow(&mut client, |view| {
         view.entries.iter().any(
@@ -344,7 +344,7 @@ async fn hostile_a_held_file_changed_after_review_isnt_rescanned() {
     assert!(held.starts_with("Held for"), "{held}");
     std::fs::write(outbox.join("report.txt"), "key: wJalrXUtnFEMI-K7MDENG").expect("file");
     let seq = pipes::messages_for_test(&factory, &pipe).pop().expect("it").seq;
-    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true };
+    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
     let last = pipes::messages_for_test(&factory, &pipe).into_iter().find(|m| m.seq == seq).expect("it");
     assert_eq!(last.state(), v1::PipeMessageState::Refused);
@@ -355,7 +355,7 @@ async fn hostile_a_held_file_changed_after_review_isnt_rescanned() {
     call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "Plan.", "files": ["plan.txt"]}"#).await;
     std::fs::remove_file(outbox.join("plan.txt")).expect("removed");
     let seq = pipes::messages_for_test(&factory, &pipe).pop().expect("it").seq;
-    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true };
+    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
     let last = pipes::messages_for_test(&factory, &pipe).into_iter().find(|m| m.seq == seq).expect("it");
     assert!(last.note.starts_with("plan.txt is gone"), "{:?}", last.note);
@@ -444,7 +444,7 @@ async fn held_files_wait_outside_the_inbox_and_incoming_is_capped() {
     assert!(!inbox(&dir).join("brief.txt").exists());
     assert!(!held.files[0].path.starts_with(inbox(&dir).to_str().expect("utf-8")), "{:?}", held.files);
     assert!(std::path::Path::new(&held.files[0].path).exists());
-    let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: held.seq, allow: true };
+    let allow = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: held.seq, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(allow)).await;
     let now = pipes::messages_for_test(&factory, &pipe).into_iter().find(|m| m.seq == held.seq).expect("it");
     assert_eq!(now.state(), v1::PipeMessageState::Received);
@@ -538,7 +538,7 @@ async fn pipe_read_shows_only_what_the_person_let_in() {
     pipes::receive_for_test(&factory, &pipe, incoming("m7", "DISCARDED-TEXT")).expect("received");
     let messages = pipes::messages_for_test(&factory, &pipe);
     let discard = messages.iter().find(|message| message.text == "DISCARDED-TEXT").expect("it").seq;
-    let decide = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: discard, allow: false };
+    let decide = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: discard, allow: false, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(decide)).await;
 
     let read = call(&mut client, &mut view, "bo", "pipe_read", "{}").await;
@@ -548,4 +548,34 @@ async fn pipe_read_shows_only_what_the_person_let_in() {
     let waits = messages.iter().find(|message| message.text == "HELD-SECRET-TEXT").expect("it").seq;
     assert!(read.contains(&format!("#{waits} A message from the other side waits for the person.")), "{read}");
     assert!(!read.contains(&format!("#{discard} ")), "{read}");
+}
+
+#[tokio::test]
+async fn what_was_still_queued_when_the_pipe_closed_shows_as_not_sent() {
+    let (_dir, factory, mut client, mut view, pipe) = setup(false).await;
+    let theirs = pipes::open_for_test(&factory, "site", "Website ⇄ Sales", &["lea", "bo"], "lea", false);
+    let went = pipes::sent_for_test(&factory, &pipe, "went", true);
+    let waiting = [pipes::sent_for_test(&factory, &pipe, "one", false), pipes::sent_for_test(&factory, &pipe, "two", false)];
+    let left = pipes::sent_for_test(&factory, &theirs, "three", false);
+    let state = |pipe: &str, seq: u64| {
+        let message = pipes::messages_for_test(&factory, pipe).into_iter().find(|message| message.seq == seq).expect("the message");
+        (message.state(), message.note)
+    };
+    let not_sent = (v1::PipeMessageState::Refused, "The pipe closed before it went.".to_owned());
+
+    // The person closes one: its queue never goes, and says so.
+    let close = v1::SetPipeState { pipe_id: pipe.clone(), action: v1::PipeAction::Close.into() };
+    apply_request(&mut client, &mut view, client_message::Body::SetPipeState(close)).await;
+    view.follow(&mut client, |view| pipe_of(view, &pipe).state() == v1::PipeState::Closed).await;
+    for seq in waiting {
+        assert_eq!(state(&pipe, seq), not_sent);
+    }
+    assert_eq!(state(&pipe, went), (v1::PipeMessageState::Delivered, String::new()));
+    let last = pipes::messages_for_test(&factory, &pipe).pop().expect("a line");
+    assert_eq!(last.text, "You closed it.");
+    assert_eq!(state(&theirs, left).0, v1::PipeMessageState::Queued, "another pipe's queue is its own");
+
+    // The other side closes the other.
+    pipes::peer_closed_for_test(&factory, &theirs);
+    assert_eq!(state(&theirs, left), not_sent);
 }

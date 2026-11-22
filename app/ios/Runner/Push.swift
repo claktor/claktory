@@ -166,19 +166,75 @@ protocol PushKeyStore: AnyObject {
   func all() -> [String: PushKey]
   func save(_ key: PushKey, for claktory: String) -> Bool
   func remove(_ claktory: String)
+
+  /// The keychain's answer to the last save: errSecSuccess, or why not.
+  var lastStatus: OSStatus { get }
 }
 
 final class KeychainPushKeys: PushKeyStore {
   static let service = "com.claktory.notifications"
 
   /// The group, as Info.plist says it (ClaktoryPushKeychainGroup): the team's
-  /// prefix and com.claktory.app.notifications.
+  /// prefix and com.claktory.app.notifications, the prefix found here when
+  /// the build left it out ([entitled]).
   let group: String?
 
-  init(group: String? = Bundle.main.object(forInfoDictionaryKey: "ClaktoryPushKeychainGroup")
-    as? String)
-  {
-    self.group = group.flatMap { $0.isEmpty || $0.hasPrefix("$(") ? nil : $0 }
+  private(set) var lastStatus: OSStatus = errSecSuccess
+
+  init(
+    group: String? = Bundle.main.object(forInfoDictionaryKey: "ClaktoryPushKeychainGroup")
+      as? String,
+    defaultGroup: () -> String? = KeychainPushKeys.appDefaultGroup
+  ) {
+    self.group = Self.entitled(group, defaultGroup: defaultGroup)
+  }
+
+  /// [group] with its team prefix. A build archived unsigned (testflight.sh
+  /// signs afterwards) leaves $(AppIdentifierPrefix) empty in Info.plist,
+  /// and a group without the prefix is one the app isn't entitled to: every
+  /// save fails (errSecMissingEntitlement), and v0.1.16 never registered
+  /// for pushes. The prefix is then the one the keychain gives the app's
+  /// own items ([defaultGroup]); without one, the group stays as it is and
+  /// saving it fails, and says so ([lastStatus]), rather than keeping the
+  /// keys where the notification extension can't read them. Nil when
+  /// Info.plist names none (a test).
+  static func entitled(_ group: String?, defaultGroup: () -> String?) -> String? {
+    guard let group, !group.isEmpty, !group.hasPrefix("$(") else { return nil }
+    if teamPrefix(of: group) != nil { return group }
+    guard let prefix = defaultGroup().flatMap(teamPrefix(of:)) else { return group }
+    return "\(prefix).\(group)"
+  }
+
+  /// A group's team prefix ("ABCDE12345" of "ABCDE12345.com.claktory.app"),
+  /// or nil when it has none.
+  static func teamPrefix(of group: String) -> String? {
+    let first = group.prefix { $0 != "." }
+    guard first.count == 10, first.count < group.count,
+      first.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber) })
+    else { return nil }
+    return String(first)
+  }
+
+  /// The access group the keychain puts this app's items in when none is
+  /// named: its first, with the team's prefix. Read from an empty item of
+  /// its own, made the first time.
+  static func appDefaultGroup() -> String? {
+    let probe: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "com.claktory.keychain-group",
+      kSecAttrAccount as String: "probe",
+      kSecReturnAttributes as String: true,
+    ]
+    var found: CFTypeRef?
+    var status = SecItemCopyMatching(probe as CFDictionary, &found)
+    if status == errSecItemNotFound {
+      var add = probe
+      add[kSecValueData as String] = Data()
+      add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      status = SecItemAdd(add as CFDictionary, &found)
+    }
+    guard status == errSecSuccess, let attributes = found as? [String: Any] else { return nil }
+    return attributes[kSecAttrAccessGroup as String] as? String
   }
 
   private func query() -> [String: Any] {
@@ -211,19 +267,23 @@ final class KeychainPushKeys: PushKeyStore {
   }
 
   func save(_ key: PushKey, for claktory: String) -> Bool {
-    guard let data = try? JSONEncoder().encode(key) else { return false }
+    guard let data = try? JSONEncoder().encode(key) else {
+      lastStatus = errSecParam
+      return false
+    }
     var match = query()
     match[kSecAttrAccount as String] = claktory
     let update: [String: Any] = [
       kSecValueData as String: data,
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     ]
-    let status = SecItemUpdate(match as CFDictionary, update as CFDictionary)
-    if status == errSecSuccess { return true }
-    guard status == errSecItemNotFound else { return false }
-    var add = match
-    add.merge(update) { $1 }
-    return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    lastStatus = SecItemUpdate(match as CFDictionary, update as CFDictionary)
+    if lastStatus == errSecItemNotFound {
+      var add = match
+      add.merge(update) { $1 }
+      lastStatus = SecItemAdd(add as CFDictionary, nil)
+    }
+    return lastStatus == errSecSuccess
   }
 
   func remove(_ claktory: String) {
@@ -235,6 +295,7 @@ final class KeychainPushKeys: PushKeyStore {
 
 final class MemoryPushKeys: PushKeyStore {
   var keys: [String: PushKey] = [:]
+  var lastStatus: OSStatus = errSecSuccess
 
   func all() -> [String: PushKey] { keys }
 

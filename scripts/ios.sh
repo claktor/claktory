@@ -57,7 +57,8 @@ if $dev; then
   /usr/libexec/PlistBuddy \
     -c "Set :CFBundleIdentifier $id" \
     -c "Set :CFBundleName Claktory Dev" \
-    -c "Set :CFBundleDisplayName Claktory Dev" "$plist"
+    -c "Set :CFBundleDisplayName Claktory Dev" \
+    -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 claktory-dev" "$plist"
   # The dev icon (scripts/icons.swift), as loose files: without
   # CFBundleIconName, iOS takes the icon from them instead of the catalog.
   cp "$root"/app/ios/dev/*.png "$app/"

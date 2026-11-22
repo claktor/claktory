@@ -164,7 +164,7 @@ fn db_tool(
         description,
         parameters,
         super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            let factory = super::live(factory)?;
             call(&factory, &agent, kind, args).await.map_err(factory_agent::Error::Other)
         }),
     )

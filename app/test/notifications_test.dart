@@ -123,6 +123,18 @@ void main() {
       Notify(id: 'n1', title: 'Rivet', body: 'Allow a secret?'),
     );
     expect(system.posted, isEmpty, reason: 'in front, at that Claktory');
+    // A test the person sent from Settings shows all the same.
+    local().notifies.add(
+      Notify(
+        id: 't1',
+        kind: NotifyKind.NOTIFY_KIND_TEST,
+        title: 'Claktory',
+        body: 'This is a test notification. Notifications work.',
+        collapse: 'test',
+      ),
+    );
+    expect(system.posted.single.id, 'local:test');
+    system.posted.clear();
 
     nixos().notifies.add(
       Notify(

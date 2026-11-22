@@ -258,7 +258,7 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_cards_say_where_the_pipe_ca
     call(&mut client, &mut view, "lea", "agents_send", r#"{"to": "bo", "text": "Deploy, please."}"#).await;
     view.follow(&mut client, |view| view.agent("bo").tainted_by_pipes == [pipe.clone()]).await;
     view.follow(&mut client, |view| idle(view, "bo")).await;
-    let route = v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: vec!["Lea".into()], pipe_id: pipe.clone() };
+    let route = v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: vec!["Lea".into()], pipe_id: pipe.clone(), kind: String::new() };
 
     let refused = call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deploy", "secrets": ["AWS"]}"#).await;
     assert!(refused.starts_with("Not run"), "{refused}");
@@ -306,5 +306,5 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_cards_say_where_the_pipe_ca
             _ => None,
         })
         .expect("a card");
-    assert_eq!(card.taint, [v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: Vec::new(), pipe_id: pipe.clone() }]);
+    assert_eq!(card.taint, [v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: Vec::new(), pipe_id: pipe.clone(), kind: String::new() }]);
 }
