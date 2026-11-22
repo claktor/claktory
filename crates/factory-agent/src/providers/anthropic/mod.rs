@@ -793,7 +793,8 @@ async fn request(
 ) -> Result<(), String> {
     let oauth = options.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
     let mut params = build_params(model, context, oauth, max_tokens, thinking)?;
-    if options.cache_ttl != CacheTtl::FiveMinutes {
+    // The only lifetime it can ask for beyond its own 5 minutes.
+    if options.cache_ttl == CacheTtl::OneHour {
         set_cache_ttl(&mut params, options.cache_ttl);
     }
     let mut builder = client().post(format!("{}/v1/messages", model.base_url.trim_end_matches('/')));

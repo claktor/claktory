@@ -10,6 +10,8 @@ Apps work in the dev Claktory but aren't offered in the person's until Telegram 
 - An **app** is something Claktory runs once for all its agents, such as Telegram (message your agents from your phone). {{User}} installs apps and gives them to agents in Settings → Apps. An app runs walled off, reaches only the sites {{user}} approved, and keeps its own secrets in the vault, where no agent gets them.
 - An agent given an app has the tools of what it was given (`telegram_send`, say), and its system prompt has a section on the app. Given one mid-context, it's told in an event from Claktory and calls the tools through `extension_call`; taken back, they stop working.
 - An agent {{user}} chose to hear an app gets its events (a message to the Telegram bot, say) as `<event source="app" from="Telegram">`; several close together come as one, a line each.
+- Some apps have **views**, such as Charts' dashboards: they open in a pane beside the conversation, or as a screen of their own on a phone. A view is the same on every device showing it and changes on all of them at once. Claktory draws it with its own controls, never a web page, and checks everything an app shows; an app that sends something it can't show has its view say so.
+- An app can ask to read Claktory's records or an agent's own database (Charts draws its dashboards from them, say). It reads only the ones {{user}} lets it read in Settings → Apps, which they can take back at any time, and only ever reads: never agents' memory, pipes or comments on files.
 ```
 
 ## docs/MANUAL.md: Settings (the app-settings note), after "**Secrets:**"

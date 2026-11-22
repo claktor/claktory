@@ -18,19 +18,24 @@ import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'connectors.dart' show ConnectProposalCard, serviceName;
 import 'controls.dart';
-import 'extensions.dart' show logTime;
 import 'forms.dart' show archivedProjectOf, rivetIn;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
 import 'pairing_card.dart' show DevicePairingCard;
+import 'pipe_start.dart' show PipeStartCard, pipeStartSummary;
 import 'pane_chrome.dart' show InPane;
+import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'recovery_key.dart' show SaveRecoveryKeyForm;
 import 'scope.dart';
-import 'secrets.dart' show SecretRequestCard, secretRequestSummary;
+import 'secrets.dart'
+    show SecretRequestCard, UnlockSecretsForm, secretRequestSummary;
 import 'state.dart' show TranscriptStore;
 import 'transcript.dart' show ProposalCard;
+import 'usage.dart' show formatAge;
 import 'waiting.dart' show NeedsYouMark;
 
 /// What a thing that waits for the person is.
@@ -50,6 +55,24 @@ enum NeedsYouKind {
 
   /// A pipe's message held for the person (Pipe.waiting_seqs).
   pipeHeld,
+
+  /// A provider refused to renew an account's sign-in
+  /// (Account.sign_in_again): the person signs in to it again.
+  signIn,
+
+  /// The secrets are locked and agents have waited for them
+  /// (VaultState.agents_waiting): the person unlocks them with the
+  /// recovery key.
+  vault,
+
+  /// A move of this Claktory an agent started, its digits waiting for the
+  /// person's own Confirm here (Workspace.move).
+  move,
+
+  /// The recovery key isn't confirmed saved yet
+  /// (VaultState.recovery_key_unconfirmed): the person shows it, saves it
+  /// and types back one group of it.
+  recoveryKey,
 }
 
 /// One thing that waits for the person's answer.
@@ -57,21 +80,65 @@ class NeedsYouItem {
   const NeedsYouItem.entry(this.agentId, this.seq)
     : kind = NeedsYouKind.entry,
       chatId = '',
-      pipeId = '';
+      pipeId = '',
+      providerId = '',
+      accountId = '';
 
   const NeedsYouItem.chat(this.chatId, this.seq)
     : kind = NeedsYouKind.chat,
       agentId = '',
-      pipeId = '';
+      pipeId = '',
+      providerId = '',
+      accountId = '';
 
   const NeedsYouItem.pipe(this.kind, this.pipeId, {this.seq = 0})
     : agentId = '',
-      chatId = '';
+      chatId = '',
+      providerId = '',
+      accountId = '';
+
+  const NeedsYouItem.signIn(this.providerId, this.accountId)
+    : kind = NeedsYouKind.signIn,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      seq = 0;
+
+  const NeedsYouItem.move()
+    : kind = NeedsYouKind.move,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0;
+
+  const NeedsYouItem.vault()
+    : kind = NeedsYouKind.vault,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0;
+
+  const NeedsYouItem.recoveryKey()
+    : kind = NeedsYouKind.recoveryKey,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0;
 
   final NeedsYouKind kind;
   final String agentId;
   final String chatId;
   final String pipeId;
+
+  /// The provider and account to sign in to again.
+  final String providerId;
+  final String accountId;
 
   /// The entry's seq in the agent's or chat's conversation, or the held
   /// message's in the pipe's.
@@ -87,12 +154,24 @@ class NeedsYouItem {
     NeedsYouKind.pipeHeld => 'pipe:$pipeId/$seq',
     NeedsYouKind.pipeApproval => 'pipe:$pipeId/approval',
     NeedsYouKind.pipeLoop => 'pipe:$pipeId/loop',
+    NeedsYouKind.signIn => 'signin:$providerId/$accountId',
+    NeedsYouKind.vault => 'vault',
+    NeedsYouKind.move => 'move',
+    NeedsYouKind.recoveryKey => 'recoveryKey',
   };
+
+  /// Done in a click, with no card to open: signing in again, unlocking
+  /// the secrets, saving the recovery key.
+  bool get isAction =>
+      kind == NeedsYouKind.signIn ||
+      kind == NeedsYouKind.vault ||
+      kind == NeedsYouKind.recoveryKey;
 }
 
 /// Everything that waits for the person now, agents' cards first in the
-/// sidebar's order, then chats', then pipes'. Archived projects' wait with
-/// them, out of sight, as in the sidebar.
+/// sidebar's order, then chats', then pipes', then sign-ins to renew and
+/// locked secrets agents wait for. Archived projects' wait with them, out
+/// of sight, as in the sidebar.
 List<NeedsYouItem> needsYouItems(Workspace workspace) {
   final archived = {
     for (final project in workspace.projects)
@@ -116,8 +195,54 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
         for (final seq in pipe.waitingSeqs)
           NeedsYouItem.pipe(NeedsYouKind.pipeHeld, pipe.id, seq: seq.toInt()),
       ],
+    for (final provider in workspace.providers)
+      for (final account in provider.accounts)
+        if (account.signInAgain) NeedsYouItem.signIn(provider.id, account.id),
+    if (workspace.vault.agentsWaiting) const NeedsYouItem.vault(),
+    if (workspace.vault.recoveryKeyUnconfirmed)
+      const NeedsYouItem.recoveryKey(),
+    // Also floating over the window on every device (MoveGate).
+    if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
+      const NeedsYouItem.move(),
   ];
 }
+
+/// The provider and account [item] asks to sign in to again, while it
+/// still does.
+({Provider provider, Account account})? signInOf(
+  Workspace workspace,
+  NeedsYouItem item,
+) {
+  for (final provider in workspace.providers) {
+    if (provider.id != item.providerId) continue;
+    for (final account in provider.accounts) {
+      if (account.id == item.accountId) {
+        return (provider: provider, account: account);
+      }
+    }
+  }
+  return null;
+}
+
+/// The account [item] asks to sign in to again.
+Account? signInAccount(Workspace workspace, NeedsYouItem item) =>
+    signInOf(workspace, item)?.account;
+
+/// What a sign-in to renew says: whose expired, and what agents do
+/// meanwhile, using the provider's other accounts or waiting.
+String signInAgainText(Provider provider, Account account) {
+  final who = account.label.isEmpty ? 'This account' : account.label;
+  final others = provider.accounts.any(
+    (other) => other.id != account.id && !other.signInAgain,
+  );
+  return "$who's sign-in expired. "
+      '${others ? 'Agents use your other accounts meanwhile.' : 'Agents on its models wait until you sign in.'}';
+}
+
+/// Whether what began waiting at [ms] has waited a day or more by [now]:
+/// its age then stands out.
+bool waitedADay(int ms, DateTime now) =>
+    now.difference(DateTime.fromMillisecondsSinceEpoch(ms)).inDays >= 1;
 
 /// How many things wait for the person, everywhere.
 int needsYouCount(Workspace workspace) => needsYouItems(workspace).length;
@@ -356,6 +481,32 @@ class _NeedsYouListState extends State<NeedsYouList> {
     if (_open.contains(key)) _fetch(item);
   }
 
+  /// Signs in again, or unlocks the secrets: no card to open first.
+  void _act(NeedsYouItem item) {
+    switch (item.kind) {
+      case NeedsYouKind.signIn:
+        final account = signInAccount(_backend.workspace.workspace, item);
+        if (account == null) return;
+        // Settings → Providers shows how the sign-in goes, at its row.
+        fireAndLog(
+          AppScope.scope(context).login.start(
+            item.providerId,
+            account.methodId.isEmpty ? 'oauth' : account.methodId,
+            addAccount: true,
+          ),
+        );
+        AppScope.openProviders(context);
+      case NeedsYouKind.vault:
+        showModal(context, (context, close) => UnlockSecretsForm(close: close));
+      case NeedsYouKind.recoveryKey:
+        showModal(
+          context,
+          (context, close) => SaveRecoveryKeyForm(close: close),
+        );
+      default:
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -395,19 +546,22 @@ class _NeedsYouListState extends State<NeedsYouList> {
       shrinkWrap: widget.shrinkWrap,
       padding: padding,
       children: [
+        // Keyed here, on the list's own children: matched by place instead,
+        // a question coming in above would take this one's card, and with
+        // it what the person was typing and their focus.
         for (final item in items)
           Align(
+            key: ValueKey(item.key),
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 640),
               child: Padding(
                 padding: const EdgeInsets.only(bottom: Space.s),
                 child: _Bubble(
-                  key: ValueKey(item.key),
                   item: item,
                   waiting: keys.contains(item.key),
                   open: _open.contains(item.key),
-                  onToggle: () => _toggle(item),
+                  onToggle: () => item.isAction ? _act(item) : _toggle(item),
                   entry: item.isEntry ? _entryOf(item) : null,
                   message: item.kind == NeedsYouKind.pipeHeld
                       ? _messageOf(item)
@@ -431,6 +585,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
         NeedsYouKind.chat => workspace.chats.any(
           (chat) => chat.id == item.chatId,
         ),
+        NeedsYouKind.move => workspace.hasMove(),
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
@@ -439,7 +594,6 @@ class _NeedsYouListState extends State<NeedsYouList> {
 /// the card itself, and a way to its conversation or pipe.
 class _Bubble extends StatelessWidget {
   const _Bubble({
-    super.key,
     required this.item,
     required this.waiting,
     required this.open,
@@ -461,10 +615,19 @@ class _Bubble extends StatelessWidget {
   final String? failed;
   final Workspace workspace;
 
-  Agent? get _agent => [
-    for (final agent in workspace.agents)
-      if (agent.id == item.agentId) agent,
-  ].firstOrNull;
+  /// Whose it is: a move's is the agent that started it.
+  Agent? get _agent {
+    final id = item.kind == NeedsYouKind.move
+        ? _move.startedByAgentId
+        : item.agentId;
+    return [
+      for (final agent in workspace.agents)
+        if (agent.id == id) agent,
+    ].firstOrNull;
+  }
+
+  MoveStatus get _move =>
+      moveStatusOf(workspace.hasMove() ? workspace.move : null);
 
   Chat? get _chat => [
     for (final chat in workspace.chats)
@@ -483,11 +646,26 @@ class _Bubble extends StatelessWidget {
     final agent = _agent;
     final chat = _chat;
     final pipe = _pipe;
-    final who =
-        agent?.name ??
-        (chat == null ? null : chatTitle(chat)) ??
-        pipe?.name ??
-        '';
+    // A pipe's liaison asks as the pipe's ("Kai · Acme launch").
+    final liaisonOf = agent == null || agent.pipeId.isEmpty
+        ? null
+        : [
+            for (final pipe in workspace.pipes)
+              if (pipe.id == agent.pipeId) pipe,
+          ].firstOrNull;
+    final signIn = signInOf(workspace, item);
+    final who = item.kind == NeedsYouKind.signIn
+        ? 'Sign in to ${signIn?.provider.name ?? 'your provider'} again'
+        : item.kind == NeedsYouKind.vault
+        ? 'Unlock your secrets with your recovery key'
+        : item.kind == NeedsYouKind.recoveryKey
+        ? 'Save your recovery key'
+        : liaisonOf != null
+        ? '${agent!.name} · ${liaisonOf.name}'
+        : agent?.name ??
+              (chat == null ? null : chatTitle(chat)) ??
+              pipe?.name ??
+              '';
     final what = _summary(backend);
     final time = switch (item.kind) {
       NeedsYouKind.entry ||
@@ -516,6 +694,16 @@ class _Bubble extends StatelessWidget {
                 child: Center(
                   child: agent != null
                       ? AgentCharacter(agent: agent, size: 24)
+                      : item.isAction
+                      ? ExtensionGlyph(
+                          icon:
+                              item.kind == NeedsYouKind.vault ||
+                                  item.kind == NeedsYouKind.recoveryKey
+                              ? 'key-round'
+                              : 'user',
+                          name: '',
+                          color: palette.textMuted,
+                        )
                       : item.kind == NeedsYouKind.chat
                       ? ChatGlyph(
                           color: waiting
@@ -532,26 +720,32 @@ class _Bubble extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text.rich(
-                      TextSpan(
-                        text: who,
-                        children: [
-                          if (time > 0)
-                            TextSpan(
-                              text:
-                                  ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(time))}',
-                              style: TextStyles.caption.copyWith(
-                                color: palette.textFaint,
-                                fontWeight: FontWeight.w400,
+                    // How long it has waited, ticking; past a day, while
+                    // it still waits, in signal.
+                    Ticking(
+                      active: time > 0,
+                      builder: (context, now) => Text.rich(
+                        TextSpan(
+                          text: who,
+                          children: [
+                            if (time > 0)
+                              TextSpan(
+                                text: ' · ${formatAge(time, now)}',
+                                style: TextStyles.caption.copyWith(
+                                  color: waiting && waitedADay(time, now)
+                                      ? palette.signal
+                                      : palette.textFaint,
+                                  fontWeight: FontWeight.w400,
+                                ),
                               ),
-                            ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyles.label.copyWith(
-                        color: waiting ? palette.text : palette.textMuted,
-                        fontWeight: FontWeight.w600,
+                          ],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.label.copyWith(
+                          color: waiting ? palette.text : palette.textMuted,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                     Text(
@@ -635,18 +829,23 @@ class _Bubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _card(context, palette),
-                    const SizedBox(height: Space.s),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: _OpenLink(
-                        label: switch (item.kind) {
-                          NeedsYouKind.entry => 'Open conversation',
-                          NeedsYouKind.chat => 'Open chat',
-                          _ => 'Open pipe',
-                        },
-                        onTap: () => _openWhere(context),
+                    // A move's card is all there is to it.
+                    if (item.kind != NeedsYouKind.move) ...[
+                      const SizedBox(height: Space.s),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _OpenLink(
+                          label: switch (item.kind) {
+                            NeedsYouKind.entry when liaisonOf != null =>
+                              'Open pipe',
+                            NeedsYouKind.entry => 'Open conversation',
+                            NeedsYouKind.chat => 'Open chat',
+                            _ => 'Open pipe',
+                          },
+                          onTap: () => _openWhere(context),
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -690,6 +889,25 @@ class _Bubble extends StatelessWidget {
           );
         }
         return PipeMessageView(pipe: pipe, message: message);
+      case NeedsYouKind.signIn ||
+          NeedsYouKind.vault ||
+          NeedsYouKind.recoveryKey:
+        // Done in a click; never opened.
+        return const SizedBox.shrink();
+      case NeedsYouKind.move:
+        final move = _move;
+        if (!MoveConfirmCard.shows(move)) {
+          return line(
+            move.active
+                ? 'This move is under way. Follow it in Settings → General.'
+                : 'This move ended.',
+          );
+        }
+        return MoveConfirmCard(
+          move: move,
+          actions: BackendMove(AppScope.of(context)),
+          agentName: _agent?.name ?? '',
+        );
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
         if (item.kind == NeedsYouKind.chat && _chat == null) {
@@ -726,8 +944,23 @@ class _Bubble extends StatelessWidget {
         final held =
             message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING;
         return held
-            ? 'Held: ${message.text}'
+            ? 'Let in a message from '
+                  '${pipe == null ? 'the other side' : pipePeerClaktory(pipe)}?'
+                  '\n${message.text}'
             : 'Waiting for you to send it: ${message.text}';
+      case NeedsYouKind.signIn:
+        final signIn = signInOf(workspace, item);
+        return signIn == null
+            ? 'Signed in again'
+            : signInAgainText(signIn.provider, signIn.account);
+      case NeedsYouKind.move:
+        return 'Move this Claktory to ${_move.target}?';
+      case NeedsYouKind.vault:
+        final why = workspace.vault.lockedWhy;
+        return why.isEmpty ? 'Agents are waiting for your secrets.' : why;
+      case NeedsYouKind.recoveryKey:
+        return "It unlocks your secrets if claktory.com can't. Save it, "
+            'then confirm you have it.';
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
         if (entry == null) return 'Waiting for your answer';
@@ -740,15 +973,31 @@ class _Bubble extends StatelessWidget {
     final backend = AppScope.of(context);
     final chat = _chat;
     AppScope.closePage(context);
+    final agent = _agent;
+    final pipe = _pipe;
     if (item.kind == NeedsYouKind.entry) {
       fireAndLog(() async {
-        await backend.selectAgent(item.agentId);
+        // A pipe's liaison's conversation shows in its pipe.
+        if (agent != null && agent.pipeId.isNotEmpty) {
+          await backend.selectPipe(agent.pipeId);
+        } else {
+          await backend.selectAgent(item.agentId);
+        }
         backend.reveal.reachSeq(item.agentId, item.seq);
       }());
     } else if (item.kind == NeedsYouKind.chat) {
       if (chat != null) openChat(context, chat);
     } else {
-      fireAndLog(backend.selectPipe(item.pipeId));
+      final liaison = pipe == null
+          ? null
+          : pipeLiaison(backend.workspace.workspace, pipe);
+      fireAndLog(() async {
+        await backend.selectPipe(item.pipeId);
+        // Among its liaison's conversation, at the message's card.
+        if (liaison != null && item.kind == NeedsYouKind.pipeHeld) {
+          backend.reveal.reachExtra(liaison.id, pipeItemKey(item.seq));
+        }
+      }());
     }
     // On a phone, the conversation is pushed over the list.
     PhoneNavigation.of(context)?.value = true;
@@ -803,6 +1052,7 @@ String waitingSummary(Entry entry, Backend backend, {String? agentId}) =>
       Entry_Kind.secretApproval =>
         'Wants to use ${entry.secretApproval.secretNames.join(', ')}',
       Entry_Kind.askPerson => entry.askPerson.title,
+      Entry_Kind.pipeStart => pipeStartSummary(entry.pipeStart),
       _ => 'Waiting for your answer',
     };
 
@@ -844,6 +1094,10 @@ Widget? waitingCard(
     key: ValueKey('$agentId/${entry.seq}'),
     entry.secretApproval,
     seq: entry.seq.toInt(),
+  ),
+  Entry_Kind.pipeStart => PipeStartCard(
+    key: ValueKey(entry.pipeStart.id),
+    entry.pipeStart,
   ),
   _ => null,
 };

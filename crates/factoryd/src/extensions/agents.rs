@@ -616,8 +616,14 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str)
             if !factory.pipes.tainted(sender).is_empty() {
                 signature.push_str(crate::pipes::agents::TAINT_LABEL);
             }
-            let event =
-                Event { source: EventSource::Agent, from: signature, id: sender.to_owned(), summary: String::new(), transient: false };
+            let event = Event {
+                source: EventSource::Agent,
+                from: signature,
+                id: sender.to_owned(),
+                summary: String::new(),
+                transient: false,
+                pipe_seqs: Vec::new(),
+            };
             letters.push((agent.id.clone(), text, event));
             reached.push(Recipient {
                 id: agent.id.clone(),
@@ -877,6 +883,7 @@ fn setup(factory: &Factory, inner: &Inner, times: &crate::store::RunTimes, me: &
                         agent_list(agent, manifest.id, spec.id).into_iter().filter(|id| config.agent(id).is_some()).collect();
                     format!("{} [{}]", spec.id, ids.join(", "))
                 }
+                super::OptionKind::Choice { .. } => format!("{} {}", spec.id, super::choice(agent, manifest.id, spec.id)),
             })
             .collect();
         if !options.is_empty() {

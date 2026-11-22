@@ -7,13 +7,15 @@ import 'package:flutter/foundation.dart';
 import 'package:protobuf/protobuf.dart';
 
 import 'annotations.dart' show ThreadStore;
+import 'app_views/transport.dart';
 import 'app_update.dart';
 import 'attachments.dart';
 import 'connections.dart';
 import 'loopback_forward.dart';
 import 'device_account.dart'
     show AccountServiceError, AccountServiceUnreachable, DeviceAccount;
-import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
+import 'device_kind.dart'
+    show thisDeviceKindForHello, thisDeviceNameForHello, thisPlatformForHello;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
 import 'network.dart';
@@ -26,7 +28,14 @@ import 'workspace_patch.dart';
 
 /// Must match `PROTOCOL_VERSION` in the backend's factory-protocol crate.
 const _protocolVersion = 1;
-const _clientVersion = '0.1.0';
+
+/// This app's release version, told to the backend in Hello ("v0.1.16";
+/// "dev" for a build the release scripts didn't stamp), as
+/// [AppBuild.current] has it.
+const _clientVersion = String.fromEnvironment(
+  'FACTORY_VERSION',
+  defaultValue: 'dev',
+);
 
 /// This Mac's Factory's port. Only a release build talks to the real one
 /// (7420) unless told otherwise; debug and profile builds and tests default
@@ -53,7 +62,25 @@ Future<RemoteFactory?> readLocalPairing() async {
         .readAsString();
     return parsePairingCode(code);
   } on IOException {
-    return null;
+    // Moved to another computer: the copy left here keeps its code with
+    // the rest of what it fenced off, and takes its token, on the open
+    // port only (its tunnel's key went with the move), to delete the copy.
+    try {
+      final code = await File('$home/$folder/moved/remote/local-pairing')
+          .readAsString();
+      final moved = parsePairingCode(code);
+      if (moved == null) return null;
+      return RemoteFactory(
+        code: moved.code,
+        host: moved.host,
+        port: moved.port,
+        token: moved.token,
+        fingerprint: moved.fingerprint,
+        name: moved.name,
+      );
+    } on IOException {
+      return null;
+    }
   }
 }
 
@@ -93,7 +120,7 @@ class _NotNow implements Exception {
 /// drops, and routes what the backend sends into the stores. The app keeps
 /// one for each Claktory it's connected to, all live at once (rail.dart). Speaks the
 /// protocol in proto/factory/v1/factory.proto.
-class Backend {
+class Backend implements AppViewTransport {
   Backend({
     required this.workspace,
     required this.transcript,
@@ -229,6 +256,119 @@ class Backend {
     if (next == move.value) return;
     move.value = next;
   }
+
+  /// This Claktory moved to another computer (ERROR_CODE_MOVED): where and
+  /// when, as the copy it left here says; null otherwise. Its screen takes
+  /// the window's place (move.dart). The connection that was answered so
+  /// stays open a while, for [deleteMovedCopy]; once it closes, the next
+  /// Hello is answered the same way.
+  final movedAway = ValueNotifier<MovedAway?>(null);
+
+  /// The connection that was answered with [movedAway].
+  WebSocket? _movedSocket;
+
+  /// Deletes, for good, the copy a Claktory that moved away left on this
+  /// Mac, the person having typed [typedWord] ("delete") to confirm. Only
+  /// this Mac's own Claktory takes it, on the connection it answered with
+  /// [movedAway]; then a new Hello says when it was deleted.
+  Future<void> deleteMovedCopy(String typedWord) async {
+    final socket = _socket;
+    if (socket == null || !identical(socket, _movedSocket)) {
+      // Between connections: the next one comes at once.
+      _retryDelay = _minRetryDelay;
+      _wakeUp();
+      throw const RequestFailure(
+        "Couldn't reach Claktory on this Mac just now. Try again in a moment.",
+      );
+    }
+    final id = _nextId++;
+    final answer = Completer<ServerMessage>();
+    _pending[id] = answer;
+    _send(
+      ClientMessage(
+        id: Int64(id),
+        deleteMovedCopy: DeleteMovedCopy(typedWord: typedWord),
+      ),
+    );
+    await answer.future;
+    // Asked again, it says when the copy was deleted.
+    _retryDelay = _minRetryDelay;
+    unawaited(socket.close());
+    _wakeUp();
+  }
+
+  // App views (app_views/): this connection's surfaces, as the backend
+  // sends them, and what's asked of them.
+  final _viewEvents = StreamController<AppViewEvent>.broadcast(sync: true);
+
+  @override
+  Stream<AppViewEvent> get viewEvents => _viewEvents.stream;
+
+  @override
+  ValueListenable<bool> get viewsConnected => connected;
+
+  @override
+  Future<AppSurfaceData> openView({
+    required String appId,
+    required String view,
+    required String params,
+    required List<String> catalogs,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        openAppView: OpenAppView(
+          appId: appId,
+          view: view,
+          params: params,
+          catalogs: catalogs,
+        ),
+      ),
+    );
+    return appSurfaceData(reply.appSurface);
+  }
+
+  @override
+  Future<void> actInView(String surfaceId, String message) => _request(
+    ClientMessage(
+      appViewAction: AppViewAction(surfaceId: surfaceId, message: message),
+    ),
+  );
+
+  @override
+  Future<void> closeView(String surfaceId) =>
+      _request(ClientMessage(closeAppView: CloseAppView(surfaceId: surfaceId)));
+  /// What the backend says the person should hear of (Notify), as it
+  /// comes: it has applied every rule already (notifications.dart shows it
+  /// as the system's notification unless this window is in use).
+  Stream<Notify> get notified => _notified.stream;
+  final _notified = StreamController<Notify>.broadcast(sync: true);
+
+  /// Whether the person is using this Claktory here now (SetActive): said
+  /// to the backend as it changes and on every new connection, since a
+  /// connection counts as inactive until it says otherwise. While any of
+  /// its devices is active, the backend notifies none.
+  bool get active => _active;
+  var _active = false;
+
+  void setActive(bool active) {
+    if (active == _active) return;
+    _active = active;
+    if (connected.value) fireAndLog(sendActive(active));
+  }
+
+  /// Says whether the person is using this Claktory here (SetActive).
+  Future<void> sendActive(bool active) =>
+      _request(ClientMessage(setActive: SetActive(active: active)));
+
+  /// Hands this device's push registration to the backend
+  /// (RegisterNotifications): the relay's handle and the key it seals with.
+  /// An empty handle stops the pushes.
+  Future<void> registerNotifications(RegisterNotifications registration) =>
+      _request(ClientMessage(registerNotifications: registration));
+
+  /// Sends a test notification to every device (SendTestNotification).
+  Future<void> sendTestNotification() =>
+      _request(ClientMessage(sendTestNotification: SendTestNotification()));
 
   /// The move is copying or past it: a dropped connection is the move's
   /// doing (the backend serves only this computer once it freezes, and
@@ -532,7 +672,9 @@ class Backend {
       // token when the tunnel to it fails (every other try then).
       final local = target == null ? await _localPairing() : null;
       final via = target ?? local;
-      final loopback = via == null || (local != null && _loopbackNext);
+      // Without a tunnel (a moved copy's code), the open port only.
+      final loopback =
+          via == null || (local != null && (_loopbackNext || !local.tunnelled));
       if (local != null) _loopbackNext = false;
       _welcomed = false;
       final tryNumber = ++_tries;
@@ -626,6 +768,7 @@ class Backend {
               canConfirm: true,
               deviceKind: await thisDeviceKindForHello(),
               deviceName: await thisDeviceNameForHello(),
+              platform: await thisPlatformForHello(),
               // Changes come as patches to the last Workspace, not whole.
               workspacePatches: askForPatches,
             ),
@@ -824,6 +967,7 @@ class Backend {
     signInRequired.value = null;
     confirmBy.value = null;
     pairing.value = null;
+    movedAway.value = null;
     _retryDelay = _minRetryDelay;
     // Unknown until this one's Workspace arrives, not empty.
     workspace.clear();
@@ -846,16 +990,14 @@ class Backend {
     final open = _tunnel;
     if (open != null && _tunnelTarget == target) return open;
     await _closeTunnel();
+    final Tunnel opened;
     try {
-      final opened = await _tunnels.open(
+      opened = await _tunnels.open(
         deviceKey: key ?? deviceKey(target),
         endpointId: target.endpointId,
         relays: target.relays,
         addresses: target.addresses,
       );
-      _tunnel = opened;
-      _tunnelTarget = target;
-      return opened;
     } catch (error) {
       tunnel.value = TunnelStatus(
         phase: TunnelPhase.failed,
@@ -866,6 +1008,16 @@ class Backend {
       );
       throw TunnelOpenFailure('$error');
     }
+    // Closed while it opened: nothing would ever close it, and it would
+    // stay on the relay as this device beside the one that replaced it.
+    // Quietly: this connection is going, so there's nothing to show.
+    if (_closed) {
+      await opened.close();
+      throw const _NotNow();
+    }
+    _tunnel = opened;
+    _tunnelTarget = target;
+    return opened;
   }
 
   /// Keeps [tunnel] current while one's open: whether it connects direct
@@ -937,6 +1089,7 @@ class Backend {
   Future<void> close() async {
     _closed = true;
     account = null;
+    unawaited(_notified.close());
     _quiet?.cancel();
     _sleepWatch?.cancel();
     unawaited(_network?.cancel());
@@ -1245,17 +1398,58 @@ class Backend {
   Future<void> unlockVault(String key) =>
       _request(ClientMessage(unlockVault: UnlockVault(passphrase: key)));
 
+  /// With [askEachTime], every command that uses it waits for the
+  /// person's Allow.
   Future<void> createSecret(
     String name,
     String description,
-    List<SecretEntry> entries,
-  ) => _request(
+    List<SecretEntry> entries, {
+    bool askEachTime = false,
+  }) => _request(
     ClientMessage(
       createSecret: CreateSecret(
         name: name,
         description: description,
         entries: entries,
+        askEachTime: askEachTime,
       ),
+    ),
+  );
+
+  /// Adds a goal of the person's, in their words, to [agentId]'s
+  /// checklist.
+  Future<void> addGoal(String agentId, String text) => _request(
+    ClientMessage(
+      addGoal: AddGoal(agentId: agentId, text: text),
+    ),
+  );
+
+  /// Changes goal [goalId] on [agentId]'s checklist: its words, its status
+  /// (done, dropped, open again), or with [remove] takes it off (its items
+  /// stay, serving no goal).
+  Future<void> updateGoal(
+    String agentId,
+    int goalId, {
+    String? text,
+    ChecklistStatus? status,
+    bool remove = false,
+  }) => _request(
+    ClientMessage(
+      updateGoal: UpdateGoal(
+        agentId: agentId,
+        goalId: goalId,
+        text: text,
+        status: status,
+        remove: remove,
+      ),
+    ),
+  );
+
+  /// Whether every command that uses secret [id] waits for the person's
+  /// Allow. Turning it off needs the vault open, as giving a secret does.
+  Future<void> setSecretAskEachTime(String id, bool on) => _request(
+    ClientMessage(
+      setSecretAskEachTime: SetSecretAskEachTime(id: id, askEachTime: on),
     ),
   );
 
@@ -1357,6 +1551,7 @@ class Backend {
     Map<String, String> aliases = const {},
     bool asIs = false,
     bool approveOnly = false,
+    bool? askEachTime,
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -1371,6 +1566,7 @@ class Backend {
         aliases: aliases.entries,
         asIs: asIs,
         approveOnly: approveOnly,
+        askEachTime: askEachTime,
       ),
     ),
   );
@@ -1581,6 +1777,26 @@ class Backend {
     return reply.recoveryKey.key;
   }
 
+  /// Asks which group of the recovery key the person types back to show
+  /// they saved it (R1): a fresh one each time, for this device only.
+  Future<RecoveryKeyCheck> checkRecoveryKey() async {
+    final reply = await _call(
+      ClientMessage(checkRecoveryKey: CheckRecoveryKey()),
+    );
+    if (!reply.hasRecoveryKeyCheck()) {
+      throw const RequestFailure('Claktory sent no group to check.');
+    }
+    return reply.recoveryKeyCheck;
+  }
+
+  /// The group the person typed back for [checkId]: right, and
+  /// VaultState.recovery_key_unconfirmed goes on every device.
+  Future<void> confirmRecoveryKey(String checkId, String typed) => _request(
+    ClientMessage(
+      confirmRecoveryKey: ConfirmRecoveryKey(checkId: checkId, typed: typed),
+    ),
+  );
+
   /// Empties the build cache at [path].
   Future<void> clearBuildCache(String path) =>
       _request(ClientMessage(clearBuildCache: ClearBuildCache(path: path)));
@@ -1780,18 +1996,21 @@ class Backend {
   // ---- Pipes (#196) ----
 
   /// Makes an invite for a pipe from [projectId]: the pipe shows as
-  /// INVITED, and the code comes back only here, once.
+  /// INVITED, and the code comes back only here, once. [startId] is the
+  /// agent's card it's made from (PipeStart), which it closes.
   Future<PipeInvite> createPipeInvite(
     String projectId,
     String name,
-    String purpose,
-  ) async {
+    String purpose, {
+    String startId = '',
+  }) async {
     final reply = await _call(
       ClientMessage(
         createPipeInvite: CreatePipeInvite(
           projectId: projectId,
           name: name,
           purpose: purpose,
+          startId: startId,
         ),
       ),
     );
@@ -1812,12 +2031,14 @@ class Backend {
     return reply.pipeInvitePreview;
   }
 
-  /// Uses an invite [code] for a pipe to [projectId].
+  /// Uses an invite [code] for a pipe to [projectId]; [startId] is the
+  /// agent's card it's used from (PipeStart), which it closes.
   Future<void> acceptPipeInvite(
     String code,
     String projectId, {
     String name = '',
     String purpose = '',
+    String startId = '',
   }) => _request(
     ClientMessage(
       acceptPipeInvite: AcceptPipeInvite(
@@ -1825,7 +2046,15 @@ class Backend {
         projectId: projectId,
         name: name,
         purpose: purpose,
+        startId: startId,
       ),
+    ),
+  );
+
+  /// Closes [agentId]'s card [startId] suggesting a pipe, unused.
+  Future<void> dismissPipeStart(String agentId, String startId) => _request(
+    ClientMessage(
+      dismissPipeStart: DismissPipeStart(agentId: agentId, startId: startId),
     ),
   );
 
@@ -2141,11 +2370,14 @@ class Backend {
       );
 
   /// Lays out [agentId]'s panes; null (or a lone chat leaf) clears it.
-  Future<void> setLayout(String agentId, ViewNode? root) => _request(
-    ClientMessage(
-      setLayout: SetLayout(agentId: agentId, root: root),
-    ),
-  );
+  /// [focus] expands that pane to fill the window ("" collapses it); left
+  /// out, the one expanded stays so while it's still in [root].
+  Future<void> setLayout(String agentId, ViewNode? root, {String? focus}) =>
+      _request(
+        ClientMessage(
+          setLayout: SetLayout(agentId: agentId, root: root, focus: focus),
+        ),
+      );
 
   /// Unpairs a device: it can't connect any more.
   Future<void> unpairDevice(String deviceId) =>
@@ -2188,7 +2420,14 @@ class Backend {
 
   /// Sends a request and completes when the backend acknowledges it, or
   /// throws [RequestFailure] if it refuses or the connection drops first.
-  Future<void> _request(ClientMessage message) => _call(message);
+  /// A request whose reply only says it was done. A real `Future<void>`,
+  /// not the reply's passed as one: a caller's catchError handler that
+  /// returns nothing is then valid (on the reply's Future, it threw
+  /// "The error handler of Future.catchError must return a value of the
+  /// future's type" whenever the backend refused).
+  Future<void> _request(ClientMessage message) async {
+    await _call(message);
+  }
 
   /// Sends a request and answers the backend's reply to it.
   Future<ServerMessage> _call(ClientMessage message) {
@@ -2230,11 +2469,14 @@ class Backend {
               )
             : null;
         pairing.value = null;
+        movedAway.value = null;
         connectedSince.value = DateTime.now();
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
         // The backend forgets a watch when the connection closes.
         if (_watching.isNotEmpty) fireAndLog(watchFiles(_watching));
+        // And whether the person is using it.
+        if (_active) fireAndLog(sendActive(true));
       case ServerMessage_Body.ack:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.pairingPending:
@@ -2257,6 +2499,14 @@ class Backend {
             message.error.code == ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED) {
           // Refused until this device signs in: neither will it.
           signInRequired.value = message.error.message;
+        } else if (toHello &&
+            message.error.code == ErrorCode.ERROR_CODE_MOVED) {
+          // Moved away: its screen shows where to, and the connection
+          // stays open for deleting the copy left here.
+          _welcomeTimer?.cancel();
+          _movedSocket = _socket;
+          reconnecting.value = false;
+          movedAway.value = message.error.moved;
         }
         final pending = _pending.remove(message.replyTo.toInt());
         if (pending != null) {
@@ -2307,6 +2557,7 @@ class Backend {
       case ServerMessage_Body.secretValue:
       case ServerMessage_Body.envPreview:
       case ServerMessage_Body.recoveryKey:
+      case ServerMessage_Body.recoveryKeyCheck:
       case ServerMessage_Body.secretUses:
       case ServerMessage_Body.entryPage:
       case ServerMessage_Body.uploadProgress:
@@ -2361,6 +2612,27 @@ class Backend {
             messages: message.chatQueuedMessages.messages,
           ),
         );
+      case ServerMessage_Body.appSurface:
+        final surface = appSurfaceData(message.appSurface);
+        final pending = _pending.remove(message.replyTo.toInt());
+        if (pending != null) {
+          pending.complete(message);
+        } else {
+          _viewEvents.add(AppSurfaceChanged(surface));
+        }
+      case ServerMessage_Body.appViewUpdate:
+        final update = message.appViewUpdate;
+        _viewEvents.add(
+          AppSurfaceUpdated(
+            AppViewUpdateData(
+              surfaceId: update.surfaceId,
+              seq: update.seq.toInt(),
+              message: update.message,
+            ),
+          ),
+        );
+      case ServerMessage_Body.notify:
+        _notified.add(message.notify);
       case ServerMessage_Body.notSet:
         // A message kind from a newer backend; nothing to do with it yet.
         break;
@@ -2385,10 +2657,15 @@ class Backend {
 
 /// Sends a request nothing waits on, logging it if the backend refuses.
 void fireAndLog(Future<void> request) {
-  request.catchError(
-    (Object error) => _log('request failed: $error'),
-    test: (error) => error is RequestFailure,
-  );
+  // Through then<void>: [request] may be a Future of a reply passed as
+  // one of void, whose catchError can't take a handler that returns
+  // nothing.
+  request
+      .then<void>((_) {})
+      .catchError(
+        (Object error) => _log('request failed: $error'),
+        test: (error) => error is RequestFailure,
+      );
 }
 
 void _log(String message) => developer.log(message, name: 'factory.backend');
@@ -2435,3 +2712,25 @@ class _ChatOutbox implements OutboxBackend {
   @override
   Future<void> cancelUpload(String uploadId) async {}
 }
+
+/// [surface] as the app's views hold it.
+AppSurfaceData appSurfaceData(AppSurface surface) => AppSurfaceData(
+  surfaceId: surface.surfaceId,
+  appId: surface.appId,
+  view: surface.view,
+  params: surface.params,
+  title: surface.title,
+  state: switch (surface.state) {
+    AppSurfaceState.APP_SURFACE_STATE_OPEN => AppViewState.open,
+    AppSurfaceState.APP_SURFACE_STATE_STOPPED => AppViewState.stopped,
+    AppSurfaceState.APP_SURFACE_STATE_FAILED => AppViewState.failed,
+    AppSurfaceState.APP_SURFACE_STATE_CLOSED => AppViewState.closed,
+    AppSurfaceState.APP_SURFACE_STATE_UNSUPPORTED => AppViewState.unsupported,
+    // Opening, or a state from a newer backend: not shown yet.
+    _ => AppViewState.opening,
+  },
+  error: surface.error,
+  catalog: surface.catalog,
+  seq: surface.seq.toInt(),
+  snapshot: surface.snapshot,
+);

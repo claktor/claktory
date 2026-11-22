@@ -26,10 +26,12 @@ import 'mobile/message_actions.dart';
 import 'mobile/metrics.dart';
 import 'mobile/platform_policy.dart';
 import 'mobile/navigation.dart';
+import 'message_time.dart';
 import 'markdown.dart';
 import 'outbox.dart';
 import 'ask_card.dart';
 import 'pairing_card.dart';
+import 'pipe_start.dart' show PipeStartCard;
 import 'pipes.dart' show SecretApprovalCard;
 import 'refusal_card.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -57,6 +59,43 @@ import 'waiting.dart' show EntryReveal, EntryTarget;
 /// a load lands at the bottom at once.
 ///
 /// Key this widget by [TranscriptStore.loads] so each load starts fresh.
+/// An item of a conversation's timeline that isn't one of its entries
+/// ([TranscriptView.extras]): [build] makes it, in the conversation's
+/// column; [key] tells it apart, and names it to go to
+/// ([EntryReveal.reachExtra]).
+class TimelineItem {
+  const TimelineItem({
+    required this.key,
+    required this.timestampMs,
+    required this.build,
+  });
+
+  final Object key;
+  final int timestampMs;
+  final WidgetBuilder build;
+}
+
+/// Where [TranscriptView.extras] go: [before] the first entry held, and
+/// [after] each entry by its index.
+class _Placed {
+  const _Placed(this.before, this.after);
+
+  static const none = _Placed([], {});
+
+  final List<TimelineItem> before;
+  final Map<int, List<TimelineItem>> after;
+
+  /// The index of the entry [key] follows: -1 before the first; null when
+  /// it isn't placed (older than what's held, or not among the extras).
+  int? indexOf(Object key) {
+    if (before.any((item) => item.key == key)) return -1;
+    for (final MapEntry(key: index, value: items) in after.entries) {
+      if (items.any((item) => item.key == key)) return index;
+    }
+    return null;
+  }
+}
+
 class TranscriptView extends StatefulWidget {
   const TranscriptView({
     super.key,
@@ -69,7 +108,20 @@ class TranscriptView extends StatefulWidget {
     this.agentId = '',
     this.reveal,
     this.loadFrom,
+    this.extras,
+    this.hidden,
   });
+
+  /// More of the timeline than the transcript's entries, by time (a pipe's
+  /// messages among its liaison's conversation), sorted by
+  /// [TimelineItem.timestampMs]: each shows after the last entry no newer
+  /// than it. One older than every entry held shows only once there's
+  /// nothing earlier to load, so paging back never leaves a gap.
+  final ValueListenable<List<TimelineItem>>? extras;
+
+  /// Entries not to show (ones an extra already shows). Tool calls on
+  /// either side of a hidden one still join up in one block.
+  final bool Function(Entry entry)? hidden;
 
   /// Where to open instead of at the end: an entry to put at the top of
   /// the view (the oldest card waiting for the person), once, when it's
@@ -173,6 +225,7 @@ class _TranscriptViewState extends State<TranscriptView>
     final transcript = widget.transcript;
     return [
       if (transcript.hasEarlier && widget.loadEarlier != null) 'earlier',
+      if (transcript.length == 0 && _placed.before.isNotEmpty) 'extras',
       for (var i = 0; i < transcript.length + _waiting.length; i++) _idOf(i),
     ];
   }
@@ -183,6 +236,111 @@ class _TranscriptViewState extends State<TranscriptView>
     final transcript = widget.transcript;
     if (!transcript.hasEarlier || transcript.length == 0) return 0;
     return transcript[0].seq;
+  }
+
+  /// The extras' keys seen so far, to tell new ones as they come.
+  final _knownExtras = <Object>{};
+
+  /// When extras that came after the view opened arrived: they ease in if
+  /// built right after, as entries do.
+  final _extraArrivals = <Object, DateTime>{};
+
+  /// Each extra's place in the tree, to bring it into view.
+  final _extraKeys = <Object, GlobalKey>{};
+
+  GlobalKey _extraKey(Object key) => _extraKeys[key] ??= GlobalKey();
+
+  void _extrasChanged() {
+    final items = widget.extras?.value ?? const <TimelineItem>[];
+    final now = DateTime.now();
+    var arrived = false;
+    for (final item in items) {
+      if (_knownExtras.add(item.key)) {
+        _extraArrivals[item.key] = now;
+        arrived = true;
+      }
+    }
+    final keys = {for (final item in items) item.key};
+    _extraKeys.removeWhere((key, _) => !keys.contains(key));
+    if (!mounted) return;
+    setState(() {});
+    // One that came in at the end is followed there, like an entry.
+    if (arrived && _controller.pinned) _startGlide();
+    if (widget.reveal?.extra != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealExtra());
+    }
+  }
+
+  /// Where the extras go among the entries held now.
+  _Placed _place() {
+    final items = widget.extras?.value ?? const <TimelineItem>[];
+    if (items.isEmpty) return _Placed.none;
+    final transcript = widget.transcript;
+    final earlier = transcript.hasEarlier && widget.loadEarlier != null;
+    final before = <TimelineItem>[];
+    final after = <int, List<TimelineItem>>{};
+    for (final item in items) {
+      // The last entry no newer than it.
+      var low = 0;
+      var high = transcript.length - 1;
+      var found = -1;
+      while (low <= high) {
+        final middle = (low + high) >> 1;
+        if (transcript[middle].entry.timestampMs.toInt() <= item.timestampMs) {
+          found = middle;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+      if (found >= 0) {
+        (after[found] ??= []).add(item);
+      } else if (!earlier) {
+        before.add(item);
+      }
+    }
+    return _Placed(before, after);
+  }
+
+  /// Where the extras are at the last build.
+  var _placed = _Placed.none;
+
+  /// Goes to the extra [EntryReveal.extra] names, once it's this view's:
+  /// loads back page by page while it's older than what's held, then puts
+  /// it at the top.
+  void _revealExtra() {
+    final reveal = widget.reveal;
+    final target = reveal?.extra;
+    final transcript = widget.transcript;
+    if (reveal == null ||
+        target == null ||
+        !mounted ||
+        target.agentId != transcript.agentId) {
+      return;
+    }
+    final items = widget.extras?.value ?? const <TimelineItem>[];
+    // Not among the extras yet: looked for again when they change.
+    if (!items.any((item) => item.key == target.key)) return;
+    final index = _place().indexOf(target.key);
+    if (index == null) {
+      final load = widget.loadEarlier;
+      if (load == null || !transcript.hasEarlier || _earlierFailed != null) {
+        reveal.usedExtra(target);
+      } else if (!_loadingEarlier) {
+        // The page joins on above; this is looked at again then.
+        unawaited(_loadEarlier(load));
+      }
+      return;
+    }
+    reveal.usedExtra(target);
+    if (index >= 0) _goTo(index);
+    // The item itself at the top, once laid out there.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = _extraKeys[target.key]?.currentContext;
+      if (!mounted || context == null) return;
+      _controller.pinned = false;
+      Scrollable.ensureVisible(context);
+    });
   }
 
   late int _split;
@@ -204,6 +362,9 @@ class _TranscriptViewState extends State<TranscriptView>
 
   /// Entries the user has expanded, so they stay open when scrolled away.
   final _expanded = <int>{};
+
+  /// Runs of thoughts the user has expanded, by their first thought's seq.
+  final _expandedRuns = <int>{};
 
   /// Whether words are selected: a hold on a message is then the
   /// selection's, not the message's actions ([MessageSelection]).
@@ -244,6 +405,11 @@ class _TranscriptViewState extends State<TranscriptView>
     widget.queued?.addListener(_queueChanged);
     widget.outbox?.addListener(_outboxChanged);
     widget.reveal?.addListener(_revealChanged);
+    widget.extras?.addListener(_extrasChanged);
+    _knownExtras.addAll([
+      for (final item in widget.extras?.value ?? const <TimelineItem>[])
+        item.key,
+    ]);
     _loads = widget.transcript.loads;
     _queueChanged(initial: true);
     _outboxChanged(initial: true);
@@ -284,6 +450,7 @@ class _TranscriptViewState extends State<TranscriptView>
   /// agent's: loads back to it if it's older than what's held, then puts
   /// it at the top. One that isn't there leaves the view where it is.
   void _revealChanged() {
+    _revealExtra();
     final reveal = widget.reveal;
     final target = reveal?.value;
     final transcript = widget.transcript;
@@ -586,6 +753,11 @@ class _TranscriptViewState extends State<TranscriptView>
       old.reveal?.removeListener(_revealChanged);
       widget.reveal?.addListener(_revealChanged);
     }
+    if (old.extras != widget.extras) {
+      old.extras?.removeListener(_extrasChanged);
+      widget.extras?.addListener(_extrasChanged);
+      _extrasChanged();
+    }
   }
 
   @override
@@ -597,6 +769,7 @@ class _TranscriptViewState extends State<TranscriptView>
     widget.queued?.removeListener(_queueChanged);
     widget.outbox?.removeListener(_outboxChanged);
     widget.reveal?.removeListener(_revealChanged);
+    widget.extras?.removeListener(_extrasChanged);
     _relabel?.cancel();
     for (final waiting in _waiting) {
       waiting.leaving?.cancel();
@@ -611,6 +784,9 @@ class _TranscriptViewState extends State<TranscriptView>
 
   /// New entries arrived: note when, and glide to them if following.
   void _entriesChanged() {
+    if (widget.reveal?.extra != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealExtra());
+    }
     final transcript = widget.transcript;
     final length = transcript.length;
     // Earlier entries paged in go above the center line, so what's on
@@ -820,6 +996,76 @@ class _TranscriptViewState extends State<TranscriptView>
   }
 
   Widget _entryItem(int index, EntryModel model) {
+    final before = index == 0 ? _placed.before : const <TimelineItem>[];
+    final after = _placed.after[index] ?? const <TimelineItem>[];
+    final shown = !(widget.hidden?.call(model.entry) ?? false);
+    final entry = shown ? _entryOnly(index, model) : null;
+    final day = shown ? _dayChange(index) : null;
+    if (before.isEmpty && after.isEmpty && day == null) {
+      return entry ?? const SizedBox.shrink();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final item in before) _extraItem(item),
+        if (day != null) DayLine(ms: day),
+        ?entry,
+        for (final item in after) _extraItem(item),
+      ],
+    );
+  }
+
+  /// An extra ([TranscriptView.extras]) in the conversation's column, a
+  /// message's gap above it, easing in when it just came.
+  Widget _extraItem(TimelineItem item) => Align(
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: contentMaxWidth),
+      child: Padding(
+        padding: EdgeInsets.only(
+          top: Space.l,
+          left: Metrics.of(context).gutter,
+          right: Metrics.of(context).gutter,
+        ),
+        child: Arrival(
+          animate:
+              !_reducedMotion &&
+              DateTime.now().difference(
+                    _extraArrivals[item.key] ?? DateTime(0),
+                  ) <
+                  _glideDuration,
+          child: KeyedSubtree(
+            key: _extraKey(item.key),
+            child: Builder(builder: item.build),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  /// The time of the entry at [index] when a new day starts there (it's
+  /// the first entry of the conversation, or the last one shown before it
+  /// was on another day), for a day line above it; null otherwise.
+  int? _dayChange(int index) {
+    final transcript = widget.transcript;
+    final ms = transcript[index].entry.timestampMs.toInt();
+    if (ms <= 0) return null;
+    // Inside a closed run of thoughts nothing shows to mark.
+    final run = thinkingRunAt(transcript, index, hidden: widget.hidden);
+    if (run != null && !run.first) return null;
+    for (var i = index - 1; i >= 0; i--) {
+      final entry = transcript[i].entry;
+      if (widget.hidden?.call(entry) ?? false) continue;
+      final before = entry.timestampMs.toInt();
+      if (before <= 0) continue;
+      return sameDay(before, ms) ? null : ms;
+    }
+    // The first held: the conversation's first, unless earlier ones are
+    // still to load.
+    return transcript.hasEarlier ? null : ms;
+  }
+
+  Widget _entryOnly(int index, EntryModel model) {
     final transcript = widget.transcript;
     final fromQueue = _fromQueue.contains(model.seq);
     return Align(
@@ -838,14 +1084,38 @@ class _TranscriptViewState extends State<TranscriptView>
                 !_reducedMotion &&
                 DateTime.now().difference(_arrivals[model.seq] ?? DateTime(0)) <
                     _glideDuration,
-            child: EntryView(
-              model: model,
-              block: model.entry.hasToolCall()
-                  ? toolBlockAt(transcript, index)
-                  : const ToolBlock(first: true, last: true),
-              live: widget.working && index == transcript.length - 1,
-              expanded: _expanded.contains(model.seq),
-              onToggle: (open) => _toggled(model.seq, open),
+            child: Builder(
+              builder: (context) {
+                final run = thinkingRunAt(
+                  transcript,
+                  index,
+                  hidden: widget.hidden,
+                  working: widget.working,
+                  // An extra after a thought shows there: the run ends.
+                  ends: (index) => _placed.after[index]?.isNotEmpty ?? false,
+                );
+                return EntryView(
+                  model: model,
+                  block: model.entry.hasToolCall()
+                      ? toolBlockAt(transcript, index, hidden: widget.hidden)
+                      : const ToolBlock(first: true, last: true),
+                  live: widget.working && index == transcript.length - 1,
+                  expanded: _expanded.contains(model.seq),
+                  onToggle: (open) => _toggled(model.seq, open),
+                  run: run,
+                  runExpanded:
+                      run != null && _expandedRuns.contains(run.firstSeq),
+                  onRunToggle: run == null
+                      ? null
+                      : (open) => setState(() {
+                          if (open) {
+                            _expandedRuns.add(run.firstSeq);
+                          } else {
+                            _expandedRuns.remove(run.firstSeq);
+                          }
+                        }),
+                );
+              },
             ),
           ),
         ),
@@ -1061,6 +1331,7 @@ class _TranscriptViewState extends State<TranscriptView>
         final split = math.min(_split, length);
         final hasEarlier =
             widget.transcript.hasEarlier && widget.loadEarlier != null;
+        _placed = _place();
         if (hasEarlier) {
           // Shorter than the view, or opened at the top: load at once.
           WidgetsBinding.instance.addPostFrameCallback(
@@ -1120,6 +1391,22 @@ class _TranscriptViewState extends State<TranscriptView>
                             childCount: split + (hasEarlier ? 1 : 0),
                           ),
                         ),
+                        // With no entries yet, the extras on their own,
+                        // just above the center line.
+                        if (length == 0 && _placed.before.isNotEmpty)
+                          SliverToBoxAdapter(
+                            child: MeasuredItem(
+                              id: 'extras',
+                              heights: _heights,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  for (final item in _placed.before)
+                                    _extraItem(item),
+                                ],
+                              ),
+                            ),
+                          ),
                         SliverPadding(
                           key: _liveKey,
                           padding: const EdgeInsets.only(bottom: Space.xl),
@@ -1555,9 +1842,20 @@ class EntryView extends StatefulWidget {
     required this.expanded,
     required this.onToggle,
     this.block = const ToolBlock(first: true, last: true),
+    this.run,
+    this.runExpanded = false,
+    this.onRunToggle,
   });
 
   final EntryModel model;
+
+  /// For a thought, or nothing shown between thoughts, the run of thoughts
+  /// it's in ([thinkingRunAt]); null when it stands alone.
+  final ThinkingRun? run;
+
+  /// The run is open: each thought shows as it would alone.
+  final bool runExpanded;
+  final ValueChanged<bool>? onRunToggle;
 
   /// The agent is still working on this entry.
   final bool live;
@@ -1587,7 +1885,10 @@ class _EntryViewState extends State<EntryView> {
       old.model.removeListener(_changed);
       widget.model.addListener(_changed);
       _built = null;
-    } else if (old.live != widget.live || old.block != widget.block) {
+    } else if (old.live != widget.live ||
+        old.block != widget.block ||
+        old.run != widget.run ||
+        old.runExpanded != widget.runExpanded) {
       _built = null;
     }
   }
@@ -1607,6 +1908,44 @@ class _EntryViewState extends State<EntryView> {
     return _built ??= _build();
   }
 
+  /// An entry in a run of thoughts: the first shows the run's row, and
+  /// under it, while the run is open, each thought as it would alone;
+  /// closed, the rest show nothing. Anything else in a run (a reply with
+  /// no words) shows nothing either.
+  Widget _inRun(Entry entry, int seq, ThinkingRun run) {
+    final open = widget.runExpanded;
+    final thought = entry.hasThinking() && open
+        ? Padding(
+            padding: EdgeInsets.only(
+              left: Space.l + 2,
+              top: run.first ? Space.xs : Space.s,
+            ),
+            child: _ThinkingView(
+              key: ValueKey(seq),
+              text: entry.thinking.text,
+              live: widget.live,
+              expanded: widget.expanded,
+              onToggle: widget.onToggle,
+            ),
+          )
+        : null;
+    if (!run.first) return thought ?? const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.m),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ThinkingRunRow(
+            run: run,
+            open: open,
+            onToggle: () => widget.onRunToggle?.call(!open),
+          ),
+          ?thought,
+        ],
+      ),
+    );
+  }
+
   /// On a phone, the hold's Reply: quotes the message into the box.
   VoidCallback? _replyTo(String text, String? from) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
@@ -1617,6 +1956,8 @@ class _EntryViewState extends State<EntryView> {
   Widget _build() {
     final entry = widget.model.entry;
     final seq = widget.model.seq;
+    final run = widget.run;
+    if (run != null) return _inRun(entry, seq, run);
     final (Widget child, double gap) = switch (entry.whichKind()) {
       Entry_Kind.user => (
         _UserText(
@@ -1624,6 +1965,7 @@ class _EntryViewState extends State<EntryView> {
           sentFrom: entry.user.hasSentFrom() ? entry.user.sentFrom : null,
           files: entry.user.attachments,
           voice: entry.user.hasVoice() ? entry.user.voice : null,
+          sentMs: entry.timestampMs.toInt(),
         ),
         Space.l,
       ),
@@ -1633,7 +1975,10 @@ class _EntryViewState extends State<EntryView> {
       ),
       Entry_Kind.event =>
         entry.event.source == EventSource.EVENT_SOURCE_AGENT
-            ? (_AgentMessage(entry.event), Space.l)
+            ? (
+                _AgentMessage(entry.event, sentMs: entry.timestampMs.toInt()),
+                Space.l,
+              )
             : (
                 _EventLine(
                   key: ValueKey(seq),
@@ -1650,6 +1995,7 @@ class _EntryViewState extends State<EntryView> {
                 entry.assistant.text,
                 answers: repliedTo(entry),
                 seq: seq,
+                sentMs: entry.timestampMs.toInt(),
               ),
         Space.l,
       ),
@@ -1714,6 +2060,10 @@ class _EntryViewState extends State<EntryView> {
         SecretApprovalCard(key: ValueKey(seq), entry.secretApproval, seq: seq),
         Space.l,
       ),
+      Entry_Kind.pipeStart => (
+        PipeStartCard(key: ValueKey(entry.pipeStart.id), entry.pipeStart),
+        Space.l,
+      ),
       // Priya's ask card (#208) replaces this.
       Entry_Kind.askPerson => (
         AskPersonCard(
@@ -1737,7 +2087,10 @@ class _EntryViewState extends State<EntryView> {
       _ => null,
     };
     final from = entry.whichKind() == Entry_Kind.event
-        ? entry.event.from
+        ? senderName(
+            entry.event,
+            context.getInheritedWidgetOfExactType<AgentTints>()?.agents,
+          )
         : null;
     return Padding(
       padding: EdgeInsets.only(top: gap),
@@ -1748,6 +2101,7 @@ class _EntryViewState extends State<EntryView> {
               from: from,
               child: MessageActions(
                 text: words,
+                markdown: entry.whichKind() != Entry_Kind.user,
                 onReply: _replyTo(words, from),
                 child: child,
               ),
@@ -1803,9 +2157,13 @@ class _UserText extends StatelessWidget {
     this.files = const [],
     this.voice,
     this.waitingVoice,
+    this.sentMs = 0,
   });
 
   final String text;
+
+  /// When it was sent, at the bubble's foot; 0 for none (still waiting).
+  final int sentMs;
 
   /// Said rather than typed: [text] is what was heard, files[0] the
   /// recording, played from ▶ under it.
@@ -1835,6 +2193,8 @@ class _UserText extends StatelessWidget {
     final bubble = Bubble(
       color: color,
       outgoing: true,
+      sentMs: sentMs,
+      timeColor: const Color(0xB3FFFFFF),
       child: waiting != null
           ? VoiceWaiting(duration: waiting)
           : voice != null && this.files.isNotEmpty
@@ -2324,9 +2684,12 @@ class _ProposalCardState extends State<ProposalCard> {
 /// opens the sender's conversation, when the app knows the sender; the
 /// bubble is like any other, for selecting text, links and Show more.
 class _AgentMessage extends StatefulWidget {
-  const _AgentMessage(this.event);
+  const _AgentMessage(this.event, {this.sentMs = 0});
 
   final Event event;
+
+  /// When it came, at the bubble's foot.
+  final int sentMs;
 
   @override
   State<_AgentMessage> createState() => _AgentMessageState();
@@ -2366,7 +2729,7 @@ class _AgentMessageState extends State<_AgentMessage> {
         // sender.
         Flexible(
           child: NameThenRole(
-            name: widget.event.from,
+            name: senderName(widget.event, tints?.agents),
             role: tints?.agents[_sender]?.role ?? '',
             style: TypeScale.of(context).caption.copyWith(
               color: nameColor,
@@ -2385,7 +2748,7 @@ class _AgentMessageState extends State<_AgentMessage> {
       // through.
       from = Semantics(
         button: true,
-        label: 'Open ${widget.event.from}',
+        label: 'Open ${senderName(widget.event, tints?.agents)}',
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _open,
@@ -2415,6 +2778,8 @@ class _AgentMessageState extends State<_AgentMessage> {
         Bubble(
           color: color ?? palette.selected,
           outgoing: false,
+          sentMs: widget.sentMs,
+          timeColor: color == null ? null : const Color(0xB3FFFFFF),
           child: Markdown(
             message,
             color: color == null ? null : const Color(0xFFFFFFFF),
@@ -2493,9 +2858,12 @@ class _Repliable extends StatelessWidget {
 /// over it: it's whose conversation this is. Others' messages, filled with
 /// their color under their name, stand apart from it at a glance.
 class _OwnReply extends StatelessWidget {
-  const _OwnReply(this.text, {this.answers, this.seq = 0});
+  const _OwnReply(this.text, {this.answers, this.seq = 0, this.sentMs = 0});
 
   final String text;
+
+  /// When it was written, at the bubble's foot.
+  final int sentMs;
 
   /// The seq of the message this reply answers ([repliedTo]), if any, for
   /// its quote over the bubble.
@@ -2512,6 +2880,7 @@ class _OwnReply extends StatelessWidget {
       edge: own.withValues(alpha: 0.5),
       outgoing: false,
       wide: true,
+      sentMs: sentMs,
       child: Markdown(text),
     );
     final answers = this.answers;
@@ -2651,7 +3020,7 @@ class _ReplyQuoteState extends State<ReplyQuote> {
     final (String? name, Color color) = switch (message?.whichKind()) {
       Entry_Kind.user => ('You', tints?.own ?? palette.textMuted),
       Entry_Kind.event => (
-        message!.event.from,
+        senderName(message!.event, tints?.agents),
         tints?.byId[message.event.fromId] ?? palette.textMuted,
       ),
       _ => (null, palette.textFaint),
@@ -2737,6 +3106,28 @@ class _ReplyQuoteState extends State<ReplyQuote> {
     return user.hasVoice() ? 'Voice message' : '';
   }
 }
+
+/// Who an agent's message is from, as the app shows it. The backend gives
+/// the sender's signature, as the receiving agent read it: "Sam (Backend)",
+/// "Ana (Frontend, Web Site)" from another project, "Rivet (admin)". When
+/// the app knows the sender ([agents] has its id), its character and role
+/// show beside the name, so the name alone, as it was when sent; an unknown
+/// one (deleted since) keeps the whole signature, which still says who it
+/// was.
+String senderName(Event event, Map<String, Agent>? agents) {
+  final from = event.from;
+  final name = agents?[event.fromId]?.name;
+  if (name == null || from == name) return from;
+  // Its name now, then the role and project: signed under that name. A
+  // name that itself ends in parentheses ("Ana (old)") is signed bare, so
+  // the name is matched first rather than any last parentheses taken off.
+  if (from.startsWith('$name (')) return name;
+  // Renamed since: the signature's last parentheses are its role and
+  // project.
+  return from.replaceFirst(_signatureTail, '');
+}
+
+final _signatureTail = RegExp(r' \([^()]*\)$');
 
 /// A message sent to several agents ends with a paragraph naming the
 /// others ("Also sent to: Lena (Backend), Omar (Backend)."): the message
@@ -2872,11 +3263,20 @@ class Bubble extends StatelessWidget {
     required this.child,
     this.edge,
     this.wide = false,
+    this.sentMs = 0,
+    this.timeColor,
   });
 
   final Color color;
   final bool outgoing;
   final Widget child;
+
+  /// When it was sent, shown small at its foot ([TimeFoot]); 0 for none.
+  final int sentMs;
+
+  /// The time's color: faint on a light bubble, its words' color, dimmed,
+  /// on a filled one.
+  final Color? timeColor;
 
   /// A 1px line around it, tail and all; none when null.
   final Color? edge;
@@ -2919,7 +3319,13 @@ class Bubble extends StatelessWidget {
                   Space.m,
                   Space.s,
                 ),
-                child: child,
+                child: sentMs <= 0
+                    ? child
+                    : TimeFoot(
+                        ms: sentMs,
+                        color: timeColor ?? Palette.of(context).textFaint,
+                        child: child,
+                      ),
               ),
             ),
           ),
@@ -3117,6 +3523,159 @@ class _ThinkingView extends StatelessWidget {
   }
 }
 
+/// A run of thoughts in a row as one line: "Thought 5 times", or while
+/// the last is under way "Thinking… · 3 so far" with the live dot. A click
+/// opens or closes it.
+class _ThinkingRunRow extends StatelessWidget {
+  const _ThinkingRunRow({
+    required this.run,
+    required this.open,
+    required this.onToggle,
+  });
+
+  final ThinkingRun run;
+  final bool open;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final live = run.live;
+    final label = live
+        ? 'Thinking… · ${run.count} so far'
+        : 'Thought ${run.count} times';
+    return Semantics(
+      container: true,
+      button: true,
+      expanded: open,
+      // What a tap does, after what it is.
+      label: '$label. ${open ? 'Hide' : 'Show'} thoughts.',
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: onToggle,
+        builder: (context, hovered) => _HeaderLine(
+          child: Row(
+            children: [
+              SizedBox(
+                width: Space.l + 2,
+                child: live && !open
+                    ? const Align(
+                        alignment: Alignment.centerLeft,
+                        child: LiveDot(),
+                      )
+                    : Chevron(color: palette.textFaint, down: open),
+              ),
+              Text(
+                label,
+                style: TypeScale.of(context).body.copyWith(
+                  color: hovered || live
+                      ? palette.textMuted
+                      : palette.textFaint,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Where an entry sits in a run of the agent's thoughts in a row, which
+/// shows as one line ("Thought 5 times").
+@immutable
+class ThinkingRun {
+  const ThinkingRun({
+    required this.first,
+    required this.count,
+    required this.live,
+    required this.firstSeq,
+  });
+
+  /// The run's first thought, which shows the run's line.
+  final bool first;
+
+  /// How many thoughts.
+  final int count;
+
+  /// The agent is still thinking its last one.
+  final bool live;
+
+  /// The first thought's seq: which run it is.
+  final int firstSeq;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ThinkingRun &&
+      other.first == first &&
+      other.count == count &&
+      other.live == live &&
+      other.firstSeq == firstSeq;
+
+  @override
+  int get hashCode => Object.hash(first, count, live, firstSeq);
+}
+
+/// The run of thoughts the entry at [index] is in: two or more thoughts
+/// with nothing shown between them (a hidden entry or a reply with no
+/// words doesn't count; anything else ends the run, as does [ends], an
+/// entry something else shows after). Null for an entry in no such run.
+/// [working]: the agent is at work, so a run nothing shown follows is
+/// still being thought.
+ThinkingRun? thinkingRunAt(
+  TranscriptStore transcript,
+  int index, {
+  bool Function(Entry entry)? hidden,
+  bool Function(int index)? ends,
+  bool working = false,
+}) {
+  bool isHidden(int i) => hidden?.call(transcript[i].entry) ?? false;
+  bool thought(int i) => transcript[i].entry.hasThinking() && !isHidden(i);
+  // Shows nothing: a run goes on past it.
+  bool nothing(int i) {
+    final entry = transcript[i].entry;
+    return isHidden(i) ||
+        (entry.hasAssistant() && entry.assistant.text.isEmpty) ||
+        entry.whichKind() == Entry_Kind.notSet;
+  }
+
+  bool within(int i) => thought(i) || nothing(i);
+  bool stops(int i) => ends?.call(i) ?? false;
+  if (!within(index)) return null;
+  var start = index;
+  while (start > 0 && within(start - 1) && !stops(start - 1)) {
+    start--;
+  }
+  var end = index;
+  while (end < transcript.length - 1 && !stops(end) && within(end + 1)) {
+    end++;
+  }
+  // From the first thought to the last.
+  while (start < end && !thought(start)) {
+    start++;
+  }
+  while (end > start && !thought(end)) {
+    end--;
+  }
+  if (index < start || index > end) return null;
+  var count = 0;
+  for (var i = start; i <= end; i++) {
+    if (thought(i)) count++;
+  }
+  if (count < 2) return null;
+  var after = end + 1;
+  while (after < transcript.length && nothing(after)) {
+    after++;
+  }
+  return ThinkingRun(
+    first: index == start,
+    count: count,
+    live: working && after == transcript.length,
+    firstSeq: transcript[start].seq,
+  );
+}
+
 /// Where a tool call sits in the block of calls one model reply made.
 @immutable
 class ToolBlock {
@@ -3138,9 +3697,20 @@ class ToolBlock {
 
 /// Where the entry at [index] sits among its reply's tool calls: the calls
 /// next to each other with the same nonzero reply form one block.
-ToolBlock toolBlockAt(TranscriptStore transcript, int index) {
+ToolBlock toolBlockAt(
+  TranscriptStore transcript,
+  int index, {
+  bool Function(Entry entry)? hidden,
+}) {
   final entry = transcript[index].entry;
-  bool sameReply(int other) {
+  // The next entry shown that way, past hidden ones.
+  bool sameReply(int step) {
+    var other = index + step;
+    while (other >= 0 &&
+        other < transcript.length &&
+        (hidden?.call(transcript[other].entry) ?? false)) {
+      other += step;
+    }
     if (other < 0 || other >= transcript.length) return false;
     final neighbour = transcript[other].entry;
     return entry.reply != Int64.ZERO &&
@@ -3148,7 +3718,7 @@ ToolBlock toolBlockAt(TranscriptStore transcript, int index) {
         neighbour.reply == entry.reply;
   }
 
-  return ToolBlock(first: !sameReply(index - 1), last: !sameReply(index + 1));
+  return ToolBlock(first: !sameReply(-1), last: !sameReply(1));
 }
 
 /// One call's part of its block: a hairline panel whose top and bottom

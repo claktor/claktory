@@ -7,25 +7,34 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use claktory_apps::{Deadlines, frames};
-use factory_protocol::apps::{Frame, Load, SecretValue, frame::Body};
+use factory_protocol::apps::{DataAnswer, DataQuery, DataSource, DataSourceList, Done, Frame, Load, PushView, SecretValue, frame::Body};
 use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
-/// The test app's component, built once per run.
+/// The test app's component (world app-with-views), built once per run.
 pub fn guest() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("guest");
-        let status = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-            .args(["build", "--quiet", "--release", "--target", "wasm32-wasip2", "--target-dir"])
-            .arg(&target)
-            .arg("--manifest-path")
-            .arg(crate_dir.join("tests/guest/Cargo.toml"))
-            .status()
-            .expect("cargo runs");
-        assert!(status.success(), "the test app builds for wasm32-wasip2 (rustup target add wasm32-wasip2)");
-        target.join("wasm32-wasip2/release/claktory_apps_test_guest.wasm")
-    })
+    BUILT.get_or_init(|| build("guest", &[]))
+}
+
+/// The same app built for 1.0 (wit-1.0, as released), without views.
+pub fn guest_1_0() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| build("guest-1.0", &["--features", "v1_0"]))
+}
+
+fn build(target: &str, features: &[&str]) -> PathBuf {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join(target);
+    let status = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "--quiet", "--release", "--target", "wasm32-wasip2", "--target-dir"])
+        .arg(&target)
+        .args(features)
+        .arg("--manifest-path")
+        .arg(crate_dir.join("tests/guest/Cargo.toml"))
+        .status()
+        .expect("cargo runs");
+    assert!(status.success(), "the test app builds for wasm32-wasip2 (rustup target add wasm32-wasip2)");
+    target.join("wasm32-wasip2/release/claktory_apps_test_guest.wasm")
 }
 
 /// A fresh folder for one test.
@@ -42,12 +51,22 @@ pub fn quick() -> Deadlines {
 }
 
 /// factoryd, as far as the host can tell: it asks, answers GetSecret from
-/// `secrets`, and keeps the one-way frames it's sent.
+/// `secrets`, PushView with `push_error` (keeping the message in
+/// `pushed`), GetDataSources with `sources` and DataQuery with `answer`
+/// (keeping the query in `queries`), and keeps the one-way frames it's
+/// sent.
 pub struct Factoryd {
     to_host: WriteHalf<DuplexStream>,
     from_host: ReadHalf<DuplexStream>,
     next_id: u64,
     pub secrets: HashMap<String, String>,
+    /// What PushView is answered: empty takes it.
+    pub push_error: String,
+    pub pushed: Vec<PushView>,
+    pub sources: Vec<DataSource>,
+    /// What DataQuery is answered.
+    pub answer: DataAnswer,
+    pub queries: Vec<DataQuery>,
     /// One-way frames not looked at yet.
     told: VecDeque<Body>,
     host: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -60,10 +79,22 @@ impl Factoryd {
         let (their_read, their_write) = tokio::io::split(theirs);
         let host = tokio::spawn(claktory_apps::serve_with(their_read, their_write, deadlines));
         let (from_host, to_host) = tokio::io::split(ours);
-        let mut factoryd = Factoryd { to_host, from_host, next_id: 1, secrets: HashMap::new(), told: VecDeque::new(), host };
+        let mut factoryd = Factoryd {
+            to_host,
+            from_host,
+            next_id: 1,
+            secrets: HashMap::new(),
+            push_error: String::new(),
+            pushed: Vec::new(),
+            sources: Vec::new(),
+            answer: DataAnswer::default(),
+            queries: Vec::new(),
+            told: VecDeque::new(),
+            host,
+        };
         let hello = factoryd.ask(Body::Hello(factory_protocol::apps::Hello { version: "test".into() })).await;
         let Body::Ready(ready) = hello else { panic!("ready: {hello:?}") };
-        assert_eq!(ready.worlds, ["claktory:app@1"]);
+        assert_eq!(ready.worlds, ["claktory:app@1", "claktory:app@1.1"]);
         factoryd
     }
 
@@ -96,6 +127,27 @@ impl Factoryd {
                     let value = self.secrets.get(&get.name).cloned();
                     let answer = SecretValue { found: value.is_some(), value: value.unwrap_or_default() };
                     let reply = Frame { id: 0, reply_to: frame.id, body: Some(Body::SecretValue(answer)) };
+                    frames::write(&mut self.to_host, &reply).await.expect("write");
+                    None
+                }
+                Some(Body::PushView(ref push)) => {
+                    self.pushed.push(push.clone());
+                    let reply = Frame { id: 0, reply_to: frame.id, body: Some(Body::Done(Done { error: self.push_error.clone() })) };
+                    frames::write(&mut self.to_host, &reply).await.expect("write");
+                    None
+                }
+                Some(Body::GetDataSources(_)) => {
+                    let reply = Frame {
+                        id: 0,
+                        reply_to: frame.id,
+                        body: Some(Body::DataSourceList(DataSourceList { sources: self.sources.clone() })),
+                    };
+                    frames::write(&mut self.to_host, &reply).await.expect("write");
+                    None
+                }
+                Some(Body::DataQuery(ref query)) => {
+                    self.queries.push(query.clone());
+                    let reply = Frame { id: 0, reply_to: frame.id, body: Some(Body::DataAnswer(self.answer.clone())) };
                     frames::write(&mut self.to_host, &reply).await.expect("write");
                     None
                 }
@@ -138,7 +190,7 @@ impl Factoryd {
             memory_mb: 0,
             storage_mb: 0,
             upgrade_from: String::new(),
-            world: "claktory:app@1".into(),
+            world: "claktory:app@1.1".into(),
         };
         change(&mut load);
         error(self.ask(Body::Load(load)).await)
@@ -164,6 +216,11 @@ impl Factoryd {
             Body::CallResult(result) if !result.is_error => result.text,
             other => panic!("{tool} {args}: {other:?}"),
         }
+    }
+
+    /// Asks the app about a view: Done's error, "" when it worked.
+    pub async fn view(&mut self, body: Body) -> String {
+        error(self.ask(body).await)
     }
 
     /// Ends factoryd's side; the host stops its apps and returns.

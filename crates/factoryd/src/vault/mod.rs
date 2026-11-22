@@ -14,12 +14,16 @@
 
 mod account;
 pub(crate) mod asks;
+pub mod backup;
 pub(crate) mod connections;
 pub(crate) mod crypto;
 pub(crate) mod env;
+pub(crate) mod generate;
 pub mod handoff;
 pub mod memory;
+pub(crate) mod recovery;
 pub(crate) mod requests;
+pub(crate) mod signins;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -192,7 +196,18 @@ ALTER TABLE requests ADD COLUMN approved INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE requests ADD COLUMN admin TEXT NOT NULL DEFAULT '';
 ALTER TABLE requests ADD COLUMN collecting INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- Each command that uses it waits for the person's Allow, for that exact
+-- command, once (`asks_each_time`). Part of what its key is sealed with
+-- (`dek_aad`), so changing it here alone makes the secret unusable rather
+-- than free. Secrets from before were sealed without it: 0, as they are.
+ALTER TABLE secrets ADD COLUMN ask INTEGER NOT NULL DEFAULT 0;
+",
 ];
+
+/// How long a command's approval stays armed between the gate that passed
+/// it and its resolving the secrets (`Vault::arm`).
+const ARMED_MS: i64 = 60_000;
 
 /// A value is too short to hide in output below this many bytes.
 const SHORT: usize = 8;
@@ -225,6 +240,12 @@ pub enum VaultError {
     NotGranted { secret: String, agent: String },
     #[error("{0}")]
     Invalid(String),
+    /// A recovery key check's wrong group, which never says what was typed.
+    #[error("That isn't block {0} of your recovery key. Check what you saved and try again.")]
+    WrongGroup(u32),
+    /// Too many wrong groups lately; says how long to wait.
+    #[error("{0}")]
+    TooManyTries(String),
     #[error("could not read or write the vault: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("could not read or write the vault: {0}")]
@@ -302,10 +323,41 @@ struct Inner {
     recent: Recent,
     /// The cost of new passphrase keys (cheaper in tests).
     passphrase_params: Option<&'static str>,
+    /// Commands the person allowed that use ask-each-time secrets, between
+    /// the gate and resolving them: (agent, secret names, until).
+    armed: Vec<(String, Vec<String>, i64)>,
+    /// Checks that the person saved the recovery key, running now.
+    checks: recovery::Checks,
 }
 
 fn aad(parts: &[&str]) -> Vec<u8> {
     parts.join("\0").into_bytes()
+}
+
+/// What a secret's key is sealed with: with "ask" when it asks each time,
+/// so the flag can't change without the vault's key.
+pub(crate) fn dek_aad(vault_id: &str, id: &str, version: &str, ask: bool) -> Vec<u8> {
+    let mut parts = vec!["dek", vault_id, id, version];
+    if ask {
+        parts.push("ask");
+    }
+    aad(&parts)
+}
+
+/// A secret's key, sealed as `dek_aad` says. One whose flag says it asks
+/// each time but whose key isn't sealed with "ask" was changed by a
+/// Claktory from before Ask each time (one an update went back to, where the
+/// person changed its values): it opens all the same and still asks (the
+/// flag decides that), and the bool says to seal it with "ask" again. The
+/// other way round, a flag turned off outside Claktory, it doesn't open.
+fn open_dek(vmk: &[u8; 32], sealed: &[u8], vault_id: &str, id: &str, version: &str, ask: bool) -> Option<(Key, bool)> {
+    if let Some(dek) = crypto::open_key(vmk, sealed, &dek_aad(vault_id, id, version, ask)) {
+        return Some((dek, false));
+    }
+    if !ask {
+        return None;
+    }
+    crypto::open_key(vmk, sealed, &dek_aad(vault_id, id, version, false)).map(|dek| (dek, true))
 }
 
 /// What a grant's MAC covers; its aliases (JSON) only when it has any, so
@@ -370,9 +422,26 @@ fn check_values(values: &[Value]) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// The last 4 characters, to tell secrets apart in Settings → Secrets. A
+/// key in armor would only show its armor ("----"): an SSH private key
+/// shows the end of its fingerprint instead (as `ssh-keygen -l` shows it,
+/// so the same for the key and its public half), any other the end of
+/// what's inside the armor.
 fn hint(value: &str) -> String {
-    let count = value.chars().count();
-    if count < HINTED { String::new() } else { value.chars().skip(count - 4).collect() }
+    let value = value.trim_end();
+    if value.ends_with("-----") {
+        if let Ok(key) = ssh_key::PrivateKey::from_openssh(value) {
+            return last_four(&key.public_key().fingerprint(ssh_key::HashAlg::Sha256).to_string());
+        }
+        let inside: Zeroizing<String> = Zeroizing::new(value.lines().filter(|line| !line.starts_with("-----")).map(str::trim).collect());
+        return if inside.chars().count() < HINTED { String::new() } else { last_four(&inside) };
+    }
+    if value.chars().count() < HINTED { String::new() } else { last_four(value) }
+}
+
+fn last_four(text: &str) -> String {
+    let count = text.chars().count();
+    text.chars().skip(count.saturating_sub(4)).collect()
 }
 
 /// Creates a file only its owner can read and write.
@@ -703,12 +772,14 @@ impl Vault {
 
     /// A new recovery key; the old one stops working.
     pub(crate) fn new_recovery_key(&self) -> Result<String, VaultError> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         let vmk = Self::open_vmk(&inner)?;
         let (text, protector) = Self::recovery_protector(&inner.vault_id, vmk);
         let db = Self::db(&inner)?;
         Self::save_protector(db, &protector)?;
         Self::keep(db, &inner.vault_id, vmk, "recovery", text.as_bytes())?;
+        // It needs confirming again (recovery::).
+        inner.state = None;
         Ok(text)
     }
 
@@ -792,10 +863,11 @@ impl Vault {
         id: &str,
         version: u32,
         values: &[Value],
+        ask: bool,
     ) -> Result<Vec<u8>, VaultError> {
         let dek = crypto::new_key();
         let version = version.to_string();
-        let sealed_dek = crypto::seal(vmk, dek.as_slice(), &aad(&["dek", vault_id, id, &version]));
+        let sealed_dek = crypto::seal(vmk, dek.as_slice(), &dek_aad(vault_id, id, &version, ask));
         db.execute("DELETE FROM variables WHERE secret = ?1", [id])?;
         for (position, value) in (0i64..).zip(values) {
             let sealed = crypto::seal(&dek, value.value.as_bytes(), &aad(&["value", vault_id, id, &version, &value.variable]));
@@ -823,7 +895,7 @@ impl Vault {
         self.with_unlocked_transaction(|transaction, vault_id, vmk| {
             Self::name_taken(transaction, &name, "")?;
             let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values)?;
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values, false)?;
             let now = now_ms();
             transaction.execute(
                 "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6)",
@@ -858,8 +930,9 @@ impl Vault {
             params![id, name, description.trim(), now],
         )?;
         if let (Some(values), Some(vmk)) = (values, vmk) {
-            let version: u32 = transaction.query_row("SELECT version FROM secrets WHERE id = ?1", [&id], |row| row.get(0))?;
-            let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, &id, version + 1, values)?;
+            let (version, ask): (u32, bool) =
+                transaction.query_row("SELECT version, ask FROM secrets WHERE id = ?1", [&id], crate::store::row2)?;
+            let sealed_dek = Self::write_values(&transaction, &vault_id, &vmk, &id, version + 1, values, ask)?;
             transaction.execute("UPDATE secrets SET version = ?2, sealed_dek = ?3 WHERE id = ?1", params![id, version + 1, sealed_dek])?;
         }
         transaction.commit()?;
@@ -981,11 +1054,17 @@ impl Vault {
 
     /// A secret's values, decrypted.
     fn values_of(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str) -> Result<Vec<Value>, VaultError> {
-        let (version, sealed_dek): (u32, Vec<u8>) =
-            db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], crate::store::row2)?;
+        let (version, sealed_dek, ask, name): (u32, Vec<u8>, bool, String) =
+            db.query_row("SELECT version, sealed_dek, ask, name FROM secrets WHERE id = ?1", [id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
         let version = version.to_string();
-        let corrupt = || VaultError::Invalid(format!("The secret {id} can't be opened: the vault was changed outside Claktory."));
-        let dek = crypto::open_key(vmk, &sealed_dek, &aad(&["dek", vault_id, id, &version])).ok_or_else(corrupt)?;
+        let corrupt = || VaultError::Invalid(format!("The secret {name} can't be opened: the vault was changed outside Claktory."));
+        let (dek, older) = open_dek(vmk, &sealed_dek, vault_id, id, &version, ask).ok_or_else(corrupt)?;
+        if older {
+            let resealed = crypto::seal(vmk, dek.as_slice(), &dek_aad(vault_id, id, &version, true));
+            db.execute("UPDATE secrets SET sealed_dek = ?2 WHERE id = ?1 AND sealed_dek = ?3", params![id, resealed, sealed_dek])?;
+        }
         let mut statement = db.prepare("SELECT name, file, sealed_value FROM variables WHERE secret = ?1 ORDER BY position")?;
         let rows = statement.query_map([id], crate::store::row3::<String, bool, Vec<u8>>)?.collect::<Result<Vec<_>, _>>()?;
         let mut values = Vec::with_capacity(rows.len());
@@ -1081,7 +1160,7 @@ impl Vault {
         let grant_key = Self::grant_key(inner).ok();
         let mut secrets = Vec::new();
         let mut statement = db.prepare(
-            "SELECT id, name, description, version, owner, created, updated, last_used_by, last_used FROM secrets ORDER BY name COLLATE NOCASE",
+            "SELECT id, name, description, version, owner, created, updated, last_used_by, last_used, ask FROM secrets ORDER BY name COLLATE NOCASE",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(v1::SecretInfo {
@@ -1094,6 +1173,7 @@ impl Vault {
                 updated_ms: row.get(6)?,
                 last_used_by: row.get(7)?,
                 last_used_ms: row.get(8)?,
+                ask_each_time: row.get(9)?,
                 ..v1::SecretInfo::default()
             })
         })?;
@@ -1140,6 +1220,7 @@ impl Vault {
             secrets,
             // Requests show only in the conversation of the agent that asked.
             proposals: connections::pending_proposals(db)?,
+            recovery_key_unconfirmed: Self::recovery_unconfirmed(inner)?,
             ..v1::VaultState::default()
         };
         Ok((state, recent))
@@ -1172,12 +1253,12 @@ impl Vault {
         let read = || -> Result<BTreeMap<String, String>, VaultError> {
             let db = Self::db(&inner)?;
             let mut statement = db.prepare(
-                "SELECT secrets.id, secrets.name, secrets.description FROM grants JOIN secrets ON secrets.id = grants.secret
+                "SELECT secrets.id, secrets.name, secrets.description, secrets.ask FROM grants JOIN secrets ON secrets.id = grants.secret
                  WHERE grants.agent = ?1 ORDER BY secrets.name COLLATE NOCASE",
             )?;
-            let rows = statement.query_map([agent], crate::store::row3::<String, String, String>)?.collect::<Result<Vec<_>, _>>()?;
+            let rows = statement.query_map([agent], crate::store::row4::<String, String, String, bool>)?.collect::<Result<Vec<_>, _>>()?;
             let mut granted = BTreeMap::new();
-            for (id, name, description) in rows {
+            for (id, name, description, ask) in rows {
                 let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else { continue };
                 let variables = db
                     .prepare("SELECT name, file FROM variables WHERE secret = ?1 ORDER BY position")?
@@ -1193,7 +1274,13 @@ impl Vault {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let about = if description.is_empty() { String::new() } else { format!(": {description}") };
-                granted.insert(id, format!("{name} (sets {}){about}", variables.join(", ")));
+                // Told once in its prompt, rather than learning it from a refusal.
+                let asks = if ask {
+                    " It asks the person each time it's used: a command with it isn't run at first, and they're asked to allow that exact command once; when you're told they allowed it, run it again exactly as it was."
+                } else {
+                    ""
+                };
+                granted.insert(id, format!("{name} (sets {}){about}{asks}", variables.join(", ")));
             }
             Ok(granted)
         };
@@ -1213,6 +1300,12 @@ impl Vault {
         let exists: Option<String> = db.query_row("SELECT id FROM secrets WHERE id = ?1", [id], |row| row.get(0)).optional()?;
         if exists.is_none() || !Self::is_granted(&inner, &key, id, grantee)? {
             return Ok(None);
+        }
+        // Nothing can ask the person for an app's use: it can't have it.
+        if Self::asks(db, id)? {
+            return Err(VaultError::Invalid(
+                "This secret asks the person each time it's used, so an app can't use it. Turn Ask each time off for it in Settings → Secrets to let apps use it.".to_owned(),
+            ));
         }
         Ok(Self::values_of(db, &inner.vault_id, vmk, id)?.into_iter().next().map(|value| value.value))
     }
@@ -1263,6 +1356,11 @@ impl Vault {
             let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else {
                 return Err(Refusal::NotYours(asked.trim().to_owned()));
             };
+            if Self::asks(db, &id)? && !Self::is_armed(&inner, agent, &name) {
+                return Err(Refusal::Said(format!(
+                    "{name} asks the person each time it's used, and this command wasn't allowed: run it with bash's `secrets`, and they're asked."
+                )));
+            }
             let public = Self::public_variables(db, &id)?;
             for value in Self::values_of(db, &inner.vault_id, vmk, &id)? {
                 // Its own name, and any other the grant gives it.
@@ -1285,7 +1383,80 @@ impl Vault {
                 }
             }
         }
+        // Allowed once: what was armed for these is used up.
+        drop(inner);
+        let resolved: Vec<String> = variables.iter().map(|variable| variable.secret.clone()).collect();
+        self.lock().armed.retain(|(armed, names, _)| {
+            !(armed == agent && names.iter().any(|name| resolved.iter().any(|done| done.eq_ignore_ascii_case(name.trim()))))
+        });
         Ok(variables)
+    }
+
+    /// Whether the secret (by id) asks the person each time it's used.
+    fn asks(db: &Connection, id: &str) -> Result<bool, VaultError> {
+        Ok(db.query_row("SELECT ask FROM secrets WHERE id = ?1", [id], |row| row.get(0)).optional()?.unwrap_or(false))
+    }
+
+    /// Which of `names` (secrets, by name, any case) ask the person each
+    /// time they're used, by their own names.
+    pub(crate) fn asking(&self, names: &[String]) -> Vec<String> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Vec::new() };
+        names
+            .iter()
+            .filter_map(|asked| {
+                db.query_row("SELECT name FROM secrets WHERE name = ?1 AND ask = 1", [asked.trim()], |row| row.get::<_, String>(0))
+                    .optional()
+                    .ok()
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// The person allowed `agent`'s command with these secrets: resolving
+    /// them is allowed once, within a minute. Only the gate that checked the
+    /// person's approval arms it.
+    pub(crate) fn arm(&self, agent: &str, names: &[String]) {
+        let mut inner = self.lock();
+        let now = now_ms();
+        inner.armed.retain(|(_, _, until)| *until > now);
+        inner.armed.push((agent.to_owned(), names.to_vec(), now + ARMED_MS));
+    }
+
+    fn is_armed(inner: &Inner, agent: &str, name: &str) -> bool {
+        let now = now_ms();
+        inner.armed.iter().any(|(armed, names, until)| {
+            armed == agent && *until > now && names.iter().any(|armed| armed.trim().eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// Ask each time on or off for a secret: its key is sealed again with
+    /// the flag. A connected service's own can't: only Claktory's broker
+    /// uses it, and nothing could ask. Returns its name.
+    pub(crate) fn set_ask_each_time(&self, id: &str, ask: bool) -> Result<String, VaultError> {
+        self.with_unlocked_transaction(|transaction, vault_id, vmk| {
+            let (id, name) = Self::secret_id(transaction, id)?;
+            if Self::kind_of(transaction, &id)? == connections::KIND_CONNECTION {
+                return Err(VaultError::Invalid(format!(
+                    "{name} is a connected service: only Claktory uses it, to make secrets. Set Ask each time on the secrets made from it."
+                )));
+            }
+            let (version, sealed, was): (u32, Vec<u8>, bool) =
+                transaction.query_row("SELECT version, sealed_dek, ask FROM secrets WHERE id = ?1", [&id], crate::store::row3)?;
+            if was == ask {
+                return Ok(name);
+            }
+            let version = version.to_string();
+            let (dek, _) = open_dek(vmk, &sealed, vault_id, &id, &version, was).ok_or_else(|| {
+                VaultError::Invalid(format!("The secret {name} can't be opened: the vault was changed outside Claktory."))
+            })?;
+            let resealed = crypto::seal(vmk, dek.as_slice(), &dek_aad(vault_id, &id, &version, ask));
+            transaction.execute(
+                "UPDATE secrets SET ask = ?2, sealed_dek = ?3, updated = ?4 WHERE id = ?1",
+                params![id, ask, resealed, now_ms()],
+            )?;
+            Ok(name)
+        })
     }
 
     /// Every value in the vault, to hide in what agents and the app are
@@ -1344,6 +1515,18 @@ impl Vault {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_hint_is_the_end_of_the_value_not_of_its_armor_or_newline() {
+        assert_eq!(hint("a-token-of-some-length\n"), "ngth");
+        assert_eq!(hint("short\n"), "");
+        let armor = |edge: &str| format!("-----{edge} {}-----", "PRIVATE KEY");
+        let pem = format!("{}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nBKcwggSjAgEAAoIBAQC7abcd\n{}\n", armor("BEGIN"), armor("END"));
+        assert_eq!(hint(&pem), "abcd");
+        let made = generate::make(generate::SSH_ED25519, "k").expect("made");
+        let fingerprint = ssh_key::PublicKey::from_openssh(&made.public).expect("public").fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        assert_eq!(hint(&made.private), fingerprint[fingerprint.len() - 4..]);
+    }
+
     const CHEAP: &str = "argon2id m=1024 t=1 p=1";
 
     fn temp() -> PathBuf {
@@ -1371,6 +1554,70 @@ mod tests {
             }
             None => false,
         }
+    }
+
+    #[test]
+    fn an_ask_each_time_secret_goes_only_to_an_allowed_command_once() {
+        let dir = temp();
+        let vault = vault(&dir);
+        vault.create(Some("correct horse battery"), false).expect("create");
+        let id = vault.create_secret("AWS", "Deploys.", &[value("AWS_SECRET", "wJalrXUtnFEMI-K7MDENG")], "").expect("secret");
+        vault.grant(&id, "bo", "").expect("grant");
+        vault.grant(&id, "app:deploy", "").expect("grant");
+        let names = vec!["aws".to_owned()];
+        assert!(vault.resolve("bo", &names).is_ok(), "off, it's given as before");
+        assert!(vault.asking(&names).is_empty());
+
+        assert_eq!(vault.set_ask_each_time(&id, true).expect("on"), "AWS");
+        assert_eq!(vault.asking(&names), ["AWS"]);
+        let refused = vault.resolve("bo", &names).expect_err("not allowed");
+        assert!(refused.starts_with("AWS asks the person each time it's used"), "{refused}");
+        assert!(vault.value_for(&id, "app:deploy").is_err(), "no app can ask the person");
+        // Armed by the gate: once, and only for that agent.
+        vault.arm("bo", &names);
+        assert!(vault.resolve("lea", &names).is_err());
+        assert_eq!(vault.resolve("bo", &names).expect("allowed")[0].value.as_str(), "wJalrXUtnFEMI-K7MDENG");
+        assert!(vault.resolve("bo", &names).is_err(), "used up");
+        assert!(vault.granted("bo").values().next().expect("granted").contains("It asks the person each time"));
+        // Its values stay hidden in output all the same.
+        assert!(vault.every_variable().iter().any(|variable| variable.value.as_str() == "wJalrXUtnFEMI-K7MDENG"));
+
+        // Changed in vault.db alone, it opens for no one, rather than for everyone.
+        let db = Connection::open(dir.join("vault/vault.db")).expect("db");
+        db.execute("UPDATE secrets SET ask = 0", []).expect("flip");
+        drop(db);
+        let flipped = vault.resolve("bo", &names).expect_err("unusable");
+        assert!(flipped.contains("changed outside Claktory"), "{flipped}");
+        let db = Connection::open(dir.join("vault/vault.db")).expect("db");
+        db.execute("UPDATE secrets SET ask = 1", []).expect("back");
+        drop(db);
+
+        // Changed by a Claktory from before Ask each time (one an update went
+        // back to): its key isn't sealed with "ask", but its flag still asks.
+        // It opens, still asks, and is sealed with "ask" again.
+        vault.set_ask_each_time(&id, false).expect("off");
+        let db = Connection::open(dir.join("vault/vault.db")).expect("db");
+        db.execute("UPDATE secrets SET ask = 1", []).expect("an older Claktory's change");
+        drop(db);
+        assert!(vault.resolve("bo", &names).is_err(), "it still asks");
+        vault.arm("bo", &names);
+        assert_eq!(vault.resolve("bo", &names).expect("allowed")[0].value.as_str(), "wJalrXUtnFEMI-K7MDENG");
+        let db = Connection::open(dir.join("vault/vault.db")).expect("db");
+        db.execute("UPDATE secrets SET ask = 0", []).expect("flip");
+        drop(db);
+        assert!(vault.resolve("bo", &names).expect_err("sealed with ask again").contains("changed outside Claktory"));
+        let db = Connection::open(dir.join("vault/vault.db")).expect("db");
+        db.execute("UPDATE secrets SET ask = 1", []).expect("back");
+        drop(db);
+
+        // Off again, it's given as before; new values keep the flag.
+        vault.set_ask_each_time(&id, false).expect("off");
+        assert!(vault.resolve("bo", &names).is_ok());
+        vault.set_ask_each_time(&id, true).expect("on");
+        vault.update_secret(&id, "AWS", "Deploys.", Some(&[value("AWS_SECRET", "a-new-value-123456")])).expect("update");
+        assert!(vault.resolve("bo", &names).is_err());
+        vault.arm("bo", &names);
+        assert_eq!(vault.resolve("bo", &names).expect("allowed")[0].value.as_str(), "a-new-value-123456");
     }
 
     #[test]

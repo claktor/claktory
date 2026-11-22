@@ -1,7 +1,7 @@
 //! Chats (#213): the person's one-off conversations beside their agents,
 //! with web search and a way to propose to Rivet, and nothing else.
 
-use crate::common::{Client, MODEL, Scripted, apply_request, start, start_with, temp_dir};
+use crate::common::{Client, MODEL, Scripted, start, start_with, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, ProposalState, client_message, entry::Kind, server_message::Body};
 
 /// What a client shows of the chats: the Workspace, and the shown chat's
@@ -338,8 +338,16 @@ async fn a_chat_proposes_to_rivet_who_gets_it_signed_with_the_chats_title() {
     let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
     let text: String = db.query_row("SELECT text FROM messages WHERE agent = 'rivet'", [], |row| row.get(0)).expect("Rivet's message");
     assert_eq!(text, format!("Yes please.\n\nA chat (\"Fried chicken\") proposes:\n\n{wanted}"));
+    // Only the Workspace: Rivet, at work on the message, may stream its
+    // entries ahead of the transcript this view never had.
     let mut view = crate::common::View { workspace: chats.workspace.clone(), ..Default::default() };
-    apply_request(&mut client, &mut view, select_agent("rivet")).await;
+    let reply = client.request(select_agent("rivet")).await;
+    assert!(matches!(reply.body, Body::Ack(_)), "{:?}", reply.body);
+    for body in reply.events.iter().filter_map(|event| event.body.as_ref()) {
+        if matches!(body, Body::Workspace(_) | Body::WorkspacePatch(_)) {
+            view.apply(body);
+        }
+    }
     assert_eq!(view.workspace.selected_chat_id, "");
 }
 

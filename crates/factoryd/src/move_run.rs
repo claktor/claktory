@@ -142,6 +142,9 @@ pub(crate) struct Moving {
     view: Mutex<Option<v1::Move>>,
     control: Mutex<Option<mpsc::UnboundedSender<Control>>>,
     freeze: Arc<AtomicBool>,
+    /// The person confirmed the digits here (ConfirmMove), for an agent
+    /// that started it to pass on to the other computer.
+    confirmed_here: AtomicBool,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -173,6 +176,11 @@ impl Moving {
         locked(&self.view).as_ref().map(v1::Move::phase)
     }
 
+    /// The person confirmed the digits here, for the move under way.
+    pub(crate) fn confirmed_here(&self) -> bool {
+        self.confirmed_here.load(Ordering::Relaxed)
+    }
+
     fn set(&self, change: impl FnOnce(&mut v1::Move)) {
         let mut view = locked(&self.view);
         let view = view.get_or_insert_with(v1::Move::default);
@@ -184,6 +192,7 @@ impl Moving {
     fn clear(&self) {
         *locked(&self.view) = None;
         *locked(&self.control) = None;
+        self.confirmed_here.store(false, Ordering::Relaxed);
     }
 }
 
@@ -208,6 +217,13 @@ fn place(home: &Home) -> Place {
 
 /// StartMove.
 pub(crate) fn start(factory: &Arc<Factory>, code: &str) -> Result<(), RequestError> {
+    start_by(factory, code, "")
+}
+
+/// StartMove by the person, or by `agent` (Rivet's move_claktory): the move
+/// says so (`Move.started_by_agent_id`), and the person confirms its digits
+/// in the app all the same.
+pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str) -> Result<(), RequestError> {
     if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
         return Err(refused("A move is already under way."));
     }
@@ -229,15 +245,16 @@ pub(crate) fn start(factory: &Arc<Factory>, code: &str) -> Result<(), RequestErr
     }
     let _ = std::fs::remove_file(failed_path(&factory.home));
     factory.moving.clear();
-    begin(factory, code, None);
+    begin(factory, code, None, agent);
     Ok(())
 }
 
 /// Starts the driver: a new move, or one a restart interrupted while copying.
-fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>) {
+fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agent: &str) {
     let (control, controls) = mpsc::unbounded_channel();
     *locked(&factory.moving.control) = Some(control);
     factory.moving.freeze.store(false, Ordering::Relaxed);
+    factory.moving.confirmed_here.store(false, Ordering::Relaxed);
     factory.moving.set(|view| {
         *view = v1::Move {
             phase: Phase::Connecting.into(),
@@ -246,6 +263,7 @@ fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>) {
             target_arch: code.arch.clone(),
             target_version: code.version.clone(),
             step_text: format!("Connecting to {}…", code.machine),
+            started_by_agent_id: agent.to_owned(),
             ..v1::Move::default()
         };
         if let Some(saved) = &resumed {
@@ -279,7 +297,11 @@ pub(crate) fn confirm(factory: &Arc<Factory>) -> Result<(), RequestError> {
     if factory.moving.phase() != Some(Phase::Confirm) {
         return Err(refused("There are no digits to confirm now."));
     }
-    send(factory, Control::Confirm)
+    send(factory, Control::Confirm)?;
+    factory.moving.confirmed_here.store(true, Ordering::Relaxed);
+    factory.moving.set(|view| view.confirmed_here = true);
+    factory.broadcast_workspace(&factory.lock());
+    Ok(())
 }
 
 /// CancelMove.
@@ -321,7 +343,7 @@ pub fn resume(factory: &Arc<Factory>) {
         return;
     };
     tracing::info!(target = %saved.target_machine, round = saved.round, "carrying on moving this Claktory");
-    begin(factory, code, Some(saved));
+    begin(factory, code, Some(saved), "");
 }
 
 /// The app's side of the person, in the normal backend.
@@ -492,13 +514,22 @@ async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, m
     };
     let target = link.target.clone();
     let machine = target.machine.clone();
+    // Whether the digits were confirmed already is this computer's to know
+    // (its saved move), never the target's to say: a target claiming a move
+    // this computer never confirmed would skip the person's yes.
+    let confirmed_before = resumed.is_some();
+    if target.resumed && !confirmed_before {
+        let why = format!("{machine} says it knows a move this computer never started, so nothing was moved.");
+        link.fail(&why).await;
+        return fail(why);
+    }
     let mut saved =
         resumed.unwrap_or_else(|| Saved { code: code.text(), export_id: move_export::new_export_id(), round: 1, ..Saved::default() });
     saved.target_machine.clone_from(&machine);
     saved.target_os.clone_from(&target.os);
     saved.target_arch.clone_from(&target.arch);
     saved.target_version.clone_from(&target.version);
-    if !target.resumed {
+    if !confirmed_before {
         let app = App { factory: weak.clone(), freeze: freeze.clone(), saved: saved.clone(), shown_at: None };
         app.update(|view| {
             view.phase = Phase::Confirm.into();
@@ -507,19 +538,32 @@ async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, m
             view.target_arch.clone_from(&target.arch);
             view.target_version.clone_from(&target.version);
             view.digits.clone_from(&target.digits);
+            view.target_address.clone_from(&target.address);
             view.step_text = format!("Check that {machine} shows {}.", target.digits);
         });
         let (mut ours, mut theirs) = (false, false);
+        // A direct path often comes a moment after the handshake: the
+        // address shown follows it while the digits wait.
+        let mut look = tokio::time::interval(Duration::from_secs(1));
         while !(ours && theirs) {
             enum Heard {
                 Person(Option<Control>),
                 Target(Result<(), Problem>),
+                Look,
             }
             let heard = tokio::select! {
                 control = controls.recv() => Heard::Person(control),
                 confirmed = link.target_confirmed(), if !theirs => Heard::Target(confirmed),
+                _ = look.tick() => Heard::Look,
             };
             match heard {
+                Heard::Look => {
+                    let address = link.address();
+                    if !address.is_empty() && address != link.target.address {
+                        link.target.address.clone_from(&address);
+                        app.update(|view| view.target_address = address);
+                    }
+                }
                 Heard::Person(Some(Control::Confirm)) if !ours => {
                     if let Err(problem) = link.send_confirmed().await {
                         return fail(problem.text(&machine));
@@ -604,6 +648,7 @@ async fn drive(weak: Weak<Factory>, code: ReceiveCode, resumed: Option<Saved>, m
     tokio::time::sleep(Duration::from_millis(300)).await;
     factory.finish_writes(Duration::from_secs(5)).await;
     factory.vault.hand_over(false);
+    crate::account::analytics::backend_stopped(&factory.home);
     std::process::exit(0);
 }
 
@@ -860,7 +905,7 @@ async fn answer(socket: &mut Socket, reply_to: u64, body: v1::server_message::Bo
 }
 
 fn error(why: impl Into<String>) -> v1::server_message::Body {
-    v1::server_message::Body::Error(v1::Error { code: v1::ErrorCode::InvalidRequest.into(), message: why.into() })
+    v1::server_message::Body::Error(v1::Error { code: v1::ErrorCode::InvalidRequest.into(), message: why.into(), ..Default::default() })
 }
 
 fn workspace(view: &v1::Move) -> v1::server_message::Body {
@@ -909,7 +954,11 @@ async fn serve_client(
     if arrival.token.is_empty() || !crate::move_wire::same(&knock.token, &arrival.token) {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let why = "This Claktory is moving to another computer; only this computer's own app can follow it.";
-        let refusal = v1::server_message::Body::Error(v1::Error { code: v1::ErrorCode::Unauthorized.into(), message: why.into() });
+        let refusal = v1::server_message::Body::Error(v1::Error {
+            code: v1::ErrorCode::Unauthorized.into(),
+            message: why.into(),
+            ..Default::default()
+        });
         return answer(&mut socket, hello.id, refusal).await;
     }
     let welcome = v1::Welcome {

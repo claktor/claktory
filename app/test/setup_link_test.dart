@@ -5,8 +5,10 @@
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/pairing.dart' show PairingWait;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scope.dart';
 import 'package:factory_app/setup_link.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -29,6 +31,7 @@ void main() {
 
   tearDown(() {
     while (setupLinks.take() != null) {}
+    //X
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(setupLinks.channel, null);
   });
@@ -89,6 +92,75 @@ void main() {
     await settle(tester);
     expect(said.length, count);
     expect(note, findsNothing);
+  });
+
+  // As the app shows them (main.dart): each Claktory in a window of its
+  // own, with its own backend, so connecting opens another window.
+  testWidgets('it follows the Claktory connecting into its own window', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(Workspace());
+    final target = parsePairingCode(_code)!;
+    final box = RecordingBackend(localBackend: false)..connectTo(target);
+    final shown = ValueNotifier<RecordingBackend>(harness.backend);
+    harness.connections.addListener(() {
+      if (harness.connections.current == target) shown.value = box;
+    });
+    await harness.show(
+      tester,
+      home: ValueListenableBuilder(
+        valueListenable: shown,
+        builder: (context, backend, _) {
+          final scope = AppScope.scope(context);
+          return AppScope(
+            backend: backend,
+            login: scope.login,
+            page: scope.page,
+            appBuild: scope.appBuild,
+            drafts: scope.drafts,
+            history: scope.history,
+            connections: scope.connections,
+            child: SetupLinkOpener(
+              key: ObjectKey(backend),
+              deviceEndpoint: (key, target) async => 'e1',
+              child: const SizedBox.expand(),
+            ),
+          );
+        },
+      ),
+    );
+    setupLinks.receive(_code);
+    await settle(tester);
+    expect(shown.value, box);
+    expect(said.last, {'state': 'connecting', 'name': 'box'});
+
+    box.pairing.value = PairingWait(
+      PairingPending(deviceId: 'd7', name: 'Mac'),
+      '4821',
+    );
+    await settle(tester);
+    expect(said.last, {
+      'state': 'waiting',
+      'name': 'box',
+      'device_id': 'd7',
+      'number': '4821',
+      'endpoint_id': 'e1',
+    });
+
+    // The code ran out before it was allowed: the window says so, and so
+    // does the status.
+    box.pairing.value = null;
+    box.refused.value = 'The code expired before this Mac used it.';
+    await settle(tester);
+    expect(said.last, {
+      'state': 'failed',
+      'reason': 'refused',
+      'message': 'The code expired before this Mac used it.',
+    });
+    expect(states(), ['connecting', 'waiting', 'failed']);
+    //Y
   });
 
   testWidgets('a Mac set up already takes none', (tester) async {

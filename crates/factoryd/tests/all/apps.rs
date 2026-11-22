@@ -86,7 +86,7 @@ fn tar_file(name: &str, content: &[u8]) -> Vec<u8> {
 }
 
 /// A .clapp of `manifest` signed with `key`, as build.sh makes one.
-fn clapp(manifest: &str, wasm: &[u8], key: &SigningKey) -> Vec<u8> {
+pub(crate) fn clapp(manifest: &str, wasm: &[u8], key: &SigningKey) -> Vec<u8> {
     let hex = |bytes: &[u8]| Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     let message = format!("claktory-app-v1\n{}  app.wasm\n{}  manifest.toml\n", hex(wasm), hex(manifest.as_bytes()));
     let signature = key.sign(message.as_bytes());

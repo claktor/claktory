@@ -46,6 +46,13 @@ abstract class PhoneRoutes {
   /// oldest card waiting for the person), else where it was.
   void openConversation(String agentId, {int? seq});
 
+  /// Shows [path] in a viewer over [agentId]'s conversation, as a page:
+  /// a review the agent asked for (#275), say. The agent is chosen and the
+  /// file opened in its layout (its `show`), if it isn't already, then the
+  /// viewer pushed once it's there. True when it's done here; false where
+  /// these routes can't show it, for the caller to open it its own way.
+  bool showFile(String agentId, String path);
+
   /// Keeps the drawer's edge swipe from starting while something else owns
   /// the finger: a recording's hold and slide, a code block or a picture
   /// panned sideways, a selection's handles. Release the hold to give it

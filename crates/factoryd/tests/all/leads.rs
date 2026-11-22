@@ -160,6 +160,7 @@ async fn a_lead_sees_how_its_team_is_set_up_and_no_one_else_does() {
         name: "Cloudflare".into(),
         description: "DNS for the site".into(),
         entries: vec![v1::SecretEntry { variable: "CF_TOKEN".into(), value: "cf-SECRETVALUE".into(), file: false }],
+        ..Default::default()
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();

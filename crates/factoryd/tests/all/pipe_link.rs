@@ -242,6 +242,93 @@ async fn a_message_waits_out_the_peer_being_away_and_a_wrong_secret_gets_nothing
     wait_for(&a, |event| matches!(event, Event::Delivered { pipe, msg_id } if pipe == "pipe" && msg_id == "m1").then_some(())).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_that_cannot_reach_the_inviter_keeps_trying_until_it_can() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    // Short dials, or every failed try would wait the whole 15 s.
+    pipe_link::set_dial(Duration::from_millis(1500));
+    let (code, _) = pipe_link::invite(&a, "p-a", &side("Matt")).await.expect("a code");
+
+    // A gate between the two: closed, the joiner's packets go nowhere, as
+    // when macOS's local-network prompt was denied (#246); open, they flow.
+    let a_port = code_values(&code, "a")
+        .first()
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .expect("an address in the code")
+        .port();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{a_port}").parse().expect("the inviter's address");
+    let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("a proxy socket");
+    let proxy_port = proxy.local_addr().expect("the proxy's address").port();
+    {
+        let open = open.clone();
+        tokio::spawn(async move {
+            let mut joiner: Option<std::net::SocketAddr> = None;
+            let mut buf = vec![0u8; 65536];
+            loop {
+                let Ok((n, from)) = proxy.recv_from(&mut buf).await else { return };
+                if !open.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                if from == a_addr {
+                    if let Some(to) = joiner {
+                        let _ = proxy.send_to(&buf[..n], to).await;
+                    }
+                } else {
+                    joiner = Some(from);
+                    let _ = proxy.send_to(&buf[..n], a_addr).await;
+                }
+            }
+        });
+    }
+
+    // The code the joiner gets points only at the proxy.
+    let kept: Vec<&str> = code.split('&').filter(|part| !part.starts_with("a=")).collect();
+    let doctored = format!("{}&a=127.0.0.1%3A{proxy_port}", kept.join("&"));
+
+    // The joiner is a full Claktory: the retry under test lives in the
+    // pipes layer behind AcceptPipeInvite, above pipe_link::join.
+    let (addr_b, _b) = crate::common::start(&dir_b).await;
+    _b.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr_b).await;
+    let mut view = View { workspace, ..View::default() };
+    let dead_relay = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(dead_relay.clone())).await;
+    apply_request(&mut client, &mut view, crate::common::create_project("Site", &dir_b.join("site"))).await;
+    let project = view.workspace.projects.first().expect("the project").id.clone();
+    let accept = v1::AcceptPipeInvite {
+        code: doctored,
+        project_id: project,
+        name: String::new(),
+        purpose: "testing".to_owned(),
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, Request::AcceptPipeInvite(accept)).await;
+    view.follow(&mut client, |view| view.workspace.pipes.iter().any(|pipe| pipe.state() == v1::PipeState::Joining)).await;
+
+    // Dials fail while the gate is closed; that must not close the pipe.
+    // Before the fix, the first failed dial closed it for good.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(dead_relay)).await;
+    let pipe = view.workspace.pipes.first().expect("the pipe");
+    assert_eq!(pipe.state(), v1::PipeState::Joining, "a failed dial should leave the pipe joining and retrying");
+    assert!(!pipe.offline_reason.is_empty() && pipe.offline_since_ms > 0, "the pipe says why it can't connect yet: {pipe:?}");
+
+    // The way opens (the person allowed the local network, say): the next
+    // retry connects, and both sides reach the digits step.
+    open.store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        view.follow(&mut client, |view| view.workspace.pipes.iter().any(|pipe| pipe.state() == v1::PipeState::Approval)),
+    )
+    .await
+    .expect("the retried join should connect once the way is open");
+    let pipe = view.workspace.pipes.first().expect("the pipe");
+    assert!(pipe.offline_reason.is_empty() && pipe.offline_since_ms == 0, "connected, the reason clears: {pipe:?}");
+    wait_for(&a, |event| matches!(event, Event::Knocked { pipe, .. } if pipe == "p-a").then_some(())).await;
+}
+
 // -- Hostile-peer regressions: a pipe's other end is an outside party --
 
 /// What a frame's signature covers (pipe_link's LABEL; a change there is
@@ -372,11 +459,12 @@ async fn a_stranger_gets_no_buffering_and_a_peer_cannot_point_us_at_ourselves() 
     assert!(relays.contains("https://relay.example/"), "{relays}");
     assert!(addresses.contains("203.0.113.5:4433"), "{addresses}");
 
-    // ...and an http relay with a loopback address changes nothing.
+    // ...and an http relay with a loopback address changes nothing, the
+    // loopback mapped into IPv6 included.
     let evil = serde_json::json!({
         "v": 1, "wire": wire, "kind": "ping", "sent_at": 1,
-        "relays": ["http://127.0.0.1:9/"], "addresses": ["127.0.0.1:22"],
+        "relays": ["http://127.0.0.1:9/"], "addresses": ["127.0.0.1:22", "[::ffff:127.0.0.1]:22"],
     });
     assert_eq!(ask(&connection, &raw_frame(&key, &evil)).await["code"], "ok");
-    assert_eq!(stored_route(&dir_a, "p-a"), (relays, addresses), "the peer's http relay and loopback address were ignored");
+    assert_eq!(stored_route(&dir_a, "p-a"), (relays, addresses), "the peer's http relay and loopback addresses were ignored");
 }

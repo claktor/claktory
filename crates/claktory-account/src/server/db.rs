@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::{Value, json};
 
 use super::geo::Location;
-use crate::protocol::{Activity, CheckIn, Counts, PublicStats, Usage, hex, sha256};
+use crate::protocol::{Activity, CheckIn, Counts, Health, PublicStats, Usage, hex, sha256};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -36,7 +36,12 @@ CREATE TABLE IF NOT EXISTS claktories (
     city TEXT,
     display_name TEXT,
     color TEXT,
-    relays TEXT
+    relays TEXT,
+    pipes INTEGER,
+    secrets INTEGER,
+    monitors INTEGER,
+    model_connected INTEGER,
+    first_run INTEGER
 );
 CREATE INDEX IF NOT EXISTS claktories_account ON claktories (account_id);
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -143,6 +148,33 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
 );
+-- A Claktory's paired devices at its last check-in, counted by system,
+-- kind and app version (never named).
+CREATE TABLE IF NOT EXISTS claktory_devices (
+    claktory_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    app_version TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (claktory_id, platform, kind, app_version)
+);
+-- The most of a Claktory's devices that connected in a period, per day.
+CREATE TABLE IF NOT EXISTS devices_connected (
+    claktory_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (claktory_id, day)
+);
+-- Backend versions rolled back after an update, or stopped without
+-- stopping cleanly, per day (the period's start).
+CREATE TABLE IF NOT EXISTS health (
+    claktory_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    version TEXT NOT NULL,
+    rolled_back INTEGER NOT NULL,
+    crashes INTEGER NOT NULL,
+    PRIMARY KEY (claktory_id, day, version)
+);
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
@@ -160,21 +192,49 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    conn.execute_batch(SCHEMA)?;
-    if version == 1 {
-        // The first version's claktories had no counts or location.
-        for column in ["agents INTEGER", "projects INTEGER", "devices INTEGER", "country TEXT", "region TEXT", "city TEXT"] {
-            conn.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
+    // One transaction (SQLite's DDL is transactional): a crash midway
+    // leaves the database as it was.
+    let tx = conn.unchecked_transaction()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    tx.execute_batch(SCHEMA)?;
+    if version >= 1 {
+        // Columns added since the first version: the first had no counts or
+        // location; before devices signed in, a Claktory sent no name, color
+        // or relays; before #119, check-ins counted no pipes, secrets or
+        // monitors, nor how far setup got. Each is added only when missing,
+        // so a database an older service went back to (which sets its own,
+        // lower user_version) opens again in this one.
+        let mut have = std::collections::HashSet::new();
+        {
+            let mut columns = tx.prepare("SELECT name FROM pragma_table_info('claktories')")?;
+            for name in columns.query_map([], |row| row.get::<_, String>(0))? {
+                have.insert(name?);
+            }
+        }
+        for column in [
+            "agents INTEGER",
+            "projects INTEGER",
+            "devices INTEGER",
+            "country TEXT",
+            "region TEXT",
+            "city TEXT",
+            "display_name TEXT",
+            "color TEXT",
+            "relays TEXT",
+            "pipes INTEGER",
+            "secrets INTEGER",
+            "monitors INTEGER",
+            "model_connected INTEGER",
+            "first_run INTEGER",
+        ] {
+            let name = column.split(' ').next().unwrap_or(column);
+            if !have.contains(name) {
+                tx.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
+            }
         }
     }
-    if (1..=2).contains(&version) {
-        // Before devices signed in, a Claktory sent no name, color or relays.
-        for column in ["display_name TEXT", "color TEXT", "relays TEXT"] {
-            conn.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
-        }
-    }
-    conn.pragma_update(None, "user_version", 3)?;
+    tx.pragma_update(None, "user_version", 4)?;
+    tx.commit()?;
     Ok(conn)
 }
 
@@ -380,7 +440,7 @@ pub struct Claktory {
 }
 
 const CLAKTORY: &str = "SELECT id, account_id, name, backend_key, epoch, created, last_seen, version, platform, revoked_at,
-    agents, projects, devices, country, region, city, display_name, color, relays FROM claktories";
+    agents, projects, devices, country, region, city, display_name, color, relays, pipes, secrets, monitors FROM claktories";
 
 fn claktory_row(row: &rusqlite::Row) -> rusqlite::Result<Claktory> {
     Ok(Claktory {
@@ -395,7 +455,14 @@ fn claktory_row(row: &rusqlite::Row) -> rusqlite::Result<Claktory> {
         platform: row.get(8)?,
         revoked_at: row.get(9)?,
         counts: match (row.get::<_, Option<u32>>(10)?, row.get::<_, Option<u32>>(11)?, row.get::<_, Option<u32>>(12)?) {
-            (Some(agents), Some(projects), Some(devices)) => Some(Counts { agents, projects, devices }),
+            (Some(agents), Some(projects), Some(devices)) => Some(Counts {
+                agents,
+                projects,
+                devices,
+                pipes: row.get::<_, Option<u32>>(19)?.unwrap_or(0),
+                secrets: row.get::<_, Option<u32>>(20)?.unwrap_or(0),
+                monitors: row.get::<_, Option<u32>>(21)?.unwrap_or(0),
+            }),
             _ => None,
         },
         location: Location { country: row.get(13)?, region: row.get(14)?, city: row.get(15)? },
@@ -581,9 +648,27 @@ pub fn check_in(
     tx.execute("UPDATE claktories SET version = ?2, platform = ?3 WHERE id = ?1", params![claktory.id, body.version, body.platform])?;
     if let Some(counts) = body.counts {
         tx.execute(
-            "UPDATE claktories SET agents = ?2, projects = ?3, devices = ?4 WHERE id = ?1",
-            params![claktory.id, counts.agents, counts.projects, counts.devices],
+            "UPDATE claktories SET agents = ?2, projects = ?3, devices = ?4, pipes = ?5, secrets = ?6, monitors = ?7 WHERE id = ?1",
+            params![claktory.id, counts.agents, counts.projects, counts.devices, counts.pipes, counts.secrets, counts.monitors],
         )?;
+    }
+    // Reached once, kept: a later check-in can't undo a step.
+    if let Some(setup) = body.setup {
+        tx.execute(
+            "UPDATE claktories SET model_connected = max(coalesce(model_connected, 0), ?2), first_run = max(coalesce(first_run, 0), ?3)
+             WHERE id = ?1",
+            params![claktory.id, setup.model_connected, setup.first_run],
+        )?;
+    }
+    if let Some(devices) = &body.devices {
+        tx.execute("DELETE FROM claktory_devices WHERE claktory_id = ?1", params![claktory.id])?;
+        for device in devices {
+            tx.execute(
+                "INSERT INTO claktory_devices (claktory_id, platform, kind, app_version, count) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (claktory_id, platform, kind, app_version) DO UPDATE SET count = count + excluded.count",
+                params![claktory.id, device.platform, device.kind, device.app_version, device.count],
+            )?;
+        }
     }
     touch(&tx, claktory, location, now)?;
     let mut recorded = 0;
@@ -601,6 +686,16 @@ pub fn check_in(
         }
         for activity in &period.activity {
             add_activity(&tx, &claktory.id, activity)?;
+        }
+        if let Some(connected) = period.devices_connected {
+            tx.execute(
+                "INSERT INTO devices_connected (claktory_id, day, count) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (claktory_id, day) DO UPDATE SET count = max(count, excluded.count)",
+                params![claktory.id, day(period.from), connected],
+            )?;
+        }
+        for health in &period.health {
+            add_health(&tx, &claktory.id, &day(period.from), health)?;
         }
     }
     // Names are kept from any check-in, even a resent period's.
@@ -649,6 +744,18 @@ fn add_usage(conn: &Connection, id: &str, day: &str, usage: &Usage) -> rusqlite:
     Ok(())
 }
 
+const ADD_HEALTH: &str = "ON CONFLICT (claktory_id, day, version) DO UPDATE SET
+    rolled_back = rolled_back + excluded.rolled_back,
+    crashes = crashes + excluded.crashes";
+
+fn add_health(conn: &Connection, id: &str, day: &str, health: &Health) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!("INSERT INTO health (claktory_id, day, version, rolled_back, crashes) VALUES (?1, ?2, ?3, ?4, ?5) {ADD_HEALTH}"),
+        params![id, day, health.version, health.rolled_back, health.crashes],
+    )?;
+    Ok(())
+}
+
 fn add_activity(conn: &Connection, id: &str, activity: &Activity) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
@@ -684,6 +791,16 @@ fn anonymize(conn: &Connection, id: &str) -> rusqlite::Result<()> {
         params![id],
     )?;
     conn.execute("DELETE FROM activity WHERE claktory_id = ?1", params![id])?;
+    conn.execute(
+        &format!(
+            "INSERT INTO health (claktory_id, day, version, rolled_back, crashes)
+             SELECT '', day, version, rolled_back, crashes FROM health WHERE claktory_id = ?1 AND true {ADD_HEALTH}"
+        ),
+        params![id],
+    )?;
+    conn.execute("DELETE FROM health WHERE claktory_id = ?1", params![id])?;
+    conn.execute("DELETE FROM claktory_devices WHERE claktory_id = ?1", params![id])?;
+    conn.execute("DELETE FROM devices_connected WHERE claktory_id = ?1", params![id])?;
     let stand_in = format!("deleted-{}", crate::protocol::b64(&crate::protocol::random_32()[..12]));
     conn.execute("UPDATE seen_days SET claktory_id = ?2, account_id = ?2 WHERE claktory_id = ?1", params![id, stand_in])?;
     conn.execute("DELETE FROM periods WHERE claktory_id = ?1", params![id])?;
@@ -913,6 +1030,36 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
                 })?
                 .collect::<rusqlite::Result<_>>()?
         };
+        let table = |sql: &str, names: &[&str]| -> rusqlite::Result<Vec<Value>> {
+            let mut statement = conn.prepare(sql)?;
+            statement
+                .query_map(params![claktory.id], |row| {
+                    let mut object = serde_json::Map::new();
+                    for (at, name) in names.iter().enumerate() {
+                        let value = match row.get::<_, rusqlite::types::Value>(at)? {
+                            rusqlite::types::Value::Integer(number) => json!(number),
+                            rusqlite::types::Value::Text(text) => json!(text),
+                            _ => Value::Null,
+                        };
+                        object.insert((*name).to_owned(), value);
+                    }
+                    Ok(Value::Object(object))
+                })?
+                .collect()
+        };
+        let devices_now = table(
+            "SELECT platform, kind, app_version, count FROM claktory_devices WHERE claktory_id = ?1 ORDER BY platform, kind, app_version",
+            &["platform", "kind", "app_version", "count"],
+        )?;
+        let devices_connected = table("SELECT day, count FROM devices_connected WHERE claktory_id = ?1 ORDER BY day", &["day", "count"])?;
+        let health = table(
+            "SELECT day, version, rolled_back, crashes FROM health WHERE claktory_id = ?1 ORDER BY day, version",
+            &["day", "version", "rolled_back", "crashes"],
+        )?;
+        let setup: (Option<i64>, Option<i64>) =
+            conn.query_row("SELECT model_connected, first_run FROM claktories WHERE id = ?1", params![claktory.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
         let days: Vec<String> = {
             let mut statement = conn.prepare("SELECT day FROM seen_days WHERE claktory_id = ?1 ORDER BY day")?;
             statement.query_map(params![claktory.id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
@@ -935,6 +1082,10 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "unlocks": unlocks,
             "usage": usage,
             "activity": activity,
+            "setup": {"model_connected": setup.0 == Some(1), "first_run": setup.1 == Some(1)},
+            "devices": devices_now,
+            "devices_connected": devices_connected,
+            "health": health,
             "days_in_touch": days,
         }));
     }

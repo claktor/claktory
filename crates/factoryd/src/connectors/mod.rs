@@ -22,7 +22,7 @@ pub(crate) mod proposals;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::factory::{Factory, RequestError};
+use crate::locking::lock as guard;
 use crate::transcript::now_ms;
 use crate::vault::connections::{ConnectionMeta, Opened};
 use crate::vault::{Value, VaultError};
@@ -463,6 +464,11 @@ pub trait Recipe: Send + Sync {
     }
 }
 
+/// A trimmed environment setting; absent, non-Unicode and empty values are unset.
+fn setting(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
 /// The recipes built in.
 fn built_in() -> Vec<Arc<dyn Recipe>> {
     let mut recipes: Vec<Arc<dyn Recipe>> = Vec::new();
@@ -548,10 +554,6 @@ impl Default for Broker {
             retired: Mutex::new(Vec::new()),
         }
     }
-}
-
-fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn random_text<const N: usize>() -> Zeroizing<String> {

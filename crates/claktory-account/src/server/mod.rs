@@ -1,6 +1,7 @@
 //! The service: an HTTP server over one SQLite file and one secrets file.
 
 mod api;
+mod apps;
 pub mod db;
 mod devices;
 pub mod geo;
@@ -48,8 +49,9 @@ const IP_PER_MINUTE: u32 = 30;
 pub struct Config {
     /// Where the account page is, as emails write it.
     pub account_page: String,
-    /// Where the service is, as emails link to it: its mark is there, at
-    /// `/mark.png`.
+    /// Where the service is. Emails no longer load its mark (`/mark.png`,
+    /// still served for those sent before); kept so `--public-url` still
+    /// starts it.
     pub public_url: String,
     /// The domain emails come from: code@ and notices@ it.
     pub mail_domain: String,
@@ -69,6 +71,10 @@ pub struct Config {
     /// An offline root's word for the service key, served at well-known
     /// (`--service-key-statement`).
     pub service_key_statement: Option<protocol::SignedStatement>,
+    /// The user-apps worker: its socket (`--user-apps`) and its user
+    /// (`--user-apps-uid`), which whatever listens there must run as.
+    /// Without one, app routes answer 503.
+    pub user_apps: Option<UserApps>,
 }
 
 impl Default for Config {
@@ -83,8 +89,16 @@ impl Default for Config {
             locator: None,
             relays: Vec::new(),
             service_key_statement: None,
+            user_apps: None,
         }
     }
+}
+
+/// Where the user-apps worker listens, and as whom.
+#[derive(Clone, Debug)]
+pub struct UserApps {
+    pub socket: std::path::PathBuf,
+    pub uid: u32,
 }
 
 pub struct Service {
@@ -270,6 +284,7 @@ impl Service {
             (&Method::POST, "/v1/devices/assertion") => devices::assertion(self, call),
             (&Method::GET, "/v1/relay/allowlist") => api::allowlist(self, call),
             (&Method::GET, "/v1/stats/public") => api::public_stats(self),
+            (_, path) if path.starts_with("/v1/apps/") => apps::call(self, call).await,
             (&Method::GET | &Method::HEAD, "/") => Ok(web::root()),
             (_, path) if path == "/account" || path.starts_with("/account/") => Ok(web::page(self, call).await),
             _ => Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "There's nothing here.")),

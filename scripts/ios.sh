@@ -69,7 +69,13 @@ if $dev; then
     -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles array" \
     -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon76x76" \
     -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles:1 string AppIcon83.5x83.5" "$plist"
-  codesign --force --sign - "$app"
+  # Its notification extension's id must start with the app's.
+  appex="$app/PlugIns/NotificationService.appex"
+  if [ -d "$appex" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $id.NotificationService" "$appex/Info.plist"
+    codesign --force --sign - --preserve-metadata=entitlements "$appex"
+  fi
+  codesign --force --sign - --preserve-metadata=entitlements "$app"
 fi
 echo "Built $app ($id)"
 

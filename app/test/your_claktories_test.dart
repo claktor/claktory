@@ -1,3 +1,5 @@
+import 'package:factory_app/account.dart' show openAccountPage, privacyPage;
+import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/connections.dart' show parsePairingCode;
 import 'package:factory_app/phone.dart' show PairScreen;
@@ -12,6 +14,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'device_confirm_test.dart' show FakeAccountApi, home, signIn;
 import 'harness.dart';
+
+Future<bool> launchUrlForTests(Uri url) async => true;
 
 void main() {
   Future<(Harness, FakeAccountApi)> phone(
@@ -108,6 +112,49 @@ void main() {
     await tester.tap(find.text('Sign out'));
     await pumpFrames(tester);
     expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+  });
+
+  testWidgets('App Store: a phone signed in with no Claktory yet can delete '
+      'its account, and the email step links the privacy policy', (
+    tester,
+  ) async {
+    final opened = <Uri>[];
+    openAccountPage = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => openAccountPage = launchUrlForTests);
+    await phone(tester, signedIn: true);
+    // Last and apart, under Sign out, a finger's height.
+    final delete = find.text('Delete account…');
+    await tester.ensureVisible(delete);
+    expect(
+      tester
+          .getSize(find.ancestor(of: delete, matching: find.byType(Button)))
+          .height,
+      greaterThanOrEqualTo(44),
+    );
+    expect(
+      tester.getTopLeft(delete).dy,
+      greaterThan(tester.getTopLeft(find.text('Sign out')).dy),
+    );
+    expect(
+      find.text(
+        'Deletes your email and everything linked to it at claktory.com, '
+        'after asking.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(delete);
+    await pumpFrames(tester);
+    expect(opened, [Uri.parse('https://account.claktory.com/account/delete')]);
+
+    await tester.tap(find.text('Sign out'));
+    await pumpFrames(tester);
+    expect(find.text('Delete account…'), findsNothing);
+    await tester.tap(find.text('How Claktory uses your email'));
+    await pumpFrames(tester);
+    expect(opened.last, privacyPage);
   });
 
   testWidgets('a Claktory that wants this device signed in says so, and '

@@ -360,7 +360,11 @@ dependencies = [
  "flutter_rust_bridge",
  "hex",
  "iroh",
+ "jni-sys 0.4.1",
+ "n0-dns-resolver",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

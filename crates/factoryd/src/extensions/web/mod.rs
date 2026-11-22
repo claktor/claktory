@@ -42,10 +42,16 @@ const FETCH: &str = "Read a web page (HTML, Markdown, text, JSON or PDF) as numb
 
 /// What web search and fetch keep for the whole Factory: every agent shares
 /// one IP, so pacing, cooldowns and caches are shared too.
-#[derive(Default)]
 pub(crate) struct State {
     search: search::Searcher,
     fetch: fetch::Fetcher,
+}
+
+impl State {
+    /// Engines' cooldowns and hourly budgets are kept in `<home>/web-search.json`.
+    pub(crate) fn new(home: &crate::home::Home) -> Self {
+        State { search: search::Searcher::new(Some(home.root().join("web-search.json"))), fetch: fetch::Fetcher::default() }
+    }
 }
 
 pub(crate) struct Web;
@@ -59,7 +65,7 @@ impl Extension for Web {
         vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
     }
 
-    fn tools(&self, factory: &Arc<Factory>, _agent: &str) -> Vec<Tool> {
+    fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
         // Optional parameters are the ones left out of `required` (see `super::tool`).
         let search = json!({
             "type": "object",
@@ -83,16 +89,20 @@ impl Extension for Web {
             "additionalProperties": false,
         });
         vec![
-            tool(factory, "web_search", "Search the web", SEARCH, search, |factory, args| Box::pin(run_search(factory, args))),
-            tool(factory, "web_fetch", "Fetch page", FETCH, fetch, |factory, args| Box::pin(run_fetch(factory, args))),
+            tool(factory, agent, "web_search", "Search the web", SEARCH, search, |factory, agent, args| {
+                Box::pin(run_search(factory, agent, args))
+            }),
+            tool(factory, agent, "web_fetch", "Fetch page", FETCH, fetch, |factory, _agent, args| Box::pin(run_fetch(factory, args))),
         ]
     }
 }
 
-type Run = fn(Arc<Factory>, serde_json::Value) -> std::pin::Pin<Box<dyn Future<Output = Result<ToolResult, String>> + Send>>;
+/// A tool's work: for the agent calling it (its id), with its arguments.
+type Run = fn(Arc<Factory>, String, serde_json::Value) -> std::pin::Pin<Box<dyn Future<Output = Result<ToolResult, String>> + Send>>;
 
 fn tool(
     factory: &Arc<Factory>,
+    agent: &str,
     name: &'static str,
     label: &'static str,
     description: &'static str,
@@ -100,6 +110,7 @@ fn tool(
     run: Run,
 ) -> Tool {
     let factory = Arc::downgrade(factory);
+    let agent = agent.to_owned();
     super::tool(
         name,
         label,
@@ -107,9 +118,10 @@ fn tool(
         parameters,
         Arc::new(move |args| {
             let factory = factory.upgrade();
+            let agent = agent.clone();
             Box::pin(async move {
                 let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-                run(factory, args).await.map_err(factory_agent::Error::Other)
+                run(factory, agent, args).await.map_err(factory_agent::Error::Other)
             })
         }),
     )
@@ -126,7 +138,7 @@ struct SearchArgs {
     limit: Option<usize>,
 }
 
-async fn run_search(factory: Arc<Factory>, args: serde_json::Value) -> Result<ToolResult, String> {
+async fn run_search(factory: Arc<Factory>, agent: String, args: serde_json::Value) -> Result<ToolResult, String> {
     let args: SearchArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let queries: Vec<String> = args.queries.iter().map(|query| query.trim().to_owned()).filter(|query| !query.is_empty()).collect();
     if queries.is_empty() || queries.len() > 4 {
@@ -140,8 +152,9 @@ async fn run_search(factory: Arc<Factory>, args: serde_json::Value) -> Result<To
         Some("year") => Some(search::Recency::Year),
         Some(other) => return Err(format!("recency is day, week, month or year, not \"{other}\".")),
     };
-    let options = search::Options { domains: args.domains, recency, limit: args.limit.unwrap_or(8).clamp(1, 10) };
-    let (answers, blocked) = factory.web.search.search(&queries, &options).await;
+    let options =
+        search::Options { domains: search::canonical_domains(args.domains), recency, limit: args.limit.unwrap_or(8).clamp(1, 10) };
+    let (answers, blocked) = factory.web.search.search(&agent, &queries, &options).await;
     let mut text = search::render(&answers);
     for notice in &blocked {
         text.push_str(&format!("\n{notice}\n"));

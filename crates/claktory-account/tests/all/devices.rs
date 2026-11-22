@@ -300,4 +300,10 @@ fn a_database_from_before_devices_gains_their_tables_and_columns() {
     assert!(db::devices(&conn, "a").unwrap().is_empty());
     drop(conn);
     db::open(&path).expect("opens again");
+    // An older service went back to it (setting its own user_version) and
+    // this one came again: the columns it has already aren't added twice.
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 3).unwrap();
+    let conn = db::open(&path).expect("opens after a rollback");
+    assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(db::claktory(&conn, "claktory-0123456789").unwrap().expect("kept").display_name.as_deref(), Some("Studio"));
 }

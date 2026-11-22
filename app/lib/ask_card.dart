@@ -5,14 +5,19 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
+import 'ipad/workbench.dart' show WorkbenchScope;
+import 'layout.dart' show layoutOf, open;
 import 'markdown.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
+import 'mobile/navigation.dart' show PhoneRoutes;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
+import 'taint_label.dart';
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
@@ -114,6 +119,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
               ),
             ],
           ),
+          // Where the question may come from, when its agent read a pipe.
+          TaintLabel(taint: ask.taint, agent: name),
           const SizedBox(height: Space.s),
           Text(
             ask.title,
@@ -129,6 +136,15 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   ? _Command(part.text)
                   : Markdown(part.text, color: palette.textMuted),
             ],
+          ],
+          // A document it asks the person to review, with Review.
+          if (ask.reviewPath.isNotEmpty) ...[
+            const SizedBox(height: Space.s),
+            _ReviewFile(
+              path: ask.reviewPath,
+              onReview: () =>
+                  openReview(context, widget.agentId, ask.reviewPath),
+            ),
           ],
           const SizedBox(height: Space.m),
           if (pending)
@@ -172,6 +188,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
           _error ??
               (wantsText
                   ? '$name gets your answer and carries on.'
+                  : widget.ask.reviewPath.isNotEmpty
+                  ? 'Your comments on it go to $name.'
                   : '$name carries on once you approve.'),
           style: type.caption.copyWith(
             color: _error == null ? palette.textFaint : palette.danger,
@@ -300,4 +318,89 @@ class _CommandState extends State<_Command> {
       },
     ),
   );
+}
+
+/// Opens the file [agentId] asked the person to review ([path]) in that
+/// agent's conversation, expanded to fill the window, so every comment
+/// they leave on it goes to that agent. On an iPad's workbench, its pane
+/// is the one shown.
+void openReview(BuildContext context, String agentId, String path) {
+  // On a phone, a page over what shows (Needs you stays under it, for
+  // Back), with the review's bar at its foot.
+  if (PhoneRoutes.of(context)?.showFile(agentId, path) ?? false) return;
+  final scope = AppScope.scope(context);
+  final backend = scope.backend;
+  if (backend.workspace.agent(agentId) == null) return;
+  final workbench = context
+      .getInheritedWidgetOfExactType<WorkbenchScope>()
+      ?.notifier;
+  // From Needs you or Settings, back to the conversation.
+  if (scope.page.value != AppPage.agent) AppScope.closePage(context);
+  fireAndLog(() async {
+    if (backend.workspace.workspace.selectedAgentId != agentId) {
+      await backend.selectAgent(agentId);
+    }
+    final agent = backend.workspace.agent(agentId);
+    if (agent == null) return;
+    final opened = open(layoutOf(agent), path);
+    workbench?.focus(agentId, opened.paneId);
+    // Open already and expanded: nothing to change.
+    if (agent.layoutFocus == opened.paneId) return;
+    await backend.setLayout(agentId, opened.root, focus: opened.paneId);
+  }());
+}
+
+/// The file a review ask is about: its glyph, name and folder, and Review,
+/// which opens it beside the asking agent's conversation, expanded.
+class _ReviewFile extends StatelessWidget {
+  const _ReviewFile({required this.path, required this.onReview});
+
+  final String path;
+  final VoidCallback onReview;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final slash = path.lastIndexOf('/');
+    final name = slash < 0 ? path : path.substring(slash + 1);
+    final folder = slash <= 0 ? '' : shortPath(path.substring(0, slash));
+    return Container(
+      padding: const EdgeInsets.fromLTRB(Space.m, Space.s, Space.s, Space.s),
+      decoration: BoxDecoration(
+        color: palette.canvas,
+        border: Border.all(color: palette.hairline),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: ActionLine(
+        lead: Row(
+          children: [
+            FileGlyph(color: palette.textMuted),
+            const SizedBox(width: Space.s),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: type.label.copyWith(color: palette.text),
+                  ),
+                  if (folder.isNotEmpty)
+                    Text(
+                      folder,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: type.caption.copyWith(color: palette.textFaint),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        action: Button(label: 'Review', onPressed: onReview),
+      ),
+    );
+  }
 }

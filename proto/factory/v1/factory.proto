@@ -190,6 +190,30 @@ message ClientMessage {
     ConfirmMove confirm_move = 137;
     CancelMove cancel_move = 138;
     FreezeMove freeze_move = 139;
+    // Settings → Secrets: Ask each time for a secret.
+    SetSecretAskEachTime set_secret_ask_each_time = 140;
+    // The person's goals on an agent's checklist (#270).
+    AddGoal add_goal = 141;
+    UpdateGoal update_goal = 142;
+    // An agent's card for starting a pipe (PipeStart): the person closes it.
+    DismissPipeStart dismiss_pipe_start = 143;
+    // The copy a moved Claktory left here, deleted from its own screen (#243 S4).
+    DeleteMovedCopy delete_moved_copy = 144;
+    // App views (see AppSurface).
+    OpenAppView open_app_view = 148;
+    AppViewAction app_view_action = 149;
+    CloseAppView close_app_view = 150;
+    // Notifications (see Notify).
+    SetActive set_active = 145;
+    RegisterNotifications register_notifications = 146;
+    SendTestNotification send_test_notification = 147;
+    // Making sure the person saved the recovery key (R1).
+    CheckRecoveryKey check_recovery_key = 153;
+    ConfirmRecoveryKey confirm_recovery_key = 154;
+    // Gives an app one of the data sources it asks for, or takes it back.
+    GrantAppSource grant_app_source = 151;
+    // The app dock: pin, unpin or move an app (Workspace.pinned_apps).
+    PinApp pin_app = 152;
   }
 }
 
@@ -274,6 +298,16 @@ message ServerMessage {
     ChatEntryDelta chat_delta = 47;
     ChatEntryPage chat_entry_page = 48;
     ChatQueuedMessages chat_queued_messages = 49;
+    // App views, only to the connections that opened the surface:
+    // AppSurface is the answer to OpenAppView, and comes again whenever the
+    // surface's state changes; AppViewUpdate carries each change to what it
+    // shows.
+    AppSurface app_surface = 51;
+    AppViewUpdate app_view_update = 52;
+    // To every client: something the person should hear of (see Notify).
+    Notify notify = 50;
+    // The answer to CheckRecoveryKey, to the asker only.
+    RecoveryKeyCheck recovery_key_check = 53;
   }
 }
 
@@ -313,6 +347,10 @@ message Hello {
   // connected with an app that can: false from apps before it, which keep
   // working as they did.
   bool can_confirm = 8;
+  // The device's system: "ios", "ipados", "android", "macos", "linux" or
+  // "windows". Kept with the paired device and counted, never named, in
+  // the account's check-in (#119). Empty from apps before it.
+  string platform = 9;
 }
 
 enum DeviceKind {
@@ -571,6 +609,9 @@ message PairedDevice {
   // Hello is refused until it confirms, and the person can confirm or remove
   // it from another device.
   int64 confirm_by_ms = 10;
+  // It gets notifications pushed to it while it isn't connected: it
+  // registered with the push relay (RegisterNotifications).
+  bool notifications = 11;
 }
 
 // ---- Requests (client → server). Each is answered with `ack` or `error`. ----
@@ -649,6 +690,8 @@ message UpdateAgent {
   // Agent.fallback_model); empty falls back to the Claktory-wide default
   // (Settings.default_fallback_model).
   optional string fallback_model = 16;
+  // Whether it notifies the person (see Agent.notify).
+  optional NotifyMode notify = 17;
 }
 
 // Turns an extension on or off for an agent, and/or sets one of its options.
@@ -772,13 +815,18 @@ message CreateFolder {
   string path = 3;
 }
 
-// Renames a project's folder, or points it at another folder on disk (files
-// aren't moved). Unset fields stay as they are.
+// Renames a project's folder, points it at another folder on disk (files
+// aren't moved), or moves it in the project's list. Unset fields stay as
+// they are.
 message UpdateFolder {
   string project_id = 1;
   string folder_id = 2;
   optional string name = 3;
   optional string path = 4;
+  // Moves the folder in its project's list (Project.folders, the sidebar's
+  // order): before the folder with this id, or last with "". Unset leaves
+  // the order as it is; its own id changes nothing.
+  optional string before_id = 5;
 }
 
 // Removes a folder from its project. Its agents go to the project's own
@@ -823,8 +871,10 @@ message UpdateSettings {
   // See Settings.
   optional bool idle_compaction = 23;
   optional bool idle_compaction_short_cache = 24;
-  // Sets one provider's or model's cache lifetime: ttl "5m" or "1h"; "" goes
-  // back to the default (its provider's, or the provider's own).
+  // Sets one provider's or model's cache lifetime: ttl one of the provider's
+  // Provider.cache_ttl_choices ("5m" or "1h" on Anthropic; "30m" or "12h" on
+  // OpenAI); "" goes back to the default (its provider's, or the provider's
+  // own).
   CacheTtl cache_ttl = 25;
   // This Claktory's name (see Settings); "" goes back to this computer's.
   optional string name = 26;
@@ -833,6 +883,15 @@ message UpdateSettings {
   optional string color = 27;
   // See Settings; "" for none.
   optional string default_fallback_model = 30;
+  // Folds the sidebar's Projects or Chats section away, or opens it (see
+  // Workspace.projects_collapsed and chats_collapsed).
+  optional bool projects_collapsed = 31;
+  optional bool chats_collapsed = 32;
+  // See Settings: 1 to 11, else refused; 0 goes back to the default.
+  optional uint32 max_open_panes = 33;
+  // Replaces the notification settings (see Settings.notifications) when
+  // set. A relay that isn't an https URL is refused.
+  NotificationSettings notifications = 34;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -1056,14 +1115,20 @@ message ReadFile {
   // Absolute, or from the home folder ("~/notes.md").
   string path = 1;
   // At most this many bytes; 0 for the default. Text is read up to 2 MB and
-  // images up to 20 MB, whatever is asked; videos (and any read from an
-  // offset) 8 MB at a time.
+  // images up to 20 MB, whatever is asked; videos and PDFs (and any read
+  // from an offset) 8 MB at a time.
   uint64 max_bytes = 2;
   // Read from this byte: a video is played a range at a time (offset 0, 8 MB,
-  // 16 MB…, until offset + data's length is the size). Videos up to 2 GB,
-  // and other files read from an offset too; larger ones come back with
-  // `error`.
+  // 16 MB…, until offset + data's length is the size), and a PDF read whole
+  // the same way. Videos up to 2 GB, PDFs up to 64 MB ("This PDF is too big
+  // to open here (80 MB)."), and other files read from an offset up to 2 GB;
+  // larger ones come back with `error`.
   uint64 offset = 3;
+  // The whole file's SHA-256 (FileContent.sha256 of an earlier range), so a
+  // file read a range at a time comes from one version: when the file's is
+  // now different, the answer has `error` "changed" and no data, and the app
+  // reads it again from offset 0. Empty: read whatever is there.
+  string expected_sha256 = 4;
 }
 
 message FileContent {
@@ -1083,7 +1148,9 @@ message FileContent {
   // When it was last changed, in ms since 1970.
   int64 modified_ms = 6;
   // Why it couldn't be read ("No such file: …", "… is a folder", "Can't
-  // read …: permission denied"); empty when it was. The rest is empty then.
+  // read …: permission denied"), or "changed" when it's no longer the
+  // version ReadFile.expected_sha256 names; empty when it was. The rest is
+  // empty then.
   string error = 7;
   // The whole file's SHA-256, in lowercase hex. Text and images read from
   // the start leave it empty when `truncated`; videos and reads from an
@@ -1103,6 +1170,12 @@ message FileContent {
 message SetLayout {
   string agent_id = 1;
   ViewNode root = 2;
+  // The pane shown in focus, filling the whole window: the id of a leaf of
+  // `root` sets it (refused if `root` has no such leaf), "" clears it. Left
+  // out, the focus stays as it is while `root` still has that pane, and is
+  // cleared when it doesn't (closing the focused pane ends focus), so
+  // callers that don't deal with focus never change it.
+  optional string focus = 3;
 }
 
 // A pane of an agent's main area, or a split of several.
@@ -1131,14 +1204,23 @@ enum ViewAxis {
 
 message ViewLeaf {
   // "chat" (the conversation, which every layout has once and can't be
-  // closed), "text" or "image"; more kinds will come (pdf, documents,
+  // closed), "text", "image", "video" or "pdf" (read whole with ReadFile's
+  // ranges and expected_sha256); more kinds will come (documents,
   // dashboards, extension panels). An app that doesn't know a kind shows
   // that it can't show it here.
   string kind = 1;
   // The file it shows, absolute; empty for "chat".
   string path = 2;
   // What its tab or header says: the file's name, unless set otherwise.
+  // For kind "app", the view's title, which apps that can't show app views
+  // put in the pane that says so.
   string title = 3;
+  // Kind "app", a pane showing an app's view (see OpenAppView): the app
+  // (AppInfo.id), the view (AppViewSpec.id; empty for the app's first) and
+  // its params (a JSON object, or empty).
+  string app_id = 4;
+  string view = 5;
+  string params = 6;
 }
 
 // Opens an extension's panel beside an agent (`Agent.open_panel`); an empty id
@@ -1488,6 +1570,36 @@ message UsageResetAnswer {
 message Error {
   ErrorCode code = 1;
   string message = 2;
+  // With ERROR_CODE_MOVED: where this Claktory went, for the screen the old
+  // computer's app shows instead of the Claktory.
+  MovedAway moved = 3;
+}
+
+// A Claktory that moved to another computer, as the copy left behind
+// (`<home>/moved.json`) says. It answers every Hello with ERROR_CODE_MOVED
+// and this.
+message MovedAway {
+  // The computer it moved to, and its system ("macos", "linux"); both
+  // empty after a move by file.
+  string to = 1;
+  string to_os = 2;
+  // When it moved, ms since 1970.
+  int64 at_ms = 3;
+  // This computer, as the move named it.
+  string machine = 4;
+  // When the copy left here was deleted (DeleteMovedCopy, or factoryd
+  // export --delete-moved); 0 while it's kept.
+  int64 deleted_ms = 5;
+}
+
+// Deletes the copy a Claktory that moved away left on this computer, for
+// good: everything of it but the workspace and project folders inside its
+// home (docs/MOVE.md). Only a Claktory in moved mode takes it, and only from
+// this computer's own app: on the loopback port, after a Hello with the
+// local pairing code's token. Answered with Ack, or Error saying why.
+message DeleteMovedCopy {
+  // What the person typed to confirm: it must be "delete".
+  string typed_word = 1;
 }
 
 enum ErrorCode {
@@ -1531,6 +1643,9 @@ enum ErrorCode {
   // The app signs in to the account (or gets a new assertion) and connects
   // again. Connection closes.
   ERROR_CODE_SIGN_IN_REQUIRED = 15;
+  // This Claktory moved to another computer (Error.moved says where); the
+  // copy left here runs nothing.
+  ERROR_CODE_MOVED = 16;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -1623,6 +1738,19 @@ message Workspace {
   // While the move is frozen (MOVE_PHASE_FROZEN and after), the backend
   // runs no Factory: its Workspace has only `move` and `version` set.
   Move move = 31;
+  // The sidebar's Projects and Chats sections folded away, the same on every
+  // device (UpdateSettings sets them); false, open, by default.
+  bool projects_collapsed = 32;
+  bool chats_collapsed = 33;
+  // The system the backend runs on: "macos" or "linux", as a Move's
+  // target_os spells it. Empty from a backend older than this field (and
+  // in the frozen-move Workspace, which has only `move` and `version`):
+  // leave out anything that assumes a platform then.
+  string os = 34;
+  // The app dock: the ids of the installed apps pinned there, in its order
+  // (PinApp). The same on every device. Empty while `apps_available` is
+  // false.
+  repeated string pinned_apps = 35;
 }
 
 // The person a Claktory belongs to, as every device shows them.
@@ -1820,6 +1948,17 @@ message ExtensionOption {
   // AGENTS: the agent's own project's agents always count, whether listed or
   // not; show them checked and greyed, as "in its project".
   bool includes_project = 6;
+  // CHOICE: what can be chosen, in the order to show them.
+  repeated OptionChoice choices = 7;
+  // CHOICE: the value in effect until someone chooses (one of `choices`).
+  string default_choice = 8;
+}
+
+message OptionChoice {
+  // What's kept in config.json and sent back in OptionValue.choice, e.g. "30m".
+  string value = 1;
+  // What to show, e.g. "Every 30 minutes".
+  string label = 2;
 }
 
 enum ExtensionOptionKind {
@@ -1828,6 +1967,8 @@ enum ExtensionOptionKind {
   EXTENSION_OPTION_KIND_SWITCH = 1;
   // A list of agents: `OptionValue.agent_ids`.
   EXTENSION_OPTION_KIND_AGENTS = 2;
+  // One of `ExtensionOption.choices`: `OptionValue.choice`.
+  EXTENSION_OPTION_KIND_CHOICE = 3;
 }
 
 message OptionValue {
@@ -1835,6 +1976,9 @@ message OptionValue {
   bool on = 1;
   // For an AGENTS list: agent ids.
   repeated string agent_ids = 2;
+  // For a CHOICE: one of ExtensionOption.choices' values; set it through
+  // ExtensionChange.value. Another value is refused.
+  string choice = 3;
 }
 
 // An extension as one agent has it, with its options' effective values.
@@ -1993,6 +2137,25 @@ message Messaging {
 // An agent's checklist: everything the person asked for, oldest first.
 message Checklist {
   repeated ChecklistItem items = 1;
+  // The person's goals: outcomes they declared, which items can serve
+  // (ChecklistItem.goal). Oldest first, every status.
+  repeated Goal goals = 2;
+}
+
+// A goal on an agent's checklist: an outcome the person wants, in their
+// words ("get the Android app to a link I can share"), recorded by the
+// person or by the agent from what the person said.
+message Goal {
+  // Small and per agent, apart from items' ids: G1, G2…
+  uint32 id = 1;
+  string text = 2;
+  // OPEN, DONE or DROPPED.
+  ChecklistStatus status = 3;
+  // ms since 1970.
+  int64 created = 4;
+  int64 updated = 5;
+  // What happened to it, oldest first; an empty author is the person.
+  repeated ChecklistUpdate log = 6;
 }
 
 message ChecklistItem {
@@ -2010,6 +2173,21 @@ message ChecklistItem {
   // While it's blocked: the latest note made since it last became blocked
   // (what it waits on), the note's own text. Empty otherwise.
   string note = 8;
+  // While it's blocked: what it waits on — "person" when it waits on the
+  // person, else a few words naming the blocker. Empty otherwise, and on
+  // blocked items from before this was kept.
+  string blocked_on = 9;
+  // While it's blocked: when it became so, ms since 1970; 0 otherwise
+  // (and on blocked items from before this was kept).
+  int64 blocked_since_ms = 10;
+  // While it blocks on the person: whether the item's owning agent (its
+  // owner, or this checklist's agent) has a question waiting for the
+  // person (a pending ask_person). False otherwise: "blocked on the
+  // person for 2 days and never asked" is blocked_on == "person",
+  // has_pending_ask == false, and an old blocked_since_ms.
+  bool has_pending_ask = 11;
+  // The goal it serves (Goal.id on the same checklist); 0 for none.
+  uint32 goal = 12;
 }
 
 message ChecklistUpdate {
@@ -2243,6 +2421,15 @@ message Settings {
   // "<provider>/<model id>" a refused step is retried on for agents that
   // name no fallback_model of their own; empty for none.
   string default_fallback_model = 30;
+  // The most panes an agent's `show` (the Viewer extension) keeps open in
+  // its layout (Agent.layout) at once, counting every pane but the
+  // conversation, whoever opened it (config.json's `display.max_open_panes`):
+  // 4 until changed, 1 to 11. Past it, show refuses until the person closes
+  // one. The person's own layouts (SetLayout) aren't held to it: they take
+  // up to 12 panes, the conversation included.
+  uint32 max_open_panes = 31;
+  // When Claktory notifies the person (Settings → Notifications).
+  NotificationSettings notifications = 32;
 }
 
 // Where a new Claktory's first run stands. A Claktory from before it, or
@@ -2276,8 +2463,9 @@ message CacheTtl {
   // A provider id ("anthropic") or a model id ("anthropic/claude-opus-4-8"),
   // which wins over its provider's.
   string key = 1;
-  // "5m" or "1h". An hour costs more to write the cache (2× input instead of
-  // 1.25× on Anthropic) and keeps it through longer breaks.
+  // "5m" or "1h" on Anthropic: an hour costs more to write the cache (2×
+  // input instead of 1.25×) and keeps it through longer breaks. "30m" or
+  // "12h" on OpenAI's models from GPT-5.6 on (2.5× instead of 1.25×).
   string ttl = 2;
 }
 
@@ -2305,10 +2493,19 @@ message Provider {
   // above describe the first, as before several accounts could be signed in.
   repeated Account accounts = 8;
   // How long its prompt cache is asked to last now, "5m" or "1h" (models with
-  // their own setting may differ; see Settings.cache_ttls). Empty when
-  // Claktory can't choose it for this provider and doesn't know how long it
-  // lasts: its agents never compact while idle.
+  // their own setting may differ; see Settings.cache_ttls). Set only where
+  // the choice is between those two (Anthropic), for apps before
+  // cache_lifetime; see that for every provider.
   string cache_ttl = 9;
+  // How long its prompt cache lasts now: "5m", "30m", "1h" or "12h" (models
+  // with their own setting may differ; see Settings.cache_ttls). Its idle
+  // conversations are summarized just before it runs out. Empty when
+  // Claktory can't know it: its agents never compact while idle.
+  string cache_lifetime = 10;
+  // The lifetimes the person can choose for it (UpdateSettings.cache_ttl),
+  // its default first, such as "5m" and "1h". Empty when there's no choice:
+  // the app then shows cache_lifetime, if any, as it is.
+  repeated string cache_ttl_choices = 11;
 }
 
 // One account signed in to a provider, such as one of two Claude
@@ -2342,6 +2539,10 @@ message Account {
   // How it's signed in: the `LoginMethod` id, "oauth" (a subscription or
   // OAuth account) or "api_key" (a key, stored or from the environment).
   string method_id = 9;
+  // The provider refused to refresh this sign-in: requests skip it until
+  // the person signs in to it again (StartLogin with its provider, method
+  // "oauth" and add_account, which replaces it in place and clears this).
+  bool sign_in_again = 10;
 }
 
 message ProviderUsage {
@@ -2612,6 +2813,19 @@ message Agent {
   // files, no secrets, web or messaging, and no other extension's tools.
   // Only the person lifts it (UpdatePipe.quarantined).
   bool quarantined = 38;
+  // The pipe this agent is bound to (Pipe.id): the liaison made for it,
+  // shown in the pipe's row and view rather than with a row of its own, its
+  // conversation streamed with the pipe's when the pipe is shown
+  // (SelectPipe). Deleting the pipe deletes it, its conversation kept in the
+  // pipe's folder (pipes/<pipe>/conversation in the project's). Empty for
+  // every other agent, and once it's no longer one of the pipe's members.
+  string pipe_id = 39;
+  // The pane of `layout` shown in focus, filling the whole window, by its
+  // ViewNode id; empty for none. The person sets it (SetLayout.focus); an
+  // agent's show keeps it as it is, its new pane waiting behind.
+  string layout_focus = 40;
+  // Whether it notifies the person ("Notify me" in its settings).
+  NotifyMode notify = 41;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -2782,6 +2996,9 @@ message Entry {
     // An agent blocked on something only the person can give asks them
     // (its ask_person tool): see AskPerson.
     AskPerson ask_person = 16;
+    // An agent opens a card for the person to start a pipe (its
+    // pipes_invite or pipes_accept tool): see PipeStart.
+    PipeStart pipe_start = 18;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -2803,8 +3020,11 @@ message Entry {
 // event, never as the person's.
 message Event {
   EventSource source = 1;
-  // Who it's from: "Factory", the sending agent's name, the task's id, or the
-  // monitor's name.
+  // Who it's from: "Factory", the task's id, the monitor's name, or, for
+  // AGENT, the sender's signature as the model reads it: its name with its
+  // role and, across projects, its project in parentheses ("Sam (Backend)",
+  // "Ana (Frontend, Web Site)", "Rivet (admin)"), just the name with
+  // neither. It's kept as it was when sent.
   string from = 2;
   // The sending agent's id, for AGENT; the task's id, for TASK; the
   // monitor's id ("m3"), for MONITOR.
@@ -2812,6 +3032,9 @@ message Event {
   // One line for people; empty when `text` is meant to be shown as it is.
   string summary = 4;
   string text = 5;
+  // PIPE: the pipe's messages it brings (PipeMessage.seq), so a view showing
+  // the pipe's messages can leave this event out. Empty for other sources.
+  repeated uint64 pipe_seqs = 6;
 }
 
 // A message the agent proposed for Rivet, the admin agent, which only the
@@ -2844,6 +3067,58 @@ message Proposal {
 // (RemoteAccess.pending_devices: "Allow … to connect?"). The entry is sent
 // again whenever its state changes, and counts in Agent.waiting_seqs while
 // WAITING or ASKING.
+// A card an agent (Rivet) opens in its conversation for the person to start
+// a pipe (#244), filled in from what the person told it; the agent never
+// sees a code. INVITE: the person checks the project, name and purpose and
+// makes the invite (CreatePipeInvite with start_id); its code comes back
+// in that reply only, to copy or share. ACCEPT: the person pastes the code
+// or link they were given (ReadPipeInvite shows whom it's from, not
+// verified: keep that apart from the prefilled name, which is only the
+// person's label), checks the project, name and purpose, and connects
+// (AcceptPipeInvite with start_id). Either way both people then approve the
+// pipe in its view, digits and all. Close it with DismissPipeStart. The
+// entry is sent again when its state changes, and counts in
+// Agent.waiting_seqs while WAITING; one left 24 hours is DISMISSED.
+message PipeStart {
+  // Unique in this Claktory: what start_id and DismissPipeStart name.
+  string id = 1;
+  // The agent that opened it.
+  string agent_id = 2;
+  PipeStartKind kind = 3;
+  // Prefilled; the person can change each before going on.
+  string project_id = 4;
+  // ACCEPT: empty takes the inviter's name for the pipe.
+  string name = 5;
+  string purpose = 6;
+  PipeStartState state = 7;
+  // DONE: the pipe it made, to open from the card.
+  string pipe_id = 8;
+  // When it was done or dismissed, in ms since 1970; 0 while WAITING.
+  int64 ended_ms = 9;
+}
+
+enum PipeStartKind {
+  PIPE_START_KIND_UNSPECIFIED = 0;
+  // Make an invite for someone else to accept.
+  PIPE_START_KIND_INVITE = 1;
+  // Accept an invite the person was given.
+  PIPE_START_KIND_ACCEPT = 2;
+}
+
+enum PipeStartState {
+  PIPE_START_STATE_UNSPECIFIED = 0;
+  PIPE_START_STATE_WAITING = 1;
+  // The person made the invite or connected with the code: pipe_id.
+  PIPE_START_STATE_DONE = 2;
+  // The person closed it, or it waited 24 hours.
+  PIPE_START_STATE_DISMISSED = 3;
+}
+
+message DismissPipeStart {
+  string agent_id = 1;
+  string start_id = 2;
+}
+
 message DevicePairing {
   // Unique in this Claktory; what ShowPairingCode names.
   string id = 1;
@@ -3201,6 +3476,20 @@ message VaultState {
   // Connections being made, or just ended (for 10 minutes, or until
   // CancelConnect): every device sees how they go, never a URL or code.
   repeated ConnectFlow flows = 8;
+  // An agent or chat has waited a minute or more for the vault to open, to
+  // use a provider whose sign-ins are kept in it: Needs you offers to unlock
+  // it with the recovery key (UnlockVault; nothing goes to claktory.com).
+  // Only ever true while it's locked.
+  bool agents_waiting = 9;
+  // Why it's locked, in a sentence or two for people, shown as it is; the
+  // Claktory account's problem when it has one. Empty while it's open.
+  string locked_why = 10;
+  // The vault holds a recovery key (made at sign-in, or by ShowRecoveryKey
+  // or NewRecoveryKey) that the person hasn't confirmed they saved
+  // (ConfirmRecoveryKey): Needs you shows "Save your recovery key" exactly
+  // while it's true. A new recovery key makes it true again. Only ever true
+  // while the vault is open.
+  bool recovery_key_unconfirmed = 11;
 }
 
 message SecretInfo {
@@ -3231,6 +3520,11 @@ message SecretInfo {
   SecretConnection connection = 13;
   // Set when it was made from a connection (DeriveSecret).
   SecretExport export = 14;
+  // Ask each time: every command that uses it waits for the person's Allow
+  // (a SecretApproval card), which lets that exact command use it once. No
+  // app can use it. Changed with SetSecretAskEachTime; never on a connected
+  // service itself (only Claktory uses that), only on secrets made from it.
+  bool ask_each_time = 15;
 }
 
 message SecretVariable {
@@ -3294,6 +3588,19 @@ message CreateSecret {
   string name = 1;
   string description = 2;
   repeated SecretEntry entries = 3;
+  // Made with Ask each time on (SecretInfo.ask_each_time).
+  bool ask_each_time = 4;
+}
+
+// Turns Ask each time (SecretInfo.ask_each_time) on or off for a secret.
+// Off needs the vault's proof, as GrantSecret does, since it lets agents'
+// commands use it without asking; on needs none. Answered with Ack (or a
+// VaultSession, like the other proven requests); refused for a connected
+// service itself.
+message SetSecretAskEachTime {
+  string id = 1;
+  bool ask_each_time = 2;
+  VaultProof proof = 3;
 }
 
 // Changes a secret's name and description, and with `entries`, replaces its
@@ -3382,6 +3689,11 @@ message DecideSecretRequest {
   // no admin agent has Secrets (the request's admin_agent_id is empty; the
   // app offers the direct path instead).
   bool approve_only = 12;
+  // A generate request (SecretRequest.generate), approved: whether the new
+  // key asks the person each time it's used (SecretInfo.ask_each_time).
+  // Unset is on: no one has ever seen a generated key, so it starts asking.
+  // `name` renames it (also the key's comment); `comment` reaches the agent.
+  optional bool ask_each_time = 13;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -3510,6 +3822,21 @@ message SecretRequest {
   // secrets_collect): the add-secret card is open in its conversation,
   // prefilled from the request, and the values go straight into the vault.
   bool collecting = 15;
+  // A key the agent asks the vault to generate (#252), by type:
+  // "ssh-ed25519". Empty for a request for a secret someone has. The card
+  // offers Generate, never a values form or the admin agent; the vault
+  // makes the keypair itself and seals the private half as the secret's
+  // one file variable (new_secret.variables), so it never exists anywhere
+  // else. new_secret.name is also the key's comment, in its public line.
+  string generate = 16;
+  // A generate request: the agent asked for the key to be given to no
+  // one. Generated, it stays so (GENERATED); otherwise it goes to the
+  // agent (GRANTED). The person can't widen it on the card.
+  bool grant_to_nobody = 17;
+  // GRANTED or GENERATED from a generate request: the key's public half,
+  // in OpenSSH's one-line form ("ssh-ed25519 AAAA… <name>"). The private
+  // half is never sent.
+  string public_key = 18;
 }
 
 message NewSecret {
@@ -3536,6 +3863,10 @@ enum SecretRequestState {
   // dismiss), so the person is never stuck on the admin agent. It doesn't
   // expire: only PENDING requests do.
   SECRET_REQUEST_STATE_APPROVED = 6;
+  // A generate request (SecretRequest.generate) decided: the vault made the
+  // key and gave it to no one, as the agent asked. given_secret_id and
+  // given_secret_name name it, public_key is its public half.
+  SECRET_REQUEST_STATE_GENERATED = 7;
 }
 
 // This Claktory's account at claktory.com, or at the service in
@@ -3640,6 +3971,37 @@ message SetAccountService {
 // The vault's recovery key, to note down. Answered with RecoveryKey, to the
 // asker only; logged in the vault's uses.
 message ShowRecoveryKey {}
+
+// Starts checking that the person saved the recovery key: they type back
+// one group of it, picked at random each time. Answered with
+// RecoveryKeyCheck, to the asker only. The check belongs to this device and
+// the current recovery key, lasts 10 minutes, and replaces this device's
+// last one.
+message CheckRecoveryKey {}
+
+message RecoveryKeyCheck {
+  // Given back in ConfirmRecoveryKey.
+  string check_id = 1;
+  // Which group of the key to type, counting from 1: in "K7QM-2XPA-…",
+  // group 2 is 2XPA.
+  uint32 group = 2;
+  // How many groups the key has: 8.
+  uint32 groups = 3;
+}
+
+// The group RecoveryKeyCheck asked for, as the person typed it: case, spaces
+// and dashes don't matter, and 0, 1 and 8 read as O, I and B. Answered with
+// Ack, and VaultState.recovery_key_unconfirmed turns false on every device.
+// A wrong group is ERROR_CODE_WRONG_PROOF, and the check stays to try
+// again; after 5 wrong groups in an hour (from any device) everything is
+// ERROR_CODE_RATE_LIMITED, its message saying how long to wait. A check
+// that ran out, is another device's or is from before the recovery key
+// changed is ERROR_CODE_INVALID_REQUEST: CheckRecoveryKey again. Nothing
+// typed is logged.
+message ConfirmRecoveryKey {
+  string check_id = 1;
+  string typed = 2;
+}
 
 // How this Claktory is arranged: where agents are, whom they can message,
 // which secrets they have, what data they read and write, and their
@@ -4189,6 +4551,168 @@ message AppInfo {
   // Its publisher's signing key, as "ed25519:" and its first 16 base64
   // characters.
   string publisher_key = 18;
+  // The views the person can open (OpenAppView), the first being its main
+  // one; empty for an app with none.
+  repeated AppViewSpec views = 19;
+  // The data it can be given to read, each granted or not (GrantAppSource):
+  // Claktory's records, and an agent's own database for each agent it asks
+  // for (every agent, when it asks for any).
+  repeated AppDataSource sources = 20;
+}
+
+// Data an app reads, only once the person grants it, and always read
+// only: SQL it runs in Claktory, one statement at a time. Agents' memory,
+// pipes and comments on files are never readable.
+message AppDataSource {
+  // "factory-records", or "agent:<agent id>"; GrantAppSource names it.
+  string id = 1;
+  AppDataKind kind = 2;
+  // AGENT_DATABASE: whose. In AppPermissions, "*" when the app asks for
+  // any agent's (the person chooses which once it's installed).
+  string agent_id = 3;
+  // For the person: "Claktory's records", "Lea's database".
+  string label = 4;
+  // Why the app asks, as its manifest says; may be empty.
+  string reason = 5;
+  // Always false in AppPermissions: installing grants nothing.
+  bool granted = 6;
+}
+
+enum AppDataKind {
+  APP_DATA_KIND_UNSPECIFIED = 0;
+  // Claktory's records (factory.db): agents, runs, usage, messages, tasks…
+  APP_DATA_KIND_FACTORY_RECORDS = 1;
+  // An agent's own database (its Database extension's).
+  APP_DATA_KIND_AGENT_DATABASE = 2;
+}
+
+// Grants the app the data source `source_id` (AppDataSource.id), or takes
+// it back: its next query sees the change. Answered with Ack.
+message GrantAppSource {
+  string app_id = 1;
+  string source_id = 2;
+  bool granted = 3;
+}
+
+// Pins an installed app to the dock at `position` among the pinned ones (0
+// first; past the end, or below 0, last), moving it if it's pinned already;
+// or, with `pinned` false, unpins it. Answered with Ack. Installing an app
+// with views pins it last, once: one the person unpinned stays unpinned
+// through updates.
+message PinApp {
+  string app_id = 1;
+  bool pinned = 2;
+  int32 position = 3;
+}
+
+message AppViewSpec {
+  // Lowercase letters, digits, - and _.
+  string id = 1;
+  // For the pane's header or the screen's bar ("Charts").
+  string title = 2;
+}
+
+// ---- App views ----
+//
+// An app with views shows them as surfaces: A2UI v1.0
+// (https://a2ui.org/specification/v1.0-a2ui/) messages, with components
+// from Claktory's own catalog ("https://claktory.com/a2ui/catalog/v1"),
+// which the backend checks before any app sees them and which apps render
+// natively. A surface is one view of one app with one set of params, the
+// same for every device showing it; the backend keeps what it shows (the
+// components and the data model) and sends it whole to a device that
+// opens it, then each change. Surfaces live in the backend's memory: after
+// reconnecting, open them again.
+
+// Opens one of an app's views for this connection: answered with
+// AppSurface. The same view with the same params is the one surface
+// already open, if there is one. Until CloseAppView (or the connection
+// ends) this connection gets the surface's AppSurface and AppViewUpdate
+// messages. Asked again, it answers a fresh snapshot (after a gap in
+// AppViewUpdate.seq, say). NOT_FOUND when there's no such app or view.
+message OpenAppView {
+  string app_id = 1;
+  // AppViewSpec.id; empty for the app's first view.
+  string view = 2;
+  // A JSON object, or empty; at most 4 KiB.
+  string params = 3;
+  // The A2UI catalogs this app renders. Without the surface's, the answer
+  // is UNSUPPORTED and nothing is opened.
+  repeated string catalogs = 4;
+}
+
+// This connection no longer shows the surface: answered with Ack. Once no
+// connection has shown it for 10 s, the app is told it's closed.
+message CloseAppView {
+  string surface_id = 1;
+}
+
+// Something the person did in a surface: answered with Ack once it's
+// checked and handed to the app, not once the app has handled it (what it
+// changes comes as AppViewUpdate). NOT_FOUND when the surface isn't open:
+// open the view again.
+message AppViewAction {
+  string surface_id = 1;
+  // One A2UI v1.0 renderer message, JSON: {"version":"1.0","action":{name,
+  // surfaceId, sourceComponentId, timestamp, context}}, from a component of
+  // the surface whose action has that name; or {"version":"1.0","error":
+  // {code, message, surfaceId}}. At most 64 KiB.
+  string message = 2;
+}
+
+message AppSurface {
+  // "<app id>-<hex>": unique while the backend runs.
+  string surface_id = 1;
+  string app_id = 2;
+  string view = 3;
+  // As a canonical JSON object ("{}" for none).
+  string params = 4;
+  // AppViewSpec.title.
+  string title = 5;
+  AppSurfaceState state = 6;
+  // Why it's STOPPED, FAILED or CLOSED, a sentence for the person; empty
+  // otherwise.
+  string error = 7;
+  // The catalog its components come from.
+  string catalog = 8;
+  // The last change folded into `snapshot`: AppViewUpdates after it apply.
+  uint64 seq = 9;
+  // All it shows now, as one A2UI v1.0 message, JSON: {"version":"1.0",
+  // "createSurface":{surfaceId, catalogId, components, dataModel}}. Empty
+  // before the app made it (OPENING, STOPPED); kept when FAILED or CLOSED,
+  // to show under the error.
+  string snapshot = 10;
+}
+
+enum AppSurfaceState {
+  APP_SURFACE_STATE_UNSPECIFIED = 0;
+  // The app is making it.
+  APP_SURFACE_STATE_OPENING = 1;
+  APP_SURFACE_STATE_OPEN = 2;
+  // The app isn't running (turned off, crashed, updating): it opens again
+  // by itself when the app runs again.
+  APP_SURFACE_STATE_STOPPED = 3;
+  // The app sent something invalid, or couldn't open it (`error` says
+  // what). It stays so: OpenAppView again opens a new surface.
+  APP_SURFACE_STATE_FAILED = 4;
+  // The app closed it, or was uninstalled. OpenAppView again for a new one.
+  APP_SURFACE_STATE_CLOSED = 5;
+  // This app doesn't render the surface's catalog: only in the answer to
+  // OpenAppView, which opened nothing.
+  APP_SURFACE_STATE_UNSUPPORTED = 6;
+}
+
+// One change to what a surface shows.
+message AppViewUpdate {
+  string surface_id = 1;
+  // One more than the change before it. Apply it when it follows the
+  // snapshot's seq (or the last update's); ignore it when it isn't newer;
+  // when it skips one, OpenAppView again for a fresh snapshot.
+  uint64 seq = 2;
+  // One A2UI v1.0 message, JSON, as the backend checked it:
+  // updateComponents, updateDataModel or deleteSurface (never
+  // createSurface: that's the snapshot).
+  string message = 3;
 }
 
 enum AppTier {
@@ -4301,6 +4825,8 @@ message AppPermissions {
   // otherwise.
   string installed_version = 17;
   repeated string added = 18;
+  // The data it asks to read (none granted yet).
+  repeated AppDataSource sources = 19;
 }
 
 message SetAppRunning {
@@ -4373,7 +4899,8 @@ message Pipe {
   string lead_id = 11;
   PipeLimits limits = 12;
   // Every outgoing message from an agent waits for the person's Send or
-  // Discard (PIPE_MESSAGE_STATE_HELD). On for a new pipe.
+  // Discard (PIPE_MESSAGE_STATE_HELD). Off for a new pipe; a pipe made
+  // before keeps what it had.
   bool review_outgoing = 13;
   // APPROVAL: the four digits both people must see alike before approving.
   string digits = 14;
@@ -4401,6 +4928,28 @@ message Pipe {
   // a misleading message from the other side could make it reach the
   // person's files, keys and network.
   repeated string can_run_commands_ids = 22;
+  // Why the other Claktory can't be reached right now, in a short line
+  // ("no answer in time"), while JOINING (each failed try of the join,
+  // which keeps retrying until the code expires) or once an established
+  // link loses its peer. Empty while it's reachable, and before anything
+  // has tried.
+  string offline_reason = 23;
+  // When reaching it started failing, in ms since 1970; 0 while it's
+  // reachable.
+  int64 offline_since_ms = 24;
+  // Every message from the other side waits for the person's Let in or
+  // Discard (PIPE_MESSAGE_STATE_HELD_INCOMING, its note saying why) before
+  // any agent can read it, whoever the other side says wrote it; its files
+  // stay outside the inbox until then. Off for a new pipe.
+  bool review_incoming = 25;
+  // The name a new liaison would get now (ApprovePipe.liaison_name,
+  // AddPipeLiaison.name): one no agent of the project has, the same until
+  // one is taken. Prefill it; the person can change it.
+  string suggested_liaison_name = 26;
+  // Its folder's name in the project's folder's pipes/, as it is on disk
+  // ("acme-launch-ab12cd"): the inbox, the outbox and a deleted liaison's
+  // conversation are in it. Text to show; it may be on another computer.
+  string folder = 27;
 }
 
 enum PipeState {
@@ -4537,6 +5086,8 @@ message CreatePipeInvite {
   // other side sees both before accepting).
   string name = 2;
   string purpose = 3;
+  // Made from an agent's card (PipeStart.id): it shows the invite made.
+  string start_id = 4;
 }
 
 message PipeInvite {
@@ -4573,6 +5124,8 @@ message AcceptPipeInvite {
   string name = 3;
   // What this side says it's for.
   string purpose = 4;
+  // Connected from an agent's card (PipeStart.id): it shows the pipe.
+  string start_id = 5;
 }
 
 // The person's decision on a pipe in APPROVAL. Approving needs a lead
@@ -4588,6 +5141,11 @@ message ApprovePipe {
   // Members to quarantine (Pipe.quarantined_ids), among member_ids; unset
   // quarantines none of them. The liaison is quarantined either way.
   PipeMembers quarantined = 6;
+  // Review incoming and Review outgoing (Pipe.review_incoming,
+  // Pipe.review_outgoing); unset leaves them as they are (off for a new
+  // pipe).
+  optional bool review_incoming = 7;
+  optional bool review_outgoing = 8;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -4606,6 +5164,9 @@ message UpdatePipe {
   // conversation is cleared (Agent.tainted_by_pipes). Only the person can
   // send this: no agent tool reaches it.
   PipeMembers quarantined = 9;
+  // Pipe.review_incoming. Turning it off lets nothing in: messages already
+  // waiting still wait for Let in or Discard.
+  optional bool review_incoming = 10;
 }
 
 message PipeMembers {
@@ -4703,6 +5264,14 @@ message SecretApproval {
   // Where what it read came from: for each pipe it has read, the agents it
   // came through (pipe_names lists the same pipes, for older apps).
   repeated PipeTaint taint = 8;
+  // Which of secret_names ask the person each time they're used
+  // (SecretInfo.ask_each_time): why it asks, besides pipe_names. A card can
+  // ask for both reasons.
+  repeated string ask_each_time_names = 9;
+  // The command visibly keeps running after it starts (in the background,
+  // or with &, nohup, setsid or disown): it has the secrets for as long as
+  // it runs ("keeps running after it starts, with AWS").
+  bool keeps_running = 10;
 }
 
 // A pipe an agent has read, and how: `via_names` are the agents, by name
@@ -4753,7 +5322,7 @@ message AskPerson {
   bool wants_text = 4;
   AskPersonState state = 5;
   // ANSWERED: the person's answer or comment; may be empty when
-  // wants_text is false.
+  // wants_text is false. DISMISSED: their comment, if they left one.
   string answer = 6;
   // When it was answered or dismissed, in ms since 1970; 0 while pending.
   int64 decided_ms = 7;
@@ -4762,6 +5331,20 @@ message AskPerson {
   // other side ("from Liaison, which reads the pipe with Ana's Claktory").
   // Empty when it had read none.
   repeated PipeTaint taint = 8;
+  // A review ask (#275): the file the agent asks the person to review or
+  // comment on, absolute; empty for an ordinary ask. It's one the agent may
+  // read and comments support (text up to 2 MB, Markdown, an image, a
+  // video, or a PDF up to 64 MB, which comments don't anchor on yet),
+  // checked when it asked. The card's Review opens the agent's
+  // conversation with the file in a pane (the person's own SetLayout), so
+  // comments made there are addressed to the agent. Answering or dismissing
+  // it sends the person's unsent comments on the file to the agent, and its
+  // event says how many comments they left there since it asked.
+  string review_path = 9;
+  // What it was answered or dismissed with besides words
+  // (AnswerAsk.attachments): the person's drawings on the PDF's pages.
+  // Empty while pending.
+  repeated Attachment answer_attachments = 10;
 }
 
 enum AskPersonState {
@@ -4781,7 +5364,16 @@ message AnswerAsk {
   // Dismiss it instead: the agent is told to use its best judgment.
   bool dismiss = 3;
   // The answer (or, when the ask doesn't want one, an optional comment).
+  // Dismissing, the person's optional comment: the agent gets it with the
+  // dismissal, and the card keeps it (AskPerson.answer).
   string text = 4;
+  // What the person answers (or dismisses) it with besides words: their
+  // drawings on a review ask's PDF, one PNG per page named
+  // "<pdf stem>-p<page>.png" (paper.pdf, page 3: paper-p3.png). Files
+  // uploaded for this agent first, checked as SendMessage.attachments are:
+  // each must be in the agent's uploads folder and still there, or the
+  // answer is refused. The agent's event names each by path, with its page.
+  repeated Attachment attachments = 5;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -4952,6 +5544,20 @@ message Move {
   bool can_cancel = 17;
   // When this last changed, ms since the epoch.
   int64 updated_ms = 18;
+  // The agent that started it (Rivet's move_claktory, #243 S1); empty when
+  // the person did. Either way only the person confirms the digits here
+  // (ConfirmMove): for a move an agent started, every device shows
+  // Claktory's own confirm while MOVE_PHASE_CONFIRM, since no agent can.
+  string started_by_agent_id = 19;
+  // The person confirmed the digits here (ConfirmMove), while
+  // MOVE_PHASE_CONFIRM waits for the other computer: every device hides its
+  // confirm.
+  bool confirmed_here = 20;
+  // The address this computer reached the other one at, when it goes
+  // directly ("203.0.113.7:4433"), as seen here, not as the other computer
+  // says: the person can match it with their server's. Empty through a
+  // relay. Set from MOVE_PHASE_CONFIRM on.
+  string target_address = 21;
 }
 
 message MovePath {
@@ -5001,3 +5607,159 @@ message CancelMove {}
 // Freezes now instead of waiting for the copy to settle
 // (MOVE_PHASE_COPYING only): agents stop for the last round.
 message FreezeMove {}
+
+// The person adds a goal to an agent's checklist: an outcome they want, in
+// their words. The agent is told. Answered with Ack.
+message AddGoal {
+  string agent_id = 1;
+  string text = 2;
+}
+
+// The person changes one of an agent's goals; unset fields stay as they
+// are. The agent is told. Answered with Ack.
+message UpdateGoal {
+  string agent_id = 1;
+  // G1, G2…: Goal.id.
+  uint32 goal_id = 2;
+  optional string text = 3;
+  // OPEN, DONE or DROPPED; UNSPECIFIED leaves it as it is.
+  ChecklistStatus status = 4;
+  // Removes the goal; items that served it serve none.
+  bool remove = 5;
+}
+// ---- Notifications ----
+//
+// What notifies is decided in the backend, the same for every device: a new
+// Needs-you item (NEEDS_YOU), an agent's notify_person (ALERT), and an
+// agent's reply to a message the person sent from a phone or tablet (REPLY;
+// from a computer too with `desktop_replies`). Nothing notifies while the
+// person is using Claktory on any device (SetActive). Each agent notifies at
+// most 6 times an hour; then one more says how many it held back. An agent
+// that has read a pipe never puts its own words in a notification: it says
+// only "<agent> has something for you".
+
+// Something the person should hear of, to every connected app. The backend
+// has already applied every rule (kinds, the agent's NotifyMode, quiet
+// hours, the hourly cap, and that nobody is using Claktory on any device
+// right now), so an app shows it as a notification of the system's unless
+// it's in front itself.
+message Notify {
+  // Unique to this notification.
+  string id = 1;
+  NotifyKind kind = 2;
+  // What it shows, as the person's preview setting allows
+  // (NotificationSettings.preview): usually the agent's name, and what it
+  // needs or says. `body` may be empty.
+  string title = 3;
+  string body = 4;
+  // What a tap opens: an agent (and `seq`, its Needs-you item), a pipe (and
+  // `seq`, its held message) or a chat. All empty for none (TEST): the app
+  // just comes forward.
+  string agent_id = 5;
+  string pipe_id = 6;
+  string chat_id = 7;
+  uint64 seq = 8;
+  // An agent marked its alert urgent and the person lets urgent alerts
+  // through: shown as time-sensitive where the system has that.
+  bool urgent = 9;
+  // When set, it replaces an earlier notification with the same key (an
+  // agent's alerts replace its earlier alert) instead of adding one.
+  string collapse = 10;
+  // Notifications with the same thread are grouped (one per agent, pipe or
+  // chat).
+  string thread = 11;
+  // When it was sent, in ms since 1970.
+  int64 sent_ms = 12;
+}
+
+enum NotifyKind {
+  NOTIFY_KIND_UNSPECIFIED = 0;
+  // Something waits for the person: a question, a request for a secret, a
+  // proposal, a held pipe message.
+  NOTIFY_KIND_NEEDS_YOU = 1;
+  // An agent's notify_person.
+  NOTIFY_KIND_ALERT = 2;
+  // An agent answered the person's message.
+  NOTIFY_KIND_REPLY = 3;
+  // SendTestNotification's.
+  NOTIFY_KIND_TEST = 4;
+}
+
+// What notifications say.
+enum NotifyPreview {
+  // As FULL.
+  NOTIFY_PREVIEW_UNSPECIFIED = 0;
+  // Who, and what it says.
+  NOTIFY_PREVIEW_FULL = 1;
+  // Only who: "Pericolo needs you".
+  NOTIFY_PREVIEW_WHO = 2;
+  // Just "Claktory has something for you".
+  NOTIFY_PREVIEW_NONE = 3;
+}
+
+// Whether an agent notifies the person.
+enum NotifyMode {
+  // As NotificationSettings says for each kind.
+  NOTIFY_MODE_DEFAULT = 0;
+  // Every kind, even those turned off (still within quiet hours and the
+  // hourly cap).
+  NOTIFY_MODE_ALWAYS = 1;
+  // Never.
+  NOTIFY_MODE_NEVER = 2;
+}
+
+// When Claktory notifies the person (config.json's `notifications`).
+message NotificationSettings {
+  // Which kinds notify (NotifyKind): on unless changed, but for
+  // desktop_replies, replies to messages sent from a computer, off.
+  bool needs_you = 1;
+  bool alerts = 2;
+  bool replies = 3;
+  bool desktop_replies = 4;
+  NotifyPreview preview = 5;
+  // Quiet hours: nothing notifies from quiet_start to quiet_end, in minutes
+  // after midnight in the Claktory's local time (it may run past
+  // midnight), but urgent alerts when urgent_breaks_quiet.
+  bool quiet_hours = 6;
+  uint32 quiet_start = 7;
+  uint32 quiet_end = 8;
+  bool urgent_breaks_quiet = 9;
+  // The push relay devices register with (RegisterNotifications): an https
+  // URL; empty for Claktory's own.
+  string relay = 10;
+}
+
+// This connection's app is in front and the person is using it (true), or
+// no longer (false: in the background, the screen locked, the computer
+// asleep). While any connection is active, nothing notifies; for 2 minutes
+// after, nothing is pushed to devices that aren't connected. A connection
+// counts as inactive until it says so, and when it closes. Answered with Ack.
+message SetActive {
+  bool active = 1;
+}
+
+// This device gets notifications pushed to it while it isn't connected: its
+// handle at the push relay (NotificationSettings.relay), from
+// `POST /v1/register`, and the key the backend seals each notification with.
+// Registering again replaces both; an empty handle stops the pushes and
+// forgets the key. Removing the device forgets them too. Answered with Ack.
+message RegisterNotifications {
+  // base64url, as the relay gave it.
+  string handle = 1;
+  // 32 random bytes the device made: AES-256-GCM.
+  bytes key = 2;
+  PushPlatform platform = 3;
+}
+
+enum PushPlatform {
+  PUSH_PLATFORM_UNSPECIFIED = 0;
+  PUSH_PLATFORM_APNS = 1;
+  // An app built for development, on APNs's sandbox.
+  PUSH_PLATFORM_APNS_SANDBOX = 2;
+  PUSH_PLATFORM_FCM = 3;
+}
+
+// Sends a test notification (NOTIFY_KIND_TEST) to every connected app and
+// every registered device, whether or not anyone is using Claktory and in
+// quiet hours too. Answered with Ack.
+message SendTestNotification {}

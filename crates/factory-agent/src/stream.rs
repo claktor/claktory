@@ -68,31 +68,43 @@ pub enum Transport {
     Sse,
 }
 
-/// How long the provider keeps a request's prompt cache, where a request can
-/// choose (Anthropic's `cache_control.ttl`).
+/// How long the provider keeps a request's prompt cache: what a request asks
+/// for where it can (Anthropic's `cache_control.ttl`, OpenAI's
+/// `prompt_cache_options.ttl`), or what the provider keeps by itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CacheTtl {
-    /// The provider's default: 5 minutes on Anthropic. Nothing is sent.
+    /// Anthropic's default: 5 minutes. Nothing is sent.
     #[default]
     #[serde(rename = "5m")]
     FiveMinutes,
-    /// An hour, at a higher price for writing the cache.
+    /// OpenAI's default from GPT-5.6 on: at least 30 minutes. Nothing is sent.
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+    /// An hour on Anthropic, at a higher price for writing the cache.
     #[serde(rename = "1h")]
     OneHour,
+    /// 12 hours on OpenAI from GPT-5.6 on, at twice the price of 30
+    /// minutes' writes.
+    #[serde(rename = "12h")]
+    TwelveHours,
 }
 
 impl CacheTtl {
     pub fn as_str(self) -> &'static str {
         match self {
             CacheTtl::FiveMinutes => "5m",
+            CacheTtl::ThirtyMinutes => "30m",
             CacheTtl::OneHour => "1h",
+            CacheTtl::TwelveHours => "12h",
         }
     }
 
     pub fn parse(text: &str) -> Option<CacheTtl> {
         match text.trim() {
             "5m" => Some(CacheTtl::FiveMinutes),
+            "30m" => Some(CacheTtl::ThirtyMinutes),
             "1h" => Some(CacheTtl::OneHour),
+            "12h" => Some(CacheTtl::TwelveHours),
             _ => None,
         }
     }
@@ -100,7 +112,9 @@ impl CacheTtl {
     pub fn millis(self) -> u64 {
         match self {
             CacheTtl::FiveMinutes => 5 * 60_000,
+            CacheTtl::ThirtyMinutes => 30 * 60_000,
             CacheTtl::OneHour => 60 * 60_000,
+            CacheTtl::TwelveHours => 12 * 60 * 60_000,
         }
     }
 }

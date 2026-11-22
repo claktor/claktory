@@ -19,6 +19,7 @@ use factory_protocol::v1::{self, OnboardingStep};
 use rusqlite::OptionalExtension;
 
 use crate::factory::{Factory, RequestError, host_event};
+use crate::locking::lock;
 use crate::store::Store;
 
 pub(crate) const SCHEMA: &str = "
@@ -38,10 +39,6 @@ pub(crate) struct State {
     model: Mutex<OnboardingStep>,
     /// Notified when the models available change.
     pub(crate) models_changed: Arc<tokio::sync::Notify>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl State {

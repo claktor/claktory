@@ -38,6 +38,37 @@ way resumes where it stopped; a code nobody had used yet is replaced by a
 fresh one. From a terminal on the old computer, `factoryd move CODE` does
 what the app's Move steps do.
 
+### Letting Rivet set up the new computer
+
+When the new computer is a server, Rivet can do its side over SSH, so you
+never open a terminal there:
+
+1. Rivet asks you for an SSH key for the server and has Claktory's vault
+   generate it: nobody sees the private half, and you add the public half
+   Rivet shows you to the server (most hosts ask for it when you create the
+   server; otherwise to root's `~/.ssh/authorized_keys`).
+2. Its first connection accepts the server's host key and tells you the key's
+   fingerprint, so you can check it against what your host shows. A key that
+   changes later is refused.
+3. It runs the installer on the server in the background, kept open for your
+   answer:
+
+   ```sh
+   ssh root@SERVER 'bash -c "$(curl -fsSL https://claktory.com/install.sh)" -- --receive --json'
+   ```
+
+   (`bash -c`, not `| bash`: the installer reads your yes or no about the
+   digits on its input, which piped into bash would be the script itself.)
+   It answers in JSON lines: the move code, how it's going, and the digits to
+   compare; the last line says Claktory runs on the server, or why the move
+   stopped.
+4. The move starts from this Claktory with that code, as in Move to another
+   computer…. Both sides show the same six digits; you check them, and Rivet
+   passes your yes or no to the server, never its own.
+5. Your agents, Rivet included, carry on on the server once it switches over.
+   The installer refuses a server that already runs a Claktory, so it never
+   stops one.
+
 ## Moving by bundle
 
 ### Before you start

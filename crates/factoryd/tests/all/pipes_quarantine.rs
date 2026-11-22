@@ -285,7 +285,7 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_cards_say_where_the_pipe_ca
     assert_eq!(card.taint, std::slice::from_ref(&route));
     // Kept with it: shown the same when it's answered.
     let seq = view.entries.iter().find(|entry| matches!(&entry.kind, Some(Kind::AskPerson(_)))).expect("it").seq;
-    let answer = v1::AnswerAsk { agent_id: "bo".into(), seq, dismiss: true, text: String::new() };
+    let answer = v1::AnswerAsk { agent_id: "bo".into(), seq, dismiss: true, text: String::new(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(answer)).await;
     view.follow(&mut client, |view| {
         view.entries.iter().any(|entry| {

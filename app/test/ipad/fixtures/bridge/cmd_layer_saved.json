@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "layerSaved",
+  "arguments": {
+    "page_1based": 9,
+    "ink_layer_id": "layer-paper-p9",
+    "revision": 1
+  },
+  "result": {}
+}

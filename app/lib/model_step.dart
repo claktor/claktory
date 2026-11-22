@@ -207,6 +207,8 @@ class _ConnectModelState extends State<ConnectModel> {
         'Your agents need an AI model to work. Sign in with your Claude or '
             'ChatGPT plan, or use an API key.',
       ),
+      const AiProviderConsent(adding: false),
+      const SizedBox(height: Space.l),
       if (claude != null)
         _Choice(
           title: 'Sign in with Claude',

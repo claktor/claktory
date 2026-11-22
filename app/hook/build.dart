@@ -30,6 +30,19 @@ const iosTriples = [
 /// The Mac's targets: rustc strips them itself.
 const macTriples = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
 
+/// Android's targets: phones (arm64) and emulators (x86_64 off Apple
+/// silicon), 64-bit only (app/android/toolchain.properties). Flutter builds
+/// armv7 too unless told otherwise, so Android builds always pass
+/// `--target-platform android-arm64,android-x64` (app/android/DESIGN.md).
+const androidTriples = ['aarch64-linux-android', 'x86_64-linux-android'];
+
+/// Android loads a library only if its segments are aligned for the
+/// phone's page size, and phones with 16 KiB pages ship now (Play requires
+/// it of apps targeting Android 15+). native_toolchain_rust adds this flag
+/// itself only when it finds no rustflags for the target anywhere, and the
+/// home-folder remap below sets them, so it's said here, explicitly.
+const androidPageSizeFlag = '-C link-arg=-Wl,-z,max-page-size=16384';
+
 /// The flags rustc gets for [triple]. Every target's say "~" for the home
 /// folder of whoever built it: a panic's location and the paths of the
 /// crates it was built from would otherwise ship in the app, naming them
@@ -38,6 +51,7 @@ const macTriples = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
 String rustFlags(String triple, {required String home}) => [
   if (home.isNotEmpty) '--remap-path-prefix=$home=~',
   if (iosTriples.contains(triple)) '-C strip=none',
+  if (androidTriples.contains(triple)) androidPageSizeFlag,
 ].join(' ');
 
 /// Builds the private tunnel's Rust crate (rust/) into the app, through
@@ -52,7 +66,7 @@ void main(List<String> args) async {
         // Read by rustc only when it builds for iOS or the Simulator.
         'IPHONEOS_DEPLOYMENT_TARGET': iosDeploymentTarget,
         // After the release profile's own strip, so iOS's wins.
-        for (final triple in [...iosTriples, ...macTriples])
+        for (final triple in [...iosTriples, ...macTriples, ...androidTriples])
           'CARGO_TARGET_${triple.replaceAll('-', '_').toUpperCase()}_RUSTFLAGS':
               rustFlags(triple, home: Platform.environment['HOME'] ?? ''),
       },

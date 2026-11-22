@@ -100,6 +100,7 @@ fn fallback_note(text: String) -> UserMessage {
             id: String::new(),
             summary: "Another model answered a step this agent's model declined.".into(),
             transient: true,
+            pipe_seqs: Vec::new(),
         }),
         sent_from: None,
         client_id: String::new(),

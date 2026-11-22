@@ -11,8 +11,21 @@ publish = false
 # Line tables only: backtraces keep file and line, and incremental relinks
 # of the test binaries take about a third of the time (debuggers lose
 # variable info, which agents rarely use). Release stays as it is.
+#
+# Packed: on macOS the line tables go into one .dSYM beside each binary,
+# replaced on every build, instead of staying in the *.rcgu.o files the
+# binary points at, which rustc leaves in target/debug/deps on every rebuild
+# (rust-lang/rust#161824): ~0.4 GB per rebuild of factoryd, never deleted.
+# It costs dsymutil's ~10 s on each relink of factoryd.
 [profile.dev]
 debug = "line-tables-only"
+split-debuginfo = "packed"
+
+# Dependencies without debug info: a backtrace still has file and line for
+# Claktory's own code. It also makes them the same for `cargo build` and
+# `cargo test` (which inherits this), so target/ holds them once, not twice.
+[profile.dev.package."*"]
+debug = false
 
 # No debug info for what `cargo test` builds: on macOS, rustc 1.88 and later
 # leaves every rebuild's *.rcgu.o files in target/*/deps and never deletes

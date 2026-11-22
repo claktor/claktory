@@ -75,6 +75,12 @@ class SetupLinks extends ChangeNotifier {
   /// The oldest request not yet taken, taking it.
   String? take() => _waiting.isEmpty ? null : _waiting.removeAt(0);
 
+  /// The request connecting now, until it's connected or failed. It's
+  /// kept here rather than in a window: each Claktory gets a window of its
+  /// own (main.dart), so connecting to one opens another window, whose
+  /// opener carries on following it.
+  SetupRequest? connecting;
+
   /// Says how the request goes, for the agent that made it.
   Future<void> status(Map<String, Object?> status) async {
     try {
@@ -85,6 +91,20 @@ class SetupLinks extends ChangeNotifier {
       // The same, in tests.
     }
   }
+}
+
+/// A request connecting this Mac to [target].
+class SetupRequest {
+  SetupRequest(this.target, this.since);
+
+  final RemoteFactory target;
+
+  /// When it started connecting: a welcome before then was another
+  /// Claktory's (this Mac's own).
+  final DateTime since;
+
+  /// What it last said, so it says each thing once.
+  Map<String, Object?>? said;
 }
 
 /// The app's requests.
@@ -115,16 +135,10 @@ class SetupLinkOpener extends StatefulWidget {
 class _SetupLinkOpenerState extends State<SetupLinkOpener> {
   SetupLinks get _links => widget.links ?? setupLinks;
 
-  /// The Claktory a request is connecting to, until it's connected or
-  /// failed.
-  RemoteFactory? _target;
+  /// What this window follows while a request connects: its Claktory
+  /// and the device's connections.
   Backend? _backend;
   Connections? _connections;
-  Map<String, Object?>? _said;
-
-  /// When it started connecting: a welcome before then was another
-  /// Claktory's (this Mac's own).
-  DateTime? _since;
 
   @override
   void initState() {
@@ -132,6 +146,15 @@ class _SetupLinkOpenerState extends State<SetupLinkOpener> {
     _links.addListener(_next);
     unawaited(_links.listen());
     WidgetsBinding.instance.addPostFrameCallback((_) => _next());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // A window shown for the Claktory connecting is a new one with its
+    // own backend (main.dart); this one follows whichever it shows.
+    context.dependOnInheritedWidgetOfExactType<AppScope>();
+    _follow();
   }
 
   @override
@@ -145,23 +168,34 @@ class _SetupLinkOpenerState extends State<SetupLinkOpener> {
     if (!mounted) return;
     final code = _links.take();
     if (code == null) return;
-    final scope = AppScope.scope(context);
-    final connections = scope.connections;
+    final connections = AppScope.scope(context).connections;
     final target = parsePairingCode(code);
     if (target == null) return _fail('bad_code');
     if (connections.readFailure != null) return _fail('connections_unreadable');
     // Set up already: only the person adds another (a link asks first).
     if (connections.saved.isNotEmpty) return _fail('already_connected');
-    if (_target != null) return _fail('busy');
-    _target = target;
-    _since = DateTime.now();
-    _say({'state': 'connecting', 'name': target.label});
+    if (_links.connecting != null) return _fail('busy');
+    final request = _links.connecting = SetupRequest(target, DateTime.now());
+    _say(request, {'state': 'connecting', 'name': target.label});
     connections.use(target);
-    _backend = scope.backend;
+    _follow();
+  }
+
+  /// Follows how the request connecting goes, in what this window shows.
+  void _follow() {
+    if (!mounted) return;
+    final following = _links.connecting != null;
+    final scope = AppScope.scope(context);
+    final backend = following ? scope.backend : null;
+    final connections = following ? scope.connections : null;
+    if (backend == _backend && connections == _connections) return;
+    _stopFollowing();
+    _backend = backend;
     _connections = connections;
     for (final changes in _followed) {
       changes.addListener(_progress);
     }
+    if (following) unawaited(_progress());
   }
 
   List<Listenable> get _followed => [
@@ -181,24 +215,29 @@ class _SetupLinkOpenerState extends State<SetupLinkOpener> {
   }
 
   Future<void> _progress() async {
-    final target = _target;
+    final request = _links.connecting;
     final backend = _backend;
     final connections = _connections;
-    if (target == null || backend == null || connections == null) return;
+    if (request == null) return _stopFollowing();
+    if (backend == null || connections == null) return;
+    final target = request.target;
     if (connections.current != target) {
       // The person picked another, or forgot it, meanwhile.
-      return _done({'state': 'failed', 'reason': 'cancelled'});
+      return _done(request, {'state': 'failed', 'reason': 'cancelled'});
     }
+    // This window's Claktory is another (the one shown before): what
+    // it says isn't the request's. The window for the target follows.
+    if (backend.target != target) return;
     final refused = backend.refused.value;
     if (refused != null) {
-      return _done({
+      return _done(request, {
         'state': 'failed',
         'reason': 'refused',
         'message': refused,
       });
     }
     if (backend.signInRequired.value != null) {
-      return _done({'state': 'failed', 'reason': 'sign_in_required'});
+      return _done(request, {'state': 'failed', 'reason': 'sign_in_required'});
     }
     final waiting = backend.pairing.value;
     if (waiting != null) {
@@ -211,8 +250,8 @@ class _SetupLinkOpenerState extends State<SetupLinkOpener> {
       } catch (_) {
         endpoint = '';
       }
-      if (!mounted || _target != target) return;
-      _say({
+      if (!mounted || _links.connecting != request) return;
+      _say(request, {
         'state': 'waiting',
         'name': target.label,
         'device_id': waiting.pending.deviceId,
@@ -221,25 +260,25 @@ class _SetupLinkOpenerState extends State<SetupLinkOpener> {
       });
       return;
     }
-    final since = _since;
     final welcomed = backend.connectedSince.value;
-    if (since != null && welcomed != null && !welcomed.isBefore(since)) {
-      _done({'state': 'connected', 'name': target.label});
+    if (welcomed != null && !welcomed.isBefore(request.since)) {
+      _done(request, {'state': 'connected', 'name': target.label});
       if (mounted) _tell(target.label);
     }
   }
 
-  void _fail(String reason) => _say({'state': 'failed', 'reason': reason});
+  void _fail(String reason) =>
+      unawaited(_links.status({'state': 'failed', 'reason': reason}));
 
-  void _done(Map<String, Object?> status) {
-    _say(status);
-    _target = null;
+  void _done(SetupRequest request, Map<String, Object?> status) {
+    _say(request, status);
+    if (_links.connecting == request) _links.connecting = null;
     _stopFollowing();
   }
 
-  void _say(Map<String, Object?> status) {
-    if (mapEquals(status, _said)) return;
-    _said = status;
+  void _say(SetupRequest request, Map<String, Object?> status) {
+    if (mapEquals(status, request.said)) return;
+    request.said = status;
     unawaited(_links.status(status));
   }
 

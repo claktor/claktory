@@ -116,6 +116,9 @@ pub(crate) struct Target {
     pub(crate) digits: String,
     /// The digits were confirmed on an earlier connection.
     pub(crate) resumed: bool,
+    /// The address this computer reached it at, when directly ("203.0.113.7:
+    /// 4433"); empty through a relay. Seen here, not said by the target.
+    pub(crate) address: String,
 }
 
 /// What the target said about the plan.
@@ -237,6 +240,7 @@ impl Mover {
                     user_home,
                     digits: move_wire::digits(&self.code.endpoint, &self.id(), &self.code.secret),
                     resumed,
+                    address: link.address(),
                 };
                 Ok(link)
             }
@@ -390,6 +394,17 @@ pub(crate) struct Link {
 const QUEUED: usize = 4;
 
 impl Link {
+    /// The address the connection reaches the target at now, when it goes
+    /// directly; empty through a relay.
+    pub(crate) fn address(&self) -> String {
+        let paths = self.connection.paths();
+        let path = paths.iter().find(|path| path.is_selected()).or_else(|| paths.iter().next());
+        match path.map(|path| path.remote_addr().clone()) {
+            Some(iroh::TransportAddr::Ip(address)) => address.to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn new(connection: Connection, mut send: SendStream, mut recv: RecvStream) -> Link {
         let (out, mut queued) = mpsc::channel::<(Frame, Vec<u8>)>(QUEUED);
         let writer = tokio::spawn(async move {
@@ -805,7 +820,16 @@ pub(crate) async fn drive(place: &Place, options: &Options, code: ReceiveCode, p
         problem => problem.text(&machine),
     })?;
     let machine = link.target.machine.clone();
-    if !link.target.resumed {
+    // A move from here starts fresh (one under way is refused above), so the
+    // person always confirms the digits: a target claiming to know this move
+    // never skips that.
+    if link.target.resumed {
+        let why = format!("{machine} says it knows a move this computer never started, so nothing was moved.");
+        link.fail(&why).await;
+        forget(&place.home);
+        return Err(why);
+    }
+    {
         let target = &link.target;
         person.say(&format!("Moving to {machine} ({} {}, Claktory {}).", target.os, target.arch, target.version));
         let digits = link.target.digits.clone();
@@ -1103,6 +1127,8 @@ mod tests {
         import_fails: Option<String>,
         /// Drops the connection once, when this round starts.
         drop_at_round: Option<u32>,
+        /// Says it knows the move (resumed) on the first connection too.
+        claims_resumed: bool,
     }
 
     /// What the fake target saw.
@@ -1177,7 +1203,7 @@ mod tests {
             let _ = move_wire::write(send, &Frame::Failed { why: "Not this code.".into() }, &[]).await;
             return true;
         }
-        let resumed = claimed.is_some();
+        let resumed = claimed.is_some() || script.claims_resumed;
         let welcome = Frame::Welcome {
             version: crate::update::VERSION.into(),
             machine: "cloud-box".into(),
@@ -1363,6 +1389,31 @@ mod tests {
         );
         assert!(!moving_dir(&place.home).exists());
         assert!(person.said.iter().any(|said| said.contains("doesn't have flutter")), "{:?}", person.said);
+    }
+
+    /// A person who must never be asked.
+    struct Absent;
+
+    impl Person for Absent {
+        fn say(&mut self, _text: &str) {}
+
+        fn digits_match(&mut self, _machine: &str, _digits: &str) -> bool {
+            panic!("asked");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_target_claiming_a_move_never_confirmed_here_gets_nothing() {
+        let place = claktory();
+        std::fs::create_dir_all(place.home.root().join("vault")).unwrap();
+        let (code, seen) = target(Script { claims_resumed: true, ..Script::default() }).await;
+        let error = drive(&place, &Options::default(), code, &mut Absent).await.unwrap_err();
+        assert!(error.contains("never started"), "{error}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let seen = seen.lock().unwrap();
+        assert!(seen.tree.is_empty() && seen.plans == 0 && seen.committed.is_none(), "nothing went");
+        assert!(move_export::read_moved(&place.home).is_none());
+        assert!(place.home.root().join("vault").is_dir(), "nothing was fenced");
     }
 
     #[tokio::test(flavor = "multi_thread")]

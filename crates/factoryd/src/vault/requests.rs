@@ -73,9 +73,27 @@ fn values(entries: &[v1::SecretEntry]) -> Vec<Value> {
 }
 
 pub(crate) fn create_secret(factory: &Factory, request: &v1::CreateSecret) -> Result<(), RequestError> {
-    factory.vault.create_secret(&request.name, &request.description, &values(&request.entries), "")?;
+    let id = factory.vault.create_secret(&request.name, &request.description, &values(&request.entries), "")?;
+    if request.ask_each_time {
+        factory.vault.set_ask_each_time(&id, true)?;
+    }
     factory.vault_changed();
     Ok(())
+}
+
+/// SetSecretAskEachTime: on at once; off only with the vault's proof, since
+/// it lets agents' commands use the secret without asking.
+pub(crate) async fn set_ask_each_time(
+    factory: &Arc<Factory>,
+    session: &mut Session,
+    request: &v1::SetSecretAskEachTime,
+) -> Result<v1::VaultSession, RequestError> {
+    if !request.ask_each_time {
+        open(factory, request.proof.as_ref()).await?;
+    }
+    factory.vault.set_ask_each_time(&request.id, request.ask_each_time)?;
+    factory.vault_changed();
+    Ok(session.answer())
 }
 
 pub(crate) fn update_secret(factory: &Factory, request: &v1::UpdateSecret) -> Result<(), RequestError> {
@@ -170,11 +188,14 @@ pub(crate) fn list_uses(factory: &Factory, request: &v1::ListSecretUses) -> Resu
 /// can't make them.
 pub(crate) struct Session {
     device: String,
+    /// Which device it is for checks bound to one (CheckRecoveryKey): the
+    /// paired device's id, "local" for this machine's own app.
+    binding: String,
 }
 
 impl Session {
-    pub(crate) fn new(device: String) -> Session {
-        Session { device }
+    pub(crate) fn new(device: String, binding: String) -> Session {
+        Session { device, binding }
     }
 
     pub(crate) fn device(&self) -> &str {
@@ -291,6 +312,19 @@ pub(crate) fn show_recovery_key(factory: &Factory, session: &Session) -> Result<
     Ok(v1::RecoveryKey { key, unlocked_until_ms: 0 })
 }
 
+/// Starts checking that the person saved the recovery key, on this device.
+pub(crate) fn check_recovery_key(factory: &Factory, session: &Session) -> Result<v1::RecoveryKeyCheck, RequestError> {
+    Ok(factory.vault.check_recovery_key(&session.binding)?)
+}
+
+/// The group the check asked for, as typed; right, every device stops
+/// asking (VaultState.recovery_key_unconfirmed).
+pub(crate) fn confirm_recovery_key(factory: &Factory, session: &Session, request: &v1::ConfirmRecoveryKey) -> Result<(), RequestError> {
+    factory.vault.confirm_recovery_key(&session.binding, &request.check_id, &request.typed)?;
+    factory.vault_changed();
+    Ok(())
+}
+
 pub(crate) async fn set_locked_mode(
     factory: &Arc<Factory>,
     session: &mut Session,
@@ -368,6 +402,7 @@ fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: 
         id: String::new(),
         summary: format!("{summary}."),
         transient: false,
+        pipe_seqs: Vec::new(),
     };
     factory.deliver_event(&admin, text, event);
     Ok(())
@@ -381,6 +416,15 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
     let asked = factory.vault.pending_request(agent, &request.request_id)?;
+    if !asked.generate.is_empty() && request.approve {
+        if request.approve_only {
+            return Err(VaultError::Invalid(
+                "A key to generate is yours to approve: there's nothing for an admin agent to find.".to_owned(),
+            )
+            .into());
+        }
+        return generate(factory, &asked, request);
+    }
     if request.approve && request.approve_only {
         if asked.state() == v1::SecretRequestState::Approved {
             return Err(VaultError::Invalid("It's approved already; the admin agent is on it.".to_owned()).into());
@@ -431,11 +475,11 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
             id: String::new(),
             summary: format!("{summary}."),
             transient: true,
+            pipe_seqs: Vec::new(),
         };
         factory.deliver_event(&asked.admin_agent_id, format!("{summary}."), event);
     }
     let person = factory.lock().config.person_capitalized().to_owned();
-    let comment = request.comment.trim();
     // What it got, and nothing else of the vault.
     let (mut summary, what) = match &given {
         Some((id, name)) => {
@@ -444,11 +488,9 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         }
         None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
     };
-    if !comment.is_empty() {
-        summary.push_str(&format!(" (comment: {comment})"));
-    }
     summary.push('.');
-    let text = format!("{summary}{what}\n\nYou asked because: {}", asked.reason);
+    // Each note says whose it is (#253).
+    let text = format!("{summary}{what}{}\n\nYou asked because: {}", note(&person, &request.comment), asked.reason);
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
@@ -517,6 +559,7 @@ pub(crate) fn fulfil_request(
     secret_ref: &str,
     aliases: &std::collections::BTreeMap<String, String>,
     as_is: bool,
+    admin_note: &str,
 ) -> Result<(String, String), RequestError> {
     let asked = factory.vault.approved_request(request_id)?;
     let agent = asked.agent_id.clone();
@@ -537,16 +580,86 @@ pub(crate) fn fulfil_request(
     };
     let label = factory.vault.granted(&agent).remove(&secret_id).unwrap_or_else(|| name.clone());
     let summary = format!("{person} approved your request and {admin_name} gave you {name}: pass it in bash's `secrets`");
-    let text = format!("{summary}.\n\nIt's {label}.\n\nYou asked because: {}", asked.reason);
+    // The person's approval comment and the admin agent's note, each as its writer's.
+    let notes = format!("{}{}", note(&person, &asked.comment), note(&admin_name, admin_note));
+    let text = format!("{summary}.\n\nIt's {label}.{notes}\n\nYou asked because: {}", asked.reason);
     let event = factory_agent::Event {
         source: factory_agent::EventSource::Host,
         from: "Claktory".to_owned(),
         id: String::new(),
         summary: format!("{summary}."),
         transient: false,
+        pipe_seqs: Vec::new(),
     };
     factory.deliver_event(&agent, text, event);
     Ok((name, agent))
+}
+
+/// A note for the asker, as its writer's ("Matt's note: …", "Rivet's
+/// note: …"), on a line of its own; empty without one.
+fn note(writer: &str, note: &str) -> String {
+    let note = note.trim();
+    if note.is_empty() { String::new() } else { format!("\n\n{writer}'s note: {note}") }
+}
+
+/// The person approves a generate request (#252): the vault makes the key,
+/// seals its private half as a new secret (asking each time unless they
+/// said not to), hides it from every output at once, and gives it to the
+/// asker, or to no one as it asked. The asker is told its public half only.
+fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
+    let agent = asked.agent_id.as_str();
+    let wanted = asked.new_secret.clone().unwrap_or_default();
+    let name = match request.name.trim() {
+        "" => asked.secret_name.clone(),
+        name => name.to_owned(),
+    };
+    let variable = wanted.variables.first().map_or_else(|| super::generate::VARIABLE.to_owned(), |variable| variable.name.clone());
+    let made = super::generate::make(&asked.generate, name.trim())?;
+    let public_key = made.public.clone();
+    let description = match wanted.description.trim() {
+        "" => format!("Public key: {public_key}"),
+        description => format!("{description}\n\nPublic key: {public_key}"),
+    };
+    let values = [Value { variable: variable.clone(), value: made.private, file: true }];
+    let id = factory.vault.create_secret(&name, &description, &values, "")?;
+    drop(values);
+    let asks = request.ask_each_time.unwrap_or(true);
+    if asks {
+        factory.vault.set_ask_each_time(&id, true)?;
+    }
+    // Hidden from every output from now on, before anyone can use it.
+    factory.vault_changed();
+    let name = factory.vault.state(|_, _| false).secrets.iter().find(|secret| secret.id == id).map_or(name, |secret| secret.name.clone());
+    let given = if asked.grant_to_nobody { name.clone() } else { factory.vault.grant_as(&id, agent, "", &Default::default())? };
+    let decided = factory.vault.decide_generated(asked, (&id, &given), &public_key, &request.comment)?;
+    factory.vault_changed();
+    show_everywhere(factory, decided);
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let kind = super::generate::called(&asked.generate);
+    let (summary, how) = if asked.grant_to_nobody {
+        (format!("{person} approved your request: the vault generated {name}, {kind}, and gave it to no one, as you asked"), String::new())
+    } else {
+        // Mid-sentence: "the person" when they have no name, never "The person".
+        let them = factory.lock().config.person().to_owned();
+        let asking = if asks {
+            format!(
+                " It asks {them} each time it's used: a command with it isn't run at first, and they're asked to allow that exact command once; when you're told they allowed it, run it again exactly as it was."
+            )
+        } else {
+            String::new()
+        };
+        (
+            format!("{person} approved your request: the vault generated {given}, {kind}, and gave it to you: pass it in bash's `secrets`"),
+            format!("\n\n{variable} is its private key's file; you never see the key itself.{asking}"),
+        )
+    };
+    let text = format!(
+        "{summary}.{how}\n\nIts public key:\n{public_key}{}\n\nYou asked because: {}",
+        note(&person, &request.comment),
+        asked.reason
+    );
+    factory.deliver_event(agent, text, host_event(format!("{summary}.")));
+    Ok(())
 }
 
 /// Shows a request as it is now in its agent's conversation.

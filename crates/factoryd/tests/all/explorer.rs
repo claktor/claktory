@@ -108,7 +108,12 @@ async fn a_focused_project_shows_its_folder_live_without_what_factoryignore_hide
 fn files_pane(agent: &str, project: &str) -> client_message::Body {
     let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
         id: id.into(),
-        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new() })),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf {
+            kind: kind.into(),
+            path: path.into(),
+            title: String::new(),
+            ..Default::default()
+        })),
     };
     let split = v1::ViewSplit {
         axis: v1::ViewAxis::Row.into(),
@@ -116,7 +121,7 @@ fn files_pane(agent: &str, project: &str) -> client_message::Body {
         weights: vec![],
     };
     let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
-    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root: Some(root) })
+    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root: Some(root), ..Default::default() })
 }
 
 fn watch(project_id: &str) -> client_message::Body {
@@ -172,7 +177,7 @@ async fn a_files_pane_or_a_watching_connection_gets_that_projects_tree_too() {
     assert_eq!(fresh.explorer.as_ref().map(|explorer| explorer.project_id.as_str()), Some("site"));
 
     // Without the pane, only a connection watching Blog gets it.
-    let plain = client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: None });
+    let plain = client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: None, ..Default::default() });
     apply_request(&mut client, &mut view, plain).await;
     match apply_request(&mut other, &mut fresh, watch("nowhere")).await {
         Body::Error(error) => assert_eq!(error.code(), ErrorCode::NotFound),

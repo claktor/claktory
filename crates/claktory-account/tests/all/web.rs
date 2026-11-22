@@ -206,15 +206,17 @@ async fn delete_account_has_a_page_of_its_own_that_signs_in_first() {
 }
 
 #[tokio::test]
-async fn the_mark_sign_in_emails_show_is_served_to_any_number_of_image_proxies() {
+async fn the_mark_older_sign_in_emails_show_is_served_to_any_number_of_image_proxies() {
     let instance = start().await;
     let mut claktory = Claktory::new("203.0.113.7");
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
     let mail = instance.mail.sent().into_iter().last().expect("the code's email");
-    assert!(mail.html.contains("<img src=\"https://account.claktory.com/mark.png\""), "{}", mail.html);
+    // Today's draw the mark and load nothing, which Gmail would hide.
+    assert!(!mail.html.contains("<img") && !mail.html.contains("mark.png"), "{}", mail.html);
     assert!(mail.html.contains(&format!(">{}</div>", instance.last_code("matt@example.com"))), "the code, large");
 
-    // More than an IP's requests a minute: mail providers fetch it through few proxies.
+    // Those sent before still load it. More than an IP's requests a minute:
+    // mail providers fetch it through few proxies.
     for _ in 0..40 {
         let mark = instance.send("GET", "/mark.png", Vec::new(), &[("x-forwarded-for", "192.0.2.80".into())]).await;
         assert_eq!(mark.status, 200);

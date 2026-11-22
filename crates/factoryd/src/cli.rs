@@ -509,9 +509,14 @@ fn status_text(workspace: &v1::Workspace, home: &Home) -> String {
         workspace.providers.iter().filter(|provider| !provider.signed_in_with.is_empty()).map(|provider| provider.name.as_str()).collect();
     let models =
         if signed_in.is_empty() { "no model provider signed in".to_owned() } else { format!("signed in to {}", signed_in.join(", ")) };
-    let devices = status["devices"].as_array().map_or(0, Vec::len);
+    // Only devices that are in count as paired: one whose code is unused,
+    // or expired, isn't a device yet (Abbacchio's fresh Linux install).
+    let count =
+        |state: &str| status["devices"].as_array().map_or(0, |devices| devices.iter().filter(|device| device["state"] == state).count());
+    let (devices, waiting) = (count("paired"), count("waiting"));
+    let waiting = if waiting == 0 { String::new() } else { format!(", {waiting} waiting to be allowed") };
     format!(
-        "Claktory {} ({}), {}: account {}, {models}, {devices} paired device{}.",
+        "Claktory {} ({}), {}: account {}, {models}, {devices} device{}{waiting}.",
         status["name"].as_str().unwrap_or_default(),
         status["version"].as_str().unwrap_or_default(),
         status["platform"].as_str().unwrap_or_default(),
@@ -662,7 +667,7 @@ fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
 
 fn devices_text(devices: &[Value]) -> String {
     if devices.is_empty() {
-        return "No devices are paired.".to_owned();
+        return "No devices yet.".to_owned();
     }
     let lines: Vec<String> = devices
         .iter()
@@ -676,7 +681,7 @@ fn devices_text(devices: &[Value]) -> String {
                 "code_unused" => "its code hasn't been used yet".to_owned(),
                 "code_expired" => "its code expired".to_owned(),
                 _ if device["connected"].as_bool() == Some(true) => "connected".to_owned(),
-                _ => "paired".to_owned(),
+                _ => "allowed".to_owned(),
             };
             format!("{id}  {}  {what}", device["name"].as_str().unwrap_or_default())
         })
@@ -781,7 +786,7 @@ async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Fl
                 format!("Allowed {} (it showed {shows}): it can connect now.", device.name),
             ),
             "deny" => Answer::ok(json!({"denied": id}), format!("Not allowed. {} can't connect.", device.name)),
-            _ => Answer::ok(json!({"unpaired": id}), format!("Unpaired {}: it can't connect any more.", device.name)),
+            _ => Answer::ok(json!({"unpaired": id}), format!("Removed {}: it can't connect any more.", device.name)),
         },
         Err(answer) => answer,
     }
@@ -988,12 +993,14 @@ pub mod receive_json {
         })
     }
 
-    /// The last line, and the exit code: 0 moved, 3 refused (nothing to
-    /// fix but what it says), 1 failed.
+    /// The last line, and the exit code: 0 moved, 3 refused or called off
+    /// by the other computer (nothing to fix but what it says), 1 failed.
     pub fn end(done: &Result<String, ImportError>) -> (Value, u8) {
         match done {
             Ok(text) => (json!({"ok": true, "event": "done", "message": text}), 0),
             Err(error @ ImportError::Refused(_)) => (json!({"ok": false, "error": "refused", "message": error.to_string()}), 3),
+            // Not moved, nothing changed here: the other computer stopped it.
+            Err(error @ ImportError::CalledOff(_)) => (json!({"ok": false, "error": "called_off", "message": error.to_string()}), 3),
             Err(error) => (json!({"ok": false, "error": "failed", "message": error.to_string()}), 1),
         }
     }

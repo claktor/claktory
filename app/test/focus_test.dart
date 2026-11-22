@@ -90,10 +90,11 @@ void main() {
         'Writer',
         'Site',
         'Workspace',
-        'Projects',
       ]) {
         expect(find.text(elsewhere), findsNothing, reason: elsewhere);
       }
+      // The Projects section's heading stays, over the focused project.
+      expect(find.text('Projects'), findsOneWidget);
 
       // The heading opens the project's settings, by click or right click.
       await tester.tap(find.text('Factory').first, buttons: kSecondaryButton);

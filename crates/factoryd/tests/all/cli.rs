@@ -93,6 +93,9 @@ async fn devices_are_paired_without_waiting_and_allowed_once_they_ask() {
     let devices = cli(&dir, addr, "devices --json", "").await;
     assert_eq!(ok(&devices)["devices"][0]["state"], "code_unused");
     assert_eq!(keys(&devices.json["devices"][0]), ["connected", "expires_in", "id", "last_seen_ms", "name", "state"]);
+    // A code nobody used yet isn't a paired device (Abbacchio, a fresh Linux install).
+    let status = cli(&dir, addr, "status", "").await;
+    assert!(status.text.ends_with(", 0 devices."), "{}", status.text);
     // Not yet: the device has to use its code first.
     let early = cli(&dir, addr, r#"allow "matt's iphone" --json"#, "").await;
     assert_eq!((early.exit, early.json["error"].as_str()), (Exit::NeedsHuman, Some("not_waiting")), "{early:?}");
@@ -158,6 +161,8 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     // The key it asks with, for a setup on the device to compare with its own (#245).
     assert_eq!(listed["endpoint_id"].as_str(), Some(device.id().to_string().as_str()));
     assert_eq!(keys(listed), ["connected", "endpoint_id", "expires_in", "id", "last_seen_ms", "name", "number", "state"]);
+    let status = cli(&dir, addr, "status", "").await;
+    assert!(status.text.ends_with(", 0 devices, 1 waiting to be allowed."), "{}", status.text);
 
     // Other digits: it may be someone else's device, so nothing is allowed.
     let other = if shows == "0000" { "0001" } else { "0000" };
@@ -167,6 +172,8 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     let allowed = cli(&dir, addr, &format!(r#"allow "Matt's MacBook" --number {shows} --json"#), "").await;
     assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json["number"].as_str()), (Some(id.as_str()), Some(shows.as_str())));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+    let status = cli(&dir, addr, "status", "").await;
+    assert!(status.text.ends_with(", 1 device."), "{}", status.text);
 
     // Fugo's rule (#245): once a device is in, a program lets no other in,
     // with its digits or without; a person at a terminal still can.

@@ -102,7 +102,7 @@ async fn resend_gets_the_whole_email_with_the_key() {
     use claktory_account::server::{Mailer, mail};
     let (url, request) = fake_resend("200 OK").await;
     let resend = mail::Resend::with_url("re_key".into(), url);
-    let email = mail::code_mail("auth.claktory.com", "https://account.claktory.com", "matt@example.com", "482913");
+    let email = mail::code_mail("auth.claktory.com", "matt@example.com", "482913");
     resend.send(&email).await.expect("sent");
     let request = request.await.unwrap();
     let (head, body) = request.split_once("\r\n\r\n").unwrap();
@@ -125,7 +125,7 @@ async fn resend_gets_the_whole_email_with_the_key() {
 #[tokio::test]
 async fn cloudflare_gets_the_whole_email_with_the_token_and_its_refusals_are_told_apart() {
     use claktory_account::server::{Mailer, mail};
-    let email = mail::code_mail("auth.claktory.com", "https://account.claktory.com", "matt@example.com", "482913");
+    let email = mail::code_mail("auth.claktory.com", "matt@example.com", "482913");
     let sent = r#"{"success": true, "errors": [], "messages": [], "result": {"message_id": "<m@auth.claktory.com>", "delivered": ["matt@example.com"], "permanent_bounces": [], "queued": [], "suppressed_recipients": []}}"#;
     let (base, request) = fake("200 OK", sent).await;
     mail::Cloudflare::with_base("cf-token".into(), "acc", &format!("{base}/client/v4")).send(&email).await.expect("sent");

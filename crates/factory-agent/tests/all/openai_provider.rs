@@ -171,3 +171,27 @@ fn max_tokens_leave_room_in_the_context_window() {
     gpt.context_window = 0;
     assert_eq!(clamp_max_tokens(&gpt, &context, 0), 1);
 }
+
+/// A model with a cache lifetime (GPT-5.6 on) asks for 12 hours when it's
+/// chosen; its own 30 minutes, and every earlier model, send nothing.
+#[tokio::test]
+async fn twelve_hours_of_cache_are_asked_for_only_where_a_model_can() {
+    use factory_agent::CacheTtl;
+    let case = openai_responses().into_iter().find(|case| case["http"]["status"] == 200 && !case["request"].is_null()).expect("a case");
+    let asked = |id: &str, ttl: CacheTtl| {
+        let case = case.clone();
+        let id = id.to_owned();
+        async move {
+            let server = serve(vec![served(&case, false)]).await;
+            let mut model = factory_agent::providers::catalog::models("openai").into_iter().find(|model| model.id == id).expect("model");
+            model.base_url = format!("{}/v1", server.base_url);
+            let mut stream = stream_simple(&model, context(&case), StreamOptions { cache_ttl: ttl, ..options(&case) }).expect("stream");
+            collect(&mut stream).await;
+            let body = server.requests.lock().first().cloned().expect("request").body;
+            body.get("prompt_cache_options").cloned()
+        }
+    };
+    assert_eq!(asked("gpt-5.6-sol", CacheTtl::TwelveHours).await, Some(serde_json::json!({"ttl": "12h"})));
+    assert_eq!(asked("gpt-5.6-sol", CacheTtl::ThirtyMinutes).await, None);
+    assert_eq!(asked("gpt-5.5", CacheTtl::TwelveHours).await, None, "an earlier model can't");
+}

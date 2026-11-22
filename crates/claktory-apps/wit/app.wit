@@ -1,8 +1,13 @@
 /// A Claktory app: one instance per Claktory, run by the claktory-apps host
 /// in its own sandbox. It can only do what this world hands it: HTTP to the
 /// hosts its approved manifest names, its own key-value store and secrets,
-/// timers, events for the agents subscribed to them, and a status line for
-/// the person. No files, processes or sockets.
+/// timers, events for the agents subscribed to them, a status line for the
+/// person, and (world `app-with-views`) views the person opens in the app.
+/// No files, processes or sockets.
+///
+/// Versions: 1.1 adds `push-view`, the `views` interface and data
+/// (`data-sources`, `data-query`). An app built
+/// for 1.0 (world `app`, manifest world "claktory:app@1") runs unchanged.
 ///
 /// Besides `host`, the host provides WASI 0.2's `wasi:http/outgoing-handler`
 /// and `wasi:http/types` (requests to hosts the manifest doesn't name fail
@@ -10,7 +15,7 @@
 /// and `wasi:cli` as Rust's wasm32-wasip2 standard library uses them: no
 /// environment, arguments, stdin or preopened folders, and stdout and stderr
 /// go nowhere (use `log`).
-package claktory:app@1.0.0;
+package claktory:app@1.1.0;
 
 interface types {
   /// What a tool call answers: text for the agent, optional JSON data, and
@@ -32,6 +37,29 @@ interface types {
     scope: string,
   }
 
+  /// Since 1.1. A source of data the manifest's `[[data]]` asks for:
+  /// "factory-records" (Claktory's records) or "agent:<id>" (an agent's own
+  /// database), and whether the person granted it.
+  record data-source {
+    id: string,
+    label: string,
+    granted: bool,
+  }
+
+  /// Since 1.1. Why `data-query` didn't answer.
+  variant data-error {
+    /// The person hasn't granted the source, or took it back. Show it
+    /// ("Ask to use Claktory's records"); the person grants it in Settings.
+    not-granted,
+    /// The manifest doesn't ask for it, or the agent is gone.
+    unknown-source,
+    /// Not one read-only SELECT (or WITH) statement, or params that
+    /// can't be bound; says why.
+    invalid(string),
+    /// It ran but failed, or ran longer than 10 s; says why.
+    failed(string),
+  }
+
   enum log-level {
     error,
     warn,
@@ -41,7 +69,7 @@ interface types {
 }
 
 interface host {
-  use types.{event, log-level};
+  use types.{event, log-level, data-source, data-error};
 
   /// One of the app's own secrets, as its manifest names them
   /// ("bot_token"); none until the person has given it.
@@ -68,14 +96,53 @@ interface host {
   set-status: func(text: string);
 
   log: func(level: log-level, message: string);
+
+  /// Since 1.1. Sends one A2UI v1.0 message (JSON) to `surface`, a view
+  /// the person has open (from `view-open` until `view-closed`): first
+  /// `createSurface`, then `updateComponents`, `updateDataModel`, or
+  /// `deleteSurface` to close it. Claktory checks every message against
+  /// its catalog ("https://claktory.com/a2ui/catalog/v1") before anyone
+  /// sees it; Err says why not. An invalid message also fails the view
+  /// (the person sees why), and `view-closed` follows.
+  push-view: func(surface: string, message: string) -> result<_, string>;
+
+  /// Since 1.1. The data sources the manifest asks for, as the person
+  /// granted them now.
+  data-sources: func() -> list<data-source>;
+
+  /// Since 1.1. Runs one read-only SQL statement (SELECT or WITH) against
+  /// a granted source; `params` is a JSON array bound to ?1, ?2… (null,
+  /// numbers, strings, booleans). Answers JSON: {"columns": ["name", …],
+  /// "rows": [[…]], "more": bool}, at most 10,000 rows and 2 MB
+  /// (`more` when there were more), within 10 s. Blobs come as base64.
+  /// Agents' memory, pipes and comments on files are never readable. The
+  /// grant is checked on every call.
+  data-query: func(source: string, sql: string, params: string) -> result<string, data-error>;
+}
+
+/// Since 1.1: the views an app with views exports. A view is a surface
+/// the person opens in a pane or on their phone; it's one surface for
+/// every device showing it.
+interface views {
+  /// The person opened `view` (one of the manifest's `[[views]]`) with
+  /// `params` (a JSON object, "{}" for none) as `surface`. Push its
+  /// `createSurface` before returning; Err says why it can't be shown.
+  view-open: func(view: string, params: string, surface: string) -> result<_, string>;
+  /// Something the person did in it: one A2UI v1.0 renderer message,
+  /// JSON (`{"version":"1.0","action":{…}}` or `"error"`), already checked
+  /// to come from a component of the surface.
+  view-action: func(surface: string, message: string);
+  /// Nobody shows it any more: stop refreshing it. Pushing to it fails.
+  view-closed: func(surface: string);
 }
 
 /// One instance, its calls one at a time; an outgoing HTTP request keeps
 /// running between them (start it with outgoing-handler.handle, keep the
 /// future, and look again from a timer). Deadlines: start, upgrade,
-/// on-timer and call 60 s, stop 5 s. A trap, a missed deadline or running
-/// out of memory ends the instance; Claktory starts it again after a while,
-/// and pauses the app if that keeps happening.
+/// on-timer, call and the views' functions 60 s, stop 5 s. A trap, a
+/// missed deadline or running out of memory ends the instance; Claktory
+/// starts it again after a while, and pauses the app if that keeps
+/// happening.
 world app {
   import host;
 
@@ -89,4 +156,10 @@ world app {
   /// agent's id); `args` is JSON.
   export call: func(tool: string, args: string, caller: string) -> tool-result;
   export on-timer: func(name: string);
+}
+
+/// An app with views (manifest world "claktory:app@1.1").
+world app-with-views {
+  include app;
+  export views;
 }

@@ -62,6 +62,15 @@ const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what t
 const LIST: &str = "Your monitors, one line each, and what else can wake you. all: monitors that ended in the last 7 days too. agent: another agent's, if you can message it.";
 const CHANGE: &str = "Change monitors: changes is a list of {id (\"m3\"), action: pause, resume, cancel or fire (fire now, to try the prompt)}, and agent for another agent's.";
 
+/// The migration that added `monitors.taint`: the pipes a monitor's
+/// creator had read when it set it, as JSON ({"<pipe id>": [route]}),
+/// spread to the agent at each fire, even if the creator's conversation
+/// was cleared meanwhile. Null when the creator had read none, and for
+/// monitors from before it was kept.
+pub(crate) const TAINT: &str = "
+ALTER TABLE monitors ADD COLUMN taint TEXT;
+";
+
 pub(crate) const SCHEMA: &str = "
 -- The Monitors extension: each agent's monitors as they are now…
 CREATE TABLE monitors (
@@ -195,6 +204,9 @@ pub(crate) struct Monitor {
     pub max_fires: Option<u32>,
     pub idle_only: bool,
     pub created_by: String,
+    /// The creator's taint when it was set (`Pipes::taint_of`, as JSON);
+    /// None when the creator had read no pipe, and for old rows.
+    pub taint: Option<String>,
     pub created: i64,
     pub status: Status,
     pub reason: String,
@@ -217,7 +229,7 @@ pub(crate) struct Query<'a> {
     pub ended_since: Option<i64>,
 }
 
-const COLUMNS: &str = "agent, id, name, prompt, spec, until, max_fires, idle_only, created_by, created, state, reason, next_due, last_fired, fires, carry, cursor";
+const COLUMNS: &str = "agent, id, name, prompt, spec, until, max_fires, idle_only, created_by, created, state, reason, next_due, last_fired, fires, carry, cursor, taint";
 
 /// The monitors `query` asks for, by agent and id. Not-yet-ended ones
 /// always; ended ones only with `ended_since`.
@@ -254,6 +266,7 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Monitor>> {
         max_fires: row.get(6)?,
         idle_only: row.get(7)?,
         created_by: row.get(8)?,
+        taint: row.get(17)?,
         created: row.get(9)?,
         status: Status::parse(&row.get::<_, String>(10)?),
         reason: row.get(11)?,
@@ -275,6 +288,8 @@ pub(crate) struct New {
     pub until: Option<i64>,
     pub max_fires: Option<u32>,
     pub idle_only: bool,
+    /// The creator's taint now, kept with the monitor (see `Monitor::taint`).
+    pub taint: Option<String>,
 }
 
 /// Adds monitors, all or none; returns their ids.
@@ -288,7 +303,7 @@ pub(crate) fn add(store: &Store, actor: &str, monitors: &[New], now: i64) -> rus
         let spec = serde_json::to_string(&monitor.when).unwrap_or_default();
         transaction.execute(
             &format!(
-                "INSERT INTO monitors ({COLUMNS}, kind, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', '', ?11, NULL, 0, '', '{{}}', ?12, ?10)"
+                "INSERT INTO monitors ({COLUMNS}, kind, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', '', ?11, NULL, 0, '', '{{}}', ?13, ?12, ?10)"
             ),
             params![
                 monitor.agent,
@@ -302,7 +317,8 @@ pub(crate) fn add(store: &Store, actor: &str, monitors: &[New], now: i64) -> rus
                 actor,
                 now,
                 monitor.next_due,
-                monitor.when.kind()
+                monitor.when.kind(),
+                monitor.taint
             ],
         )?;
         record(&transaction, &monitor.agent, id, now, actor, "created", &monitor.when.describe(now))?;
@@ -623,6 +639,13 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
         return Err("monitors is empty; give at least one {name, prompt, when}.".to_owned());
     }
     let now = factory.monitors.now();
+    // What the creator has read of pipes, kept with the monitor: each fire
+    // spreads it to the monitor's agent, even if the creator's conversation
+    // is cleared meanwhile — the prompt was written under that influence.
+    let taint = {
+        let taint = factory.pipes.taint_of(asker);
+        (!taint.is_empty()).then(|| serde_json::to_string(&taint).unwrap_or_default())
+    };
     let mut new = Vec::new();
     {
         let inner = factory.lock();
@@ -651,7 +674,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
                 Some(_) => return Err(fail("max_fires must be at least 1.".to_owned())),
             };
             let idle_only = one.idle_only.unwrap_or(when.is_time());
-            new.push(New { agent, name, prompt, when, next_due, until, max_fires, idle_only });
+            new.push(New { agent, name, prompt, when, next_due, until, max_fires, idle_only, taint: taint.clone() });
         }
     }
     // Room for them, agent by agent.

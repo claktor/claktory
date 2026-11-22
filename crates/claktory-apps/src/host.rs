@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use factory_protocol::apps::{Call, Done, Frame, Load, Ready, frame::Body};
+use factory_protocol::apps::{Call, Done, Frame, Load, Ready, ViewAction, ViewClosed, ViewOpen, frame::Body};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -16,8 +16,8 @@ use crate::app::{Deadlines, Owner, Request, Spec, State};
 use crate::frames::{self, Outbox};
 use crate::net::Rule;
 
-/// The WIT worlds this host runs.
-pub const WORLDS: [&str; 1] = ["claktory:app@1"];
+/// The WIT worlds this host runs: 1.0 apps, and 1.1 apps (views).
+pub const WORLDS: [&str; 2] = ["claktory:app@1", "claktory:app@1.1"];
 
 /// How often the epoch ticks: how soon a busy app yields.
 const TICK: Duration = Duration::from_millis(10);
@@ -111,6 +111,13 @@ impl Host {
             Body::Start(start) => self.enqueue(&start.app_id, Request::Start),
             Body::Stop(stop) => self.enqueue(&stop.app_id, Request::Stop),
             Body::Call(Call { app_id, tool, args, caller }) => self.enqueue(&app_id, |answer| Request::Call { tool, args, caller, answer }),
+            Body::ViewOpen(ViewOpen { app_id, view, params, surface }) => {
+                self.enqueue(&app_id, |answer| Request::ViewOpen { view, params, surface, answer })
+            }
+            Body::ViewAction(ViewAction { app_id, surface, message }) => {
+                self.enqueue(&app_id, |answer| Request::ViewAction { surface, message, answer })
+            }
+            Body::ViewClosed(ViewClosed { app_id, surface }) => self.enqueue(&app_id, |answer| Request::ViewClosed { surface, answer }),
             Body::Hello(hello) => {
                 tracing::info!(factoryd = %hello.version, "factoryd said hello");
                 let ready = Ready { version: env!("CARGO_PKG_VERSION").into(), worlds: WORLDS.map(String::from).to_vec() };

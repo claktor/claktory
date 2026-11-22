@@ -138,6 +138,7 @@ async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
         name: "AWS".into(),
         description: "Deploys.".into(),
         entries: vec![v1::SecretEntry { variable: "AWS_SECRET".into(), value: "wJalrXUtnFEMI-K7MDENG".into(), file: false }],
+        ..Default::default()
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     // (What the person types is hidden from the model, so the agent puts it in a file.)
@@ -157,6 +158,7 @@ async fn an_agent_that_read_a_pipe_needs_the_person_for_each_secret() {
         name: "AWS".into(),
         description: "Deploys.".into(),
         entries: vec![v1::SecretEntry { variable: "AWS_SECRET".into(), value: "wJalrXUtnFEMI-K7MDENG".into(), file: false }],
+        ..Default::default()
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
@@ -245,6 +247,7 @@ pub(crate) async fn aws(client: &mut Client, view: &mut View) {
         name: "AWS".into(),
         description: "Deploys.".into(),
         entries: vec![v1::SecretEntry { variable: "AWS_SECRET".into(), value: "wJalrXUtnFEMI-K7MDENG".into(), file: false }],
+        ..Default::default()
     };
     apply_request(client, view, client_message::Body::CreateSecret(secret)).await;
 }
@@ -419,7 +422,7 @@ async fn the_other_sides_words_are_one_line_capped_and_escaped() {
     assert!(!told.contains("<sent") && told.chars().count() < 1_200, "{told}");
 }
 
-fn file_in(dir: &std::path::Path, name: &str, bytes: usize) -> factoryd::pipe_link::InFile {
+pub(crate) fn file_in(dir: &std::path::Path, name: &str, bytes: usize) -> factoryd::pipe_link::InFile {
     let path = dir.join(format!("arriving-{name}"));
     std::fs::write(&path, vec![b'a'; bytes]).expect("file");
     factoryd::pipe_link::InFile { name: name.into(), path }
@@ -519,4 +522,30 @@ async fn a_kept_taint_reaches_its_target_once_even_after_the_writer_clears() {
     assert_eq!(pipes::taint_of_for_test(&factory, "bo"), format!(r#"{{"{pipe}":["lea"]}}"#));
     pipes::taint_with_for_test(&factory, "lea", "bo", &kept);
     assert_eq!(pipes::taint_of_for_test(&factory, "bo"), format!(r#"{{"{pipe}":["lea"]}}"#));
+}
+
+// What the person discarded, or hasn't let in, never reaches a model: a
+// held message shows only that it waits, a discarded one not at all.
+#[tokio::test]
+async fn pipe_read_shows_only_what_the_person_let_in() {
+    let (_dir, factory, mut client, mut view, pipe) = setup(true).await;
+    for number in 1..=5 {
+        pipes::receive_for_test(&factory, &pipe, incoming(&format!("m{number}"), &format!("Message {number}"))).expect("received");
+    }
+    let mut held = incoming("m6", "HELD-SECRET-TEXT");
+    held.via = Via::Agent { name: "Mallory".into(), role: "Injector".into() };
+    pipes::receive_for_test(&factory, &pipe, held).expect("received");
+    pipes::receive_for_test(&factory, &pipe, incoming("m7", "DISCARDED-TEXT")).expect("received");
+    let messages = pipes::messages_for_test(&factory, &pipe);
+    let discard = messages.iter().find(|message| message.text == "DISCARDED-TEXT").expect("it").seq;
+    let decide = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: discard, allow: false };
+    apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(decide)).await;
+
+    let read = call(&mut client, &mut view, "bo", "pipe_read", "{}").await;
+    assert!(read.contains("Message 5"), "{read}");
+    assert!(!read.contains("HELD-SECRET-TEXT") && !read.contains("Mallory") && !read.contains("Injector"), "{read}");
+    assert!(!read.contains("DISCARDED-TEXT"), "{read}");
+    let waits = messages.iter().find(|message| message.text == "HELD-SECRET-TEXT").expect("it").seq;
+    assert!(read.contains(&format!("#{waits} A message from the other side waits for the person.")), "{read}");
+    assert!(!read.contains(&format!("#{discard} ")), "{read}");
 }

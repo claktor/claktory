@@ -2,7 +2,7 @@
 //! edit. The backend watches it and applies valid changes immediately.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use factory_agent::CacheTtl;
 use serde::{Deserialize, Serialize};
@@ -65,8 +65,15 @@ Set up an agent that tracks my spending and tells me where it goes\n\
 Set up a team that finds me a new job and preps me for interviews\n\
 Set up a team that turns my podcast episodes into blog posts and clips";
 
+/// Settings in config.json this version doesn't know, by key, in any part
+/// of it: a newer Claktory's, read after the supervisor went back to this
+/// one (or a typo in a hand edit). They're kept and written back as they
+/// were, so a downgrade never makes the file unreadable nor loses a newer
+/// setting, and only logged (`Config::unknown_keys`). Versions before this
+/// refused a file with any.
+pub type Unknown = BTreeMap<String, Value>;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
     /// This Claktory's name, the same on every device; unset, this
     /// computer's (`Config::claktory_name`). Only written once set, so a
@@ -133,12 +140,16 @@ pub struct Config {
     /// The apps installed (`crate::apps`). Only written once there's one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<crate::apps::AppConfig>,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 /// Claktory's account at claktory.com, or at a service of the person's own.
 /// What it's signed in with lives in `<home>/account`, never here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct AccountConfig {
     /// Signing in is on (the default): the app asks for it, and a signed-in
     /// Claktory calls the service. Off, nothing calls the service and the app
@@ -148,11 +159,15 @@ pub struct AccountConfig {
     /// (`crate::account::DEFAULT_SERVICE`).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub service: String,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 impl Default for AccountConfig {
     fn default() -> AccountConfig {
-        AccountConfig { enabled: true, service: String::new() }
+        AccountConfig { enabled: true, service: String::new(), other: Default::default() }
     }
 }
 
@@ -164,17 +179,21 @@ impl AccountConfig {
 
 /// When agents compact besides a full context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct CompactionConfig {
     /// An idle agent compacts just before its prompt cache expires.
     pub idle: bool,
     /// Also when the cache lasts only 5 minutes (after 4 idle minutes).
     pub idle_short_cache: bool,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 impl Default for CompactionConfig {
     fn default() -> CompactionConfig {
-        CompactionConfig { idle: true, idle_short_cache: false }
+        CompactionConfig { idle: true, idle_short_cache: false, other: Default::default() }
     }
 }
 
@@ -187,16 +206,20 @@ impl CompactionConfig {
 /// The vault's settings. Which secrets exist and who may use them live in
 /// the vault itself, never here: agents can edit this file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct VaultConfig {
     /// Minutes a connection stays unlocked after the person gave the vault
     /// passphrase on it, 1 to 60.
     pub unlock_minutes: u32,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 impl Default for VaultConfig {
     fn default() -> VaultConfig {
-        VaultConfig { unlock_minutes: 5 }
+        VaultConfig { unlock_minutes: 5, other: Default::default() }
     }
 }
 
@@ -256,7 +279,7 @@ impl UserConfig {
 /// logical pixels; 0 for the app's default. The app keeps them in its range.
 /// And how much each device zooms the app.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct DisplayConfig {
     #[serde(skip_serializing_if = "is_zero")]
     pub sidebar_width: f64,
@@ -268,11 +291,27 @@ pub struct DisplayConfig {
     /// from before it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub zoom: BTreeMap<String, f64>,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 /// How far a device can zoom the app out and in.
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 2.0;
+
+/// Panes `show` keeps open besides the conversation, until the person
+/// changes it…
+pub const DEFAULT_OPEN_PANES: u32 = 4;
+/// …and at most: a layout's 12 panes, less the conversation.
+pub const MAX_OPEN_PANES: u32 = 11;
+
+/// The most panes `show` keeps open besides the conversation, as the person
+/// set it (`State::max_open_panes`; 0 for the default).
+pub fn open_panes(chosen: u32) -> u32 {
+    if chosen == 0 { DEFAULT_OPEN_PANES } else { chosen.min(MAX_OPEN_PANES) }
+}
 
 impl DisplayConfig {
     fn is_default(&self) -> bool {
@@ -298,10 +337,14 @@ fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
+fn is_zero_count(value: &u32) -> bool {
+    *value == 0
+}
+
 /// The Resources extension's alerts (`crate::extensions::resources`), and
 /// the build caches' budget (`crate::extensions::tree::caches`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct ResourcesConfig {
     /// Memory used above this percentage for a few minutes.
     pub ram_percent: u32,
@@ -317,6 +360,10 @@ pub struct ResourcesConfig {
     /// written when changed, so a backend from before it reads the rest.
     #[serde(skip_serializing_if = "is_default_build_cache")]
     pub build_cache_gb: f64,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 const DEFAULT_BUILD_CACHE_GB: f64 = 25.0;
@@ -327,7 +374,14 @@ fn is_default_build_cache(gb: &f64) -> bool {
 
 impl Default for ResourcesConfig {
     fn default() -> ResourcesConfig {
-        ResourcesConfig { ram_percent: 90, disk_free_gb: 10, disk_free_percent: 10, cpu_percent: 0, build_cache_gb: DEFAULT_BUILD_CACHE_GB }
+        ResourcesConfig {
+            ram_percent: 90,
+            disk_free_gb: 10,
+            disk_free_percent: 10,
+            cpu_percent: 0,
+            build_cache_gb: DEFAULT_BUILD_CACHE_GB,
+            other: Default::default(),
+        }
     }
 }
 
@@ -355,7 +409,6 @@ impl ResourcesConfig {
 /// listener's, which is gone: still read, so older files load, and kept, but
 /// unused.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
     #[serde(default, skip_serializing_if = "is_zero_port")]
     pub port: u16,
@@ -365,6 +418,10 @@ pub struct RemoteConfig {
     /// as URLs; empty for the default ones (n0's).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relays: Vec<String>,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 fn is_zero_port(port: &u16) -> bool {
@@ -384,7 +441,6 @@ impl RemoteConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub id: String,
     pub name: String,
@@ -397,18 +453,28 @@ pub struct ProjectConfig {
     /// Map leaves it out, until it's unarchived.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 /// A folder inside a project, where some of its agents work. It only scopes
 /// where they work: messaging and everything else stay project-wide.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FolderConfig {
     /// Unique within the project.
     pub id: String,
     pub name: String,
-    /// Absolute; anywhere, such as a repository outside the workspace.
+    /// In memory always absolute. In the file: relative when inside
+    /// Claktory's home (its territory, resolved against the home it's
+    /// read from), absolute anywhere else, such as a repository outside
+    /// the workspace.
     pub path: PathBuf,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 impl ProjectConfig {
@@ -417,8 +483,36 @@ impl ProjectConfig {
     }
 }
 
+/// A project or folder path as read: relative in the file means under
+/// the Claktory home it was read from.
+fn resolve(path: &mut PathBuf, root: &Path) {
+    if path.is_relative() {
+        *path = root.join(&path);
+    }
+}
+
+/// A project or folder path as written: inside the root it's emitted
+/// relative, so the file doesn't name the machine. The root itself
+/// stays as it is.
+fn relativize(path: &mut PathBuf, root: &Path) {
+    if let Ok(rest) = path.strip_prefix(root)
+        && !rest.as_os_str().is_empty()
+    {
+        *path = rest.to_path_buf();
+    }
+}
+
+/// Whether `read`, a settings file's text, writes any project or folder
+/// path relative.
+fn any_relative(read: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(read) else { return false };
+    let relative = |path: &Value| path.as_str().is_some_and(|path| std::path::Path::new(path).is_relative());
+    value["projects"].as_array().into_iter().flatten().any(|project| {
+        relative(&project["path"]) || project["folders"].as_array().into_iter().flatten().any(|folder| relative(&folder["path"]))
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub id: String,
     /// One of `AGENT_COLORS`. Factory gives every agent one and saves it
@@ -464,6 +558,10 @@ pub struct AgentConfig {
     /// Its character's shape as chosen; left out, automatic.
     #[serde(default, skip_serializing_if = "Avatar::is_automatic")]
     pub avatar: Avatar,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 /// An agent's character as chosen in its settings: `shape` empty for
@@ -478,6 +576,10 @@ pub struct Avatar {
     /// and ignored (dropped when the file is next saved).
     #[serde(default, skip_serializing)]
     pub face: String,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
 }
 
 impl Avatar {
@@ -545,8 +647,9 @@ impl Default for Config {
             placeholder: RIVET_PLACEHOLDER.to_owned(),
             folder: String::new(),
             extensions: rivet_extensions(),
-            avatar: Avatar { shape: "hexagon".to_owned(), face: String::new() },
+            avatar: Avatar { shape: "hexagon".to_owned(), face: String::new(), other: Default::default() },
             fallback_model: String::new(),
+            other: Default::default(),
         };
         Config {
             name: String::new(),
@@ -568,6 +671,7 @@ impl Default for Config {
             account: AccountConfig::default(),
             apps: Vec::new(),
             default_fallback_model: String::new(),
+            other: Default::default(),
         }
     }
 }
@@ -612,19 +716,37 @@ pub enum Invalid {
     BadVault,
     #[error("account: service \"{0}\" must be an https:// address (http:// only on this computer)")]
     BadAccountService(String),
-    #[error("prompt_cache: \"{0}\" must be a provider whose cache lifetime can be chosen ({providers}) or one of its models (\"anthropic/<model id>\")", providers = CACHE_TTL_PROVIDERS.join(", "))]
+    #[error("prompt_cache: \"{0}\" must be a provider whose cache lifetime can be chosen ({providers}) or one of their models (\"anthropic/<model id>\")", providers = CACHE_TTL_PROVIDERS.join(", "))]
     BadPromptCache(String),
+    #[error("prompt_cache: \"{0}\" can't be \"{1}\": it's {2}")]
+    BadPromptCacheTtl(String, String, String),
+    #[error("prompt_cache: \"{0}\"'s cache lifetime can't be chosen yet")]
+    PromptCacheNotOffered(String),
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
     #[error("name \"{0}\" can't have line breaks or other control characters")]
     BadName(String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
-    BadExtensionSetting { agent: String, setting: String, expected: &'static str },
+    BadExtensionSetting { agent: String, setting: String, expected: String },
+    #[error("notifications: {0}")]
+    BadNotifications(String),
 }
 
 impl Config {
-    pub fn parse(text: &str) -> Result<Config, ConfigError> {
-        let config: Config = serde_json::from_str(text)?;
+    /// Reads the settings as kept at `root` (the Claktory home the file
+    /// belongs to): a project or folder path written relative is under
+    /// the root — Claktory's own territory, the same wherever the home
+    /// moves — and is resolved against it here. Absolute paths (external
+    /// folders, and every path a config written before relative forms
+    /// holds) are kept as they are, so old files read forever.
+    pub fn parse(text: &str, root: &Path) -> Result<Config, ConfigError> {
+        let mut config: Config = serde_json::from_str(text)?;
+        for project in &mut config.projects {
+            resolve(&mut project.path, root);
+            for folder in &mut project.folders {
+                resolve(&mut folder.path, root);
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -640,6 +762,41 @@ impl Config {
     /// This Claktory's color: as set, or `default` (`remote::key_color`).
     pub fn claktory_color<'a>(&'a self, default: &'a str) -> &'a str {
         if self.color.is_empty() { default } else { &self.color }
+    }
+
+    /// Where the file holds settings this version doesn't know
+    /// (`Unknown`), such as "display.pane_rules" or "agents[ed].notify", to
+    /// log.
+    pub fn unknown_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut add = |at: &str, other: &Unknown| {
+            keys.extend(other.keys().map(|key| if at.is_empty() { key.clone() } else { format!("{at}.{key}") }))
+        };
+        add("", &self.other);
+        add("account", &self.account.other);
+        add("compaction", &self.compaction.other);
+        add("vault", &self.vault.other);
+        add("user", &self.user.other);
+        add("user.avatar", &self.user.avatar.other);
+        add("display", &self.display.other);
+        add("resources", &self.resources.other);
+        if let Some(remote) = &self.remote {
+            add("remote", &remote.other);
+        }
+        for project in &self.projects {
+            add(&format!("projects[{}]", project.id), &project.other);
+            for folder in &project.folders {
+                add(&format!("projects[{}].folders[{}]", project.id, folder.id), &folder.other);
+            }
+        }
+        for agent in &self.agents {
+            add(&format!("agents[{}]", agent.id), &agent.other);
+            add(&format!("agents[{}].avatar", agent.id), &agent.avatar.other);
+        }
+        for app in &self.apps {
+            add(&format!("apps[{}]", app.id), &app.other);
+        }
+        keys
     }
 
     /// The user's name, when it's set.
@@ -658,7 +815,39 @@ impl Config {
         self.user_name().unwrap_or("The person")
     }
 
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+    /// The settings as written at `root`, in the new form: a project or
+    /// folder path inside the root (Claktory's own territory) is emitted
+    /// relative to it, so the file stays true when the home moves to
+    /// another machine; paths outside stay absolute. A backend from before
+    /// relative forms can't read a file that holds one, so only a move
+    /// (`move_import`), into a home with no older backend to go back to,
+    /// writes the file this way; every other write keeps the file's form
+    /// (`to_json_keeping_form`).
+    pub fn to_json(&self, root: &Path) -> Result<String, serde_json::Error> {
+        let mut config = self.clone();
+        for project in &mut config.projects {
+            relativize(&mut project.path, root);
+            for folder in &mut project.folders {
+                relativize(&mut folder.path, root);
+            }
+        }
+        let mut text = serde_json::to_string_pretty(&config)?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    /// The settings in the form `read`, the file as it is now, has: the new
+    /// form (`to_json`) once it writes any path relative (a move put it
+    /// there, or the person did), else every path absolute, as every
+    /// version reads it. The supervisor can hand the file back to the
+    /// backend before an update, during the update's trial or any time
+    /// after when the new one keeps failing to start, so no write of
+    /// Claktory's, nor the person's settings changes, may move a file an
+    /// older backend reads into a form it can't.
+    pub fn to_json_keeping_form(&self, root: &Path, read: &str) -> Result<String, serde_json::Error> {
+        if any_relative(read) {
+            return self.to_json(root);
+        }
         let mut text = serde_json::to_string_pretty(self)?;
         text.push('\n');
         Ok(text)
@@ -682,10 +871,13 @@ impl Config {
         if !self.account.service.is_empty() && crate::account::service_url(&self.account.service).is_none() {
             return Err(Invalid::BadAccountService(self.account.service.clone()));
         }
-        for key in self.prompt_cache.keys() {
+        for (key, ttl) in &self.prompt_cache {
             let provider = key.split_once('/').map_or(key.as_str(), |(provider, model)| if model.is_empty() { "" } else { provider });
             if !CACHE_TTL_PROVIDERS.contains(&provider) {
                 return Err(Invalid::BadPromptCache(key.clone()));
+            }
+            if !cache_ttl_choices(provider).contains(ttl) {
+                return Err(Invalid::BadPromptCacheTtl(key.clone(), ttl.as_str().to_owned(), choices_text(provider)));
             }
         }
         check_model(&self.default_model)?;
@@ -897,19 +1089,63 @@ const AGENT_RGB: [[u8; 3]; 8] = [
     [0x5A, 0x63, 0x77],
 ];
 
-/// Providers whose requests can choose how long the prompt cache lasts.
-pub const CACHE_TTL_PROVIDERS: &[&str] = &["anthropic"];
+/// Providers whose requests can choose how long the prompt cache lasts, and
+/// the lifetimes each offers, its default first.
+pub const CACHE_TTL_PROVIDERS: &[&str] = &["anthropic", "openai"];
+
+/// `provider`'s choices, as words: "5m or 1h".
+fn choices_text(provider: &str) -> String {
+    cache_ttl_choices(provider).iter().map(|ttl| ttl.as_str()).collect::<Vec<_>>().join(" or ")
+}
+
+/// The lifetimes `provider`'s cache can be asked to last; none for one whose
+/// requests can't choose.
+pub fn cache_ttl_choices(provider: &str) -> &'static [CacheTtl] {
+    match provider {
+        "anthropic" => &[CacheTtl::FiveMinutes, CacheTtl::OneHour],
+        "openai" => &[CacheTtl::ThirtyMinutes, CacheTtl::TwelveHours],
+        _ => &[],
+    }
+}
+
+/// The choices the app offers, and UpdateSettings takes: OpenAI's only from
+/// the release after the one that first reads them, so that a rollback never
+/// meets a config.json it refuses (#281).
+pub fn cache_ttl_offered(provider: &str) -> &'static [CacheTtl] {
+    match provider {
+        "openai" => &[],
+        provider => cache_ttl_choices(provider),
+    }
+}
+
+/// How long a cache is asked to last unless set (Matt's call): an hour, so
+/// an idle conversation is compacted just before it expires (`crate::idle`)
+/// rather than paying for the whole context again after 5 minutes. Only the
+/// default: config.json holds nothing new, and a set "5m" still wins.
+pub const DEFAULT_CACHE_TTL: CacheTtl = CacheTtl::OneHour;
+
+/// OpenAI's own lifetime from GPT-5.6 on, which its requests ask for by
+/// sending nothing: at least 30 minutes. The ChatGPT subscription (Codex)
+/// lets no request choose, and keeps it as long (measured, #281).
+pub const OPENAI_CACHE_TTL: CacheTtl = CacheTtl::ThirtyMinutes;
 
 impl Config {
-    /// How long the prompt cache of `model` ("provider/model id") is asked to
-    /// last: its own setting, its provider's, or the provider's default; None
-    /// for a provider whose cache lifetime Claktory can't choose or know.
+    /// How long the prompt cache of `model` ("provider/model id", or a
+    /// provider alone) lasts: its own setting, its provider's, or the
+    /// provider's default (`DEFAULT_CACHE_TTL` on Anthropic,
+    /// `OPENAI_CACHE_TTL` on OpenAI's models that have one); None where
+    /// Claktory can neither choose it nor know it.
     pub fn cache_ttl(&self, model: &str) -> Option<CacheTtl> {
-        let provider = model.split_once('/').map_or(model, |(provider, _)| provider);
-        if !CACHE_TTL_PROVIDERS.contains(&provider) {
-            return None;
+        let (provider, id) = model.split_once('/').unwrap_or((model, ""));
+        let set = || self.prompt_cache.get(model).or_else(|| self.prompt_cache.get(provider)).copied();
+        // A model that keeps its cache as OpenAI likes: unknown.
+        let known = id.is_empty() || factory_agent::providers::catalog::has_cache_lifetime(provider, id);
+        match provider {
+            "anthropic" => Some(set().unwrap_or(DEFAULT_CACHE_TTL)),
+            "openai" if known => Some(set().unwrap_or(OPENAI_CACHE_TTL)),
+            "openai-codex" if known => Some(OPENAI_CACHE_TTL),
+            _ => None,
         }
-        Some(self.prompt_cache.get(model).or_else(|| self.prompt_cache.get(provider)).copied().unwrap_or_default())
     }
 
     /// The default prompt an agent can go back to, with its placeholders:
@@ -1090,6 +1326,17 @@ pub struct State {
     /// Project folders (project id, folder id) whose agents are folded away in the sidebar.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub collapsed_folders: std::collections::BTreeSet<(String, String)>,
+    /// The sidebar's Projects and Chats sections, folded away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub projects_collapsed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chats_collapsed: bool,
+    /// The most panes `show` keeps open besides the conversation (Settings
+    /// → Display), 1 to `MAX_OPEN_PANES`; 0 for `DEFAULT_OPEN_PANES`. Kept
+    /// here rather than in config.json, which a backend from before it
+    /// would refuse whole after a rollback.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub max_open_panes: u32,
 }
 
 /// How a project's explorer is opened up.
@@ -1105,6 +1352,92 @@ pub struct FolderView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long each model's cache lasts: Anthropic's an hour unless set;
+    /// OpenAI's from GPT-5.6 on 30 minutes unless set, the subscription's
+    /// always (it can't be asked for more), and earlier models' unknown.
+    #[test]
+    fn each_provider_s_cache_lifetime_is_known_or_set_or_none() {
+        let mut config = Config::default();
+        let ttl = |config: &Config, model: &str| config.cache_ttl(model).map(CacheTtl::as_str);
+        assert_eq!(ttl(&config, "anthropic/claude-opus-4-8"), Some("1h"));
+        assert_eq!(ttl(&config, "openai/gpt-5.6-sol"), Some("30m"));
+        assert_eq!(ttl(&config, "openai"), Some("30m"));
+        assert_eq!(ttl(&config, "openai/gpt-5.5"), None, "kept as OpenAI likes");
+        assert_eq!(ttl(&config, "openai-codex/gpt-6.1-sol"), Some("30m"));
+        assert_eq!(ttl(&config, "openai-codex"), Some("30m"));
+        assert_eq!(ttl(&config, "openrouter/anthropic/claude-opus-4.5"), None);
+        config.prompt_cache.insert("openai".into(), CacheTtl::TwelveHours);
+        assert_eq!(ttl(&config, "openai/gpt-5.6-sol"), Some("12h"));
+        assert_eq!(ttl(&config, "openai/gpt-5.5"), None);
+        assert!(config.validate().is_ok());
+        config.prompt_cache.insert("openai".into(), CacheTtl::OneHour);
+        assert!(config.validate().is_err(), "an hour isn't OpenAI's");
+        config.prompt_cache.clear();
+        config.prompt_cache.insert("openai-codex".into(), CacheTtl::ThirtyMinutes);
+        assert!(config.validate().is_err(), "the subscription can't choose");
+        // This release offers no choice for OpenAI yet; it reads one.
+        assert!(cache_ttl_offered("openai").is_empty());
+        assert_eq!(cache_ttl_offered("anthropic"), [CacheTtl::FiveMinutes, CacheTtl::OneHour]);
+    }
+
+    /// A newer Claktory's settings, read after the supervisor went back to
+    /// this one: every part of the file reads, and keeps them for when the
+    /// newer one comes back.
+    #[test]
+    fn settings_this_version_doesnt_know_are_kept_wherever_they_are() {
+        let root = Path::new("/tmp/claktory-home");
+        let text = r#"{
+            "pane_rules": {"max": 3},
+            "display": {"sidebar_width": 300, "max_open_panes": 5},
+            "account": {"enabled": false, "region": "eu"},
+            "compaction": {"idle": true, "later": 1},
+            "vault": {"unlock_minutes": 5, "touch_id": true},
+            "resources": {"gpu_percent": 80},
+            "remote": {"relays": [], "mesh": "on"},
+            "user": {"name": "Matt", "avatar": {"seed": "ab", "hue": 3}},
+            "projects": [{"id": "site", "name": "Site", "path": "/tmp/site", "pinned": true,
+                          "folders": [{"id": "ui", "name": "UI", "path": "/tmp/site/ui", "color": "red"}]}],
+            "agents": [{"id": "ed", "name": "Ed", "model": "anthropic/claude-sonnet-4-5", "effort": "off",
+                        "purpose": "Old name for the prompt.", "notify": "always", "avatar": {"shape": "circle", "ring": 2}}]
+        }"#;
+        let config = Config::parse(text, root).expect("a newer Claktory's settings read");
+        assert_eq!(config.agents[0].prompt, "Old name for the prompt.", "the old alias still reads");
+        assert_eq!(config.display.sidebar_width, 300.0);
+        let mut keys = config.unknown_keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "account.region",
+                "agents[ed].avatar.ring",
+                "agents[ed].notify",
+                "compaction.later",
+                "display.max_open_panes",
+                "pane_rules",
+                "projects[site].folders[ui].color",
+                "projects[site].pinned",
+                "remote.mesh",
+                "resources.gpu_percent",
+                "user.avatar.hue",
+                "vault.touch_id",
+            ]
+        );
+        // Written back as they were, whichever form the file takes.
+        for written in [config.to_json(root).expect("json"), config.to_json_keeping_form(root, text).expect("json")] {
+            let value: Value = serde_json::from_str(&written).expect("json");
+            assert_eq!(value["pane_rules"]["max"], 3, "{written}");
+            assert_eq!(value["display"]["max_open_panes"], 5);
+            assert_eq!(value["vault"]["touch_id"], true);
+            assert_eq!(value["remote"]["mesh"], "on");
+            assert_eq!(value["user"]["avatar"]["hue"], 3);
+            assert_eq!(value["projects"][0]["pinned"], true);
+            assert_eq!(value["projects"][0]["folders"][0]["color"], "red");
+            assert_eq!(value["agents"][0]["notify"], "always");
+            assert_eq!(value["agents"][0]["avatar"]["ring"], 2);
+            assert_eq!(Config::parse(&written, root).expect("reads again"), config);
+        }
+    }
 
     /// A changed rivet-prompt.md needs its hash in SHIPPED_RIVET_PROMPTS, or
     /// the next version wouldn't know it as a default.

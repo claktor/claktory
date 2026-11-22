@@ -10,4 +10,5 @@ mod sign_in;
 mod signed;
 mod statement;
 mod support;
+mod user_apps;
 mod web;

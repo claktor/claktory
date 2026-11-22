@@ -94,8 +94,8 @@ class ExtensionAbout extends StatelessWidget {
   }
 }
 
-/// One option as the agent has it: its label, and On or Off, or the agents
-/// it lists.
+/// One option as the agent has it: its label, and On or Off, the agents it
+/// lists, or the one of a few chosen.
 class _OptionLine extends StatelessWidget {
   const _OptionLine({
     required this.option,
@@ -118,6 +118,17 @@ class _OptionLine extends StatelessWidget {
         if (option.includesProject) 'Its project',
         for (final id in value?.agentIds ?? const <String>[]) agentName(id),
       ].join(', '),
+      // The chosen one's label, the default's while none is set.
+      ExtensionOptionKind.EXTENSION_OPTION_KIND_CHOICE => () {
+        final chosen = (value?.choice ?? '').isEmpty
+            ? option.defaultChoice
+            : value!.choice;
+        return option.choices
+                .where((choice) => choice.value == chosen)
+                .firstOrNull
+                ?.label ??
+            chosen;
+      }(),
       _ => 'Needs a newer Claktory',
     };
     return Column(

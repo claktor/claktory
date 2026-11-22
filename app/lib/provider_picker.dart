@@ -24,6 +24,29 @@ class ProviderSettings extends StatefulWidget {
   State<ProviderSettings> createState() => _ProviderSettingsState();
 }
 
+/// Where an agent's work goes, said before a provider is chosen (App Store
+/// 5.1.2(i): data shared with a third-party AI is disclosed, and choosing
+/// is the permission): on Connect a model ([adding] false) and above Add a
+/// provider… in Settings → Providers.
+String aiProviderConsent({required bool adding}) =>
+    'To work, your agents send your messages and the files and pages they '
+    'use to the AI provider you choose, such as Anthropic or OpenAI. '
+    '${adding ? 'By adding one, you allow this.' : 'By choosing one below, you allow this.'}';
+
+/// [aiProviderConsent] as it reads on screen: caption, muted.
+class AiProviderConsent extends StatelessWidget {
+  const AiProviderConsent({super.key, required this.adding});
+
+  final bool adding;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    aiProviderConsent(adding: adding),
+    style: TypeScale.of(context).caption
+        .copyWith(color: Palette.of(context).textMuted),
+  );
+}
+
 /// Whether [provider] has been signed in to or added: it has accounts, a
 /// credential, or a sign-in under way ([flow]).
 bool providerAdded(Provider provider, LoginFlow? flow) =>
@@ -76,6 +99,8 @@ class _ProviderSettingsState extends State<ProviderSettings> {
           const SizedBox(height: Space.m),
         ] else
           const SizedBox(height: Space.xs),
+        const AiProviderConsent(adding: true),
+        const SizedBox(height: Space.m),
         ProviderPicker(
           providers: workspace.providers,
           onPick: _start,

@@ -109,6 +109,7 @@ fn provider(id: &str, name: &str, accounts: usize) -> v1::Provider {
             .map(|n| v1::Account { id: format!("account-{n}"), label: format!("Account {n}"), usage: usage(), ..Default::default() })
             .collect(),
         cache_ttl: String::new(),
+        ..Default::default()
     }
 }
 

@@ -69,8 +69,9 @@ class VersionStep extends StatelessWidget {
     // The banner shows where the latest release fixes it: it updates the
     // backend, and on a Mac this app too.
     final latest = versionLine(workspace.latestRelease);
-    // No banner on a phone: there the backend's own device updates it.
-    final banner = !isPhoneLayout(context);
+    // No banner on a phone: there the backend's own device updates it; nor
+    // in the Android app, which never updates Claktory ([updatesHere]).
+    final banner = !isPhoneLayout(context) && updatesHere;
     final fixes = switch (which) {
       Mismatch.backendOlder =>
         banner &&

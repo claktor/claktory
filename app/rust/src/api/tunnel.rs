@@ -28,12 +28,19 @@ pub async fn open_tunnel(
     relays: Vec<String>,
     addresses: Vec<String>,
 ) -> anyhow::Result<TunnelHandle> {
+    // Without it iroh would resolve through public fallbacks, not the
+    // phone's own DNS; and a Dart that loaded a second copy of this
+    // library would find it missing here.
+    #[cfg(target_os = "android")]
+    crate::android::ready()?;
     RUNTIME
         .spawn(async move {
             let key = tunnel::parse_key(&device_key)?;
             let backend = tunnel::backend_addr(&endpoint_id, &relays, &addresses)?;
-            let endpoint = tunnel::device_endpoint(key).await?;
-            let tunnel = tunnel::Tunnel::open(endpoint, backend).await?;
+            // Made again by reconnect, after the app was away or the network
+            // changed (tunnel.rs).
+            let make: tunnel::MakeEndpoint = Arc::new(move || Box::pin(tunnel::device_endpoint(key.clone())));
+            let tunnel = tunnel::Tunnel::open_with(make, tunnel::REBUILD_AFTER, backend).await?;
             Ok(TunnelHandle { tunnel: Arc::new(tunnel) })
         })
         .await?

@@ -2,15 +2,17 @@
 //! by a task of its own that takes factoryd's requests one at a time and
 //! fires the app's timers between them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use factory_protocol::apps::{CallResult, Crashed, Done, Emit, GetSecret, SetStatus, frame::Body};
+use factory_protocol::apps::{
+    CallResult, Crashed, DataError as WireDataError, DataQuery, Done, Emit, GetDataSources, GetSecret, PushView, SetStatus, frame::Body,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, InstancePre, Linker, ResourceTable};
 use wasmtime::{Engine, ResourceLimiter, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
@@ -19,14 +21,35 @@ use crate::frames::Outbox;
 use crate::kv::Kv;
 use crate::net::{Filter, Rule};
 
-wasmtime::component::bindgen!({
-    path: "wit",
-    world: "app",
-    imports: { default: async | trappable },
-    exports: { default: async },
-});
+/// World `app`: what every app has (1.0 and 1.1).
+mod base {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "app",
+        imports: { default: async | trappable },
+        exports: { default: async },
+    });
+}
 
-use claktory::app::types::{Event, LogLevel};
+/// World `app-with-views` (1.1): only its `views` export is used, with the
+/// imports `base` has.
+mod viewing {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "app-with-views",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "claktory:app/types": super::base::claktory::app::types,
+            "claktory:app/host": super::base::claktory::app::host,
+        },
+    });
+}
+
+use base::claktory;
+use base::{App, AppIndices};
+use claktory::app::types::{DataError, DataSource, Event, LogLevel};
+use viewing::exports::claktory::app::views::{Guest as Views, GuestIndices as ViewsIndices};
 
 /// How long each of the app's exports may run.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +74,10 @@ impl Default for Deadlines {
 
 /// The most timers an app has at once.
 pub const MAX_TIMERS: usize = 64;
+/// The most surfaces (views the person has open) an app has at once.
+pub const MAX_SURFACES: usize = 16;
+/// The largest message an app may push to a surface.
+pub const MAX_VIEW_MESSAGE: usize = 1 << 20;
 /// Memory and storage when Load leaves them at 0.
 const DEFAULT_MEMORY_MB: u32 = 64;
 const DEFAULT_STORAGE_MB: u32 = 16;
@@ -82,6 +109,9 @@ pub enum Request {
     Start(oneshot::Sender<Body>),
     Stop(oneshot::Sender<Body>),
     Call { tool: String, args: String, caller: String, answer: oneshot::Sender<Body> },
+    ViewOpen { view: String, params: String, surface: String, answer: oneshot::Sender<Body> },
+    ViewAction { surface: String, message: String, answer: oneshot::Sender<Body> },
+    ViewClosed { surface: String, answer: oneshot::Sender<Body> },
 }
 
 /// The store's data: everything the app's imports reach.
@@ -94,6 +124,8 @@ pub struct State {
     limits: Limits,
     kv: Kv,
     timers: HashMap<String, Instant>,
+    /// The surfaces the app may push to: opened and not closed since.
+    surfaces: HashSet<String>,
     outbox: Arc<Outbox>,
 }
 
@@ -184,6 +216,45 @@ impl claktory::app::host::Host for State {
         Ok(())
     }
 
+    async fn push_view(&mut self, surface: String, message: String) -> wasmtime::Result<Result<(), String>> {
+        if !self.surfaces.contains(&surface) {
+            return Ok(Err(format!("The surface \"{surface}\" isn't open.")));
+        }
+        if message.len() > MAX_VIEW_MESSAGE {
+            return Ok(Err(format!("The message is {} bytes; at most {MAX_VIEW_MESSAGE} go to a view.", message.len())));
+        }
+        let ask = Body::PushView(PushView { app_id: self.app_id.clone(), surface, message });
+        Ok(match self.outbox.ask(ask).await {
+            Some(Body::Done(done)) if done.error.is_empty() => Ok(()),
+            Some(Body::Done(done)) => Err(done.error),
+            _ => Err("Claktory didn't take the message.".to_owned()),
+        })
+    }
+
+    async fn data_sources(&mut self) -> wasmtime::Result<Vec<DataSource>> {
+        let ask = Body::GetDataSources(GetDataSources { app_id: self.app_id.clone() });
+        Ok(match self.outbox.ask(ask).await {
+            Some(Body::DataSourceList(list)) => {
+                list.sources.into_iter().map(|source| DataSource { id: source.id, label: source.label, granted: source.granted }).collect()
+            }
+            _ => Vec::new(),
+        })
+    }
+
+    async fn data_query(&mut self, source: String, sql: String, params: String) -> wasmtime::Result<Result<String, DataError>> {
+        let ask = Body::DataQuery(DataQuery { app_id: self.app_id.clone(), source, sql, params });
+        Ok(match self.outbox.ask(ask).await {
+            Some(Body::DataAnswer(answer)) => match answer.error() {
+                WireDataError::None => Ok(answer.json),
+                WireDataError::NotGranted => Err(DataError::NotGranted),
+                WireDataError::UnknownSource => Err(DataError::UnknownSource),
+                WireDataError::Invalid => Err(DataError::Invalid(answer.message)),
+                WireDataError::Failed => Err(DataError::Failed(answer.message)),
+            },
+            _ => Err(DataError::Failed("Claktory didn't answer.".to_owned())),
+        })
+    }
+
     async fn log(&mut self, level: LogLevel, message: String) -> wasmtime::Result<()> {
         let app = &self.app_id;
         match level {
@@ -206,28 +277,39 @@ pub fn linker(engine: &Engine) -> wasmtime::Result<Linker<State>> {
     Ok(linker)
 }
 
+/// A running instance's exports: every app's, and its views when it has
+/// them.
+struct Exports {
+    app: App,
+    views: Option<Views>,
+}
+
 /// A running instance.
 struct Running {
     store: Store<State>,
-    app: App,
+    exports: Exports,
 }
 
 /// The task that owns one app.
 pub struct Owner {
     spec: Spec,
-    pre: AppPre<State>,
+    pre: InstancePre<State>,
+    indices: AppIndices,
+    /// Where its views are, when it exports them (world app-with-views).
+    views: Option<ViewsIndices>,
     outbox: Arc<Outbox>,
     running: Option<Running>,
 }
 
 impl Owner {
-    /// Checks that `component` links as a claktory:app@1 app.
+    /// Checks that `component` links as a claktory:app@1 app, and whether
+    /// it has views.
     pub fn new(spec: Spec, component: &Component, linker: &Linker<State>, outbox: Arc<Outbox>) -> Result<Owner, String> {
-        let pre = linker
-            .instantiate_pre(component)
-            .and_then(AppPre::new)
-            .map_err(|error| format!("The component isn't a claktory:app@1 app: {}", first_line(&error)))?;
-        Ok(Owner { spec, pre, outbox, running: None })
+        let not_an_app = |error: wasmtime::Error| format!("The component isn't a claktory:app@1 app: {}", first_line(&error));
+        let pre = linker.instantiate_pre(component).map_err(not_an_app)?;
+        let indices = AppIndices::new(&pre).map_err(not_an_app)?;
+        let views = ViewsIndices::new(&pre).ok();
+        Ok(Owner { spec, pre, indices, views, outbox, running: None })
     }
 
     /// Takes requests until the sender is dropped (Unload), then stops the
@@ -259,6 +341,18 @@ impl Owner {
             Request::Call { tool, args, caller, answer } => {
                 let _ = answer.send(self.call(&tool, &args, &caller).await);
             }
+            Request::ViewOpen { view, params, surface, answer } => {
+                let error = self.view_open(&view, &params, &surface).await.err().unwrap_or_default();
+                let _ = answer.send(Body::Done(Done { error }));
+            }
+            Request::ViewAction { surface, message, answer } => {
+                let error = self.view_action(&surface, &message).await.err().unwrap_or_default();
+                let _ = answer.send(Body::Done(Done { error }));
+            }
+            Request::ViewClosed { surface, answer } => {
+                let error = self.view_closed(&surface).await.err().unwrap_or_default();
+                let _ = answer.send(Body::Done(Done { error }));
+            }
         }
     }
 
@@ -268,16 +362,21 @@ impl Owner {
         }
         let mut store = self.store()?;
         let deadlines = self.spec.deadlines;
-        let app = match tokio::time::timeout(deadlines.start, self.pre.instantiate_async(&mut store)).await {
-            Ok(Ok(app)) => app,
+        let instance = match tokio::time::timeout(deadlines.start, self.pre.instantiate_async(&mut store)).await {
+            Ok(Ok(instance)) => instance,
             Ok(Err(error)) => return Err(format!("It didn't start: {}", first_line(&error))),
             Err(_) => return Err(format!("It didn't start within {} seconds.", deadlines.start.as_secs())),
         };
-        self.running = Some(Running { store, app });
+        let app = self.indices.load(&mut store, &instance).map_err(|error| format!("It didn't start: {}", first_line(&error)))?;
+        let views = match &self.views {
+            Some(indices) => Some(indices.load(&mut store, &instance).map_err(|error| format!("It didn't start: {}", first_line(&error)))?),
+            None => None,
+        };
+        self.running = Some(Running { store, exports: Exports { app, views } });
         if let Some(from) = self.spec.upgrade_from.take() {
-            self.guest("upgrade", deadlines.start, async |app, store| app.call_upgrade(store, &from).await).await?;
+            self.guest("upgrade", deadlines.start, async |exports, store| exports.app.call_upgrade(store, &from).await).await?;
         }
-        self.guest("start", deadlines.start, async |app, store| app.call_start(store).await).await
+        self.guest("start", deadlines.start, async |exports, store| exports.app.call_start(store).await).await
     }
 
     /// Calls stop() if it runs, then drops the instance and its timers.
@@ -285,7 +384,7 @@ impl Owner {
         if self.running.is_none() {
             return;
         }
-        let stopped = self.guest_quietly("stop", self.spec.deadlines.stop, async |app, store| app.call_stop(store).await).await;
+        let stopped = self.guest_quietly("stop", self.spec.deadlines.stop, async |exports, store| exports.app.call_stop(store).await).await;
         if let Err(error) = stopped {
             tracing::warn!(app = %self.spec.app_id, %error, "stop() failed; the instance is dropped anyway");
         }
@@ -296,11 +395,76 @@ impl Owner {
         if self.running.is_none() {
             return Body::Done(Done { error: format!("{} isn't running.", self.spec.app_id) });
         }
-        let result = self.guest("call", self.spec.deadlines.call, async |app, store| app.call_call(store, tool, args, caller).await).await;
+        let result = self
+            .guest("call", self.spec.deadlines.call, async |exports, store| exports.app.call_call(store, tool, args, caller).await)
+            .await;
         Body::CallResult(match result {
             Ok(result) => CallResult { text: result.text, data: result.data.unwrap_or_default(), is_error: result.is_error },
             Err(error) => CallResult { text: error, data: String::new(), is_error: true },
         })
+    }
+
+    /// Why the app's views can't be reached now, if they can't.
+    fn views_closed(&self) -> Result<(), String> {
+        if self.running.is_none() {
+            return Err(format!("{} isn't running.", self.spec.app_id));
+        }
+        if self.views.is_none() {
+            return Err(format!("{} has no views.", self.spec.app_id));
+        }
+        Ok(())
+    }
+
+    /// view-open: the surface is open (the app may push to it) from now
+    /// until view-closed, unless the app refuses it.
+    async fn view_open(&mut self, view: &str, params: &str, surface: &str) -> Result<(), String> {
+        self.views_closed()?;
+        let surfaces = &mut self.running.as_mut().expect("running").store.data_mut().surfaces;
+        if !surfaces.contains(surface) && surfaces.len() >= MAX_SURFACES {
+            return Err(format!("{} has {MAX_SURFACES} views open already.", self.spec.app_id));
+        }
+        surfaces.insert(surface.to_owned());
+        let opened = self
+            .guest("view-open", self.spec.deadlines.call, async |exports, store| match &exports.views {
+                Some(views) => views.call_view_open(store, view, params, surface).await,
+                None => Ok(Err("It has no views.".to_owned())),
+            })
+            .await;
+        let refused = match opened {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(refused)) => refused,
+            Err(crashed) => return Err(crashed),
+        };
+        if let Some(running) = self.running.as_mut() {
+            running.store.data_mut().surfaces.remove(surface);
+        }
+        Err(refused)
+    }
+
+    async fn view_action(&mut self, surface: &str, message: &str) -> Result<(), String> {
+        self.views_closed()?;
+        if !self.running.as_ref().expect("running").store.data().surfaces.contains(surface) {
+            return Err(format!("The surface \"{surface}\" isn't open."));
+        }
+        self.guest("view-action", self.spec.deadlines.call, async |exports, store| match &exports.views {
+            Some(views) => views.call_view_action(store, surface, message).await,
+            None => Ok(()),
+        })
+        .await
+    }
+
+    /// view-closed: the app can't push to it any more, even while it hears
+    /// so.
+    async fn view_closed(&mut self, surface: &str) -> Result<(), String> {
+        self.views_closed()?;
+        if !self.running.as_mut().expect("running").store.data_mut().surfaces.remove(surface) {
+            return Ok(());
+        }
+        self.guest("view-closed", self.spec.deadlines.call, async |exports, store| match &exports.views {
+            Some(views) => views.call_view_closed(store, surface).await,
+            None => Ok(()),
+        })
+        .await
     }
 
     fn next_timer(&self) -> Option<Instant> {
@@ -312,7 +476,8 @@ impl Owner {
         let timers = &mut running.store.data_mut().timers;
         let Some(name) = timers.iter().min_by_key(|(_, at)| **at).map(|(name, _)| name.clone()) else { return };
         timers.remove(&name);
-        let _ = self.guest("on-timer", self.spec.deadlines.timer, async |app, store| app.call_on_timer(store, &name).await).await;
+        let _ =
+            self.guest("on-timer", self.spec.deadlines.timer, async |exports, store| exports.app.call_on_timer(store, &name).await).await;
     }
 
     /// A new store for an instance, with the app's limits and capabilities.
@@ -331,6 +496,7 @@ impl Owner {
             limits: Limits { memory: (spec.memory_mb() as usize) << 20, ran_out: false },
             kv,
             timers: HashMap::new(),
+            surfaces: HashSet::new(),
             outbox: self.outbox.clone(),
         };
         let mut store = Store::new(self.pre.engine(), state);
@@ -348,7 +514,7 @@ impl Owner {
         &mut self,
         what: &str,
         deadline: Duration,
-        call: impl AsyncFnOnce(&App, &mut Store<State>) -> wasmtime::Result<T>,
+        call: impl AsyncFnOnce(&Exports, &mut Store<State>) -> wasmtime::Result<T>,
     ) -> Result<T, String> {
         let result = self.guest_quietly(what, deadline, call).await;
         if let Err(error) = &result {
@@ -363,10 +529,10 @@ impl Owner {
         &mut self,
         what: &str,
         deadline: Duration,
-        call: impl AsyncFnOnce(&App, &mut Store<State>) -> wasmtime::Result<T>,
+        call: impl AsyncFnOnce(&Exports, &mut Store<State>) -> wasmtime::Result<T>,
     ) -> Result<T, String> {
         let Some(running) = self.running.as_mut() else { return Err("It isn't running.".to_owned()) };
-        let outcome = tokio::time::timeout(deadline, call(&running.app, &mut running.store)).await;
+        let outcome = tokio::time::timeout(deadline, call(&running.exports, &mut running.store)).await;
         let error = match outcome {
             Ok(Ok(value)) => return Ok(value),
             Ok(Err(_)) if running.store.data().limits.ran_out => {

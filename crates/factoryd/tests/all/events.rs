@@ -163,9 +163,11 @@ async fn a_background_task_outlives_the_backend_and_its_agent_still_hears_when_i
     old.shutdown_background();
 
     let (addr, _new) = start(&dir).await;
-    let (mut client, _, _) = Client::connect(addr).await;
-    let mut view = View::default();
-    apply_request(&mut client, &mut view, select("builder")).await;
+    // Builder is still selected: its transcript comes with the welcome, and
+    // what it does next (the task may have ended already) follows it.
+    let (mut client, workspace, transcript) = Client::connect(addr).await;
+    let entries = transcript.expect("Builder's transcript").entries;
+    let mut view = View { workspace, entries, ..View::default() };
     let finished =
         tokio::time::timeout(Duration::from_secs(10), view.follow(&mut client, |view| view.entries.len() == 5 && idle(view, "builder")))
             .await;

@@ -82,6 +82,18 @@ void main() {
     expect(find.text('OpenRouter'), findsNothing);
     // The list is closed until the field is used.
     expect(find.text('OpenRouter OAuth'), findsNothing);
+    // Where agents' work goes, and that adding one allows it (App Store
+    // 5.1.2(i)), above the picker.
+    final consent = find.text(aiProviderConsent(adding: true));
+    expect(consent, findsOneWidget);
+    expect(
+      aiProviderConsent(adding: true),
+      endsWith('such as Anthropic or OpenAI. By adding one, you allow this.'),
+    );
+    expect(
+      tester.getTopLeft(consent).dy,
+      lessThan(tester.getTopLeft(pickerField).dy),
+    );
 
     await tester.tap(pickerField);
     await settle(tester);

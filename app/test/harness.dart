@@ -6,6 +6,7 @@ import 'package:factory_app/connections.dart';
 import 'package:factory_app/device_account.dart' show DeviceAccount;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/history.dart';
+import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/login.dart';
 import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -287,14 +288,19 @@ class RecordingBackend extends Backend {
   var appliesLayouts = false;
 
   @override
-  Future<void> setLayout(String agentId, ViewNode? root) async {
+  Future<void> setLayout(
+    String agentId,
+    ViewNode? root, {
+    String? focus,
+  }) async {
     await _record(
       ClientMessage(
-        setLayout: SetLayout(agentId: agentId, root: root),
+        setLayout: SetLayout(agentId: agentId, root: root, focus: focus),
       ),
     );
     if (!appliesLayouts) return;
-    // As the backend does: the agent's layout is it now.
+    // As the backend does: the agent's layout is it now, and its expanded
+    // pane the one asked for, or kept while it's still there.
     final now = workspace.workspace.deepCopy();
     for (final agent in now.agents) {
       if (agent.id != agentId) continue;
@@ -303,6 +309,11 @@ class RecordingBackend extends Backend {
       } else {
         agent.layout = root;
       }
+      final expanded = focus ?? agent.layoutFocus;
+      agent.layoutFocus =
+          root != null && leaves(root).any((leaf) => leaf.id == expanded)
+          ? expanded
+          : '';
     }
     workspace.apply(now);
   }
@@ -663,14 +674,47 @@ class RecordingBackend extends Backend {
   Future<void> createSecret(
     String name,
     String description,
-    List<SecretEntry> entries,
-  ) => _record(
+    List<SecretEntry> entries, {
+    bool askEachTime = false,
+  }) => _record(
     ClientMessage(
       createSecret: CreateSecret(
         name: name,
         description: description,
         entries: entries,
+        askEachTime: askEachTime,
       ),
+    ),
+  );
+
+  @override
+  Future<void> addGoal(String agentId, String text) => _record(
+    ClientMessage(addGoal: AddGoal(agentId: agentId, text: text)),
+  );
+
+  @override
+  Future<void> updateGoal(
+    String agentId,
+    int goalId, {
+    String? text,
+    ChecklistStatus? status,
+    bool remove = false,
+  }) => _record(
+    ClientMessage(
+      updateGoal: UpdateGoal(
+        agentId: agentId,
+        goalId: goalId,
+        text: text,
+        status: status,
+        remove: remove,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> setSecretAskEachTime(String id, bool on) => _record(
+    ClientMessage(
+      setSecretAskEachTime: SetSecretAskEachTime(id: id, askEachTime: on),
     ),
   );
 
@@ -759,6 +803,7 @@ class RecordingBackend extends Backend {
     Map<String, String> aliases = const {},
     bool asIs = false,
     bool approveOnly = false,
+    bool? askEachTime,
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -773,6 +818,7 @@ class RecordingBackend extends Backend {
         aliases: aliases.entries,
         asIs: asIs,
         approveOnly: approveOnly,
+        askEachTime: askEachTime,
       ),
     ),
   );
@@ -818,6 +864,26 @@ class RecordingBackend extends Backend {
     await _record(ClientMessage(showRecoveryKey: ShowRecoveryKey()));
     return recoveryKey;
   }
+
+  /// What [checkRecoveryKey] answers.
+  var recoveryKeyCheck = RecoveryKeyCheck(
+    checkId: 'check-1',
+    group: 3,
+    groups: 8,
+  );
+
+  @override
+  Future<RecoveryKeyCheck> checkRecoveryKey() async {
+    await _record(ClientMessage(checkRecoveryKey: CheckRecoveryKey()));
+    return recoveryKeyCheck;
+  }
+
+  @override
+  Future<void> confirmRecoveryKey(String checkId, String typed) => _record(
+    ClientMessage(
+      confirmRecoveryKey: ConfirmRecoveryKey(checkId: checkId, typed: typed),
+    ),
+  );
 
   /// What [startConnect] answers (Priya's connectors_test).
   var connectStarted = ConnectStarted(
@@ -987,14 +1053,16 @@ class RecordingBackend extends Backend {
   Future<PipeInvite> createPipeInvite(
     String projectId,
     String name,
-    String purpose,
-  ) async {
+    String purpose, {
+    String startId = '',
+  }) async {
     await _record(
       ClientMessage(
         createPipeInvite: CreatePipeInvite(
           projectId: projectId,
           name: name,
           purpose: purpose,
+          startId: startId,
         ),
       ),
     );
@@ -1016,6 +1084,7 @@ class RecordingBackend extends Backend {
     String projectId, {
     String name = '',
     String purpose = '',
+    String startId = '',
   }) => _record(
     ClientMessage(
       acceptPipeInvite: AcceptPipeInvite(
@@ -1023,7 +1092,15 @@ class RecordingBackend extends Backend {
         projectId: projectId,
         name: name,
         purpose: purpose,
+        startId: startId,
       ),
+    ),
+  );
+
+  @override
+  Future<void> dismissPipeStart(String agentId, String startId) => _record(
+    ClientMessage(
+      dismissPipeStart: DismissPipeStart(agentId: agentId, startId: startId),
     ),
   );
 
@@ -1347,7 +1424,12 @@ class Harness {
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
+    // The window fills the screen, so what the screen says the device is
+    // (a phone's 393 points, an iPad's 744 or more) matches the window.
+    tester.view.display.size = size;
+    tester.view.display.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
+    addTearDown(tester.view.display.reset);
     await tester.pumpWidget(
       WidgetsApp(
         color: const Color(0xFF000000),

@@ -1,0 +1,171 @@
+{
+  "about": "Test vectors for opening Claktory's pushes (notify/push.rs). c = base64(nonce 12 ‖ AES-256-GCM ciphertext ‖ tag 16), no AAD; the plaintext is JSON padded with spaces. Apply them in order: the replay pair shares a ctr. expect: shows (the plaintext's title and body) or generic (\"Claktory has something for you\", tap only opens the app). sent_at is fixed: check freshness against it, not the clock. id is the Notify's id: an app that already showed that Notify drops the push.",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "thread_for_agent_devops": "Bv6H5l7hdJgG_h268SXQmg",
+  "vectors": [
+    {
+      "name": "512",
+      "expect": "shows",
+      "ctr": 1,
+      "c": "fNEvvq1L8X6twW6b9VondQaglfZQIwvYjilUSHlFb1SVfHaQ8v7KynPvbipbj6KtjSZdgBVFepsKTkyL1DxQBM6FVChDfszU44hTqoqDLTpm+hAqPCqGllwm3nxUGAYjj5rHSnO68kHa892qvbFvp7yIvcvbEwduG7VxKPGYZbc9gixk6B4LlXkeil+89bLMEo+PFN4i7the32cMYkMcUmMP0hsJnP1yLdHgJao6N33w37LGmS+0lLzVeEip839HZYxMoFs0te4pxKrKfZVq1mlSX/eRgqRwmgRRYQWfwyGqVXNyJ6qws46kYBNz3qX4reK8Xp5hYB5kHA0wbgFwykwNW4u8g2C1xoLJVHji40PqMymtge5t1BX3dN2J2wtCK+edauE+Gtdjlo0OLB/kBUJDlHS5wwjOpZM4bo49PfferMwTpB1eg0WUDnbuPoqbzrv9cYiG6aNsta+AsoP2NPjQ3kItwUSyemc95sTN1ti3eA8rhQOm+f0vt2WFyhmx09dZ8uWXT6DWTUwsiFn3xVRAxG5PEhAsISWhLlLjiwc2TUZXZ5ID6ff5BVuzeeKlQeJxuYgtLHji1637jA6K7/UejkojglJbizJb6cyU4ia1YvMqlyDT2T6K6xZcno6qXtEAZkHRrQcm4j+Hb1e25B/RjHGxRLiDWEiqur6cgIpOJMQ15dnYRglJW0uXMhwAdNRPQHY2PTcIS0iv",
+      "padded_size": 512,
+      "plaintext": {
+        "v": 1,
+        "id": "1800000000000-3fa9",
+        "ctr": 1,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "Deploy tonight?",
+        "badge": 2,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    },
+    {
+      "name": "1024",
+      "expect": "shows",
+      "ctr": 2,
+      "c": "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",
+      "padded_size": 2048,
+      "plaintext": {
+        "v": 1,
+        "id": "1800000000000-3fa9",
+        "ctr": 2,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "badge": 2,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    },
+    {
+      "name": "2048",
+      "expect": "shows",
+      "ctr": 3,
+      "c": "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",
+      "padded_size": 2048,
+      "plaintext": {
+        "v": 1,
+        "id": "1800000000000-3fa9",
+        "ctr": 3,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本日本",
+        "badge": 2,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    },
+    {
+      "name": "bad tag",
+      "expect": "generic",
+      "ctr": 4,
+      "c": "yUwUZ6VPvu4c4iJ5ViUL3D9ujWs5BQkwh9c3PgTMy9wJr+6AWl6Wfd0WcSqfhYMYa61M8aNfHNj8lR2qZj9GBvGwxRJUtOsZgZdo2KNsIJ4ISBl5c3vNzHStqkIl3Neeakqpg52OqezrU38dsEzgrTSSuhIcjHOTu1J9hIfPERFXZtnjmmxWu/nvo3LiFQ6FgoehQiHwNwN0jZnK/Sc1I6oihWN78sSzi6sG9WIuySt8T2W7xosLyNM5VA6p23mTxkOw+0GWvODLOmyXZf6Dj+8PzNCTU8tTsrxfu3An9fZTzpLvLKMqFIwG6HUbZYmvCxUQTLW0kLI7i9NcOpqmqr9awBoKiP2UiVkpVPMeE7pqNcPaHtA4/u9UmoFA0pLwwZ2HTJTr4BTbiPDI676t6pz6QMymXHGcnbDGzD7J4mz7yp5znXU0Lnbp0gshnAwdGHzMMiCevU9T0b28Xtfh9I8y3+RHTVWcABydMj1TzThM+woYErovAONwuKmGr/8Q/rKUwyYhzjQOunJnUdsbRsnyVDb1L72fqfsvo/QdclRjhxHwBWpUEKTTUOblk2OaIU67rHPXoMv7wH90y1FbvSkS661vMCFrXOzkmyH/N60wjeXrzZ8BG/M4it8n7VxoyoFyHXA6qmXSAZ58E8hhfuxXU6OptR2nf3Ckxwy4nebRCEGQo+yTFPDyAwsTrFYng8oKHbWz3K0OezTQ",
+      "padded_size": null,
+      "plaintext": null
+    },
+    {
+      "name": "v=2",
+      "expect": "generic",
+      "ctr": 5,
+      "c": "vjxs56utNxHn88U5UEN7JmksAzDV3VdCDZ9DOLYDN6CrRRkyl2l2sUO8PzqTCFa7tVqjionARm6HqJzSNfsQl0OUV8OkXMia6YzF5Fu/H2gYFJ551TugIklzshQjf9iFmUryOFb/VFTVYJPIPBvVg3neBgbbWnkpzTvUg45GRxnnZqwpq3AZfECAU/QWSqOusgaRW/N289iVKWdz7gpwnLK2YWczZil9nk1OMfJy/XkFlaAnX6cHy7NkKCN6hxNHquWTib7KniOjNeiQk1YRRELxFIU2QAgN7eyB2ZrxlpJJHwAmHKBhScy/OZFzkDhgh4YvksZM4dmB+Q+hUIxm8YFFKHVy+o6SfF88AOJj7D3oCEk1MEp0ytQ2W6NXm8Vf7EiRd4XpI3C9fOKA/dH/QCg6To/ZMi25eb38wXWVoxNBOnRK6oSeVKhINCsW7NIuD7RQnWzghOOXq+fKweGGy9NFIL7jxnIlQCd10VkGh1FtUh1n5rg8SeP3MHLQQSwhCOQk88QaUv1d2skme9eDlSGTV4dkIyX/LRx0Cd3w0+/y+WmWLikjLXf4uf/QCgyoDLadTEe9RiZHyX+mp4UcFzPM7sOEmjiXfFqLCpwh7DYC0NMMj6tIQ5bkBcXa478RX13Vz+2rkcbJsTfaTgx445NfEBss7f+haMj+G9tgGDt1kkiE55A9fGrCXZPpT7fdR1To5lzZsEOI0GVU",
+      "padded_size": 512,
+      "plaintext": {
+        "v": 2,
+        "id": "1800000000000-3fa9",
+        "ctr": 5,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "From the future",
+        "badge": 1,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    },
+    {
+      "name": "replay: first",
+      "expect": "shows",
+      "ctr": 6,
+      "c": "Df8nqqWr62LWh4Dty7eT5RqPwxg0b+fLrtz809DfHmNMxOhsT5ExPDRR1sRh65ul6HrG+5Sj41n/uOhRv72VtWGxqjMFrFFUl+l4sWb+a0GhvE15kjWXDLQvrrxs6eE5PTK/ZvfOv5aKKwunfKKwzv4egcvkQ//mCZCJeqFtjFC9q+DBl4BOMBkKTCKGmQD0BMbaa/22b7oUdDmTdypfob6yJNyyCSMM92nA14QKSBYKfF0UTXbaOpHPqA6zgm0hgGg786J5v0+XVRFSgGgoV0au/9yp1r5S91CNr2CMsVsGDeerL4iUXnXo0r8klNiKg6a6f26OevgZN51BcKkcOC8144eQ3WXkCT4dCQlJyDaep4940mnGy8I54E4jlVmLUoWIUAwKQ3kx7W2hKHMZCkr0eQB2lPkqfReSaMDPWJaiv9uBpgVsfvm5aycSPjSgTWfwqJl+NG6y+vxbGxJHyNDzq+C4UbAy0GBhNQDxDFzy0NbXmO3ziXEUfF7LiQvdjnCc6BsILL4T8UxOWliJ/KH9xj4/hqzTR/8Lj1rqBkANV6Qk55LXTUxI64ETroT2NqRKu0luNFbJ/jeh0Ffqs0IQz5V4UtGu/2xjxN2XK3q/tTLBJSh/j3WA/qEuTDox8IYgqOG9/dIq65TQLhXIEbweu9RSme3B4jiIzKG7pM95YTV/HfwhQE/PN5dYqX+QOqvul3SUpsCynuA5",
+      "padded_size": 512,
+      "plaintext": {
+        "v": 1,
+        "id": "1800000000000-3fa9",
+        "ctr": 6,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "First with 6",
+        "badge": 2,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    },
+    {
+      "name": "replay: same ctr after it",
+      "expect": "generic",
+      "ctr": 6,
+      "c": "jAzCwD+KZ9+vwpSD2ZMlJ0vLk2u2lshBHG3yVQ4LPGBVir3jJd+0EkY5UO878LgWnIiwRLdEl4E4s6tgHnzmUbIcxcBlUf2JJsiDXQLlgm+Fho8zixcJr0AC9UAm1EuJR3lFEXNFOBpb1AozlZ6/B4omWMI7tXWNQTWTdv5Qac1hwCyI6Wob5wkonKsuhYnqut9OKe2dQEcTnLoNoOeJ8aXHLHg/+3LjR4XKVSBPBiTrTVm3TUaYVbbv6vWLuXDLcnCYYOYBudahvZp/pdbe0AChHml4hDe5mOjbaUiBszlXOCIEjcS8FaxYbhG+VRafiVTQvUiHdt9Aj8Bg5cpwPKPn7Y3+XPCUME3lOjV9OmOLfAoPAlNfwOpX+p+l7QTVr+HTs1FzQOrXjLnBDRBPGcErOhPJQ3WNB64HtuBjS+Q1ZYfZwtWC+xs4AEAHaWFUD+uHMNnvzc0kF8AClqaF2yr6mBLaDQn+jRe1TfjJTsNJ3iD6taXBN+xC1u/XqXom1nW280DGzs3x12faWWIJzaUulI/4/Q/d0L3x6UpXYtWMBh2jKs+da0k1yAmlXoM7RTY5bhr2L24PP3xhsLci5R8OMsC2Ibap1OtQaz4z3r/KqDydXxkBvhyAj13V2Ri/5Gtu/2+QKxrPTPthTcNXZlnHXqtzB53QRB08AeQwoGNeO1Luw4TCJSVwtmNrj4zmzCEeR1T/QeOdGVc9",
+      "padded_size": 512,
+      "plaintext": {
+        "v": 1,
+        "id": "1800000000000-3fa9",
+        "ctr": 6,
+        "sent_at": 1800000000000,
+        "ttl": 86400,
+        "claktory": "Matt's Claktory",
+        "kind": "needs_you",
+        "title": "Pericolo",
+        "body": "Again with 6",
+        "badge": 2,
+        "urgent": false,
+        "target": {
+          "agent": "devops",
+          "pipe": "",
+          "chat": "",
+          "seq": 42
+        }
+      }
+    }
+  ]
+}

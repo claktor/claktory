@@ -93,7 +93,10 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
             for (final pane in viewers)
               _Row(
                 glyph: paneGlyph(agent, pane.leaf, palette.textMuted),
-                name: paneTitle(pane.leaf),
+                name: paneTitle(
+                  pane.leaf,
+                  AppScope.of(context).workspace.workspace,
+                ),
                 onTap: () => widget.viewed(pane.id),
               ),
           ],

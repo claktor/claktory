@@ -11,7 +11,7 @@ fn idle(view: &View, agent: &str) -> bool {
 }
 
 fn read(path: &std::path::Path, max_bytes: u64) -> client_message::Body {
-    client_message::Body::ReadFile(v1::ReadFile { path: path.display().to_string(), max_bytes, offset: 0 })
+    client_message::Body::ReadFile(v1::ReadFile { path: path.display().to_string(), max_bytes, ..Default::default() })
 }
 
 fn content(body: Body) -> v1::FileContent {
@@ -22,7 +22,10 @@ fn content(body: Body) -> v1::FileContent {
 }
 
 fn leaf(id: &str, kind: &str, path: &str) -> v1::ViewNode {
-    v1::ViewNode { id: id.into(), node: Some(Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new() })) }
+    v1::ViewNode {
+        id: id.into(),
+        node: Some(Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new(), ..Default::default() })),
+    }
 }
 
 fn row(id: &str, children: Vec<v1::ViewNode>) -> v1::ViewNode {
@@ -30,7 +33,11 @@ fn row(id: &str, children: Vec<v1::ViewNode>) -> v1::ViewNode {
 }
 
 fn set_layout(agent: &str, root: Option<v1::ViewNode>) -> client_message::Body {
-    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root })
+    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root, focus: None })
+}
+
+fn focused(agent: &str, root: Option<v1::ViewNode>, focus: &str) -> client_message::Body {
+    client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root, focus: Some(focus.into()) })
 }
 
 /// The layout's panes, depth first, as "kind path".
@@ -157,17 +164,18 @@ async fn an_agent_shows_the_person_a_file_once() {
     apply_request(&mut client, &mut view, show(r#"{"path":"blob.bin"}"#)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     let refused = said(&view).expect("said");
-    assert!(refused.contains("isn't text, an image or a video the app can show"), "{refused}");
+    assert!(refused.contains("isn't text, an image, a video or a PDF the app can show"), "{refused}");
     apply_request(&mut client, &mut view, show(r#"{"path":"missing.md"}"#)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     assert!(said(&view).expect("said").starts_with("No such file: "));
 }
 
-/// show opens at most 5 files beside the conversation: a sixth is refused,
-/// saying the way out; a file already open still shows, and once the person
-/// closes panes there's room again.
+/// show opens panes up to the person's setting (4 until changed), counting
+/// every pane but the conversation, whoever opened it: past it, show is
+/// refused, saying the way out; a file already open still shows; closing a
+/// pane, or a higher setting, makes room again.
 #[tokio::test]
-async fn show_refuses_a_sixth_file_until_one_closes() {
+async fn show_refuses_past_the_open_panes_setting_until_there_is_room() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
@@ -178,6 +186,7 @@ async fn show_refuses_a_sixth_file_until_one_closes() {
     for number in 1..=6 {
         std::fs::write(site.join(format!("f{number}.md")), "notes\n").expect("write");
     }
+    let path = |number: usize| std::fs::canonicalize(site.join(format!("f{number}.md"))).expect("path").display().to_string();
     let show = |number: usize| send_message("builder", &format!(r#"call show {{"path":"f{number}.md"}}"#));
     let said = |view: &View| {
         view.entries.iter().rev().find_map(|entry| match &entry.kind {
@@ -185,32 +194,119 @@ async fn show_refuses_a_sixth_file_until_one_closes() {
             _ => None,
         })
     };
-    for number in 1..=5 {
+    let settings = |view: &View| view.workspace.settings.clone().expect("settings");
+    assert_eq!(settings(&view).max_open_panes, 4, "the default");
+
+    // The person has Settings open beside the conversation: it counts.
+    let page = row("s", vec![leaf("chat", "chat", ""), leaf("set", "settings", "")]);
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(page))).await, Body::Ack(_)));
+    for number in 1..=3 {
         apply_request(&mut client, &mut view, show(number)).await;
-        view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == number + 1).await;
+        view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == number + 2).await;
     }
 
-    // The sixth is refused, saying the way out, and the layout stands.
-    apply_request(&mut client, &mut view, show(6)).await;
+    // The fourth file is the fifth pane: refused, saying the way out, and
+    // the layout stands.
+    apply_request(&mut client, &mut view, show(4)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     let refused = said(&view).expect("said");
-    assert!(refused.contains("5 files open beside it") && refused.contains("close one"), "{refused}");
-    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 6);
+    assert_eq!(
+        refused,
+        "This conversation already has 4 panes open beside it, the most show opens at once (4; the person can change it in \
+         Settings → Display). Ask the person to close one, or show an already-open file to point at it."
+    );
+    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 5);
 
     // A file already open still shows: its pane, not a new one.
     let glows = view.highlights.len();
     apply_request(&mut client, &mut view, show(3)).await;
     view.follow(&mut client, |view| idle(view, "builder") && view.highlights.len() > glows).await;
     assert!(said(&view).expect("said").starts_with("Showing "));
-    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 6);
+    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 5);
 
-    // The person closes panes; there's room again.
-    let f1 = std::fs::canonicalize(site.join("f1.md")).expect("path").display().to_string();
-    let smaller = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", &f1)]);
+    // The setting is from 1 to 11, or 0 for the default.
+    let set = |panes: u32| client_message::Body::UpdateSettings(v1::UpdateSettings { max_open_panes: Some(panes), ..Default::default() });
+    let refused = apply_request(&mut client, &mut view, set(12)).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("max_open_panes must be from 1 to 11")), "{refused:?}");
+
+    // Raised, there's room for more.
+    assert!(matches!(apply_request(&mut client, &mut view, set(5)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| settings(view).max_open_panes == 5).await;
+    // Kept in factory.db: a config.json that held it would be refused whole
+    // by a backend from before it, after a rollback.
+    let config = std::fs::read_to_string(dir.join("home/config.json")).expect("config");
+    assert!(!config.contains("max_open_panes"), "{config}");
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    let kept: String = db.query_row("SELECT value FROM state WHERE key = 'max_open_panes'", [], |row| row.get(0)).expect("kept");
+    assert_eq!(kept, "5");
+    apply_request(&mut client, &mut view, show(4)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 6).await;
+    apply_request(&mut client, &mut view, show(5)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    assert!(said(&view).expect("said").contains("already has 5 panes open beside it"));
+
+    // Back to the default, and the person closes panes: room again.
+    assert!(matches!(apply_request(&mut client, &mut view, set(0)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| settings(view).max_open_panes == 4).await;
+    let smaller = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", &path(1))]);
     assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(smaller))).await, Body::Ack(_)));
     apply_request(&mut client, &mut view, show(6)).await;
     view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 3).await;
     assert!(said(&view).expect("said").starts_with("Showing "));
+}
+
+/// Focus (#272): the person fills the window with one pane; it's kept with
+/// the layout, for every device and across a restart, and an agent's show
+/// leaves it in place.
+#[tokio::test]
+async fn a_pane_in_focus_is_kept_with_the_layout_and_show_leaves_it_there() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let site = dir.join("site");
+    apply_request(&mut client, &mut view, create_project("Site", &site)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    std::fs::write(site.join("notes.md"), "notes\n").expect("write");
+    let layout = || row("s", vec![leaf("chat", "chat", ""), leaf("set", "settings", "")]);
+    assert_eq!(view.agent("builder").layout_focus, "");
+
+    // Only a pane of the layout can be in focus.
+    let refused = apply_request(&mut client, &mut view, focused("builder", Some(layout()), "nope")).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("no pane \"nope\"")), "{refused:?}");
+    let refused = apply_request(&mut client, &mut view, focused("builder", None, "chat")).await;
+    assert!(matches!(refused, Body::Error(_)), "just the conversation has nothing to focus");
+    assert!(matches!(apply_request(&mut client, &mut view, focused("builder", Some(layout()), "set")).await, Body::Ack(_)));
+    assert_eq!(view.agent("builder").layout_focus, "set");
+
+    // The agent shows a file: its pane joins the layout, the focus stays.
+    apply_request(&mut client, &mut view, send_message("builder", r#"call show {"path":"notes.md"}"#)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 3).await;
+    assert_eq!(view.agent("builder").layout_focus, "set");
+
+    // Kept across a restart, as every device sees it.
+    let (addr, _again) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert_eq!((view.agent("builder").layout_focus.as_str(), panes(view.agent("builder").layout.as_ref()).len()), ("set", 3));
+
+    // A SetLayout that leaves focus out keeps it while its pane is there,
+    // and ends it when the pane closes.
+    let rearranged = row("s", vec![leaf("set", "settings", ""), leaf("chat", "chat", "")]);
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(rearranged))).await, Body::Ack(_)));
+    assert_eq!(view.agent("builder").layout_focus, "set");
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(layout()))).await, Body::Ack(_)));
+    assert_eq!(view.agent("builder").layout_focus, "set");
+    let closed = row("s", vec![leaf("chat", "chat", ""), leaf("other", "usage", "")]);
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(closed))).await, Body::Ack(_)));
+    assert_eq!(view.agent("builder").layout_focus, "", "its pane closed");
+    assert!(matches!(apply_request(&mut client, &mut view, focused("builder", Some(layout()), "set")).await, Body::Ack(_)));
+
+    // Back: the same layout with no focus.
+    let back = view.agent("builder").layout.clone();
+    assert!(matches!(apply_request(&mut client, &mut view, focused("builder", back, "")).await, Body::Ack(_)));
+    assert_eq!(view.agent("builder").layout_focus, "");
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", "settings"], "the arrangement is as it was");
 }
 
 #[tokio::test]
@@ -234,7 +330,7 @@ async fn a_video_is_shown_and_played_a_range_at_a_time() {
     assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &format!("video {}", clip.display())]);
 
     // Played as the app does: 8 MB at a time, each range with the whole file's hash.
-    let ranged = |offset: u64| client_message::Body::ReadFile(v1::ReadFile { path: clip.display().to_string(), max_bytes: CHUNK, offset });
+    let ranged = |offset: u64| client_message::Body::ReadFile(v1::ReadFile { path: clip.display().to_string(), max_bytes: CHUNK, offset, ..Default::default() });
     let first = content(client.request(ranged(0)).await.body);
     assert_eq!((first.mime.as_str(), first.offset, first.data.len() as u64, first.truncated), ("video/mp4", 0, CHUNK, true));
     let last = content(client.request(ranged(CHUNK)).await.body);
@@ -251,4 +347,69 @@ async fn a_video_is_shown_and_played_a_range_at_a_time() {
     std::fs::File::options().write(true).open(&clip).and_then(|file| file.set_modified(later)).expect("touch");
     let again = content(client.request(ranged(CHUNK)).await.body);
     assert_ne!(again.sha256, last.sha256);
+}
+
+/// A PDF is read whole, a range at a time, from one version (iPad phase 3
+/// §2): ranges of 8 MB up to 64 MB, each with the whole file's hash, and a
+/// read that names the version it expects says when the file changed.
+#[tokio::test]
+async fn a_pdf_is_shown_and_read_whole_from_one_version() {
+    const CHUNK: u64 = 8 * 1024 * 1024;
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let site = dir.join("site");
+    apply_request(&mut client, &mut view, create_project("Site", &site)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    // Over text's 2 MB, which a PDF read from the start fell under before.
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    bytes.extend((0..CHUNK + 4096).map(|at| (at % 251) as u8));
+    std::fs::write(site.join("paper.pdf"), &bytes).expect("write");
+    let paper = std::fs::canonicalize(site.join("paper.pdf")).expect("path");
+
+    apply_request(&mut client, &mut view, send_message("builder", r#"call show {"path":"paper.pdf"}"#)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &format!("pdf {}", paper.display())]);
+
+    let ranged = |offset: u64, expected: &str| {
+        client_message::Body::ReadFile(v1::ReadFile {
+            path: paper.display().to_string(),
+            offset,
+            expected_sha256: expected.into(),
+            ..Default::default()
+        })
+    };
+    let first = content(client.request(ranged(0, "")).await.body);
+    assert_eq!((first.mime.as_str(), first.offset, first.data.len() as u64, first.truncated), ("application/pdf", 0, CHUNK, true));
+    assert_eq!(first.sha256.len(), 64, "the whole file's, from the first range");
+    let last = content(client.request(ranged(CHUNK, &first.sha256)).await.body);
+    assert_eq!((last.error.as_str(), last.offset + last.data.len() as u64, last.sha256.as_str()), ("", last.size, first.sha256.as_str()));
+    assert_eq!([first.data, last.data].concat(), bytes);
+
+    // Changed between ranges: the next one says so, with nothing of the new version.
+    let mut changed = bytes.clone();
+    changed[64] ^= 0xff;
+    std::fs::write(&paper, &changed).expect("rewrite");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&paper).and_then(|file| file.set_modified(later)).expect("touch");
+    let stale = content(client.request(ranged(CHUNK, &first.sha256)).await.body);
+    assert_eq!((stale.error.as_str(), stale.data.len(), stale.sha256.as_str()), ("changed", 0, ""));
+    let fresh = content(client.request(ranged(0, "")).await.body);
+    assert_ne!(fresh.sha256, first.sha256);
+
+    // A small file read whole is checked against what was read.
+    std::fs::write(site.join("notes.md"), "# Notes\n").expect("write");
+    let notes = site.join("notes.md").display().to_string();
+    let whole = content(client.request(client_message::Body::ReadFile(v1::ReadFile { path: notes.clone(), ..Default::default() })).await.body);
+    let same = v1::ReadFile { path: notes.clone(), expected_sha256: whole.sha256.to_uppercase(), ..Default::default() };
+    assert_eq!(content(client.request(client_message::Body::ReadFile(same)).await.body).data, b"# Notes\n");
+    let other = v1::ReadFile { path: notes, expected_sha256: first.sha256.clone(), ..Default::default() };
+    assert_eq!(content(client.request(client_message::Body::ReadFile(other)).await.body).error, "changed");
+
+    // Over 64 MB: refused, with a sentence for the person.
+    let file = std::fs::File::options().write(true).open(&paper).expect("open");
+    file.set_len(80_000_000).expect("grow");
+    let big = content(client.request(ranged(0, "")).await.body);
+    assert_eq!((big.error.as_str(), big.data.len()), ("This PDF is too big to open here (80 MB).", 0));
 }

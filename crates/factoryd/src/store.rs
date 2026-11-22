@@ -75,7 +75,9 @@ CREATE TABLE tasks (
 );
 
 -- What the app shows, the same on every device: selected_agent,
--- focused_project and open_panel.
+-- focused_project and open_panel; projects_collapsed and chats_collapsed
+-- ('1' when the sidebar's section is folded away, left out when open);
+-- max_open_panes (Settings → Display's pane limit, left out for the default).
 CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- Open folders in each project's explorer.
 CREATE TABLE expanded (project TEXT NOT NULL, folder TEXT NOT NULL, PRIMARY KEY (project, folder));
@@ -86,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 27] = [
+const MIGRATIONS: [&str; 38] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -173,6 +175,17 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::chats::SCHEMA,
     crate::move_import::SCHEMA,
     crate::pipes::TAINT_VIA,
+    crate::extensions::monitors::TAINT,
+    crate::extensions::checklist::BLOCKED_ON,
+    crate::pipes::start::SCHEMA,
+    crate::extensions::checklist::GOALS,
+    crate::extensions::viewer::FOCUS,
+    crate::extensions::ask::REVIEW,
+    crate::notify::SCHEMA,
+    crate::extensions::swarm::WATCH,
+    crate::extensions::ask::DRAWINGS,
+    crate::account::analytics::HEALTH,
+    crate::apps::pins::SCHEMA,
 ];
 
 /// A background task as recorded.
@@ -320,7 +333,14 @@ impl Store {
             let source: String = row.get(2)?;
             let event = match source_named(&source) {
                 None => None,
-                Some(source) => Some(Event { source, from: row.get(3)?, id: row.get(4)?, summary: row.get(5)?, transient: false }),
+                Some(source) => Some(Event {
+                    source,
+                    from: row.get(3)?,
+                    id: row.get(4)?,
+                    summary: row.get(5)?,
+                    transient: false,
+                    pipe_seqs: Vec::new(),
+                }),
             };
             let sent_from: Option<String> = row.get(8)?;
             let sent_from = sent_from.and_then(|from| serde_json::from_str(&from).ok());
@@ -482,6 +502,9 @@ impl Store {
             open_panels: BTreeMap::new(),
             collapsed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
+            projects_collapsed: value("projects_collapsed")?.as_deref() == Some("1"),
+            chats_collapsed: value("chats_collapsed")?.as_deref() == Some("1"),
+            max_open_panes: value("max_open_panes")?.and_then(|value| value.parse().ok()).unwrap_or(0),
         };
         let mut statement = db.prepare("SELECT project, folder FROM expanded ORDER BY project, folder")?;
         let mut rows = statement.query([])?;
@@ -524,9 +547,17 @@ impl Store {
         )?;
         // `open_panel` keeps the selected agent's, for an older Factory after a rollback.
         let open_panel = state.selected_agent.as_ref().and_then(|agent| state.open_panels.get(agent)).cloned();
-        for (key, value) in
-            [("selected_agent", &state.selected_agent), ("focused_project", &state.focused_project), ("open_panel", &open_panel)]
-        {
+        let folded = |collapsed: bool| collapsed.then(|| "1".to_owned());
+        let (projects_collapsed, chats_collapsed) = (folded(state.projects_collapsed), folded(state.chats_collapsed));
+        let max_open_panes = (state.max_open_panes != 0).then(|| state.max_open_panes.to_string());
+        for (key, value) in [
+            ("selected_agent", &state.selected_agent),
+            ("focused_project", &state.focused_project),
+            ("open_panel", &open_panel),
+            ("projects_collapsed", &projects_collapsed),
+            ("chats_collapsed", &chats_collapsed),
+            ("max_open_panes", &max_open_panes),
+        ] {
             if let Some(value) = value {
                 transaction.execute("INSERT INTO state (key, value) VALUES (?1, ?2)", [key, value])?;
             }

@@ -2234,7 +2234,23 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'inbox': _drawInbox,
   'message-circle-question': _drawMessageCircleQuestion,
   'shield-alert': _drawShieldAlert,
+  'maximize-2': _drawMaximize2,
+  'minimize-2': _drawMinimize2,
 };
+
+final _drawMaximize2 = _paths(const [
+  'M15 3h6v6',
+  'm21 3-7 7',
+  'm3 21 7-7',
+  'M9 21H3v-6',
+]);
+
+final _drawMinimize2 = _paths(const [
+  'm14 10 7-7',
+  'M20 10h-6V4',
+  'm3 21 7-7',
+  'M4 14h6v6',
+]);
 
 final _drawShieldAlert = _paths(const [
   'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 '

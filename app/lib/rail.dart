@@ -186,7 +186,34 @@ class Claktories extends ChangeNotifier {
   /// Shows [claktory] in the window.
   void select(Claktory claktory) => connections.use(claktory.target);
 
+  /// Whether [_sync] is running, and whether [connections] changed
+  /// meanwhile.
+  var _syncing = false;
+  var _syncAgain = false;
+
+  /// Opens a Claktory for each one in [connections] and closes the rest.
+  /// Opening one can change [connections] (its first connection makes this
+  /// device's key for it, and keeps it), which would run this again before
+  /// the first one is in [_open]: it opens a second, live connection to the
+  /// same Claktory as the same device, never closed, which then fights the
+  /// first one for its relay. So a change while it runs is taken after it.
   void _sync() {
+    if (_syncing) {
+      _syncAgain = true;
+      return;
+    }
+    _syncing = true;
+    try {
+      do {
+        _syncAgain = false;
+        _syncOnce();
+      } while (_syncAgain);
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  void _syncOnce() {
     // On a phone, after the one showing was removed, another shows.
     final saved = connections.saved;
     if (!localBackend && connections.current == null && saved.isNotEmpty) {

@@ -1,6 +1,12 @@
 //! The Checklist's nudge: an agent that stopped with work outstanding, and
 //! that nothing running will wake, is reminded once, so outstanding work
-//! doesn't sit until the person notices.
+//! doesn't sit until the person notices. And the doctrine on blockers
+//! (#255): an item that blocks on the person, owned by an agent with no
+//! question waiting for them, reminds that agent daily to ask, so work
+//! never sits parked behind a question nobody filed. And the periodic
+//! check-in (#270, the `nudge_every` option, off unless chosen): while an
+//! agent has open goals or outstanding items, it's reminded that often once
+//! idle, even while others work on its items, to see what can move.
 //!
 //! It's reminded when, for a short while (`Factory::set_nudge_after`), it has
 //! been idle with open or in-progress items, no messages waiting, no
@@ -36,6 +42,7 @@ struct Situation {
 /// Checks every agent now and then, for as long as Factory runs.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     let mut reminded: HashMap<String, Situation> = HashMap::new();
+    let mut checked_in: HashMap<String, i64> = HashMap::new();
     loop {
         let Some(after) = factory.upgrade().map(|factory| factory.nudge_after()) else { return };
         tokio::time::sleep((after / 2).clamp(Duration::from_millis(50), Duration::from_secs(2))).await;
@@ -43,7 +50,243 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         if let Err(error) = check(&factory, after, &mut reminded) {
             tracing::error!(%error, "could not check for agents to remind");
         }
+        if let Err(error) = check_person_blocked(&factory) {
+            tracing::error!(%error, "could not check for unasked blockers");
+        }
+        if let Err(error) = check_in(&factory, &mut checked_in) {
+            tracing::error!(%error, "could not check in on agents' goals and items");
+        }
     }
+}
+
+/// The periodic check-in: each idle agent whose `nudge_every` is set, with
+/// open goals or outstanding items, is reminded once that long has passed
+/// since it last worked and since its last check-in (counted from when
+/// Claktory started, the first time).
+fn check_in(factory: &Arc<Factory>, checked_in: &mut HashMap<String, i64>) -> rusqlite::Result<()> {
+    let minute = factory.nudge_minute();
+    let now = now_ms();
+    let due: Vec<(String, i64, &'static str)> = {
+        let inner = factory.lock();
+        let mut due = Vec::new();
+        for agent in &inner.config.agents {
+            if !super::enabled(agent, checklist::ID) || inner.config.archived(agent) {
+                continue;
+            }
+            let chosen = super::choice(agent, checklist::ID, "nudge_every");
+            let Some((_, label, minutes)) = checklist::EVERY.iter().find(|(value, _, minutes)| *value == chosen && *minutes > 0) else {
+                checked_in.remove(&agent.id);
+                continue;
+            };
+            // From when it's first seen with the option on.
+            checked_in.entry(agent.id.clone()).or_insert(now);
+            let runtime = inner.agents.get(&agent.id);
+            if runtime.is_some_and(|runtime| runtime.running || runtime.has_ready()) {
+                continue;
+            }
+            due.push((agent.id.clone(), minutes.saturating_mul(minute), *label));
+        }
+        due
+    };
+    if due.is_empty() {
+        return Ok(());
+    }
+    let runs = factory.store.run_times()?;
+    let person = factory.lock().config.person().to_owned();
+    for (id, every, label) in due {
+        let ended = runs.get(&id).and_then(|(_, ended)| *ended).unwrap_or(0);
+        let since = checked_in.get(&id).copied().unwrap_or(now).max(ended);
+        if now - since < every {
+            continue;
+        }
+        let open_goals: Vec<checklist::Goal> =
+            checklist::goals(&factory.store, &id, false)?.into_iter().filter(|goal| goal.status == Status::Open).collect();
+        let outstanding = Query { agent: &id, statuses: Some(vec![Status::Open, Status::InProgress, Status::Blocked]), ..Query::default() };
+        let (items, total) = checklist::query(&factory.store, &outstanding)?;
+        if open_goals.is_empty() && total == 0 {
+            continue;
+        }
+        let plural = |count: usize, one: &str| format!("{count} {one}{}", if count == 1 { "" } else { "s" });
+        let mut parts = Vec::new();
+        if !open_goals.is_empty() {
+            let progress = checklist::progress(&factory.store, &id)?;
+            let named: Vec<String> = open_goals
+                .iter()
+                .take(NAMED)
+                .map(|goal| match progress.get(&goal.id).filter(|(_, all)| *all > 0) {
+                    Some((done, all)) => format!("G{} {} ({done}/{all} done)", goal.id, clip(&goal.text, 60)),
+                    None => format!("G{} {} (no items yet)", goal.id, clip(&goal.text, 60)),
+                })
+                .collect();
+            let more = if open_goals.len() > NAMED { format!(", +{} more", open_goals.len() - NAMED) } else { String::new() };
+            parts.push(format!("{}: {}{more}", plural(open_goals.len(), "open goal"), named.join(", ")));
+        }
+        if total > 0 {
+            let named: Vec<String> = items
+                .iter()
+                .take(NAMED)
+                .map(|item| {
+                    let state = match item.status {
+                        Status::InProgress => " (in progress)",
+                        Status::Blocked => " (blocked)",
+                        _ => "",
+                    };
+                    format!("#{} {}{state}", item.id, clip(&item.text, 60))
+                })
+                .collect();
+            let more = if total > NAMED { format!(", +{} more", total - NAMED) } else { String::new() };
+            parts.push(format!("{}: {}{more}", plural(total, "outstanding item"), named.join(", ")));
+        }
+        let text = format!(
+            "Check-in ({}): {}. See whether anything can be driven further: a step you can take now, an item to hand to someone, \
+             or a question for {person} (ask_person). If nothing can move yet, stop without a reply.",
+            label.to_lowercase(),
+            parts.join("; "),
+        );
+        let mut summary = vec![];
+        if !open_goals.is_empty() {
+            summary.push(plural(open_goals.len(), "goal"));
+        }
+        if total > 0 {
+            summary.push(plural(total, "item"));
+        }
+        tracing::info!(agent = %id, goals = open_goals.len(), items = total, "checking in on an agent's goals and items");
+        factory.deliver_event(&id, text, host_event(format!("Check-in: {}", summary.join(", "))));
+        checked_in.insert(id, now);
+    }
+    Ok(())
+}
+
+/// How long between reminders of the same agent's unasked blockers.
+const ASK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A person-blocked item as read: the checklist it's on, its owner, id
+/// and text.
+type Blocked = (String, String, u32, String);
+
+/// The daily reminder: items with `blocked_on` "person" whose owning
+/// agent (the owner, or the checklist's agent) has no pending ask get
+/// that agent told to file one, at most once a day.
+fn check_person_blocked(factory: &Arc<Factory>) -> rusqlite::Result<()> {
+    sweep_once(factory)?;
+    let rows: Vec<Blocked> = {
+        let db = factory.store.db();
+        let mut statement = db.prepare(
+            "SELECT agent, owner, id, text FROM checklist_items WHERE status = 'blocked' AND blocked_on = 'person' ORDER BY agent, id",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let person = factory.lock().config.person().to_owned();
+    for (owning, items) in by_owner(rows) {
+        remind_owner(factory, &owning, &items, &person, "")?;
+    }
+    Ok(())
+}
+
+/// The items by their owning agent: the owner when one is set, else the
+/// agent whose checklist they're on.
+fn by_owner(rows: Vec<Blocked>) -> HashMap<String, Vec<Blocked>> {
+    let mut groups: HashMap<String, Vec<Blocked>> = HashMap::new();
+    for row in rows {
+        let owning = if row.1.is_empty() { row.0.clone() } else { row.1.clone() };
+        groups.entry(owning).or_default().push(row);
+    }
+    groups
+}
+
+/// Tells `owning` its person-blocked items have no question filed, if
+/// that holds and a day has passed since it was last told. `lead` opens
+/// the text (the sweep's explanation), empty for the daily reminder.
+fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person: &str, lead: &str) -> rusqlite::Result<()> {
+    {
+        let inner = factory.lock();
+        let Some(config) = inner.config.agent(owning) else { return Ok(()) };
+        if inner.config.archived(config) || (super::enabled(config, checklist::ID) && !super::switch(config, checklist::ID, "nudge")) {
+            return Ok(());
+        }
+    }
+    if super::ask::pending_of(&factory.store, owning) {
+        return Ok(());
+    }
+    let now = now_ms();
+    let last: Option<i64> =
+        factory.store.db().query_row("SELECT last FROM checklist_nudges WHERE agent = ?1", [owning], |row| row.get(0)).optional()?;
+    if last.is_some_and(|last| now - last < ASK_EVERY_MS) {
+        return Ok(());
+    }
+    let named: Vec<String> = items
+        .iter()
+        .take(NAMED)
+        .map(|(agent, _, id, text)| {
+            let whose = if agent == owning { String::new() } else { format!(" on {agent}'s checklist") };
+            format!("#{id}{whose} {}", clip(text, 60))
+        })
+        .collect();
+    let mut text = format!(
+        "{lead}{count} checklist item{s} block{third} on {person} and you have no question waiting for them: {list}",
+        count = items.len(),
+        s = if items.len() == 1 { "" } else { "s" },
+        third = if items.len() == 1 { "s" } else { "" },
+        list = named.join(", "),
+    );
+    if items.len() > NAMED {
+        let _ = write!(text, ", +{} more", items.len() - NAMED);
+    }
+    text.push_str(
+        ". A decision that gates work is asked the day it blocks: file ask_person now, one card per real decision \
+         (only pure preferences batch into one question) — or note on the item why you can't ask yet.",
+    );
+    let summary = format!("Reminder: {} blocked item{} with nothing asked", items.len(), if items.len() == 1 { "" } else { "s" });
+    tracing::info!(agent = %owning, items = items.len(), "reminding an agent of person-blocked items with no ask");
+    factory.deliver_event(owning, text, host_event(summary));
+    factory.store.db().execute("INSERT OR REPLACE INTO checklist_nudges (agent, last) VALUES (?1, ?2)", rusqlite::params![owning, now])?;
+    Ok(())
+}
+
+/// Once, after the update that brought `blocked_on`: blocked items from
+/// before it whose notes read as waiting on the person get their owners
+/// told, so old parked blockers surface too.
+fn sweep_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
+    let done: bool =
+        factory.store.db().query_row("SELECT EXISTS (SELECT 1 FROM checklist_nudges WHERE agent = '')", [], |row| row.get(0))?;
+    if done {
+        return Ok(());
+    }
+    let agents: Vec<String> = {
+        let db = factory.store.db();
+        let mut statement = db.prepare("SELECT DISTINCT agent FROM checklist_items WHERE status = 'blocked' AND blocked_on = ''")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let person = factory.lock().config.person().to_owned();
+    let mut rows: Vec<Blocked> = Vec::new();
+    for agent in agents {
+        let blocked = Query { agent: &agent, statuses: Some(vec![Status::Blocked]), with_log: true, ..Query::default() };
+        let (items, _) = checklist::query(&factory.store, &blocked)?;
+        for item in items {
+            if item.blocked_on.is_empty() && looks_person_blocked(&item.blocked_note, &person) {
+                rows.push((agent.clone(), item.owner.clone(), item.id, item.text.clone()));
+            }
+        }
+    }
+    for (owning, items) in by_owner(rows) {
+        let lead = "Some blocked items on the books look like they wait on the person. If so, set blocked_on: \"person\" on each with checklist_update. ";
+        remind_owner(factory, &owning, &items, &person, lead)?;
+    }
+    factory.store.db().execute("INSERT OR REPLACE INTO checklist_nudges (agent, last) VALUES ('', ?1)", [now_ms()])?;
+    Ok(())
+}
+
+/// Whether a blocked item's note reads as waiting on the person.
+fn looks_person_blocked(note: &str, person: &str) -> bool {
+    let note = note.to_ascii_lowercase();
+    let person = person.to_ascii_lowercase();
+    let marks = ["person", "approv", "decision", "decide", "confirm", "permission", "answer", "waiting for", "ask"];
+    !note.is_empty() && (note.contains(&person) || marks.iter().any(|mark| note.contains(mark)))
 }
 
 fn check(factory: &Arc<Factory>, after: Duration, reminded: &mut HashMap<String, Situation>) -> rusqlite::Result<()> {

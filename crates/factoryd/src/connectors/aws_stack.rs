@@ -30,7 +30,7 @@ use zeroize::Zeroizing;
 
 use super::{
     AccessSpec, BoxFuture, Choice, Choices, Control, Derive, Derived, ExportMeta, FlowKind, Http, Inspected, Problem, Recipe, Spec, Start,
-    Variable,
+    Variable, setting as set,
 };
 use crate::encoding::hex;
 
@@ -923,13 +923,7 @@ impl AwsStack {
     /// template at `FACTORY_AWS_TEMPLATE_URL`), or with `FACTORY_AWS_BASE`
     /// against a stand-in playing STS and IAM.
     pub(crate) fn built_in() -> Option<AwsStack> {
-        let set = |name: &str| std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
-        let dev = std::env::args().any(|arg| arg == "--dev");
-        let stand_in = set("FACTORY_AWS_BASE").filter(|_| dev).map(|base| base.trim_end_matches('/').to_owned());
-        let enabled = dev && set("FACTORY_AWS_ENABLED").is_some_and(|value| value != "0");
-        if !(SHIPPED || enabled || stand_in.is_some()) {
-            return None;
-        }
+        let (dev, stand_in) = super::aws::built_in_settings(SHIPPED)?;
         let template_url = set("FACTORY_AWS_TEMPLATE_URL").filter(|_| dev).unwrap_or_else(|| TEMPLATE_URL.to_owned());
         Some(AwsStack { stand_in, template_url })
     }

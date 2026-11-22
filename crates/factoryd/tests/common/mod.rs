@@ -261,6 +261,7 @@ impl Models for Scripted {
                 plan: String::new(),
                 accounts: Vec::new(),
                 cache_ttl: String::new(),
+                ..Default::default()
             }]
         })
     }
@@ -797,6 +798,7 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
                 format!("secret approval ({:?}): {} for {}", approval.state(), approval.secret_names.join(", "), approval.command)
             }
             Some(Kind::AskPerson(ask)) => format!("ask {} ({:?}): {}", ask.id, ask.state(), ask.title),
+            Some(Kind::PipeStart(start)) => format!("pipe start {} ({:?}): {}", start.id, start.state(), start.name),
             None => "empty".into(),
         });
     }

@@ -31,7 +31,7 @@ fn signer(service: &Service, call: &Call) -> Result<String, ApiError> {
 }
 
 /// The signed-in device a request is from; counts as its contact.
-fn authenticate(service: &Service, call: &Call) -> Result<db::Device, ApiError> {
+pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Device, ApiError> {
     let account_key = signer(service, call)?;
     let conn = service.db();
     let device = db::device(&conn, &account_key)?.ok_or_else(unauthorized)?;

@@ -11,12 +11,16 @@ import 'controls.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
-import 'mobile/header.dart' show HeaderButton;
+import 'mobile/header.dart' show HeaderButton, PhoneHeader;
+import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pairing.dart' show PairingDigits;
+import 'pipe_timeline.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'selection.dart';
+import 'taint_label.dart' show TaintLabel;
 import 'transcript.dart' show Bubble, userAvatarSize;
 
 /// A pipe's color: its portal glyph, its header's bar and its line on the
@@ -90,6 +94,12 @@ int pipeWaiting(Pipe pipe) =>
         ? 1
         : 0);
 
+/// What waits for the person in [pipe] and in its liaison's conversation
+/// (its cards: a question, a secret to allow), for the pipe's row, as the
+/// liaison has none of its own.
+int pipeWaitingAll(Workspace workspace, Pipe pipe) =>
+    pipeWaiting(pipe) + (pipeLiaison(workspace, pipe)?.waitingSeqs.length ?? 0);
+
 /// Where [pipe] stands, in a few words, for its sidebar row and header.
 String pipeStatus(Pipe pipe) {
   final who = pipePeerName(pipe);
@@ -113,6 +123,40 @@ String pipeStatus(Pipe pipe) {
     _ => '',
   };
 }
+
+/// The name to prefill for [pipe]'s new liaison: Claktory's suggestion
+/// (Pipe.suggested_liaison_name), else "Liaison".
+String liaisonNameFor(Pipe pipe) => pipe.suggestedLiaisonName.isNotEmpty
+    ? pipe.suggestedLiaisonName
+    : 'Liaison';
+
+/// While [pipe]'s other side can't be reached: since when and why, when
+/// Claktory knows (Pipe.offline_reason), and that messages wait.
+String pipeOfflineText(Pipe pipe) {
+  final who = pipePeerName(pipe);
+  final reason = pipe.offlineReason;
+  final since = pipe.offlineSinceMs > 0
+      ? ' since ${logTime(DateTime.fromMillisecondsSinceEpoch(pipe.offlineSinceMs.toInt()))}'
+      : '';
+  final head = reason.isEmpty
+      ? '$who’s Claktory is offline.'
+      : '$who’s Claktory has been offline$since: $reason.';
+  return pipe.queued > 0
+      ? '$head Messages wait until it’s back · ${pipe.queued} waiting to send'
+      : '$head Messages wait until it’s back.';
+}
+
+/// What to check when a join can't get through: the Local Network
+/// permission of the Mac the backend runs on, which a declined prompt
+/// turns off. Shown only when that's a Mac.
+const pipeLocalNetworkHint =
+    'If the Mac Claktory runs on asked to find devices on your local '
+    'network and you said no, allow it in System Settings → Privacy & '
+    'Security → Local Network.';
+
+/// Whether the backend runs on a Mac (Workspace.os); false while it
+/// doesn't say.
+bool backendOnMac(Workspace workspace) => workspace.os == 'macos';
 
 /// Opens [pipe] in the main pane.
 void openPipe(BuildContext context, Pipe pipe) {
@@ -186,11 +230,25 @@ class PipeView extends StatelessWidget {
     final palette = Palette.of(context);
     final store = AppScope.of(context).workspace;
     final project = store.project(pipe.projectId);
+    // Its liaison's conversation, with the pipe's messages among it, once
+    // the pipe is open: the box writes to the liaison or through the pipe.
+    final liaison = switch (pipe.state) {
+      PipeState.PIPE_STATE_OPEN ||
+      PipeState.PIPE_STATE_PAUSED ||
+      PipeState.PIPE_STATE_CLOSED => pipeLiaison(store.workspace, pipe),
+      _ => null,
+    };
     final Widget body = switch (pipe.state) {
       PipeState.PIPE_STATE_APPROVAL => PipeApprovalCard(pipe: pipe),
       PipeState.PIPE_STATE_INVITED ||
       PipeState.PIPE_STATE_JOINING ||
       PipeState.PIPE_STATE_WAITING_PEER => _Waiting(pipe: pipe),
+      _ when liaison != null => LiaisonPipeBody(
+        key: ValueKey('liaison/${liaison.id}'),
+        pipe: pipe,
+        liaison: liaison,
+        phone: onMenu != null,
+      ),
       _ => _PipeChatView(pipe: pipe),
     };
     return DefaultTextStyle(
@@ -198,10 +256,15 @@ class PipeView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _PipeHeader(pipe: pipe, project: project, onMenu: onMenu),
+          _PipeHeader(
+            pipe: pipe,
+            project: project,
+            liaison: liaison,
+            onMenu: onMenu,
+          ),
           _Readers(pipe: pipe),
           Expanded(child: body),
-          _PipeFoot(pipe: pipe),
+          if (liaison == null) _PipeFoot(pipe: pipe),
         ],
       ),
     );
@@ -209,14 +272,25 @@ class PipeView extends StatelessWidget {
 }
 
 class _PipeHeader extends StatelessWidget {
-  const _PipeHeader({required this.pipe, required this.project, this.onMenu});
+  const _PipeHeader({
+    required this.pipe,
+    required this.project,
+    this.liaison,
+    this.onMenu,
+  });
 
   final Pipe pipe;
   final Project? project;
+
+  /// The pipe's liaison, whose conversation shows: its face and its
+  /// "…" (Liaison settings…, Clear conversation…) end the header, and the
+  /// working wave runs along its line while it works.
+  final Agent? liaison;
   final VoidCallback? onMenu;
 
   @override
   Widget build(BuildContext context) {
+    if (onMenu case final onMenu?) return _phone(context, onMenu);
     final palette = Palette.of(context);
     final peer = pipe.peer;
     final ends = [
@@ -224,7 +298,8 @@ class _PipeHeader extends StatelessWidget {
       if (peer.projectName.isNotEmpty)
         '${peer.projectName} in ${peer.claktoryName.isEmpty ? pipePeerName(pipe) : peer.claktoryName}',
     ].join(' ⇄ ');
-    return DecoratedBox(
+    final liaison = this.liaison;
+    final header = DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -290,12 +365,147 @@ class _PipeHeader extends StatelessWidget {
                     style: TextStyles.body.copyWith(color: palette.textMuted),
                   ),
                 ),
+                if (liaison != null) ...[
+                  const SizedBox(width: Space.m),
+                  Semantics(
+                    label: liaison.name,
+                    child: AgentCharacter(agent: liaison, size: 24, live: true),
+                  ),
+                  const SizedBox(width: Space.xs),
+                  GlyphButton(
+                    label: 'More',
+                    active: false,
+                    onTap: () => _liaisonActions(context, liaison),
+                    glyph: (color) => ExtensionGlyph(
+                      icon: 'ellipsis',
+                      name: 'More',
+                      color: color,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
         ),
       ),
     );
+    if (liaison?.status != AgentStatus.AGENT_STATUS_WORKING) return header;
+    return Stack(
+      children: [
+        header,
+        const Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 2,
+          child: WorkingWave(color: Color(0xFFFFFFFF), peak: 0.6),
+        ),
+      ],
+    );
+  }
+}
+
+extension on _PipeHeader {
+  /// On a phone, as an agent's header: Menu, the portal and the name over
+  /// one line of where it stands ("Online · Not verified"), then the
+  /// liaison's face and its "…"; the name always keeps its room.
+  Widget _phone(BuildContext context, VoidCallback onMenu) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final liaison = this.liaison;
+    final status = [
+      pipeStatus(pipe),
+      if (pipe.state != PipeState.PIPE_STATE_INVITED && !pipe.peer.verified)
+        'Not verified',
+      if (pipe.canRunCommandsIds.isNotEmpty)
+        canRunCommandsText(pipe.canRunCommandsIds.length),
+    ].where((part) => part.isNotEmpty).join(' · ');
+    return PhoneHeader(
+      background: Color.alphaBlend(
+        pipeColor.withValues(alpha: 0.14),
+        palette.canvas,
+      ),
+      hairline: false,
+      leading: HeaderButton.menu(onTap: onMenu),
+      title: Row(
+        children: [
+          const ExcludeSemantics(child: PortalGlyph(size: 22)),
+          const SizedBox(width: Space.s + 2),
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  pipe.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: type.emphasis.copyWith(color: palette.text),
+                ),
+                if (status.isNotEmpty)
+                  Text(
+                    status,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: type.caption.copyWith(color: palette.textMuted),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      titleLabel: [pipe.name, if (status.isNotEmpty) status].join(', '),
+      titleHint: 'Opens pipe settings',
+      onTitleTap: () => showPipeSettings(context, pipe),
+      trailing: [
+        if (liaison != null) ...[
+          ExcludeSemantics(
+            child: AgentCharacter(agent: liaison, size: 24, live: true),
+          ),
+          HeaderButton.more(
+            label: '${liaison.name}: more',
+            onTap: () => _liaisonActions(context, liaison),
+          ),
+        ],
+      ],
+      bottom: SizedBox(
+        height: 2,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ColoredBox(color: pipeColor.withValues(alpha: 0.7)),
+            if (liaison?.status == AgentStatus.AGENT_STATUS_WORKING)
+              const WorkingWave(color: Color(0xFFFFFFFF), peak: 0.6),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What can be done with a pipe's liaison from the pipe's "…": its
+/// settings, and clearing its conversation.
+Future<void> _liaisonActions(BuildContext context, Agent liaison) async {
+  final action = await showActions<String>(
+    context,
+    title: liaison.name,
+    actions: const [
+      SheetAction('Liaison settings…', 'settings'),
+      SheetAction('Clear conversation…', 'clear'),
+    ],
+  );
+  if (!context.mounted) return;
+  switch (action) {
+    case 'settings':
+      await showModal(
+        context,
+        (context, close) => AgentSettingsForm(agent: liaison, close: close),
+      );
+    case 'clear':
+      await showModal(
+        context,
+        (context, close) => _ClearConversation(agent: liaison, close: close),
+      );
   }
 }
 
@@ -518,6 +728,16 @@ class _Waiting extends StatelessWidget {
             'it in their Claktory, and you both approve. It works once'
             '${pipe.inviteExpiresMs > 0 ? ', until ${logTime(DateTime.fromMillisecondsSinceEpoch(pipe.inviteExpiresMs.toInt()))}' : ''}.',
       ),
+      PipeState.PIPE_STATE_JOINING when pipe.offlineReason.isNotEmpty => (
+        'Can’t reach $who yet',
+        [
+          pipe.inviteExpiresMs > 0
+              ? 'Claktory keeps trying until the code expires at '
+                    '${logTime(DateTime.fromMillisecondsSinceEpoch(pipe.inviteExpiresMs.toInt()))}.'
+              : 'Claktory keeps trying until the code expires.',
+          'Last try: ${pipe.offlineReason}.',
+        ].join(' '),
+      ),
       PipeState.PIPE_STATE_JOINING => (
         'Connecting to $who…',
         'Reaching their Claktory with the code.',
@@ -555,6 +775,15 @@ class _Waiting extends StatelessWidget {
                 body,
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
+              if (pipe.state == PipeState.PIPE_STATE_JOINING &&
+                  pipe.offlineReason.isNotEmpty &&
+                  backendOnMac(AppScope.of(context).workspace.workspace)) ...[
+                const SizedBox(height: Space.s),
+                Text(
+                  pipeLocalNetworkHint,
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                ),
+              ],
               if (pipe.state == PipeState.PIPE_STATE_WAITING_PEER &&
                   pipe.digits.isNotEmpty) ...[
                 const SizedBox(height: Space.l),
@@ -672,7 +901,16 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   /// turned it; else [_canRunByDefault].
   final _canRun = <String, bool>{};
   var _lead = _liaison;
-  final _liaisonName = TextEditingController(text: 'Liaison');
+
+  /// Prefilled with the name Claktory suggests (a first name no agent of
+  /// the project has).
+  late final _liaisonName = TextEditingController(
+    text: liaisonNameFor(widget.pipe),
+  );
+
+  /// Both reviews start off, as a new pipe's do.
+  var _reviewIncoming = false;
+  var _reviewOutgoing = false;
   var _busy = false;
   String? _error;
 
@@ -711,6 +949,8 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
                   ],
                 )
               : null,
+          reviewIncoming: approve ? _reviewIncoming : null,
+          reviewOutgoing: approve ? _reviewOutgoing : null,
         ),
       );
     } on RequestFailure catch (failure) {
@@ -866,6 +1106,14 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               label: "Liaison's name",
               child: TextField(controller: _liaisonName),
             ),
+          _ReviewIncomingField(
+            value: _reviewIncoming,
+            onChanged: (on) => setState(() => _reviewIncoming = on),
+          ),
+          _ReviewOutgoingField(
+            value: _reviewOutgoing,
+            onChanged: (on) => setState(() => _reviewOutgoing = on),
+          ),
           Row(
             children: [
               Expanded(
@@ -1025,10 +1273,19 @@ class _PipeChatViewState extends State<_PipeChatView> {
 /// one waits. Their text is shown as it is, never as Markdown or links:
 /// it comes from outside.
 class PipeMessageView extends StatefulWidget {
-  const PipeMessageView({super.key, required this.pipe, required this.message});
+  const PipeMessageView({
+    super.key,
+    required this.pipe,
+    required this.message,
+    this.framed = false,
+  });
 
   final Pipe pipe;
   final PipeMessage message;
+
+  /// As a card among a liaison's conversation ("From Ana's Claktory"),
+  /// rather than a bubble in the pipe's own chat.
+  final bool framed;
 
   @override
   State<PipeMessageView> createState() => _PipeMessageViewState();
@@ -1121,6 +1378,25 @@ class _PipeMessageViewState extends State<PipeMessageView> {
         roleColor: palette.textFaint,
       ),
     };
+    if (widget.framed) {
+      return _card(
+        palette,
+        time,
+        mine: mine,
+        dropped: dropped,
+        who: switch (author.kind) {
+          PipeAuthorKind.PIPE_AUTHOR_KIND_ME => 'You',
+          PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT =>
+            agent?.name ?? author.name,
+          PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_PERSON =>
+            'Says it’s from ${author.name.isEmpty ? 'their person' : author.name}',
+          _ => [
+            author.name.isEmpty ? 'Their agent' : author.name,
+            if (author.role.isNotEmpty) author.role,
+          ].join(', '),
+        },
+      );
+    }
     final bubble = Opacity(
       opacity: dropped ? 0.5 : 1,
       child: Bubble(
@@ -1183,8 +1459,96 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     );
   }
 
-  /// What became of it, and the person's decision when one waits.
-  Widget _state(Palette palette, String time) {
+  /// The message as a card in a liaison's conversation: a frame in the
+  /// pipe's color, "From Ana's Claktory" or "To Ana's Claktory" with the
+  /// portal and who wrote it, the text as it is, its files, and what
+  /// became of it.
+  Widget _card(
+    Palette palette,
+    String time, {
+    required bool mine,
+    required bool dropped,
+    required String who,
+  }) {
+    final message = widget.message;
+    final peer = pipePeerClaktory(widget.pipe);
+    final caption = TextStyles.caption;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(Space.m, Space.s, Space.m, Space.s),
+      decoration: BoxDecoration(
+        color: pipeColor.withValues(alpha: 0.05),
+        border: Border.all(color: pipeColor.withValues(alpha: 0.45)),
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const PortalGlyph(size: 14),
+              const SizedBox(width: Space.xs + 2),
+              Flexible(
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: mine ? 'To $peer' : 'From $peer',
+                        style: const TextStyle(
+                          color: pipeColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (who.isNotEmpty)
+                        TextSpan(
+                          text: '  $who',
+                          style: TextStyle(color: palette.textMuted),
+                        ),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: caption,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Space.xs),
+          Opacity(
+            opacity: dropped ? 0.5 : 1,
+            child: Text(
+              message.text,
+              style: TextStyles.body.copyWith(
+                color: palette.text,
+                decoration: dropped ? TextDecoration.lineThrough : null,
+                decorationColor: palette.text,
+              ),
+            ),
+          ),
+          if (message.files.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.xs),
+              child: Wrap(
+                spacing: Space.xs,
+                runSpacing: Space.xs,
+                children: [
+                  for (final file in message.files)
+                    _Mark(
+                      text: '${file.name} · ${formatBytes(file.size)}',
+                      color: palette.textMuted,
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(height: Space.xs),
+          _state(palette, time, start: true),
+        ],
+      ),
+    );
+  }
+
+  /// What became of it, and the person's decision when one waits; [start]
+  /// lines it up at the start whichever way it went.
+  Widget _state(Palette palette, String time, {bool start = false}) {
     final message = widget.message;
     final faint = TextStyles.caption.copyWith(color: palette.textFaint);
     final note = message.note;
@@ -1203,7 +1567,7 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     if (decide != null) {
       final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
       return Column(
-        crossAxisAlignment: held
+        crossAxisAlignment: held && !start
             ? CrossAxisAlignment.end
             : CrossAxisAlignment.start,
         children: [
@@ -1213,8 +1577,8 @@ class _PipeMessageViewState extends State<PipeMessageView> {
                       ? 'Waiting for you to send it · $time'
                       : 'Waiting for you to send it · $note · $time'
                 : note.isEmpty
-                ? 'Held: over the pipe’s limit · $time'
-                : 'Held: $note · $time',
+                ? 'Over this pipe’s limits: let it in, or discard it. · $time'
+                : '$note · $time',
             color: palette.textMuted,
           ),
           if (_error case final error?) line(error, color: palette.danger),
@@ -1265,67 +1629,75 @@ class _PipeFoot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final who = pipePeerName(pipe);
-    Widget bar(String text, List<Widget> actions) => Container(
-      padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: palette.hairline)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
-            ),
-          ),
-          for (final action in actions) ...[
-            const SizedBox(width: Space.s),
-            action,
-          ],
-        ],
-      ),
-    );
-    switch (pipe.state) {
-      case PipeState.PIPE_STATE_OPEN:
-        return _PipeComposer(pipe: pipe);
-      case PipeState.PIPE_STATE_PAUSED:
-        return switch (pipe.paused) {
-          PipePause.PIPE_PAUSE_LOOP => bar(pipeLoopText(pipe), [
-            _StateButton(
-              pipe: pipe,
-              action: PipeAction.PIPE_ACTION_RESUME,
-              label: 'Continue',
-              primary: true,
-            ),
-          ]),
-          PipePause.PIPE_PAUSE_BY_PEER => bar(
-            '$who paused this pipe. Only they can resume it.',
-            const [],
-          ),
-          _ => bar('You paused this pipe. Nothing goes through either way.', [
-            _StateButton(
-              pipe: pipe,
-              action: PipeAction.PIPE_ACTION_RESUME,
-              label: 'Resume',
-              primary: true,
-            ),
-          ]),
-        };
-      case PipeState.PIPE_STATE_CLOSED:
-        return bar('This pipe is closed. Its messages stay here.', [
-          Button(
-            label: 'Delete…',
-            onPressed: () => showModal(
-              context,
-              (context, close) => _DeletePipe(pipe: pipe, close: close),
-            ),
-          ),
-        ]);
-      default:
-        return const SizedBox.shrink();
+    if (pipe.state == PipeState.PIPE_STATE_OPEN) {
+      return _PipeComposer(pipe: pipe);
     }
+    return pipeStateBar(context, pipe) ?? const SizedBox.shrink();
+  }
+}
+
+/// Why nothing goes through [pipe] and what the person can do (Continue,
+/// Resume, Delete…), as a bar behind a top hairline; null while it's open
+/// or before it is.
+Widget? pipeStateBar(BuildContext context, Pipe pipe) {
+  final palette = Palette.of(context);
+  final who = pipePeerName(pipe);
+  Widget bar(String text, List<Widget> actions) => Container(
+    padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
+    decoration: BoxDecoration(
+      border: Border(top: BorderSide(color: palette.hairline)),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyles.body.copyWith(color: palette.textMuted),
+          ),
+        ),
+        for (final action in actions) ...[
+          const SizedBox(width: Space.s),
+          action,
+        ],
+      ],
+    ),
+  );
+  switch (pipe.state) {
+    case PipeState.PIPE_STATE_PAUSED:
+      return switch (pipe.paused) {
+        PipePause.PIPE_PAUSE_LOOP => bar(pipeLoopText(pipe), [
+          _StateButton(
+            pipe: pipe,
+            action: PipeAction.PIPE_ACTION_RESUME,
+            label: 'Continue',
+            primary: true,
+          ),
+        ]),
+        PipePause.PIPE_PAUSE_BY_PEER => bar(
+          '$who paused this pipe. Only they can resume it.',
+          const [],
+        ),
+        _ => bar('You paused this pipe. Nothing goes through either way.', [
+          _StateButton(
+            pipe: pipe,
+            action: PipeAction.PIPE_ACTION_RESUME,
+            label: 'Resume',
+            primary: true,
+          ),
+        ]),
+      };
+    case PipeState.PIPE_STATE_CLOSED:
+      return bar('This pipe is closed. Its messages stay here.', [
+        Button(
+          label: 'Delete…',
+          onPressed: () => showModal(
+            context,
+            (context, close) => _DeletePipe(pipe: pipe, close: close),
+          ),
+        ),
+      ]);
+    default:
+      return null;
   }
 }
 
@@ -1398,17 +1770,25 @@ class _DeletePipeState extends State<_DeletePipe> {
   }
 
   @override
-  Widget build(BuildContext context) => FormFrame(
-    title: 'Delete ${widget.pipe.name}?',
-    body:
-        'Its messages are deleted from this Claktory. The other side keeps '
-        'theirs.',
-    error: _error,
-    fields: const [],
-    submitLabel: 'Delete pipe',
-    onSubmit: _busy ? null : _delete,
-    onCancel: widget.close,
-  );
+  Widget build(BuildContext context) {
+    final pipe = widget.pipe;
+    final liaison = pipeLiaison(AppScope.of(context).workspace.workspace, pipe);
+    return FormFrame(
+      title: 'Delete ${pipe.name}?',
+      body: liaison == null
+          ? 'Its messages are deleted from this Claktory. The other side '
+                'keeps theirs.'
+          : 'Its messages are deleted from this Claktory; the other side '
+                'keeps theirs. ${liaison.name} goes with it, and its '
+                'conversation is saved in the project’s folder, '
+                '${pipe.folder.isEmpty ? 'under pipes' : 'in pipes/${pipe.folder}/conversation'}.',
+      error: _error,
+      fields: const [],
+      submitLabel: 'Delete pipe',
+      onSubmit: _busy ? null : _delete,
+      onCancel: widget.close,
+    );
+  }
 }
 
 /// The person's box in an open pipe: what they write goes out as theirs.
@@ -1466,12 +1846,7 @@ class _PipeComposerState extends State<_PipeComposer> {
             Padding(
               padding: const EdgeInsets.only(bottom: Space.xs),
               child: Text(
-                _error ??
-                    (pipe.queued > 0
-                        ? '$who’s Claktory is offline · ${pipe.queued} '
-                              'waiting to deliver'
-                        : '$who’s Claktory is offline. Messages wait until '
-                              "it's back."),
+                _error ?? pipeOfflineText(pipe),
                 style: TextStyles.caption.copyWith(
                   color: _error == null ? palette.textFaint : palette.danger,
                 ),
@@ -1520,7 +1895,7 @@ Future<void> showPipeSettings(BuildContext context, Pipe pipe) => showModal(
 
 /// A pipe's settings: its name, what it's for (the other side sees it),
 /// this side's prompt (only this side's agents see it), who may use it and
-/// who leads, Review outgoing and its limits; and pausing, closing or
+/// who leads, its reviews and its limits; and pausing, closing or
 /// deleting it.
 class PipeSettingsForm extends StatefulWidget {
   const PipeSettingsForm({
@@ -1548,6 +1923,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   late final _limited = {..._start.quarantinedIds};
   late var _lead = _start.leadId;
   late var _review = _start.reviewOutgoing;
+  late var _reviewIncoming = _start.reviewIncoming;
   late final _perHour = TextEditingController(
     text: '${_start.limits.messagesPerHour}',
   );
@@ -1564,7 +1940,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   /// The member the person turned on "Can run commands", to confirm.
   Agent? _letting;
   var _addingLiaison = false;
-  final _liaisonName = TextEditingController(text: 'Liaison');
+  late final _liaisonName = TextEditingController(text: liaisonNameFor(_start));
 
   Pipe? get _pipe {
     for (final pipe in AppScope.of(context).workspace.workspace.pipes) {
@@ -1627,6 +2003,9 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     }
     if (_lead != pipe.leadId) update.leadId = _lead;
     if (_review != pipe.reviewOutgoing) update.reviewOutgoing = _review;
+    if (_reviewIncoming != pipe.reviewIncoming) {
+      update.reviewIncoming = _reviewIncoming;
+    }
     final limits = PipeLimits(
       messagesPerHour: int.tryParse(_perHour.text.trim()) ?? 0,
       burst: int.tryParse(_burst.text.trim()) ?? 0,
@@ -1840,16 +2219,13 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
             onChanged: (lead) => setState(() => _lead = lead),
           ),
         ),
-        Field(
-          label: 'Review outgoing',
-          note: _review
-              ? 'Each message from your agents waits here for your Send.'
-              : 'Your agents’ messages go out without asking you.',
-          child: _SwitchLine(
-            label: 'Review messages before they go out',
-            value: _review,
-            onChanged: (on) => setState(() => _review = on),
-          ),
+        _ReviewIncomingField(
+          value: _reviewIncoming,
+          onChanged: (on) => setState(() => _reviewIncoming = on),
+        ),
+        _ReviewOutgoingField(
+          value: _review,
+          onChanged: (on) => setState(() => _review = on),
         ),
         Field(
           label: 'Limits',
@@ -1986,6 +2362,50 @@ class _MemberLine extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Review incoming (Pipe.review_incoming): each message from the other
+/// side waits for the person's Let in before any agent reads it.
+class _ReviewIncomingField extends StatelessWidget {
+  const _ReviewIncomingField({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Field(
+    label: 'Review incoming',
+    note: value
+        ? 'Each message from the other side waits here until you let it in.'
+        : 'Messages from the other side reach your agents as they arrive.',
+    child: _SwitchLine(
+      label: 'Review messages before your agents read them',
+      value: value,
+      onChanged: onChanged,
+    ),
+  );
+}
+
+/// Review outgoing (Pipe.review_outgoing): each message from this side's
+/// agents waits for the person's Send.
+class _ReviewOutgoingField extends StatelessWidget {
+  const _ReviewOutgoingField({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Field(
+    label: 'Review outgoing',
+    note: value
+        ? 'Each message from your agents waits here for your Send.'
+        : 'Your agents’ messages go out without asking you.',
+    child: _SwitchLine(
+      label: 'Review messages before they go out',
+      value: value,
+      onChanged: onChanged,
+    ),
+  );
 }
 
 /// Words beside a switch, the whole line one click target for it.
@@ -2346,6 +2766,29 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
   var _busy = false;
   String? _error;
 
+  /// "AWS", "AWS and Stripe", "AWS, Stripe and GitHub".
+  static String _listed(List<String> names) => names.length < 2
+      ? names.join()
+      : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+
+  /// Why Claktory asks: [name] read the pipes [pipes], or the person set
+  /// some of its secrets to ask each time, or both.
+  String _why(String name, String pipes) {
+    final asks = widget.approval.askEachTimeNames;
+    const expect = 'Allow it only if this command is what you expect.';
+    if (asks.isEmpty) {
+      return '$name has read the pipe $pipes, so Claktory asks you before it '
+          'uses a secret. $expect';
+    }
+    final set = 'you set ${_listed(asks)} to ask each time';
+    final read =
+        widget.approval.pipeNames.isNotEmpty ||
+        widget.approval.taint.isNotEmpty;
+    return read
+        ? '$name has read the pipe $pipes, and $set. $expect'
+        : '${set[0].toUpperCase()}${set.substring(1)}. $expect';
+  }
+
   Future<void> _decide(bool allow) async {
     setState(() {
       _busy = true;
@@ -2402,11 +2845,12 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
               ),
             ],
           ),
+          // Where the command may come from: the pipes it read, and
+          // through whom.
+          TaintLabel(taint: approval.taint, agent: name),
           const SizedBox(height: Space.xs),
           Text(
-            '$name has read the pipe $pipes, so Claktory asks you before it '
-            'uses a secret. Allow it only if this command is what you '
-            'expect.',
+            _why(name, pipes),
             style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
           const SizedBox(height: Space.s),
@@ -2425,6 +2869,15 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
               ),
             ),
           ),
+          // Running on after it starts, it holds the secret all along.
+          if (approval.keepsRunning) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              'It keeps running after it starts, and can use '
+              '${_listed(approval.secretNames)} the whole time.',
+              style: TextStyles.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
           const SizedBox(height: Space.m),
           if (pending)
             Row(

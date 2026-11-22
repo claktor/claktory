@@ -14,7 +14,7 @@ use crate::accounts::{
 };
 use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
-use crate::credentials::{Account, Credential, FileCredentialStore};
+use crate::credentials::{Account, Credential, CredentialBacking, FileCredentialStore};
 use crate::errors::{Error, models_error};
 use crate::limits::{AccountUsage, ResetAnswer, UsageLimit, UsageReset};
 use crate::providers::keys::KeyCheck;
@@ -22,8 +22,12 @@ use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai
 use crate::stream::{EventStream, LlmContext, StreamFn, StreamOptions, ThinkingLevel, event_stream};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent, Usage};
 
+/// A credential store's answer, its failure said as the store's; sign-ins
+/// locked away stay `LOCKED`, so the request waits for them.
 fn credential_result<T>(result: Result<T, Error>, operation: &str, id: &str) -> Result<T, Error> {
-    result.map_err(|error| models_error("auth", format!("Credential store {operation} failed for {id}"), Some(&error)))
+    result.map_err(|error| {
+        if error.is_locked() { error } else { models_error("auth", format!("Credential store {operation} failed for {id}"), Some(&error)) }
+    })
 }
 
 /// `config.ts` registers the four providers in this order.
@@ -60,6 +64,9 @@ pub struct AccountInfo {
     pub exhausted_until: u64,
     /// An API key that ran out of credit, until a request on it succeeds.
     pub out_of_credit: bool,
+    /// The provider refused to refresh its sign-in: skipped until it's
+    /// signed in to again.
+    pub sign_in_again: bool,
     /// Factory stored it, so it can be signed out of; a key from the
     /// environment can't.
     pub stored: bool,
@@ -109,10 +116,12 @@ fn pool_until(account: &Account, fable: bool) -> u64 {
 }
 
 /// Whether requests for the pool's models can go to the account at `now`:
-/// past the pool's limit reset, and with credit (or out of it long enough
-/// to try again).
+/// past the pool's limit reset, with credit (or out of it long enough to try
+/// again), and with a sign-in the provider still refreshes.
 fn has_capacity(account: &Account, fable: bool, now: u64) -> bool {
-    pool_until(account, fable) <= now && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
+    pool_until(account, fable) <= now
+        && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
+        && account.refused_since == 0
 }
 
 /// The first account with capacity for the pool at `now`, leaving out `tried`.
@@ -141,6 +150,16 @@ fn shown_label(account: &Account) -> String {
     match &account.credential {
         Credential::ApiKey { key, .. } if account.label.is_empty() => key_label(key),
         _ => account.label.clone(),
+    }
+}
+
+/// Why a request can't go to any of a provider's sign-ins: it refused to
+/// refresh each of them.
+fn refused_message(provider: &str, noun: &str, accounts: usize) -> String {
+    if accounts == 1 {
+        format!("{provider} no longer accepts your {noun} sign-in. Sign in again to use it.")
+    } else {
+        format!("{provider} no longer accepts any of your {noun} sign-ins. Sign in again to use them.")
     }
 }
 
@@ -207,6 +226,27 @@ impl Registry {
         &self.inner.providers
     }
 
+    /// The credentials' file, `auth.json`.
+    pub fn auth_path(&self) -> &std::path::Path {
+        self.inner.store.path()
+    }
+
+    /// Keeps the credentials with `backing` from now on (a Claktory's vault).
+    pub fn set_backing(&self, backing: Arc<dyn CredentialBacking>) {
+        self.inner.store.set_backing(backing);
+    }
+
+    /// Takes in sign-ins kept elsewhere meanwhile; whether any changed.
+    pub async fn take_in(&self) -> Result<bool, Error> {
+        self.inner.store.take_in().await
+    }
+
+    /// Whether the provider's sign-ins are locked away now, with none made
+    /// meanwhile: its requests wait until they open.
+    pub async fn is_locked(&self, id: &str) -> bool {
+        matches!(self.inner.store.accounts(id).await, Err(error) if error.is_locked())
+    }
+
     pub fn provider(&self, id: &str) -> Option<&Provider> {
         self.inner.providers.iter().find(|provider| provider.id == id)
     }
@@ -233,8 +273,15 @@ impl Registry {
     pub async fn models(&self) -> Result<Vec<ModelInfo>, Error> {
         let mut models = Vec::new();
         for provider in &self.inner.providers {
-            if self.check_auth(provider.id).await?.is_none() {
-                continue;
+            match self.check_auth(provider.id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => continue,
+                // One sign-in that can't be read (edited by hand, say) takes
+                // only its own provider's models away.
+                Err(error) => {
+                    tracing::warn!(provider = provider.id, %error, "its sign-in can't be read: its models aren't offered");
+                    continue;
+                }
             }
             for model in &provider.models {
                 models.push(ModelInfo {
@@ -252,7 +299,23 @@ impl Registry {
     /// The stored credential's type and source, without touching the network except for a due refresh.
     pub async fn check_auth(&self, id: &str) -> Result<Option<AuthCheck>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
-        if let Some(Credential::Oauth { .. }) = credential_result(self.inner.store.read(id).await, "read", id)? {
+        let first = match self.inner.store.read(id).await {
+            // Locked away: signed in all the same, as its outline says.
+            Err(error) if error.is_locked() => {
+                let outlined = credential_result(self.inner.store.locked_accounts(id).await, "read", id)?;
+                return Ok(match outlined.first().map(|account| &account.credential) {
+                    Some(Credential::Oauth { .. }) => {
+                        provider.oauth.as_ref().map(|_| AuthCheck { source: Some("OAuth".into()), kind: "oauth" })
+                    }
+                    Some(Credential::ApiKey { .. }) => {
+                        provider.api_key.as_ref().map(|_| AuthCheck { source: Some("stored credential".into()), kind: "api_key" })
+                    }
+                    None => None,
+                });
+            }
+            read => credential_result(read, "read", id)?,
+        };
+        if let Some(Credential::Oauth { .. }) = first {
             return Ok(provider.oauth.as_ref().map(|_| AuthCheck { source: Some("OAuth".into()), kind: "oauth" }));
         }
         if provider.api_key.is_none() {
@@ -265,7 +328,7 @@ impl Registry {
     /// The provider's accounts, in the order requests try them.
     pub async fn accounts(&self, id: &str) -> Result<Vec<AccountInfo>, Error> {
         let now = now_ms();
-        let accounts = self.candidates(id).await?;
+        let accounts = self.outlined_candidates(id).await?;
         // As shown: the normal pool, which is what most models draw on.
         let in_use = with_capacity(&accounts, &[], false, now).map(|(position, _)| position);
         Ok(accounts
@@ -276,6 +339,7 @@ impl Registry {
                 kind: account.credential.kind(),
                 exhausted_until: if account.exhausted_until > now { account.exhausted_until } else { 0 },
                 out_of_credit: account.out_of_credit_since != 0,
+                sign_in_again: account.refused_since != 0,
                 stored: account.id != ENV_ACCOUNT,
                 in_use: in_use == Some(position),
                 id: account.id,
@@ -286,7 +350,18 @@ impl Registry {
     /// The provider's accounts in the order requests try them: those stored,
     /// then a key in the environment.
     async fn candidates(&self, id: &str) -> Result<Vec<Account>, Error> {
-        let mut accounts = credential_result(self.inner.store.accounts(id).await, "read", id)?;
+        let stored = credential_result(self.inner.store.accounts(id).await, "read", id)?;
+        Ok(self.with_env_key(id, stored))
+    }
+
+    /// `candidates` to show: with those locked away, as far as they're known.
+    async fn outlined_candidates(&self, id: &str) -> Result<Vec<Account>, Error> {
+        let stored = credential_result(self.inner.store.outlined_accounts(id).await, "read", id)?;
+        Ok(self.with_env_key(id, stored))
+    }
+
+    /// `accounts`, then a key in the environment.
+    fn with_env_key(&self, id: &str, mut accounts: Vec<Account>) -> Vec<Account> {
         if let Some((variable, key)) = self.env_key(id) {
             let state = self.inner.env_state.lock().get(id).copied().unwrap_or_default();
             accounts.push(Account {
@@ -296,10 +371,22 @@ impl Registry {
                 exhausted_until: state.exhausted_until,
                 fable_exhausted_until: state.fable_exhausted_until,
                 out_of_credit_since: state.out_of_credit_since,
+                refused_since: 0,
                 credential: Credential::ApiKey { key, extra: Map::new() },
             });
         }
-        Ok(accounts)
+        accounts
+    }
+
+    /// Refuses to change the provider's accounts as a whole while some are
+    /// locked away, or `account` when it is: they're changed once they open.
+    async fn not_locked(&self, id: &str, account: Option<&str>) -> Result<(), Error> {
+        let locked = credential_result(self.inner.store.locked_accounts(id).await, "read", id)?;
+        let held = match account {
+            Some(account) => locked.iter().any(|stored| stored.id == account),
+            None => !locked.is_empty(),
+        };
+        if held { Err(crate::credentials::locked_error(id)) } else { Ok(()) }
     }
 
     /// The provider's key in the environment: its variable and the key.
@@ -340,6 +427,22 @@ impl Registry {
             .await;
         credential_result(changed, "modify", id)?;
         self.candidates(id).await
+    }
+
+    /// Marks one of the provider's stored sign-ins as refused by the
+    /// provider: skipped until it's signed in to again.
+    async fn refuse(&self, id: &str, account: &str) -> Result<(), Error> {
+        let account = account.to_owned();
+        let changed = self
+            .inner
+            .store
+            .modify_accounts(id, |mut accounts| async move {
+                let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
+                stored.refused_since = now_ms();
+                Ok(Some(accounts))
+            })
+            .await;
+        credential_result(changed, "modify", id).map(drop)
     }
 
     /// Forgets that one of the provider's accounts (None: all of them) is at
@@ -485,7 +588,10 @@ impl Registry {
             .store
             .modify_accounts(id, |mut accounts| async move {
                 let Some(stored) = accounts.iter_mut().find(|stored| stored.id == account) else { return Ok(None) };
-                stored.label = identity.label;
+                // Named meanwhile (the person renamed it while this asked): theirs stays.
+                if stored.label.is_empty() {
+                    stored.label = identity.label;
+                }
                 stored.identity = identity.key;
                 Ok(Some(accounts))
             })
@@ -496,7 +602,11 @@ impl Registry {
     /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.
     async fn subscription_auth(&self, provider: &Provider, account: Option<&str>) -> Result<Option<(String, RequestAuth)>, Error> {
         let Some(oauth) = &provider.oauth else { return Ok(None) };
-        let accounts = credential_result(self.inner.store.accounts(provider.id).await, "read", provider.id)?;
+        let accounts = match self.inner.store.accounts(provider.id).await {
+            // Nothing to read until they open.
+            Err(error) if error.is_locked() => return Ok(None),
+            read => credential_result(read, "read", provider.id)?,
+        };
         let stored = match account {
             Some(account) => accounts.iter().find(|stored| stored.id == account),
             None => accounts.first(),
@@ -504,7 +614,20 @@ impl Registry {
         if !oauth.is_subscription() || !matches!(stored, Some(Account { credential: Credential::Oauth { .. }, .. })) {
             return Ok(None);
         }
-        let resolution = resolve_account_auth(provider, &self.inner.store, &self.inner.env, account, &CancellationToken::new()).await?;
+        // Refused: nothing to read until it's signed in to again, and no
+        // token endpoint asked again meanwhile.
+        let Some(stored) = stored.filter(|stored| stored.refused_since == 0) else { return Ok(None) };
+        let stored = stored.id.clone();
+        let resolution = match resolve_account_auth(provider, &self.inner.store, &self.inner.env, account, &CancellationToken::new()).await
+        {
+            // Found by a usage read rather than a request: the same refusal.
+            Err(error) if error.is_refused() => {
+                tracing::warn!(provider = provider.id, account = %stored, %error, "the provider refused to refresh a sign-in; skipping it until it's signed in to again");
+                self.refuse(provider.id, &stored).await?;
+                return Err(error);
+            }
+            resolved => resolved?,
+        };
         let Some(resolution) = resolution else { return Ok(None) };
         let base_url = resolution.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
         Ok(Some((base_url, resolution.auth)))
@@ -646,6 +769,7 @@ impl Registry {
         if account.is_empty() {
             return self.logout(id).await;
         }
+        self.not_locked(id, Some(account)).await?;
         let account = account.to_owned();
         let removed = self
             .inner
@@ -665,6 +789,7 @@ impl Registry {
         if account == ENV_ACCOUNT {
             return Err(models_error("auth", "A key from the environment comes after the accounts signed in", None));
         }
+        self.not_locked(id, None).await?;
         let wanted = account.to_owned();
         let mut found = false;
         let moved = self
@@ -772,6 +897,16 @@ impl Registry {
                 loop {
                     let accounts = match registry.candidates(&model.provider).await {
                         Ok(accounts) => accounts,
+                        // The sign-ins are locked away with the person's
+                        // secrets: the request waits until they open.
+                        Err(error) if error.is_locked() => {
+                            let mut event = failed(&model, error.to_string());
+                            if let StreamEvent::Error { error, .. } = &mut event {
+                                mark_none_left(error, None);
+                            }
+                            sink.push(event);
+                            return;
+                        }
                         Err(error) => {
                             sink.push(failed(&model, error.to_string()));
                             return;
@@ -785,9 +920,34 @@ impl Registry {
                     let account = chosen.as_ref().map(|account| account.id.clone());
                     let mut inner = match registry.open(&model, context.clone(), options.clone(), account.as_deref()).await {
                         Ok(inner) => inner,
+                        // A stored sign-in whose token the provider won't refresh: only
+                        // signing in again helps, so it's skipped until then, and the
+                        // request goes to the next account (rivet-move.md §3 P2).
+                        Err(error)
+                            if error.is_refused()
+                                && chosen.as_ref().is_some_and(|chosen| matches!(chosen.credential, Credential::Oauth { .. }))
+                                && account.as_deref().is_some_and(|account| account != ENV_ACCOUNT) =>
+                        {
+                            let account = account.clone().unwrap_or_default();
+                            tracing::warn!(provider = %model.provider, %account, %error, "the provider refused to refresh a sign-in; skipping it until it's signed in to again");
+                            if let Err(error) = registry.refuse(&model.provider, &account).await {
+                                tracing::warn!(provider = %model.provider, %error, "could not mark a sign-in as refused");
+                                let mut event = failed(&model, error.to_string());
+                                if let StreamEvent::Error { error, .. } = &mut event {
+                                    mark_refused(error, &refused_by(chosen.as_ref()));
+                                }
+                                sink.push(event);
+                                return;
+                            }
+                            if let Some(notes) = &notes {
+                                notes(AccountNote::Changed);
+                            }
+                            tried.push(account);
+                            continue;
+                        }
                         Err(error) => {
                             let mut event = failed(&model, error.to_string());
-                            // A sign-in whose token the provider won't refresh.
+                            // A key the provider won't take.
                             if let (true, StreamEvent::Error { error, .. }) = (error.is_refused(), &mut event) {
                                 mark_refused(error, &refused_by(chosen.as_ref()));
                             }
@@ -905,6 +1065,16 @@ impl Registry {
     /// they're out of credit, which waits for the person). Judged for the
     /// model's pool: another pool's limit doesn't hold its requests back.
     fn none_left(&self, model: &Model, accounts: &[Account]) -> StreamEvent {
+        // Every sign-in refused: only signing in again helps, and the
+        // conversation offers it.
+        if let Some(first) = accounts.first().filter(|_| accounts.iter().all(|account| account.refused_since != 0)) {
+            let name = self.provider(&model.provider).map_or(model.provider.as_str(), |provider| provider.name);
+            let mut event = failed(model, refused_message(name, &self.noun(&model.provider), accounts.len()));
+            if let StreamEvent::Error { error, .. } = &mut event {
+                mark_refused(error, &refused_by(Some(first)));
+            }
+            return event;
+        }
         let now = now_ms();
         let fable = fable_pool(model);
         let until = accounts.iter().map(|account| pool_until(account, fable)).filter(|at| *at > now).min();

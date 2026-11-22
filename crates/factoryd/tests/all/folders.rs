@@ -142,7 +142,13 @@ async fn agents_work_in_their_folder_and_read_the_whole_project() {
     assert!(view.explorer.as_ref().expect("explorer").entries.iter().all(|entry| !entry.expanded), "the project's tree is its own");
 
     // Renamed and folded away in the sidebar.
-    let rename = v1::UpdateFolder { project_id: "site".into(), folder_id: "research".into(), name: Some("Papers".into()), path: None };
+    let rename = v1::UpdateFolder {
+        project_id: "site".into(),
+        folder_id: "research".into(),
+        name: Some("Papers".into()),
+        path: None,
+        before_id: None,
+    };
     apply_request(&mut client, &mut view, client_message::Body::UpdateFolder(rename)).await;
     let fold = v1::SetFolderCollapsed { project_id: "site".into(), folder_id: "research".into(), collapsed: true };
     apply_request(&mut client, &mut view, client_message::Body::SetFolderCollapsed(fold)).await;
@@ -198,18 +204,24 @@ async fn a_folder_the_project_lacks_is_ignored_and_bad_folders_are_refused() {
         site = dir.join("site").display(),
         app = dir.join("app").display()
     );
-    let config = factoryd::config::Config::parse(&text).expect("valid");
+    let config = factoryd::config::Config::parse(&text, &dir.join("home")).expect("valid");
     assert!(config.agent_folder(config.agent("lead").expect("lead")).is_none());
     assert_eq!(config.agent_folder(config.agent("dev").expect("dev")).map(|folder| folder.name.as_str()), Some("App"));
     for bad in [
-        r#"{"id":"app","name":"App","path":"relative"}"#,
         r#"{"id":"Bad Id","name":"App","path":"/app"}"#,
         r#"{"id":"app","name":" ","path":"/app"}"#,
         r#"{"id":"app","name":"App","path":"/app"},{"id":"app","name":"Again","path":"/again"}"#,
     ] {
         let text = format!(r#"{{"projects":[{{"id":"site","name":"Site","path":"/site","folders":[{bad}]}}]}}"#);
-        assert!(factoryd::config::Config::parse(&text).is_err(), "{text}");
+        assert!(factoryd::config::Config::parse(&text, std::path::Path::new("/claktory")).is_err(), "{text}");
     }
+
+    // A relative folder path is Claktory's own territory: under the home
+    // the file was read from (and written back relative; see config.rs).
+    let text = r#"{"projects":[{"id":"site","name":"Site","path":"workspace/site","folders":[{"id":"notes","name":"Notes","path":"workspace/site/notes"}]}]}"#;
+    let config = factoryd::config::Config::parse(text, std::path::Path::new("/claktory")).expect("territory paths resolve");
+    assert_eq!(config.projects[0].path, std::path::Path::new("/claktory/workspace/site"));
+    assert_eq!(config.projects[0].folders[0].path, std::path::Path::new("/claktory/workspace/site/notes"));
 }
 
 #[tokio::test]
@@ -246,4 +258,68 @@ async fn the_explorer_never_shows_a_directory_twice() {
         })
         .collect();
     assert_eq!(shown, [("app", vec!["main.rs"]), ("docs", vec!["guide.md"]), ("research", vec!["found.md"])]);
+}
+
+/// #248: a project's folders come in the order the person drags them to,
+/// kept in config.json, the same on every device and after a restart.
+#[tokio::test]
+async fn folders_are_dragged_into_the_order_the_person_wants() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Claktory", &dir.join("claktory"))).await;
+    for name in ["App", "Research", "Ops"] {
+        apply_request(&mut client, &mut view, create_folder("claktory", name, "")).await;
+    }
+    let order = |view: &View| folders(view, "claktory").into_iter().map(|folder| folder.id).collect::<Vec<_>>();
+    assert_eq!(order(&view), ["app", "research", "ops"], "new ones go last");
+    let drag = |folder: &str, before: &str| {
+        client_message::Body::UpdateFolder(v1::UpdateFolder {
+            project_id: "claktory".into(),
+            folder_id: folder.into(),
+            before_id: Some(before.into()),
+            ..Default::default()
+        })
+    };
+
+    // Ops to the top, so its pipe is at hand; then App last.
+    assert!(matches!(apply_request(&mut client, &mut view, drag("ops", "app")).await, Body::Ack(_)));
+    assert_eq!(order(&view), ["ops", "app", "research"]);
+    apply_request(&mut client, &mut view, drag("app", "")).await;
+    assert_eq!(order(&view), ["ops", "research", "app"]);
+    // Before itself changes nothing; a name and a place in one request both hold.
+    apply_request(&mut client, &mut view, drag("research", "research")).await;
+    assert_eq!(order(&view), ["ops", "research", "app"]);
+    let both = v1::UpdateFolder {
+        project_id: "claktory".into(),
+        folder_id: "app".into(),
+        name: Some("Code".into()),
+        path: None,
+        before_id: Some("ops".into()),
+    };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateFolder(both)).await;
+    assert_eq!(order(&view), ["app", "ops", "research"]);
+    assert_eq!(folders(&view, "claktory")[0].name, "Code");
+
+    // A drag from a list that changed meanwhile is refused, and nothing moves.
+    for (folder, before, said) in
+        [("gone", "", "That folder no longer exists."), ("ops", "gone", "The list changed while you were dragging. Try again.")]
+    {
+        match apply_request(&mut client, &mut view, drag(folder, before)).await {
+            Body::Error(error) => assert_eq!((error.code(), error.message.as_str()), (ErrorCode::InvalidRequest, said)),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+    assert_eq!(order(&view), ["app", "ops", "research"]);
+
+    // Kept in config.json's order, and so after a restart.
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("json");
+    let written: Vec<&str> =
+        config["projects"][0]["folders"].as_array().expect("folders").iter().filter_map(|folder| folder["id"].as_str()).collect();
+    assert_eq!(written, ["app", "ops", "research"]);
+    let (addr, _again) = start_with(&dir, Scripted::signed_in()).await;
+    let (_client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(order(&View { workspace, ..View::default() }), ["app", "ops", "research"]);
 }

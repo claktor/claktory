@@ -38,10 +38,8 @@ pub(super) async fn start(service: &Service, mut request: db::Request, code: &st
     request.expires = service.now() + CODE_LIFETIME;
     db::insert_request(&service.db(), &request)?;
     let mail = match (request.kind.as_str(), &request.name) {
-        ("device", Some(device)) => {
-            mail::device_code_mail(&service.config.mail_domain, &service.config.public_url, &request.email, code, device)
-        }
-        _ => mail::code_mail(&service.config.mail_domain, &service.config.public_url, &request.email, code),
+        ("device", Some(device)) => mail::device_code_mail(&service.config.mail_domain, &request.email, code, device),
+        _ => mail::code_mail(&service.config.mail_domain, &request.email, code),
     };
     if service.send(&mail, true).await.is_err() {
         db::delete_request(&service.db(), &request.id)?;
@@ -181,7 +179,7 @@ fn holds_key(service: &Service, call: &Call, claktory_id: &str) -> Result<bool, 
 
 /// The Claktory a signed request is from: its token, its time and its
 /// backend key's signature checked, and seen only once.
-fn authenticate(service: &Service, call: &Call) -> Result<db::Claktory, ApiError> {
+pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Claktory, ApiError> {
     let token = call.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).ok_or_else(ApiError::unauthorized)?;
     let claktory = db::claktory_by_token(&service.db(), token.trim())?.ok_or_else(ApiError::unauthorized)?;
     let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
@@ -265,6 +263,8 @@ const PERIODS_PER_CHECK_IN: usize = 400;
 const MOST_COUNTED: u32 = 1_000_000;
 const MOST_TOKENS: u64 = 10_000_000_000_000;
 const MOST_REQUESTS: u64 = 1_000_000_000;
+/// Kinds of device (system, kind, app version) one check-in may count.
+const MOST_DEVICE_KINDS: usize = 100;
 /// The longest a period may be: a month.
 const LONGEST_PERIOD: i64 = 31 * 86_400;
 
@@ -298,14 +298,37 @@ fn sound(period: &Period, now: i64) -> bool {
                 && activity.agent_minutes <= activity.agents_working.saturating_mul(60)
                 && activity.runs <= MOST_COUNTED
         })
+        && period.devices_connected.is_none_or(|connected| connected <= MOST_COUNTED)
+        && period.health.len() <= 20
+        && period
+            .health
+            .iter()
+            .all(|health| valid_label(&health.version) && health.rolled_back <= MOST_COUNTED && health.crashes <= MOST_COUNTED)
 }
 
 pub(super) fn check_in(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let claktory = authenticate(service, call)?;
     let mut body: CheckIn = call.json()?;
-    let counts_fine =
-        body.counts.is_none_or(|counts| [counts.agents, counts.projects, counts.devices].iter().all(|count| *count <= MOST_COUNTED));
-    if !valid_label(&body.version) || !valid_label(&body.platform) || !counts_fine || body.periods.len() > PERIODS_PER_CHECK_IN {
+    let counts_fine = body.counts.is_none_or(|counts| {
+        [counts.agents, counts.projects, counts.devices, counts.pipes, counts.secrets, counts.monitors]
+            .iter()
+            .all(|count| *count <= MOST_COUNTED)
+    });
+    let devices_fine = body.devices.as_ref().is_none_or(|devices| {
+        devices.len() <= MOST_DEVICE_KINDS
+            && devices.iter().all(|device| {
+                valid_label(&device.platform)
+                    && valid_label(&device.kind)
+                    && valid_label(&device.app_version)
+                    && device.count <= MOST_COUNTED
+            })
+    });
+    if !valid_label(&body.version)
+        || !valid_label(&body.platform)
+        || !counts_fine
+        || !devices_fine
+        || body.periods.len() > PERIODS_PER_CHECK_IN
+    {
         return Err(ApiError::invalid("A field is missing or out of range."));
     }
     let now = service.now();

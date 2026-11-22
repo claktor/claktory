@@ -19,8 +19,9 @@ use zeroize::Zeroizing;
 
 use super::{
     AccessSpec, BoxFuture, Choice, Choices, Control, Derive, Derived, Device, ExportMeta, FieldSpec, FlowKind, Http, Inspected, Poll,
-    Problem, Recipe, Spec, Start, Variable,
+    Problem, Recipe, Spec, Start, Variable, setting as set,
 };
+use crate::locking::lock as guard;
 use crate::transcript::now_ms;
 
 /// What the connection may do: get role credentials, no IAM action of its own.
@@ -70,6 +71,17 @@ impl Default for Aws {
 /// `FACTORY_AWS_ENABLED`).
 const SHIPPED: bool = false;
 
+/// The built-in AWS gate and dev-only stand-in, read afresh for each recipe.
+pub(super) fn built_in_settings(shipped: bool) -> Option<(bool, Option<String>)> {
+    let dev = std::env::args().any(|arg| arg == "--dev");
+    let stand_in = set("FACTORY_AWS_BASE").filter(|_| dev).map(|base| base.trim_end_matches('/').to_owned());
+    let enabled = dev && set("FACTORY_AWS_ENABLED").is_some_and(|value| value != "0");
+    if !(shipped || enabled || stand_in.is_some()) {
+        return None;
+    }
+    Some((dev, stand_in))
+}
+
 impl Aws {
     /// The recipe, with AWS's own services.
     pub fn new() -> Aws {
@@ -83,13 +95,7 @@ impl Aws {
     /// (`/client/register`, `/device_authorization`, `/token`) and the
     /// portal's (`/assignment/…`, `/federation/credentials`, `/logout`).
     pub(crate) fn built_in() -> Option<Aws> {
-        let set = |name: &str| std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
-        let dev = std::env::args().any(|arg| arg == "--dev");
-        let stand_in = set("FACTORY_AWS_BASE").filter(|_| dev).map(|base| base.trim_end_matches('/').to_owned());
-        let enabled = dev && set("FACTORY_AWS_ENABLED").is_some_and(|value| value != "0");
-        if !(SHIPPED || enabled || stand_in.is_some()) {
-            return None;
-        }
+        let (_, stand_in) = built_in_settings(SHIPPED)?;
         if let Some(base) = &stand_in {
             tracing::warn!(%base, "AWS is played by a stand-in");
         }
@@ -177,10 +183,6 @@ struct Made {
     account_id: String,
     account_name: String,
     role: String,
-}
-
-fn guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Checks a region's name, so it can only ever be a part of an AWS host name.

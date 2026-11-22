@@ -148,6 +148,11 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
 
   Backend? _backend;
 
+  /// Whether [_backend] was connected when last heard from: a read that
+  /// failed, or never came, before it connected is made again when it
+  /// connects (a cold start over the tunnel), once per connection.
+  bool _wasConnected = false;
+
   /// The comments on the file, for the viewer to show.
   CommentsController? comments;
 
@@ -172,8 +177,12 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     final backend = AppScope.of(context);
     if (backend != _backend) {
       _backend?.fileChanged.removeListener(_fileChanged);
+      _backend?.connected.removeListener(_connectedChanged);
       comments?.dispose();
-      _backend = backend..fileChanged.addListener(_fileChanged);
+      _backend = backend
+        ..fileChanged.addListener(_fileChanged)
+        ..connected.addListener(_connectedChanged);
+      _wasConnected = backend.connected.value;
       comments = CommentsController(backend: backend, path: path);
     }
   }
@@ -182,9 +191,18 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   void dispose() {
     _reloads?.removeListener(reload);
     _backend?.fileChanged.removeListener(_fileChanged);
+    _backend?.connected.removeListener(_connectedChanged);
     comments?.dispose();
     _updatedFor?.cancel();
     super.dispose();
+  }
+
+  /// Connected again: what couldn't be read before is read now.
+  void _connectedChanged() {
+    final now = _backend?.connected.value ?? false;
+    final connecting = now && !_wasConnected;
+    _wasConnected = now;
+    if (connecting && (failure != null || file == null)) unawaited(reload());
   }
 
   /// The file changed on the machine: read it again, and say who did it.

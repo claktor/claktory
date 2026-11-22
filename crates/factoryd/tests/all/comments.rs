@@ -93,7 +93,7 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
         "# Essay\n\nThe industrial revolution was **not** a single event but a long series of changes.\n\nIt was, arguably, slow.\n";
     std::fs::write(dir.join("site/essay.md"), essay).expect("write");
     let path = std::fs::canonicalize(dir.join("site/essay.md")).expect("path").display().to_string();
-    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), ..Default::default() })).await;
     let Body::FileContent(content) = read.body else { panic!("expected the file") };
     assert_eq!(content.sha256.len(), 64, "the version comments are made on");
 
@@ -189,16 +189,30 @@ async fn the_person_comments_on_a_file_and_the_agent_answers_and_revises() {
     // Someone else rewords it, in a pane: it's checked, and the thread moves with the text.
     let pane = v1::ViewNode {
         id: "pane-1".into(),
-        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: "text".into(), path: path.clone(), title: String::new() })),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf {
+            kind: "text".into(),
+            path: path.clone(),
+            title: String::new(),
+            ..Default::default()
+        })),
     };
     let chat = v1::ViewNode {
         id: "chat".into(),
-        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: "chat".into(), path: String::new(), title: String::new() })),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf {
+            kind: "chat".into(),
+            path: String::new(),
+            title: String::new(),
+            ..Default::default()
+        })),
     };
     let split = v1::ViewSplit { axis: v1::ViewAxis::Row.into(), children: vec![chat, pane], weights: Vec::new() };
     let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
-    apply_request(&mut client, &mut view, client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root) }))
-        .await;
+    apply_request(
+        &mut client,
+        &mut view,
+        client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root), ..Default::default() }),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     std::fs::write(&path, rewritten.replace("**not** a single event", "**not** one single event")).expect("write");
     let moved = client
@@ -299,7 +313,7 @@ async fn the_persons_drafts_reach_no_agent_until_sent_not_even_through_claktorys
     apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(change)).await;
     std::fs::write(dir.join("site/notes.txt"), "one\ntwo\nthree\n").expect("write");
     let path = std::fs::canonicalize(dir.join("site/notes.txt")).expect("path").display().to_string();
-    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), ..Default::default() })).await;
     let Body::FileContent(content) = read.body else { panic!("expected the file") };
     let made = client.request(create(&path, "text", &content.sha256, vec![quote("two", "one\n", "\nthree")], "Half-formed thought.")).await;
     assert!(matches!(made.body, Body::Thread(ref thread) if thread.comments[0].draft), "{:?}", made.body);
@@ -464,7 +478,7 @@ async fn a_region_of_an_image_is_told_in_words_and_pixels() {
     png.extend_from_slice(b"pixels");
     std::fs::write(dir.join("site/hero.png"), &png).expect("write");
     let path = std::fs::canonicalize(dir.join("site/hero.png")).expect("path").display().to_string();
-    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), max_bytes: 0, offset: 0 })).await;
+    let read = client.request(client_message::Body::ReadFile(v1::ReadFile { path: path.clone(), ..Default::default() })).await;
     let Body::FileContent(content) = read.body else { panic!("expected the file") };
     let region = serde_json::json!({"type": "FragmentSelector", "conformsTo": "http://www.w3.org/TR/media-frags/", "value": "xywh=percent:12.5,8,30,20"});
     let client_message::Body::CreateThread(mut made) =
@@ -541,7 +555,12 @@ async fn a_moment_of_a_video_is_told_in_words() {
     // Shown in a pane, it's checked: a new version makes its comments outdated.
     let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
         id: id.into(),
-        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), title: String::new() })),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf {
+            kind: kind.into(),
+            path: path.into(),
+            title: String::new(),
+            ..Default::default()
+        })),
     };
     let split = v1::ViewSplit {
         axis: v1::ViewAxis::Row.into(),
@@ -549,8 +568,12 @@ async fn a_moment_of_a_video_is_told_in_words() {
         weights: Vec::new(),
     };
     let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
-    apply_request(&mut client, &mut view, client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root) }))
-        .await;
+    apply_request(
+        &mut client,
+        &mut view,
+        client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root), ..Default::default() }),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     video.extend_from_slice(b"more");
     std::fs::write(dir.join("site/clip.mp4"), &video).expect("write");

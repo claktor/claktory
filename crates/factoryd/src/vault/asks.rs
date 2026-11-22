@@ -28,6 +28,16 @@ pub(crate) struct Wanted {
     #[serde(default)]
     pub description: String,
     pub variables: Vec<WantedVariable>,
+    /// A key the vault generates (#252), by type; empty for a secret
+    /// someone has.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generate: String,
+    /// A key to generate for no one, as the agent asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nobody: bool,
+    /// The generated key's public half, once made.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public_key: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -45,6 +55,7 @@ fn state_of(state: &str) -> SecretRequestState {
         "expired" => SecretRequestState::Expired,
         "withdrawn" => SecretRequestState::Withdrawn,
         "approved" => SecretRequestState::Approved,
+        "generated" => SecretRequestState::Generated,
         _ => SecretRequestState::Pending,
     }
 }
@@ -54,7 +65,10 @@ const COLUMNS: &str =
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let new_secret: String = row.get(4)?;
-    let new_secret = serde_json::from_str::<Wanted>(&new_secret).ok().map(|wanted| v1::NewSecret {
+    let wanted = serde_json::from_str::<Wanted>(&new_secret).ok();
+    let (generate, grant_to_nobody, public_key) =
+        wanted.as_ref().map(|wanted| (wanted.generate.clone(), wanted.nobody, wanted.public_key.clone())).unwrap_or_default();
+    let new_secret = wanted.map(|wanted| v1::NewSecret {
         name: wanted.name,
         description: wanted.description,
         variables: wanted
@@ -65,6 +79,9 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     });
     let state: String = row.get(6)?;
     Ok(v1::SecretRequest {
+        generate,
+        grant_to_nobody,
+        public_key,
         id: row.get(0)?,
         agent_id: row.get(1)?,
         secret_id: row.get(2)?,
@@ -103,6 +120,9 @@ pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
         "new_secret": new_secret,
         "reason": request.reason,
         "admin": request.admin_agent_id,
+        "generate": request.generate,
+        "nobody": request.grant_to_nobody,
+        "public_key": request.public_key,
     })
 }
 
@@ -173,6 +193,9 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
         reason: text("reason"),
         state: SecretRequestState::Pending.into(),
         admin_agent_id: text("admin"),
+        generate: text("generate"),
+        grant_to_nobody: details.get("nobody").and_then(serde_json::Value::as_bool).unwrap_or_default(),
+        public_key: text("public_key"),
         ..v1::SecretRequest::default()
     })
 }
@@ -226,6 +249,28 @@ fn check_variables(given: &[WantedVariable]) -> Result<Vec<WantedVariable>, Vaul
     Ok(variables)
 }
 
+/// A generate request's variables (#252): the one its key's file goes in,
+/// a file, `SSH_KEY` when none is named; any other request's as given.
+fn check_generated(generate: &str, variables: Vec<WantedVariable>) -> Result<Vec<WantedVariable>, VaultError> {
+    let generate = generate.trim();
+    if generate.is_empty() {
+        return Ok(variables);
+    }
+    if !super::generate::KINDS.contains(&generate) {
+        return Err(VaultError::Invalid(format!(
+            "The vault can't generate \"{generate}\"; it generates {}.",
+            super::generate::KINDS.join(", ")
+        )));
+    }
+    match variables.as_slice() {
+        [] => Ok(vec![WantedVariable { name: super::generate::VARIABLE.to_owned(), file: true }]),
+        [one] => Ok(vec![WantedVariable { name: one.name.clone(), file: true }]),
+        _ => Err(VaultError::Invalid(
+            "A generated key goes in one variable, its private key's file: name one, or none for SSH_KEY.".to_owned(),
+        )),
+    }
+}
+
 /// What an agent changes in a request of its own; None keeps it as it was.
 #[derive(Default)]
 pub(crate) struct Change {
@@ -255,8 +300,15 @@ impl Vault {
             )
         })?;
         let description = check_description(&wanted.description)?;
-        let variables = check_variables(&wanted.variables)?;
-        let wanted = Wanted { name: name.clone(), description, variables };
+        let variables = check_generated(&wanted.generate, check_variables(&wanted.variables)?)?;
+        let wanted = Wanted {
+            name: name.clone(),
+            description,
+            variables,
+            generate: wanted.generate.trim().to_owned(),
+            nobody: wanted.nobody,
+            public_key: String::new(),
+        };
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
@@ -406,6 +458,34 @@ impl Vault {
         Self::changed_request(&mut inner, id)
     }
 
+    /// Marks a generate request decided (#252): its key `given` (id, and
+    /// the name the asker has it under) made, with `public_key`, and given
+    /// to the asker or, `nobody`, to no one. Returns it as it is now.
+    pub(crate) fn decide_generated(
+        &self,
+        request: &v1::SecretRequest,
+        given: (&str, &str),
+        public_key: &str,
+        comment: &str,
+    ) -> Result<v1::SecretRequest, VaultError> {
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let json: String = db.query_row("SELECT new_secret FROM requests WHERE id = ?1", [&request.id], |row| row.get(0))?;
+        let mut wanted: Wanted = serde_json::from_str(&json).unwrap_or_default();
+        wanted.public_key = public_key.to_owned();
+        let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
+        let state = if request.grant_to_nobody { "generated" } else { "granted" };
+        let changed = db.execute(
+            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7, new_secret = ?8, collecting = 0
+             WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![request.id, request.agent_id, state, now_ms(), comment.trim(), given.0, given.1, json],
+        )?;
+        if changed == 0 {
+            return Err(VaultError::Invalid("This request was decided already.".to_owned()));
+        }
+        Self::changed_request(&mut inner, &request.id)
+    }
+
     /// The requests waiting for the person, oldest first, each with when it
     /// was made or last changed; none while there's no vault.
     pub(crate) fn waiting_requests(&self) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
@@ -434,6 +514,8 @@ impl Vault {
         let current = self.own_waiting(agent, id)?;
         let mut wanted: Wanted = Wanted {
             name: current.secret_name.clone(),
+            generate: current.generate.clone(),
+            nobody: current.grant_to_nobody,
             ..current.new_secret.as_ref().map_or_else(Wanted::default, |wanted| Wanted {
                 name: wanted.name.clone(),
                 description: wanted.description.clone(),
@@ -442,13 +524,14 @@ impl Vault {
                     .iter()
                     .map(|variable| WantedVariable { name: variable.name.clone(), file: variable.file })
                     .collect(),
+                ..Wanted::default()
             })
         };
         if let Some(description) = &change.description {
             wanted.description = check_description(description)?;
         }
         if let Some(variables) = &change.variables {
-            wanted.variables = check_variables(variables)?;
+            wanted.variables = check_generated(&wanted.generate, check_variables(variables)?)?;
         }
         let reason = match &change.reason {
             Some(reason) => check_reason(reason)?,

@@ -5,8 +5,9 @@
 //! supervisor stays content, and answers every client that it moved.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use factory_protocol::v1::{self, ErrorCode, ServerMessage, server_message::Body};
+use factory_protocol::v1::{self, ErrorCode, ServerMessage, client_message, server_message::Body};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
 use serde::Deserialize;
@@ -30,8 +31,15 @@ pub struct Moved {
     /// empty when the move didn't say (a bundle, moved by hand).
     #[serde(default)]
     pub to: String,
+    /// The new computer's system ("macos", "linux"); empty when the move
+    /// didn't say.
+    #[serde(default)]
+    pub to_os: String,
     #[serde(default)]
     pub version: String,
+    /// When the copy left here was deleted; 0 while it's kept.
+    #[serde(default)]
+    pub deleted_ms: i64,
 }
 
 fn path(home: &Home) -> PathBuf {
@@ -64,15 +72,20 @@ pub fn said(moved: &Moved) -> String {
         .map(|at| format!(" on {}", at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%-d %b %Y")))
         .unwrap_or_default();
     let to = if moved.to.trim().is_empty() { "another computer".to_owned() } else { moved.to.trim().to_owned() };
-    format!(
-        "This Claktory moved to {to}{when}. It no longer runs here: connect to it on the computer it moved to. To bring it back here instead, run factoryd export --restore on this computer."
-    )
+    let back = if moved.deleted_ms == 0 { " To bring it back here instead, run factoryd export --restore on this computer." } else { "" };
+    format!("This Claktory moved to {to}{when}. It no longer runs here: connect to it on the computer it moved to.{back}")
 }
 
+/// How long a client has to say hello.
+const HELLO_WITHIN: Duration = Duration::from_secs(10);
+/// How long this computer's own app's connection stays open after it's
+/// told, for it to delete the copy left here (DeleteMovedCopy).
+const KEPT_OPEN: Duration = Duration::from_secs(600);
+
 /// Serves moved mode on `listener` until stopped: every client's Hello is
-/// answered with why, then closed.
+/// answered that it moved (ERROR_CODE_MOVED, with where to), and this
+/// computer's own app may then delete the copy left here.
 pub async fn serve(listener: tokio::net::TcpListener, home: &Home, moved: Moved) {
-    let said = said(&moved);
     tracing::warn!(machine = %moved.machine, epoch = moved.epoch, "this Claktory moved away; serving moved mode only");
     let _ = crate::remote::write_private(&pid_path(home), format!("{}\n", std::process::id()).as_bytes());
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -81,23 +94,119 @@ pub async fn serve(listener: tokio::net::TcpListener, home: &Home, moved: Moved)
             accepted = listener.accept() => accepted,
             () = async { match terminate.as_mut() { Some(terminate) => { terminate.recv().await; } None => std::future::pending().await } } => break,
         };
-        let Ok((stream, _)) = accepted else { continue };
-        let said = said.clone();
+        let Ok((stream, peer)) = accepted else { continue };
+        let home = home.clone();
         tokio::spawn(async move {
-            let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else { return };
-            let mut reply_to = 0;
-            if let Ok(Some(Ok(Message::Binary(bytes)))) = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next()).await
-                && let Ok(message) = v1::ClientMessage::decode(bytes)
-            {
-                reply_to = message.id;
-            }
-            let error = v1::Error { code: ErrorCode::Internal.into(), message: said };
-            let answer = ServerMessage { reply_to, body: Some(Body::Error(error)) };
-            let _ = socket.send(Message::Binary(answer.encode_to_vec().into())).await;
-            let _ = socket.close(None).await;
+            let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
+            client(socket, peer.ip().is_loopback(), &home).await;
         });
     }
     let _ = std::fs::remove_file(pid_path(home));
+}
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// One client: told it moved, then, if it's this computer's own app, its
+/// DeleteMovedCopy taken. Everything else is answered that it moved.
+async fn client(mut socket: Socket, loopback: bool, home: &Home) {
+    // This computer's own app: on the loopback port, with the token of the
+    // local pairing code the move put aside with the rest of the copy.
+    let mut own = false;
+    loop {
+        // Its first message has 10 s; only this computer's own app is then
+        // kept waiting on.
+        let wait = if own { KEPT_OPEN } else { HELLO_WITHIN };
+        let Ok(Some(Ok(frame))) = tokio::time::timeout(wait, socket.next()).await else { break };
+        let message = match frame {
+            Message::Binary(bytes) => match v1::ClientMessage::decode(bytes) {
+                Ok(message) => message,
+                Err(_) => break,
+            },
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let mut done = false;
+        let body = match message.body {
+            Some(client_message::Body::Hello(hello)) => {
+                own = loopback && local_token(home).is_some_and(|token| crate::move_wire::same(&hello.token, &token));
+                moved_error(home)
+            }
+            Some(client_message::Body::DeleteMovedCopy(request)) => {
+                let answer = delete(home, own, &request.typed_word).await;
+                done = matches!(answer, Body::Ack(_));
+                answer
+            }
+            _ => moved_error(home),
+        };
+        // Anyone but this computer's own app is answered once and let go.
+        if !send(&mut socket, message.id, body).await || done || !own {
+            break;
+        }
+    }
+    let _ = socket.close(None).await;
+}
+
+async fn send(socket: &mut Socket, reply_to: u64, body: Body) -> bool {
+    let answer = ServerMessage { reply_to, body: Some(body) };
+    socket.send(Message::Binary(answer.encode_to_vec().into())).await.is_ok()
+}
+
+/// The answer to everything: it moved, and where to, as moved.json says now.
+fn moved_error(home: &Home) -> Body {
+    let moved = read(home).unwrap_or_default();
+    let away = v1::MovedAway {
+        to: moved.to.clone(),
+        to_os: moved.to_os.clone(),
+        at_ms: moved.at_ms,
+        machine: moved.machine.clone(),
+        deleted_ms: moved.deleted_ms,
+    };
+    Body::Error(v1::Error { code: ErrorCode::Moved.into(), message: said(&moved), moved: Some(away) })
+}
+
+/// The token of this computer's own pairing code, as the move fenced it.
+fn local_token(home: &Home) -> Option<String> {
+    let code = std::fs::read_to_string(home.root().join("moved/remote/local-pairing")).ok()?;
+    crate::remote::code_values(&code, "t").next().filter(|token| !token.is_empty())
+}
+
+/// DeleteMovedCopy: the copy left here, deleted for good (as `factoryd
+/// export --delete-moved`), when this computer's app asks and the person
+/// typed the word.
+async fn delete(home: &Home, own: bool, typed: &str) -> Body {
+    let refused = |code: ErrorCode, why: &str| Body::Error(v1::Error { code: code.into(), message: why.to_owned(), ..Default::default() });
+    if !own {
+        return refused(ErrorCode::Unauthorized, "Only this computer's own Claktory app can delete the copy left here.");
+    }
+    if typed != "delete" {
+        return refused(ErrorCode::InvalidRequest, "Type delete to confirm.");
+    }
+    if read(home).is_some_and(|moved| moved.deleted_ms != 0) {
+        return refused(ErrorCode::InvalidRequest, "The copy left here was already deleted.");
+    }
+    let place = crate::move_export::Place {
+        home: home.clone(),
+        port: 0,
+        user_home: std::env::home_dir().unwrap_or_default(),
+        dev: false,
+        service: crate::move_export::Service::None,
+    };
+    let deleted = tokio::task::spawn_blocking(move || {
+        let deleted = crate::move_export::delete_moved(&place);
+        // The deletion takes the process id with the rest; moving back
+        // here must still find this backend to stop it.
+        let _ = crate::remote::write_private(&pid_path(&place.home), format!("{}\n", std::process::id()).as_bytes());
+        deleted
+    })
+    .await;
+    match deleted {
+        Ok(Ok(_)) => {
+            tracing::warn!("the copy this Claktory left here was deleted from its app");
+            Body::Ack(v1::Ack {})
+        }
+        Ok(Err(refusal)) => refused(ErrorCode::Internal, &refusal.reason),
+        Err(error) => refused(ErrorCode::Internal, &error.to_string()),
+    }
 }
 
 /// A backend in moved mode runs for this home.
@@ -148,6 +257,9 @@ mod tests {
         assert!(said(&moved).starts_with("This Claktory moved to another computer on "), "{}", said(&moved));
         let named = Moved { to: "cloud-box".to_owned(), ..moved };
         assert!(said(&named).starts_with("This Claktory moved to cloud-box on "), "{}", said(&named));
+        assert!(said(&named).ends_with("run factoryd export --restore on this computer."), "{}", said(&named));
+        let deleted = Moved { deleted_ms: 1763735200000, ..named };
+        assert!(!said(&deleted).contains("--restore"), "a deleted copy can't come back: {}", said(&deleted));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -206,7 +206,9 @@ Map<String, Object?> encodeCommands(List<WorkbenchCommand> commands) => {
 /// Binds [commands]' keys over [child], unless the system's menu runs them
 /// ([native]); disabled ones are left unbound, so their keys reach what's
 /// focused. Esc ([escape]) is never a menu item: it's always bound here.
-class WorkbenchShortcuts extends StatelessWidget {
+/// [child] is a focus scope of its own, so a hardware keyboard's keys
+/// reach these bindings even when nothing in it is focused.
+class WorkbenchShortcuts extends StatefulWidget {
   const WorkbenchShortcuts({
     super.key,
     required this.commands,
@@ -225,12 +227,49 @@ class WorkbenchShortcuts extends StatelessWidget {
   final bool native;
 
   @override
+  State<WorkbenchShortcuts> createState() => _WorkbenchShortcutsState();
+}
+
+class _WorkbenchShortcutsState extends State<WorkbenchShortcuts> {
+  final _scope = FocusScopeNode(debugLabel: 'workbench');
+
+  @override
+  void initState() {
+    super.initState();
+    FocusManager.instance.addListener(_keepKeys);
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.removeListener(_keepKeys);
+    _scope.dispose();
+    super.dispose();
+  }
+
+  /// Where the keyboard goes when what had it lets go (the message box
+  /// unfocused, a popover closed, a tap that dismissed the keyboard): this
+  /// window, inside its bindings, never the view's root, which nothing
+  /// here hears.
+  void _keepKeys() {
+    if (!_aboveUs(FocusManager.instance.primaryFocus)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_aboveUs(FocusManager.instance.primaryFocus)) return;
+      if (_scope.canRequestFocus) _scope.requestFocus();
+    });
+  }
+
+  /// Whether the keyboard is with nothing (no focus, or a scope this
+  /// window is in: the view's, the app's).
+  bool _aboveUs(FocusNode? primary) =>
+      primary == null || _scope.ancestors.contains(primary);
+
+  @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
-      if (!native)
-        for (final command in commands) command.keys: ?command.run,
-      const SingleActivator(LogicalKeyboardKey.escape): ?escape,
+      if (!widget.native)
+        for (final command in widget.commands) command.keys: ?command.run,
+      const SingleActivator(LogicalKeyboardKey.escape): ?widget.escape,
     },
-    child: child,
+    child: FocusScope(node: _scope, autofocus: true, child: widget.child),
   );
 }

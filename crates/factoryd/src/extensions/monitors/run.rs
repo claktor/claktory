@@ -258,9 +258,22 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
     let last = trigger.last || monitor.max_fires.is_some_and(|max| monitor.fires >= max);
     let text = fire_text(factory, monitor, &trigger, last);
     let summary = format!("m{} {} fired", monitor.id, monitor.name);
-    let event =
-        Event { source: EventSource::Monitor, from: monitor.name.clone(), id: format!("m{}", monitor.id), summary, transient: false };
-    crate::pipes::agents::spread_taint(factory, &monitor.created_by, &monitor.agent);
+    let event = Event {
+        source: EventSource::Monitor,
+        from: monitor.name.clone(),
+        id: format!("m{}", monitor.id),
+        summary,
+        transient: false,
+        pipe_seqs: Vec::new(),
+    };
+    // The fire carries what its creator had read of pipes when it was set
+    // (kept with the monitor, so clearing the creator's conversation doesn't
+    // wash the prompt); monitors from before that was kept spread the
+    // creator's taint as it is now.
+    match monitor.taint.as_deref().and_then(|taint| serde_json::from_str::<crate::pipes::Taint>(taint).ok()) {
+        Some(taint) => crate::pipes::agents::taint_with(factory, &monitor.created_by, &monitor.agent, &taint),
+        None => crate::pipes::agents::spread_taint(factory, &monitor.created_by, &monitor.agent),
+    }
     factory.deliver_event(&monitor.agent, text, event);
     monitor.last_fired = Some(now);
     monitor.carry.clear();

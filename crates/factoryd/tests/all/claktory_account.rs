@@ -227,7 +227,7 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
         let state = account(&workspace);
         let sent: serde_json::Value = serde_json::from_str(&state.last_check_in_json).expect("the JSON sent");
         assert!(sent["version"].is_string() && sent["platform"].is_string(), "{sent}");
-        assert_eq!(sent["counts"], serde_json::json!({"agents": 0, "projects": 0, "devices": 0}));
+        assert_eq!(sent["counts"], serde_json::json!({"agents": 0, "projects": 0, "devices": 0, "pipes": 0, "secrets": 1, "monitors": 0}));
         assert!(sent.get("periods").is_none(), "no whole hour since signing in: {sent}");
         assert!(state.last_contact_ms > 0);
         assert_eq!(instance.count("SELECT COUNT(*) FROM endpoints WHERE kind = 'backend'"), 1, "the backend's endpoint registered");
@@ -244,6 +244,27 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
         let Body::RecoveryKey(key) = shown.body else { panic!("expected the recovery key, got {:?}", shown.body) };
         let again = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
         assert!(matches!(again.body, Body::RecoveryKey(ref again) if again.key == key.key));
+
+        // Saved? Needs you asks until a group of it is typed back (R1).
+        assert!(workspace.vault.as_ref().is_some_and(|vault| vault.recovery_key_unconfirmed), "signed in, a key to confirm");
+        let check = client.request(Request::CheckRecoveryKey(v1::CheckRecoveryKey {})).await;
+        let Body::RecoveryKeyCheck(check) = check.body else { panic!("expected a check, got {:?}", check.body) };
+        assert_eq!(check.groups, 8);
+        let group = key.key.split('-').nth(check.group as usize - 1).expect("the group").to_owned();
+        let wrong = if group == "AAAA" { "BBBB" } else { "AAAA" };
+        let refused = client
+            .request(Request::ConfirmRecoveryKey(v1::ConfirmRecoveryKey { check_id: check.check_id.clone(), typed: wrong.into() }))
+            .await;
+        let said = format!("That isn't block {} of your recovery key. Check what you saved and try again.", check.group);
+        assert_eq!(failure(&refused.body), (ErrorCode::WrongProof, said));
+        let stale = client
+            .request(Request::ConfirmRecoveryKey(v1::ConfirmRecoveryKey { check_id: "not-this-one".into(), typed: group.clone() }))
+            .await;
+        assert_eq!(failure(&stale.body), (ErrorCode::InvalidRequest, "This check timed out. Start again.".into()));
+        let events =
+            client.ok(Request::ConfirmRecoveryKey(v1::ConfirmRecoveryKey { check_id: check.check_id, typed: group.to_lowercase() })).await;
+        let workspace = last_workspace(&events).expect("workspace");
+        assert!(workspace.vault.as_ref().is_some_and(|vault| !vault.recovery_key_unconfirmed), "confirmed, for every device");
     }
 
     // A model call is counted for the next check-in.
@@ -697,4 +718,78 @@ async fn an_anchored_service_s_key_is_taken_only_on_its_root_s_word_and_never_ro
         "Couldn't confirm this is really 127.0.0.1, so your secrets stay locked for now. Claktory keeps trying."
     );
     assert_eq!(saved(&dir)["service_key"].as_str(), Some(new_key.as_str()), "the pinned key stays");
+}
+
+#[tokio::test]
+async fn a_check_in_counts_devices_setup_and_how_backend_versions_fared() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let home = dir.join("home");
+    {
+        let (addr, factory) = open(&dir, &instance.url).await;
+        // The backend before stopped without stopping cleanly, and the
+        // supervisor rolled an update back: each counted once, however
+        // often this backend starts.
+        std::fs::write(home.join("backend-running"), "v0.1.14").expect("marker");
+        std::fs::write(
+            home.join("update-failed.json"),
+            r#"{"version": "v0.1.16", "back_to": "v0.1.15", "reason": "It couldn't serve the app."}"#,
+        )
+        .expect("update-failed.json");
+        factoryd::backend_started(&factory);
+        assert!(home.join("backend-running").exists(), "this one runs");
+        factoryd::backend_stopped(factory.home());
+        assert!(!home.join("backend-running").exists(), "stopped cleanly");
+        factoryd::backend_started(&factory);
+        // An app on a laptop says its system and version; a tool says none.
+        let mut app = Client::open(addr).await;
+        let hello = v1::Hello {
+            protocol_version: factory_protocol::PROTOCOL_VERSION,
+            client_version: "v0.1.16".into(),
+            platform: "macos".into(),
+            token: crate::common::local_token(addr),
+            device_kind: v1::DeviceKind::Laptop.into(),
+            ..Default::default()
+        };
+        app.send(v1::ClientMessage { id: 1, body: Some(v1::client_message::Body::Hello(hello)) }).await;
+        app.welcomed().await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+        let workspace = until(&mut client, workspace, |workspace| account(workspace).last_check_in_ms > 0).await;
+        let sent: serde_json::Value = serde_json::from_str(&account(&workspace).last_check_in_json).expect("the JSON sent");
+        assert_eq!(sent["counts"], serde_json::json!({"agents": 0, "projects": 0, "devices": 0, "pipes": 0, "secrets": 0, "monitors": 0}));
+        assert_eq!(sent["setup"], serde_json::json!({"model_connected": true, "first_run": false}));
+        assert_eq!(sent["devices"], serde_json::json!([{"platform": "macos", "kind": "laptop", "app_version": "v0.1.16", "count": 1}]));
+    }
+    // As if the hour before held it all, and the hours since were unsent.
+    let db = rusqlite::Connection::open(home.join("factory.db")).expect("factory.db");
+    let hour = factoryd::transcript::now_ms() / 1000 / 3600 * 3600;
+    for table in ["device_hours", "backend_health"] {
+        db.execute(&format!("UPDATE {table} SET hour = ?1"), [hour - 3600]).expect("an hour back");
+    }
+    // A run that never reached a model (none to run on) isn't a first run.
+    db.execute("INSERT INTO runs (agent, version, started, ended, outcome) VALUES ('rivet', 'v0.1.16', ?1, ?1, 'finished')", [hour * 1000]).expect("a run");
+    let path = home.join("account/account.json");
+    let mut saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("account.json")).expect("json");
+    saved["periods_until"] = serde_json::json!(hour - 7200);
+    std::fs::write(&path, saved.to_string()).expect("account.json");
+
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, |workspace| account(workspace).last_check_in_json.contains("periods")).await;
+    let sent: serde_json::Value = serde_json::from_str(&account(&workspace).last_check_in_json).expect("the JSON sent");
+    let period = &sent["periods"][0];
+    assert_eq!(period["devices_connected"], 1, "this computer's app, however often it connected: {sent}");
+    assert_eq!(
+        period["health"],
+        serde_json::json!([
+            {"version": "v0.1.14", "rolled_back": 0, "crashes": 1},
+            {"version": "v0.1.16", "rolled_back": 1, "crashes": 0},
+        ]),
+        "{sent}"
+    );
+    assert_eq!(instance.count("SELECT COALESCE(SUM(crashes), 0) FROM health"), 1, "recorded at the service");
+    // A model connected stays reached; no agent has reached a model.
+    assert_eq!(sent["setup"], serde_json::json!({"model_connected": true, "first_run": false}));
 }

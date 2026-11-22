@@ -243,7 +243,7 @@ The tombstone:
 
    - `machine` is this computer's name.
    - `to` is where it moved: empty after a bundle (`--final`); after a move over the network, the target's machine name, with `to_os` its system (`linux`, `macos`).
-   - A backend that finds `moved.json` runs no agents and starts no endpoint (moved mode, import's side).
+   - A backend that finds `moved.json` runs no agents and starts no endpoint (moved mode, import's side). It answers every request with `ERROR_CODE_MOVED` and `Error.moved` (where it went, when, and when this copy was deleted, read from `moved.json` each time). On the loopback port, a client whose Hello carries the token of the local pairing code the fence put away (`moved/remote/local-pairing`), this computer's own app, may then send `DeleteMovedCopy` with the word `delete`: the copy goes as with `--delete-moved`, and the connection closes.
 2. **The fence.** `auth.json`, `vault/`, `account/` and `remote/` move into `<home>/moved/`, as they are. Then a backend of **any** version that starts here has no model sign-ins, no vault key, no account token and no tunnel key: it can't run an agent, open the secrets, check in, or answer devices as this Claktory. Nothing is deleted.
 3. **The service** stays stopped, and is turned off so it doesn't start at login: `launchctl disable` on a Mac, `systemctl --user disable` on Linux.
 
@@ -411,4 +411,4 @@ minutes before a round gives up; after the fence it's dialed again until
 
 - The moved Claktory keeps the same tunnel key, so devices find it on the new computer. The receive endpoint's id means nothing after the move.
 - At its first start, the target asks the account service for a new token and key (`POST /v1/move`, signed with the old key), if it's signed in. The old copy's token then no longer works. Until that succeeds, it carries on with the old ones, retrying.
-- The old copy stays fenced until the person deletes it (`factoryd export --delete-moved`, or later the app).
+- The old copy stays fenced until the person deletes it (`factoryd export --delete-moved`, or from the app on that computer).

@@ -282,6 +282,64 @@ void main() {
     );
   });
 
+  testWidgets('of several subscriptions, the first says it is used first; '
+      'Use this one on another puts it first (#277)', (tester) async {
+    final harness = await _phone(tester);
+    await tester.tap(find.text('matt@home.test'));
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        'Claktory then uses it first whenever it has room, including after '
+        'a reset.',
+      ),
+      findsOneWidget,
+    );
+    final use = find.bySemanticsLabel('Use this one');
+    expect(tester.getSize(use).height, greaterThanOrEqualTo(44));
+    await tester.tap(use);
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent.where((m) => m.hasMoveAccount()).single.moveAccount,
+      MoveAccount(providerId: 'anthropic', accountId: 'a2', position: 0),
+    );
+    // The first one says so, with nothing to tap.
+    await tester.tap(find.text('matt@claktory.com'));
+    await pumpFrames(tester);
+    expect(
+      find.text('Used first whenever it has room, including after a reset.'),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Use this one'), findsOneWidget);
+    // A provider with one subscription has no order to choose.
+    await tester.tap(find.text('matt@openai.test'));
+    await pumpFrames(tester);
+    expect(find.textContaining('Used first'), findsOneWidget);
+  });
+
+  testWidgets("a Mac's cards have Use this one too", (tester) async {
+    final harness = Harness(_workspace());
+    harness.backend.usageReport = _report();
+    await harness.show(tester, size: const Size(1200, 900));
+    harness.page.value = AppPage.usage;
+    await pumpFrames(tester);
+    await tester.scrollUntilVisible(
+      find.text('Use this one'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('Use this one'), findsOneWidget);
+    expect(
+      find.text('Used first whenever it has room, including after a reset.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Use this one'));
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent.where((m) => m.hasMoveAccount()).single.moveAccount,
+      MoveAccount(providerId: 'anthropic', accountId: 'a2', position: 0),
+    );
+  });
+
   testWidgets("a Mac's page keeps its tabs first and its cards last", (
     tester,
   ) async {

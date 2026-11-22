@@ -15,7 +15,7 @@ use factory_protocol::v1::{self, ErrorCode, client_message::Body as Request, ser
 use factoryd::factory::Factory;
 use serde_json::{Value, json};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -26,7 +26,14 @@ async fn anthropic(resets_at_seconds: u64) -> (String, Arc<Mutex<Vec<(String, St
 }
 
 /// `anthropic`, with account "a" over its limit only while `limited`.
-async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+pub(crate) async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    anthropic_resetting(Arc::new(AtomicU64::new(resets_at_seconds)), limited).await
+}
+
+/// `anthropic_with`, with the limit resetting at `resets` (unix seconds),
+/// or, while that's 0, 5 seconds after the first model request: a busy
+/// machine slow to set the test up can't let it pass before it's asked.
+async fn anthropic_resetting(resets: Arc<AtomicU64>, limited: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -34,7 +41,7 @@ async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (St
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else { return };
-            let (recorded, limited) = (recorded.clone(), limited.load(Ordering::SeqCst));
+            let (recorded, limited, resets) = (recorded.clone(), limited.load(Ordering::SeqCst), resets.clone());
             tokio::spawn(async move {
                 let mut raw = Vec::new();
                 let head_end = loop {
@@ -71,7 +78,10 @@ async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (St
                     recorded.push((path.clone(), account.clone()));
                     recorded.iter().any(|(path, _)| path.ends_with("/reset_rate_limits"))
                 };
-                let (status, extra, content_type, body) = answer(&path, &account, resets_at_seconds, claimed, limited);
+                if path.ends_with("/v1/messages") {
+                    let _ = resets.compare_exchange(0, now_ms() / 1000 + 5, Ordering::SeqCst, Ordering::SeqCst);
+                }
+                let (status, extra, content_type, body) = answer(&path, &account, resets.load(Ordering::SeqCst), claimed, limited);
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n",
                     body.len()
@@ -90,10 +100,13 @@ async fn anthropic_with(resets_at_seconds: u64, limited: Arc<AtomicBool>) -> (St
 /// Account "a" is over its limit, with a full reset to use; "b" answers
 /// "hi". Each has its own usage and plan, and says who it is. Once the reset
 /// is `claimed`, or when it's not `limited`, a has no limit reached (and no
-/// reset left once claimed).
+/// reset left once claimed). Its usage's window resets when a request at the
+/// limit is told it does.
 fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool, limited: bool) -> (u16, String, &'static str, String) {
     let json = |body: Value| (200, String::new(), "application/json", body.to_string());
     if path == "/api/oauth/usage?cedar_ember=1&skip_spend=1" {
+        let five_hour_resets =
+            jiff::Timestamp::from_second(i64::try_from(resets_at_seconds).expect("seconds")).expect("a time").to_string();
         let used = if account == "b" {
             12.0
         } else if claimed {
@@ -108,7 +121,8 @@ fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool, limi
             json!([])
         };
         return json(json!({
-            "five_hour": {"utilization": used, "resets_at": "2031-01-01T05:00:00Z"},
+            // When the limit a request runs into resets: whichever tells first, the same.
+            "five_hour": {"utilization": used, "resets_at": five_hour_resets},
             "cedar_ember": {"eligible": true, "at_limit": account == "a" && !claimed, "grants": grants},
         }));
     }
@@ -139,7 +153,7 @@ fn answer(path: &str, account: &str, resets_at_seconds: u64, claimed: bool, limi
     (200, String::new(), "text/event-stream", body)
 }
 
-fn account(id: &str) -> Value {
+pub(crate) fn account(id: &str) -> Value {
     json!({"type": "oauth", "access": format!("sk-ant-oat01-{id}"), "refresh": "r", "expires": now_ms() + 3_600_000, "factoryAccount": id})
 }
 
@@ -150,6 +164,12 @@ fn registry(dir: &std::path::Path, base_url: &str) -> Registry {
     let mut first = account("a");
     first["factoryAccounts"] = json!([account("b")]);
     std::fs::write(&file, json!({"anthropic": first}).to_string()).expect("credentials");
+    registry_over(file, base_url)
+}
+
+/// The real providers, all on `base_url`, with the sign-ins in `file` as
+/// they are.
+pub(crate) fn registry_over(file: std::path::PathBuf, base_url: &str) -> Registry {
     let base: &'static str = Box::leak(base_url.to_owned().into_boxed_str());
     let mut providers = default_providers();
     for provider in &mut providers {
@@ -162,11 +182,11 @@ fn registry(dir: &std::path::Path, base_url: &str) -> Registry {
     Registry::with_providers(FileCredentialStore::new(file), env, providers)
 }
 
-fn claude(view: &View) -> v1::Provider {
+pub(crate) fn claude(view: &View) -> v1::Provider {
     view.workspace.providers.iter().find(|provider| provider.id == "anthropic").cloned().expect("anthropic")
 }
 
-fn order(view: &View) -> Vec<String> {
+pub(crate) fn order(view: &View) -> Vec<String> {
     claude(view).accounts.iter().map(|account| account.id.clone()).collect()
 }
 
@@ -349,11 +369,11 @@ fn only_a(dir: &std::path::Path, base_url: &str) -> Registry {
     registry
 }
 
-fn builder(view: &View) -> v1::Agent {
+pub(crate) fn builder(view: &View) -> v1::Agent {
     view.agent("builder").clone()
 }
 
-async fn serve(factory: &Arc<Factory>, dir: &std::path::Path) -> (Client, View) {
+pub(crate) async fn serve(factory: &Arc<Factory>, dir: &std::path::Path) -> (Client, View) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     crate::common::serves(addr, crate::common::home(dir));
@@ -363,7 +383,7 @@ async fn serve(factory: &Arc<Factory>, dir: &std::path::Path) -> (Client, View) 
     (client, View { workspace, entries, ..View::default() })
 }
 
-async fn create_builder(client: &mut Client, view: &mut View) {
+pub(crate) async fn create_builder(client: &mut Client, view: &mut View) {
     // A model of the normal pool: Fable draws on a weekly limit of its own,
     // and these tests are about the account machinery.
     let model = factory_agent::providers::catalog::models("anthropic")
@@ -382,7 +402,7 @@ async fn create_builder(client: &mut Client, view: &mut View) {
     apply_request(client, view, select).await;
 }
 
-fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
+pub(crate) fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
     seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/v1/messages")).count()
 }
 
@@ -393,10 +413,10 @@ fn model_requests(seen: &Mutex<Vec<(String, String)>>) -> usize {
 #[tokio::test]
 async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
     let dir = temp_dir();
-    // Far enough ahead that a busy machine still asks before it.
-    let resets = now_ms() / 1000 + 5;
+    // Set when the agent first asks, however long getting there took.
+    let reset = Arc::new(AtomicU64::new(0));
     let limited = Arc::new(AtomicBool::new(true));
-    let (base_url, seen) = anthropic_with(resets, limited.clone()).await;
+    let (base_url, seen) = anthropic_resetting(reset.clone(), limited.clone()).await;
     let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
     factory.set_usage_wait_margin(Duration::ZERO);
     let (mut client, mut view) = serve(&factory, &dir).await;
@@ -404,6 +424,7 @@ async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
 
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
     view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;
+    let resets = reset.load(Ordering::SeqCst);
     let agent = builder(&view);
     assert!(agent.usage_wait.starts_with("Waiting for your Claude usage to reset at "), "{}", agent.usage_wait);
     assert_eq!(agent.usage_wait_until_ms, i64::try_from(resets * 1000).expect("ms"));
@@ -435,13 +456,21 @@ async fn a_wait_survives_a_restart_and_ends_early_with_a_usage_reset() {
     let dir = temp_dir();
     let resets = now_ms() / 1000 + 3 * 3600;
     let (base_url, seen) = anthropic(resets).await;
-    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    let registry = Arc::new(only_a(&dir, &base_url));
+    let factory = Factory::open(crate::common::home(&dir), registry.clone()).await.expect("open");
     let (mut client, mut view) = serve(&factory, &dir).await;
     create_builder(&mut client, &mut view).await;
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
     view.follow(&mut client, |view| builder(view).usage_wait_until_ms == i64::try_from(resets * 1000).expect("ms")).await;
 
     // Restarted: the open run resumes, finds no account free, and waits again, asking nothing.
+    // The first one runs on in this process: its sign-ins are kept elsewhere from now on, as they
+    // are (a at its limit), so it takes in none of what the next one writes, and its run waits on.
+    let mut limited = account("a");
+    limited["factoryExhaustedUntil"] = json!(resets * 1000);
+    let stopped = dir.join("stopped.json");
+    std::fs::write(&stopped, json!({"anthropic": limited}).to_string()).expect("stopped");
+    registry.set_backing(Arc::new(factory_agent::credentials::FileBacking::new(stopped)));
     let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a_again(&dir, &base_url))).await.expect("open again");
     let (mut client, mut view) = serve(&factory, &dir).await;
     view.follow(&mut client, |view| !builder(view).usage_wait.is_empty()).await;

@@ -77,14 +77,16 @@ class Drafts extends ChangeNotifier {
     return true;
   }
 
-  /// Drops the drafts of agents and chats that no longer exist, each time
-  /// the backend sends the workspace. A chat's draft is keyed `chat:<id>`.
+  /// Drops the drafts of agents, chats and pipes that no longer exist, each
+  /// time the backend sends the workspace. A chat's draft is keyed
+  /// `chat:<id>`, a pipe's `pipe:<id>`.
   void watch(WorkspaceStore workspace) {
     void prune() {
       if (!workspace.received) return;
       final kept = {
         for (final agent in workspace.workspace.agents) agent.id,
         for (final chat in workspace.workspace.chats) 'chat:${chat.id}',
+        for (final pipe in workspace.workspace.pipes) 'pipe:${pipe.id}',
       };
       final before = _drafts.length;
       _drafts.removeWhere((key, _) => !kept.contains(key));

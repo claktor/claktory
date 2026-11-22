@@ -25,6 +25,13 @@ files and optional fields; don't change the meaning of a field.
   surface belongs to; `active: false` means the leaf is hidden by the
   column projection (native may drop live canvases, never committed ink).
 - `cmd_*.json`: Dart → native on `claktory/ink/<view_id>`, with the result.
+  Native holds its events until Dart sends `attach` (`cmd_attach.json`),
+  so none is lost before Dart listens. `layerSaved` tells native the
+  layer and revision a `drawingChanged` was saved as, the next change's
+  base; `setDrawingPolicy` switches Pencil-only and any-input live, ink
+  untouched. The workbench draws its own tool controls, so
+  `showToolPicker` answers `visible: false` (PKToolPicker takes focus from
+  Flutter's text fields).
 - `ev_*.json`: native → Dart on the same channel. Pen motion never crosses
   the bridge: native sends `drawingChanged` after a finished stroke (or an
   erase, undo, redo, lasso move), coalesced; Dart saves it as a new
@@ -33,7 +40,11 @@ files and optional fields; don't change the meaning of a field.
   `new_bounds` the strokes added since the previous event, the default
   region of a new review item. `pageChanged` and `selectionChanged` (PDF
   text selection, for an item's extracted quote) keep the pane's header
-  and review column current.
+  and review column current. `strokeActive` says a tool went down on a
+  page or lifted; when a resize, rotation, undo or hiding cuts a stroke
+  short, `strokeActive` false comes first, then `strokeInterrupted`
+  (PencilKit drops such a stroke, so native says `kept: false`;
+  `ev_stroke_interrupted.json` shows the field's other value).
 - `create_*.json` carry `layers`: the ink layer and revision of each page
   (or the one of an image) to load; `loadDrawing` brings their bytes.
 

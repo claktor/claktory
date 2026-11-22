@@ -3,13 +3,18 @@ name = "claktory-apps-test-guest"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "A claktory:app@1 app for the host's tests: each tool exercises one thing the host provides."
+description = "A claktory:app@1.1 app for the host's tests: each tool exercises one thing the host provides; with feature v1_0, the same app built for 1.0."
 
 # Its own workspace: the tests build it for wasm32-wasip2.
 [workspace]
 
 [lib]
 crate-type = ["cdylib"]
+
+[features]
+# Built against the 1.0 WIT (wit-1.0, frozen as released), without views:
+# an app built before 1.1, which must keep running.
+v1_0 = []
 
 [dependencies]
 wit-bindgen = "0.63"

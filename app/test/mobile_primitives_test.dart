@@ -94,6 +94,9 @@ class _Routes implements PhoneRoutes {
   bool get canPop => false;
   @override
   void openConversation(String agentId, {int? seq}) {}
+
+  @override
+  bool showFile(String agentId, String path) => false;
 }
 
 class _Hold implements DrawerHold {

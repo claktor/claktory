@@ -1,6 +1,8 @@
+import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/usage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -144,7 +146,7 @@ void main() {
     expect(harness.last.startLogin.addAccount, isFalse);
   });
 
-  testWidgets('one account has no grip, no Use first and no hint', (
+  testWidgets('one account has no grip, no Use this one and no hint', (
     tester,
   ) async {
     await showSettings(
@@ -163,7 +165,7 @@ void main() {
       ),
     );
     expect(grips, findsNothing);
-    expect(find.text('Use first'), findsNothing);
+    expect(find.text('Use this one'), findsNothing);
     expect(find.textContaining('switches to the next'), findsNothing);
     expect(find.text('Sign out'), findsOneWidget);
   });
@@ -178,13 +180,42 @@ void main() {
     expect(harness.last.signOut.accountId, 'a2');
   });
 
-  testWidgets('Use first moves an account to the front', (tester) async {
+  testWidgets('Use this one moves an account to the front', (tester) async {
     final harness = await showSettings(tester, claude());
-    expect(find.text('Use first'), findsNWidgets(2), reason: 'not the first');
-    await tester.tap(find.text('Use first').last);
+    expect(
+      find.text('Use this one'),
+      findsNWidgets(2),
+      reason: 'not the first',
+    );
+    await tester.tap(find.text('Use this one').last);
     await settle(tester);
     expect(harness.last.moveAccount.accountId, 'k1');
     expect(harness.last.moveAccount.position, 0);
+  });
+
+  testWidgets('on a phone the actions sit under the account, each on one '
+      'line, and its email reads whole', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await showSettings(tester, claude(), size: const Size(375, 667));
+    await pumpFrames(tester, const Duration(seconds: 1));
+    await tester.tap(find.text('Providers').first);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    final use = find.text('Use this one').first;
+    await tester.ensureVisible(use);
+    await settle(tester);
+    // One line, not wrapped in a narrow column beside the name.
+    expect(tester.getSize(use).height, lessThan(30));
+    final email = find.text('matt@home.test');
+    expect(
+      tester.getTopLeft(use).dy,
+      greaterThan(tester.getBottomLeft(email).dy),
+    );
+    // Its button starts under the name (the label inset in its button).
+    expect(
+      tester.getTopLeft(use).dx - tester.getTopLeft(email).dx,
+      inInclusiveRange(0, Space.xl),
+    );
   });
 
   testWidgets('dragging an account changes the order', (tester) async {
@@ -206,7 +237,7 @@ void main() {
   testWidgets('a refusal shows under the provider', (tester) async {
     final harness = await showSettings(tester, claude());
     harness.backend.refuse = 'Claktory is busy with that account.';
-    await tester.tap(find.text('Use first').first);
+    await tester.tap(find.text('Use this one').first);
     await settle(tester);
     expect(find.text('Claktory is busy with that account.'), findsOneWidget);
   });
@@ -259,7 +290,7 @@ void main() {
     await showSettings(tester, withKeys());
     expect(find.text('ANTHROPIC_API_KEY'), findsOneWidget);
     expect(grips, findsNWidgets(2), reason: 'not the environment key');
-    expect(find.text('Use first'), findsOneWidget, reason: 'only k1');
+    expect(find.text('Use this one'), findsOneWidget, reason: 'only k1');
     expect(find.text('Sign out'), findsNWidgets(2));
     expect(find.text('Rename'), findsOneWidget);
   });

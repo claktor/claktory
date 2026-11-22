@@ -73,6 +73,39 @@ final ValueNotifier<bool> hardwareKeyboard = ValueNotifier(false);
 
 StreamSubscription<Object?>? _keyboard;
 
+/// How far an iPad window's controls (close, minimize and arrange, at its
+/// top left) reach into the app, from the native side
+/// (`factory/device/window_controls`): [leading], the room a toolbar's
+/// leading items move right by to clear them, as Apple's apps' toolbars do
+/// (UIKit's horizontal corner adaptation); [top], how much of the view's
+/// top padding is theirs rather than the status bar's (the vertical
+/// adaptation, which the native side adds to the safe area, so a screen
+/// with no toolbar of its own starts below them). Zero where there are
+/// none: an iPhone, a Mac, iPadOS before 26.
+class WindowControls {
+  const WindowControls({this.leading = 0, this.top = 0});
+
+  static const none = WindowControls();
+
+  final double leading;
+  final double top;
+
+  @override
+  bool operator ==(Object other) =>
+      other is WindowControls && other.leading == leading && other.top == top;
+
+  @override
+  int get hashCode => Object.hash(leading, top);
+}
+
+/// This window's controls, as the native side last said.
+final ValueNotifier<WindowControls> windowControls = ValueNotifier(
+  WindowControls.none,
+);
+
+const _windowControlsEvents = EventChannel('factory/device/window_controls');
+StreamSubscription<Object?>? _windowControls;
+
 /// Asks the native side what this device is, once, before the app's first
 /// frame, so nothing lays out as another device first. Never fails: what
 /// it can't learn it works out ([fallbackCapabilities]).
@@ -103,6 +136,19 @@ Future<void> loadDeviceCapabilities() async {
     }, onError: (Object _) {});
   } on Object {
     // No keyboard events from this native side.
+  }
+  try {
+    _windowControls ??= _windowControlsEvents.receiveBroadcastStream().listen((
+      event,
+    ) {
+      if (event is! Map) return;
+      windowControls.value = WindowControls(
+        leading: (event['leading'] as num?)?.toDouble() ?? 0,
+        top: (event['top'] as num?)?.toDouble() ?? 0,
+      );
+    }, onError: (Object _) {});
+  } on Object {
+    // No window controls from this native side (an app built before them).
   }
 }
 

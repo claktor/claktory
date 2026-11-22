@@ -32,7 +32,7 @@ fn config(dir: &std::path::Path) -> Config {
     let mut config = Config::default();
     config.agents[0].model = MODEL.into();
     let rivet = config.agents[0].clone();
-    let folder = |id: &str, name: &str| FolderConfig { id: id.into(), name: name.into(), path: dir.join(id) };
+    let folder = |id: &str, name: &str| FolderConfig { id: id.into(), name: name.into(), path: dir.join(id), other: Default::default() };
     config.projects = vec![
         ProjectConfig {
             id: "factory".into(),
@@ -40,8 +40,16 @@ fn config(dir: &std::path::Path) -> Config {
             path: dir.join("factory"),
             folders: vec![folder("app", "App"), folder("research", "Research")],
             archived: false,
+            other: Default::default(),
         },
-        ProjectConfig { id: "site".into(), name: "Site".into(), path: dir.join("site"), folders: Vec::new(), archived: false },
+        ProjectConfig {
+            id: "site".into(),
+            name: "Site".into(),
+            path: dir.join("site"),
+            folders: Vec::new(),
+            archived: false,
+            other: Default::default(),
+        },
     ];
     let mut lena = agent(&rivet, "lena", "factory", "app", "Backend", json!({}));
     lena.lead = Some("sam".into());
@@ -81,7 +89,7 @@ fn to(ids: &[&str]) -> Vec<(String, bool)> {
 async fn the_map_shows_where_agents_are_whom_they_message_and_what_they_reach() {
     let dir = temp_dir();
     std::fs::create_dir_all(dir.join("home")).expect("home");
-    std::fs::write(dir.join("home/config.json"), config(&dir).to_json().expect("json")).expect("config");
+    std::fs::write(dir.join("home/config.json"), config(&dir).to_json(&dir.join("home")).expect("json")).expect("config");
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let map = workspace.map.clone().expect("a map");
@@ -172,6 +180,7 @@ async fn the_map_shows_where_agents_are_whom_they_message_and_what_they_reach() 
         name: "Cloudflare".into(),
         description: "The claktory.com zone.".into(),
         entries: vec![v1::SecretEntry { variable: "TOKEN".into(), value: "cf-SECRETVALUE".into(), file: false }],
+        ..Default::default()
     };
     let events = client.ok(Request::CreateSecret(secret)).await;
     let map = last_workspace(&events).and_then(|workspace| workspace.map.clone()).expect("a new map");

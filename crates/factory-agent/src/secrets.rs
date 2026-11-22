@@ -291,7 +291,11 @@ fn forms(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
         }
         forms.push(Zeroizing::new(base.to_vec()));
         if base.contains(&b'\n') {
-            forms.extend(base.split(|byte| *byte == b'\n').map(|line| Zeroizing::new(line.trim_ascii().to_vec())));
+            // A PEM key's armor ("-----BEGIN OPENSSH PRIVATE KEY-----") is
+            // the same in every key and says nothing secret: hiding it would
+            // hide it in any output, named after whichever key came first.
+            let lines = base.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii).filter(|line| !is_armor(line));
+            forms.extend(lines.map(|line| Zeroizing::new(line.to_vec())));
         }
         for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
             for offset in 0..3 {
@@ -315,6 +319,11 @@ fn forms(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
         }
     }
     forms
+}
+
+/// A PEM armor line: "-----BEGIN …-----" or "-----END …-----".
+fn is_armor(line: &[u8]) -> bool {
+    (line.starts_with(b"-----BEGIN ") || line.starts_with(b"-----END ")) && line.ends_with(b"-----")
 }
 
 /// The base64 characters that depend only on `value`, when it sits
@@ -570,6 +579,25 @@ mod tests {
         let pem = "-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nBKcwggSjAgEAAoIBAQC7\n-----END KEY-----\n";
         let redactor = Redactor::new(&[variable("Deploy", "SSH_KEY", pem)]);
         assert_eq!(redactor.redact("got   MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n"), "got   [secret Deploy/SSH_KEY]\n");
+    }
+
+    #[test]
+    fn a_pem_keys_armor_stays_and_its_body_is_hidden() {
+        let deploy = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUA\nAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\n-----END OPENSSH PRIVATE KEY-----\n";
+        let backup = "-----BEGIN OPENSSH PRIVATE KEY-----\nc3NoLWVkMjU1MTkAAAAgQ2xha3Rvcnkg\nVGVzdCBLZXkgT25seSBGYWtlIEtleQ==\n-----END OPENSSH PRIVATE KEY-----\n";
+        let redactor = Redactor::new(&[variable("Deploy", "SSH_KEY", deploy), variable("Backup", "SSH_KEY", backup)]);
+        // Each body line is hidden under its own key's name.
+        let shown = redactor.redact(backup);
+        assert_eq!(shown, "[secret Backup/SSH_KEY]");
+        // Part of one, as `head -2` prints it: the armor shows, the body doesn't.
+        let head = "-----BEGIN OPENSSH PRIVATE KEY-----\nc3NoLWVkMjU1MTkAAAAgQ2xha3Rvcnkg\n";
+        let shown = redactor.redact(head);
+        assert!(shown.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----\n"), "the armor stays");
+        assert!(shown.ends_with("\n[secret Backup/SSH_KEY]\n") && !shown.contains("c3NoLWVk"), "the body is hidden");
+        assert_eq!(redactor.redact("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUA"), "[secret Deploy/SSH_KEY]");
+        // The armor alone, as tools print it about any key, isn't a secret.
+        let about = "ssh-keygen wrote -----BEGIN OPENSSH PRIVATE KEY----- to id_ed25519";
+        assert!(matches!(redactor.redact(about), Cow::Borrowed(_)));
     }
 
     #[test]

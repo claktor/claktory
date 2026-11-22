@@ -24,6 +24,7 @@ pub mod home;
 mod idle;
 pub mod install;
 pub mod launch_agent;
+mod locking;
 mod login;
 mod manual;
 mod map;
@@ -35,6 +36,7 @@ pub mod move_run;
 pub mod move_source;
 pub mod move_wire;
 mod network;
+pub mod notify;
 mod onboarding;
 mod patch;
 mod person;
@@ -57,9 +59,13 @@ mod usage_report;
 pub mod vault;
 mod waits;
 
+pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.
 #[doc(hidden)]
 pub use account::anchor::anchor_for_tests as anchor_account_for_tests;
 pub use connection::{ConnectionError, serve};
+/// For tests: one hourly Team health check, as if at a given time.
+#[doc(hidden)]
+pub use extensions::swarm::check_for_test as swarm_check_for_test;
 pub use factory::Factory;
 pub use runner::set_filter_executable;

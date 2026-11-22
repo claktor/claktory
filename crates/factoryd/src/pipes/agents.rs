@@ -94,6 +94,9 @@ fn section(factory: &Factory, config: &Config, record: &Record, agent: &str) -> 
     if record.review {
         let _ = writeln!(text, "Review outgoing is on: each message you send waits for {person} to send or discard it.");
     }
+    if record.review_incoming {
+        let _ = writeln!(text, "Review incoming is on: {person} lets in each message from the other side before you can read it.");
+    }
     if record.quarantined.iter().any(|id| id == agent) {
         let _ = writeln!(text, "{}", super::quarantine::prompt_line(record));
     }
@@ -395,28 +398,38 @@ fn read(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> Result<ToolResul
         text.push_str("\nNo messages yet.");
     }
     for message in &messages {
+        // What the person discarded, or hasn't let in, never reaches a model.
+        let Some(shown) = shown(&record, message, &person) else { continue };
         text.push_str("\n\n");
-        text.push_str(&shown(&record, message, &person));
+        text.push_str(&shown);
     }
     Ok(ToolResult::text(text, json!({"pipe": record.id})))
 }
 
-/// A message as an agent reads it: the other side's fenced.
-fn shown(record: &Record, message: &Message, person: &str) -> String {
+/// A message as an agent reads it: the other side's fenced, and only once
+/// it's let in. One waiting for the person shows as that alone (no text, no
+/// writer, no files); one they discarded doesn't show.
+fn shown(record: &Record, message: &Message, person: &str) -> Option<String> {
+    if matches!(message.author, Author::TheirAgent | Author::TheirPerson) {
+        return match message.state {
+            MessageState::Received => Some(format!("#{} {}", message.seq, fenced(record, message, person))),
+            MessageState::HeldIncoming => Some(format!("#{} A message from the other side waits for {person}.", message.seq)),
+            _ => None,
+        };
+    }
     let state = match message.state {
         MessageState::Held => " (held for review)",
         MessageState::Queued => " (on its way)",
         MessageState::Refused => " (refused)",
         MessageState::Discarded => " (discarded)",
-        MessageState::HeldIncoming => " (held: over the limit)",
         _ => "",
     };
-    match message.author {
-        Author::TheirAgent | Author::TheirPerson => format!("#{} {}", message.seq, fenced(record, message, person)),
+    Some(match message.author {
+        Author::TheirAgent | Author::TheirPerson => return None,
         Author::MyAgent => format!("#{} {} (yours){state}:\n{}", message.seq, message.name, message.text),
         Author::Me => format!("#{} {person}{state}:\n{}", message.seq, message.text),
         Author::Claktory => format!("#{} Claktory: {}", message.seq, escape(&message.text)),
-    }
+    })
 }
 
 pub(crate) fn escape(text: &str) -> String {
@@ -470,20 +483,27 @@ fn status(factory: &Arc<Factory>, agent: &str, args: StatusArgs) -> Result<ToolR
     if records.is_empty() {
         return Err("You have no pipe.".to_owned());
     }
+    let person = factory.lock().config.person().to_owned();
     let mut lines = Vec::new();
     for record in records {
         let link = pipe_link::status(factory, &record.id);
         let (sent, mb) = super::used(factory, &record.id);
         let state = if record.state == State::Open { "open".to_owned() } else { super::not_open(&record) };
         lines.push(format!(
-            "\"{}\" with {}: {state} The other Claktory is {}{}. Left this hour: {} messages; today: {} MB of files. Review outgoing: {}. You're its {}.",
+            "\"{}\" with {}: {state} The other Claktory is {}{}.{} Left this hour: {} messages; today: {} MB of files. Review outgoing: {}. Review incoming: {}. You're its {}.",
             record.name,
             record.peer_claktory(),
             if link.online { "online" } else { "offline" },
             if link.queued > 0 { format!(", {} messages waiting to reach it", link.queued) } else { String::new() },
+            match super::waiting_incoming(factory, &record.id) {
+                0 => String::new(),
+                1 => format!(" 1 message from the other side waits for {person}."),
+                count => format!(" {count} messages from the other side wait for {person}."),
+            },
             record.limits.per_hour.saturating_sub(sent),
             record.limits.file_mb.saturating_sub(mb),
             if record.review { "on" } else { "off" },
+            if record.review_incoming { "on" } else { "off" },
             if record.lead == agent { "lead" } else { "member" },
         ));
     }
@@ -532,11 +552,16 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
     let fresh: Vec<Message> = super::messages(factory, pipe, 0, 1000)
         .0
         .into_iter()
-        .filter(|message| message.seq > record.told && message.author.incoming() && message.state == MessageState::Received)
+        .filter(|message| {
+            (message.seq > record.told || record.untold.contains(&message.seq))
+                && message.author.incoming()
+                && message.state == MessageState::Received
+        })
         .collect();
     let Some(last) = fresh.last().map(|message| message.seq) else { return };
     super::change(factory, pipe, |record| {
-        record.told = last;
+        record.told = record.told.max(last);
+        record.untold.retain(|seq| !fresh.iter().any(|message| message.seq == *seq));
         record.woke = now_ms();
     });
     let parts: Vec<String> = fresh.iter().map(|message| fenced(&record, message, &person)).collect();
@@ -554,6 +579,7 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
         id: format!("pipe:{}", record.id),
         summary,
         transient: false,
+        pipe_seqs: fresh.iter().map(|message| message.seq).collect(),
     };
     taint(factory, &lead, pipe);
     factory.deliver_event(&lead, text, event);
@@ -741,20 +767,46 @@ pub(crate) fn gate(factory: &Arc<Factory>, agent: &str) -> factory_agent::agent:
             }
             let factory = weak.upgrade()?;
             let read = factory.pipes.tainted(&agent);
-            if read.is_empty() {
+            let asking = factory.vault.asking(&names);
+            if read.is_empty() && asking.is_empty() {
                 return None;
             }
             let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_owned();
-            if allowance(&factory, &agent, &names, &command) {
+            let background = args.get("run_in_background").and_then(Value::as_bool).unwrap_or(false);
+            if allowance(&factory, &agent, &names, &approved_as(&command, background)) {
+                // The vault gives ask-each-time secrets only to a command
+                // the person allowed, once: this one.
+                if !asking.is_empty() {
+                    factory.vault.arm(&agent, &names);
+                }
                 return None;
             }
-            Some(ask(&factory, &agent, names, &read, command))
+            Some(ask(&factory, &agent, names, &read, &asking, command, background))
         })
     })
 }
 
+/// A command as an approval is bound to it: run in the background too,
+/// when it is, since then it keeps the secrets as long as it runs.
+fn approved_as(command: &str, background: bool) -> String {
+    if background { format!("{command}\0in the background") } else { command.to_owned() }
+}
+
+/// Whether the command visibly outlives itself, keeping the secrets it got
+/// for as long as it runs: in the background, or detached in the shell.
+fn keeps_running(command: &str, background: bool) -> bool {
+    if background {
+        return true;
+    }
+    let plain = command.replace("&&", " ").replace("&>", " ").replace(">&", " ").replace("<&", " ");
+    plain.contains('&')
+        || plain
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-' || character == '_'))
+            .any(|word| matches!(word, "nohup" | "setsid" | "disown" | "daemonize" | "tmux" | "screen"))
+}
+
 /// Uses an approval the person gave for these secrets and exactly this
-/// command (the one they were shown), once; false if none.
+/// command (the one they were shown, `approved_as`), once; false if none.
 fn allowance(factory: &Factory, agent: &str, names: &[String], command: &str) -> bool {
     let db = factory.store.db();
     let read = || -> rusqlite::Result<Vec<(i64, String)>> {
@@ -773,16 +825,36 @@ fn allowance(factory: &Factory, agent: &str, names: &[String], command: &str) ->
     false
 }
 
-fn ask(factory: &Factory, agent: &str, names: Vec<String>, read: &[String], command: String) -> factory_agent::agent::Block {
+/// Asks the person to allow the command with these secrets once: it read
+/// a pipe (`read`), or some of them (`asking`) ask each time.
+fn ask(
+    factory: &Factory,
+    agent: &str,
+    names: Vec<String>,
+    read: &[String],
+    asking: &[String],
+    command: String,
+    background: bool,
+) -> factory_agent::agent::Block {
     let pipes: Vec<String> = read.iter().filter_map(|id| factory.pipes.get(id)).map(|record| record.name).collect();
     let person = factory.lock().config.person().to_owned();
     let taint = routes_json(&routes(factory, agent));
     let secrets = serde_json::to_string(&names).unwrap_or_default();
-    let reason = format!(
-        "Not run: you've read the pipe {}, so using a secret ({}) needs {person}'s approval each time. They're asked in your conversation; you'll be told when they decide, then run the command again.",
-        pipes.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "),
-        names.join(", ")
-    );
+    let reason = if pipes.is_empty() {
+        format!(
+            "Not run: {} asks {person} each time it's used, so they're asked in your conversation to allow this exact command once. You'll be told when they decide; then run the same command again, exactly as it was.",
+            asking.join(", ")
+        )
+    } else {
+        format!(
+            "Not run: you've read the pipe {}, so using a secret ({}) needs {person}'s approval each time. They're asked in your conversation; you'll be told when they decide, then run the command again.",
+            pipes.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "),
+            names.join(", ")
+        )
+    };
+    let keeps = keeps_running(&command, background);
+    let shown = command;
+    let command = approved_as(&shown, background);
     let db = factory.store.db();
     let waiting: Option<i64> = db
         .query_row(
@@ -807,7 +879,16 @@ fn ask(factory: &Factory, agent: &str, names: Vec<String>, read: &[String], comm
         return factory_agent::agent::Block { reason: Some(reason), terminate: false, details: Value::Null };
     }
     let id = db.last_insert_rowid().to_string();
-    let details = json!({"secretApproval": id, "agent": agent, "secrets": names, "pipes": pipes, "taint": taint, "command": command});
+    let details = json!({
+        "secretApproval": id,
+        "agent": agent,
+        "secrets": names,
+        "pipes": pipes,
+        "taint": taint,
+        "askEachTime": asking,
+        "keepsRunning": keeps,
+        "command": shown,
+    });
     factory_agent::agent::Block { reason: Some(reason), terminate: false, details }
 }
 
@@ -826,6 +907,8 @@ pub(crate) fn asked(tool: &str, details: &Value) -> Option<v1::SecretApproval> {
         secret_names: list("secrets"),
         pipe_names: list("pipes"),
         taint: details.get("taint").map(routes_from_json).unwrap_or_default(),
+        ask_each_time_names: list("askEachTime"),
+        keeps_running: details.get("keepsRunning").and_then(Value::as_bool).unwrap_or(false),
         command: details.get("command").and_then(Value::as_str).unwrap_or_default().to_owned(),
         state: v1::SecretApprovalState::Pending.into(),
         decided_ms: 0,

@@ -5,11 +5,13 @@ import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'controls.dart';
+import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart' as pb;
 import 'resources.dart' show formatBytes;
+import 'scope.dart' show AppScope;
 
 /// Moving this Claktory to another computer (#217, docs/MOVE.md, "The
 /// handshake"): the target runs `factoryd receive` and shows a code; the
@@ -74,6 +76,9 @@ class MoveStatus {
     this.round = 0,
     this.stepText = '',
     this.error = '',
+    this.startedByAgentId = '',
+    this.confirmedHere = false,
+    this.targetAddress = '',
   });
 
   static const none = MoveStatus(phase: MovePhase.none);
@@ -120,6 +125,26 @@ class MoveStatus {
 
   /// Why it failed, a sentence.
   final String error;
+
+  /// The agent that started it (Rivet's move_claktory); empty when the
+  /// person did.
+  final String startedByAgentId;
+
+  /// The person confirmed the digits on this side.
+  final bool confirmedHere;
+
+  /// Where this computer reached the other one ("203.0.113.7:4433"), when
+  /// it's a direct path; empty through a relay. Seen from here, not said
+  /// by the other computer.
+  final String targetAddress;
+
+  /// An agent started it and its digits wait for the person: every device
+  /// shows Claktory's own confirm ([MoveConfirmCard]), since only the
+  /// person can confirm.
+  bool get awaitsPerson =>
+      phase == MovePhase.confirm &&
+      startedByAgentId.isNotEmpty &&
+      !confirmedHere;
 
   bool get active => phase != MovePhase.none;
 
@@ -804,6 +829,18 @@ class _CancelMoveState extends State<_CancelMove> {
 /// in the app ([BackendMove]), a fake in tests.
 abstract interface class MoveSource implements MoveActions {
   ValueListenable<MoveStatus> get status;
+
+  /// This Claktory moved away from this computer (Error.moved): where and
+  /// when; null otherwise.
+  ValueListenable<pb.MovedAway?> get movedAway;
+
+  /// Whether the copy it left can be deleted from here: only this Mac's
+  /// own Claktory takes [deleteMovedCopy].
+  bool get canDeleteMovedCopy;
+
+  /// Deletes the copy it left here, for good; [typedWord] is what the
+  /// person typed to confirm ("delete").
+  Future<void> deleteMovedCopy(String typedWord);
 }
 
 /// [move] (Workspace.move) as the app shows it; none when unset.
@@ -840,6 +877,9 @@ MoveStatus moveStatusOf(pb.Move? move) {
     stepText: move.stepText,
     error: move.error,
     canCancel: move.canCancel,
+    startedByAgentId: move.startedByAgentId,
+    confirmedHere: move.confirmedHere,
+    targetAddress: move.targetAddress,
   );
 }
 
@@ -864,6 +904,16 @@ class BackendMove implements MoveSource {
 
   @override
   Future<void> freeze() => backend.freezeMove();
+
+  @override
+  ValueListenable<pb.MovedAway?> get movedAway => backend.movedAway;
+
+  @override
+  bool get canDeleteMovedCopy => backend.target == null;
+
+  @override
+  Future<void> deleteMovedCopy(String typedWord) =>
+      backend.deleteMovedCopy(typedWord);
 
   @override
   bool operator ==(Object other) =>
@@ -898,8 +948,9 @@ class _MoveStatusOf implements ValueListenable<MoveStatus> {
 /// [child], or while the agents are paused for a move, [MovingScreen] in
 /// its place: the backend serves nothing else then (its Workspace has only
 /// the move). A move that fails after the pause stays on the screen, saying
-/// why, until the person closes it. A Mac's [rail] stays beside it, so
-/// another Claktory is always in reach.
+/// why, until the person closes it. Once this Claktory has moved away, the
+/// copy it left answers nothing but where it went: [MovedScreen]. A Mac's
+/// [rail] stays beside either, so another Claktory is always in reach.
 class MoveGate extends StatefulWidget {
   const MoveGate({
     super.key,
@@ -920,28 +971,317 @@ class _MoveGateState extends State<MoveGate> {
   /// The screen showed this move paused: a failure now is told there.
   var _paused = false;
 
+  Widget _withRail(Widget screen) {
+    final rail = widget.rail;
+    if (rail == null) return screen;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        rail,
+        Expanded(child: screen),
+      ],
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<MoveStatus>(
-    valueListenable: widget.source.status,
-    builder: (context, move, child) {
-      if (move.frozen) {
-        _paused = true;
-      } else if (move.phase != MovePhase.failed) {
-        _paused = false;
+  Widget build(BuildContext context) => ValueListenableBuilder<pb.MovedAway?>(
+    valueListenable: widget.source.movedAway,
+    builder: (context, moved, child) {
+      if (moved != null) {
+        return _withRail(MovedScreen(moved: moved, source: widget.source));
       }
-      if (!_paused) return child!;
-      final screen = MovingScreen(move: move, actions: widget.source);
-      final rail = widget.rail;
-      if (rail == null) return screen;
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          rail,
-          Expanded(child: screen),
-        ],
-      );
+      return child!;
     },
-    child: widget.child,
+    child: ValueListenableBuilder<MoveStatus>(
+      valueListenable: widget.source.status,
+      builder: (context, move, child) {
+        if (move.frozen) {
+          _paused = true;
+        } else if (move.phase != MovePhase.failed) {
+          _paused = false;
+        }
+        if (!_paused) {
+          // The window stays as it is under the confirm, so nothing in it
+          // loses its place while it shows.
+          return Stack(
+            children: [
+              Positioned.fill(child: child!),
+              if (MoveConfirmCard.shows(move))
+                _FloatingConfirm(move: move, actions: widget.source),
+            ],
+          );
+        }
+        return _withRail(MovingScreen(move: move, actions: widget.source));
+      },
+      child: widget.child,
+    ),
+  );
+}
+
+/// [MoveConfirmCard] floating over whatever shows: on a phone or iPad at
+/// the foot, above the keyboard; on a Mac under its top band. At most 520
+/// wide, with the floating shadow.
+class _FloatingConfirm extends StatelessWidget {
+  const _FloatingConfirm({required this.move, required this.actions});
+
+  final MoveStatus move;
+  final MoveActions actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = AppScope.of(context).workspace.workspace;
+    final agent = workspace.agents
+        .where((agent) => agent.id == move.startedByAgentId)
+        .firstOrNull;
+    final touch = touchFirst(context);
+    final card = Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(Radii.panel),
+            boxShadow: floatingShadow,
+          ),
+          child: MoveConfirmCard(
+            move: move,
+            actions: actions,
+            agentName: agent?.name ?? '',
+          ),
+        ),
+      ),
+    );
+    // On a phone or iPad at the foot, over the message box, as an action
+    // sheet: the header (its menu, its drawer) and the banners under it
+    // stay in reach. On a Mac under the title bar.
+    if (touch) {
+      return Positioned(
+        left: 0,
+        right: 0,
+        bottom: MediaQuery.viewInsetsOf(context).bottom,
+        child: SafeArea(
+          top: false,
+          child: Padding(padding: const EdgeInsets.all(Space.s), child: card),
+        ),
+      );
+    }
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 0,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Space.s,
+            titleBarHeight + Space.s,
+            Space.s,
+            0,
+          ),
+          child: card,
+        ),
+      ),
+    );
+  }
+}
+
+/// When [at] was, in a sentence: "today at 14:20", "on 21 Nov at 14:20",
+/// with the year when it isn't this one.
+String movedWhen(DateTime at, {DateTime? now}) {
+  now ??= DateTime.now();
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final clock =
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}';
+  if (at.year == now.year && at.month == now.month && at.day == now.day) {
+    return 'today at $clock';
+  }
+  final day = '${at.day} ${months[at.month - 1]}';
+  return 'on ${at.year == now.year ? day : '$day ${at.year}'} at $clock';
+}
+
+/// The whole window on the computer a Claktory moved away from: the copy
+/// left here runs nothing and answers nothing but where it went. It says
+/// so, and offers to delete the copy once the person is sure, for good
+/// (docs/MOVE.md, "6. After the move").
+class MovedScreen extends StatelessWidget {
+  const MovedScreen({super.key, required this.moved, required this.source});
+
+  final pb.MovedAway moved;
+  final MoveSource source;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final to = moved.to;
+    final there = to.isEmpty ? 'the other computer' : to;
+    // Seen from another device, the computer it left by its name.
+    final here = !source.canDeleteMovedCopy
+        ? (moved.machine.isEmpty ? 'the Mac it moved from' : moved.machine)
+        : defaultTargetPlatform == TargetPlatform.macOS
+        ? 'this Mac'
+        : 'this computer';
+    final at = moved.atMs > 0
+        ? movedWhen(DateTime.fromMillisecondsSinceEpoch(moved.atMs.toInt()))
+        : null;
+    final deleted = moved.deletedMs > 0
+        ? movedWhen(
+            DateTime.fromMillisecondsSinceEpoch(moved.deletedMs.toInt()),
+          )
+        : null;
+    return ColoredBox(
+      color: palette.canvas,
+      child: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(Space.xl),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Semantics(
+                    header: true,
+                    child: Text(
+                      to.isEmpty
+                          ? 'This Claktory moved to another computer'
+                          : 'This Claktory moved to $to',
+                      style: type.emphasis.copyWith(color: palette.text),
+                    ),
+                  ),
+                  const SizedBox(height: Space.s),
+                  if (deleted != null)
+                    Text(
+                      '${at == null ? '' : 'It moved $at. '}The copy it '
+                      'left on $here was deleted $deleted. Claktory runs on '
+                      '$there.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    )
+                  else ...[
+                    Text(
+                      '${at == null ? '' : 'It moved $at. '}What’s left on '
+                      '$here is a copy from that moment: nothing in it '
+                      'runs, and everything since happens on $there.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    ),
+                    const SizedBox(height: Space.s),
+                    Text(
+                      source.canDeleteMovedCopy
+                          ? 'Keep it as a fallback, or delete it once you’re '
+                                'sure Claktory works there.'
+                          : 'You can delete it only on $here.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    ),
+                    if (source.canDeleteMovedCopy) ...[
+                      const SizedBox(height: Space.xl),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Button(
+                          label: 'Delete this copy…',
+                          onPressed: () => showModal(
+                            context,
+                            (context, close) => _DeleteMovedCopy(
+                              source: source,
+                              here: here,
+                              close: close,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Deleting the copy a moved Claktory left: what goes and what stays, and
+/// "delete" typed to confirm, since it can't be undone.
+class _DeleteMovedCopy extends StatefulWidget {
+  const _DeleteMovedCopy({
+    required this.source,
+    required this.here,
+    required this.close,
+  });
+
+  final MoveSource source;
+  final String here;
+  final VoidCallback close;
+
+  @override
+  State<_DeleteMovedCopy> createState() => _DeleteMovedCopyState();
+}
+
+class _DeleteMovedCopyState extends State<_DeleteMovedCopy> {
+  final _word = TextEditingController();
+  var _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _word.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _word.dispose();
+    super.dispose();
+  }
+
+  bool get _typed => _word.text.trim().toLowerCase() == 'delete';
+
+  Future<void> _delete() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.source.deleteMovedCopy('delete');
+      widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FormFrame(
+    title: 'Delete this copy?',
+    body:
+        'This deletes everything the move left on ${widget.here}: '
+        'agents, conversations, settings, secrets and sign-ins as they '
+        'were when it moved. Your workspace and project folders stay. '
+        'It isn’t a backup of your Claktory as it is now, and deleting it '
+        'can’t be undone.',
+    error: _error,
+    fields: [
+      Field(
+        label: 'Type delete to confirm',
+        child: TextField(
+          controller: _word,
+          placeholder: 'delete',
+          autofocus: true,
+          autocorrect: false,
+          onSubmitted: (_) {
+            if (_typed && !_busy) _delete();
+          },
+        ),
+      ),
+    ],
+    submitLabel: 'Delete copy',
+    onSubmit: _typed && !_busy ? _delete : null,
+    onCancel: widget.close,
   );
 }
 
@@ -1051,4 +1391,181 @@ class _CommandState extends State<_Command> {
       ),
     );
   }
+}
+
+/// Claktory's own confirm for a move an agent started (#243 S1), shown on
+/// every device while its digits wait for the person: fixed words around
+/// the other computer's name, system and the digits, never words of the
+/// agent's (the agent's name only as who started it). The name is what
+/// that computer says of itself, so it's "the computer named …", and
+/// Cancel move is the primary, safe choice (Fugo). Confirm sends ConfirmMove,
+/// Cancel CancelMove. Once confirmed here it says it waits for the other
+/// computer. Nothing when no such move waits.
+class MoveConfirmCard extends StatefulWidget {
+  const MoveConfirmCard({
+    super.key,
+    required this.move,
+    required this.actions,
+    this.agentName = '',
+  });
+
+  final MoveStatus move;
+  final MoveActions actions;
+
+  /// The name of the agent that started it, as Claktory knows it.
+  final String agentName;
+
+  /// Whether [move] is one this card shows: an agent's, at its digits.
+  static bool shows(MoveStatus move) =>
+      move.phase == MovePhase.confirm && move.startedByAgentId.isNotEmpty;
+
+  @override
+  State<MoveConfirmCard> createState() => _MoveConfirmCardState();
+}
+
+class _MoveConfirmCardState extends State<MoveConfirmCard> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _run(Future<void> Function() action) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await action();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final move = widget.move;
+    if (!MoveConfirmCard.shows(move)) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final machine = move.target;
+    final system = move.targetSystem;
+    final who = widget.agentName.isEmpty ? 'An agent' : widget.agentName;
+    final confirmed = move.confirmedHere;
+    return Semantics(
+      container: true,
+      child: Container(
+        padding: const EdgeInsets.all(Space.l),
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.panel),
+        ),
+        child: Column(
+          spacing: Space.s,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              header: true,
+              child: Text(
+                confirmed
+                    ? 'Confirmed here'
+                    : 'Move this Claktory to the computer named $machine?',
+                style: type.emphasis.copyWith(color: palette.text),
+              ),
+            ),
+            if (confirmed)
+              Text(
+                move.targetConfirmed
+                    ? '$machine confirmed too. The move goes on by itself.'
+                    : 'Waiting for $machine to confirm too.',
+                style: type.body.copyWith(color: palette.textMuted),
+              )
+            else ...[
+              Text(
+                '$who started this move.',
+                style: type.body.copyWith(
+                  color: palette.text,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              Text(
+                'It moves this whole Claktory (agents, secrets, sign-ins and '
+                'your devices’ connection) to the computer named $machine'
+                '${system.isEmpty ? '' : ' ($system)'}, and it stops running '
+                'here.',
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+              if (move.targetAddress.isNotEmpty)
+                Text(
+                  'This computer reached it at ${addressHost(move.targetAddress)}.',
+                  style: type.caption.copyWith(
+                    color: palette.textMuted,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              Text(
+                'Confirm only if you asked for this move and that computer '
+                'shows these digits:',
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+              Semantics(
+                label: 'Digits ${move.digits.split('').join(' ')}',
+                child: ExcludeSemantics(
+                  child: Text(
+                    move.digits,
+                    textAlign: TextAlign.center,
+                    style: type.emphasis.copyWith(
+                      color: palette.text,
+                      fontFamily: TextStyles.mono,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 4,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            if (_error case final error?)
+              Text(error, style: type.caption.copyWith(color: palette.danger)),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: Space.s,
+              runSpacing: Space.s,
+              children: [
+                // Confirm stays the quiet one: calling it off is the safe
+                // choice for a move the person didn't ask for.
+                if (!confirmed)
+                  Button(
+                    label: 'Confirm',
+                    onPressed: _busy
+                        ? null
+                        : () => _run(widget.actions.confirm),
+                  ),
+                if (move.canCancel)
+                  Button(
+                    label: 'Cancel move',
+                    primary: true,
+                    onPressed: _busy ? null : () => _run(widget.actions.cancel),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// [address] ("203.0.113.7:4433", "[2001:db8::1]:4433") without its port.
+String addressHost(String address) {
+  if (address.startsWith('[')) {
+    final end = address.indexOf(']');
+    return end > 0 ? address.substring(1, end) : address;
+  }
+  final colon = address.lastIndexOf(':');
+  // A bare IPv6 address has several colons and no port to drop.
+  return colon > 0 && address.indexOf(':') == colon
+      ? address.substring(0, colon)
+      : address;
 }

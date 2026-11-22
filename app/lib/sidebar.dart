@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -30,7 +31,6 @@ import 'inbox.dart' show needsYouCount, needsYouLabel;
 import 'identity.dart';
 import 'loopback_forward.dart' show ForwardingsLine;
 import 'markdown.dart';
-import 'mobile/drawer.dart' show largeText;
 import 'mobile/haptics.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -38,6 +38,7 @@ import 'mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/platform_policy.dart';
 import 'phone.dart' show PhoneProjects;
+import 'pipe_timeline.dart' show pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -45,6 +46,7 @@ import 'state.dart' show isAdminAgent;
 import 'usage.dart';
 import 'usage_wait.dart';
 import 'waiting.dart' show NeedsYouMark, waitingIn, waitingLabel;
+import 'team_activity.dart';
 import 'tell_rivet.dart';
 
 /// The workspace's own agents, then projects with their agents nested under
@@ -104,144 +106,195 @@ class Sidebar extends StatelessWidget {
                     rivet.projectId != focused.id
                 ? rivet
                 : null;
-            // On a phone: what waits for the person first, and the
-            // footer's places as rows at the end of the list.
-            final needsYou = phone ? _NeedsYou.of(workspace) : const <Object>[];
+            // Above both sections, where they don't scroll away (on a
+            // Mac): what waits for the person, and the workspace's agents
+            // (Rivet), or Rivet pinned beside a focused project.
+            final top = <Widget>[
+              // Everything that waits for the person in one place, on a
+              // Mac and in a phone's drawer alike: there only while
+              // something does.
+              if (needsYouCount(workspace) case final count when count > 0) ...[
+                _NeedsYouRow(count: count),
+                SizedBox(height: phone ? Space.m : Space.s),
+              ],
+              if (focused == null &&
+                  backend.workspace.agentsIn('').isNotEmpty) ...[
+                _Place(
+                  projectId: '',
+                  header: null,
+                  agents: backend.workspace.agentsIn(''),
+                  selectedAgentId: selected,
+                ),
+                const SizedBox(height: Space.l),
+              ],
+              if (pinned != null) ...[
+                _Place(
+                  projectId: pinned.projectId,
+                  header: null,
+                  agents: [pinned],
+                  selectedAgentId: selected,
+                ),
+                const SizedBox(height: Space.s),
+              ],
+            ];
+            final projects = <Widget>[
+              if (focused != null) ...[
+                // What's out of sight elsewhere glows here.
+                Glow(
+                  store: backend.highlights,
+                  matches: (key) => _elsewhere(
+                    key,
+                    workspace,
+                    focused!.id,
+                    shown: pinned?.id,
+                  ),
+                  child: _QuietRow(
+                    label: '‹ All projects',
+                    waiting: waitingIn([
+                      for (final agent in workspace.agents)
+                        if (agent.projectId != focused.id &&
+                            agent.id != pinned?.id &&
+                            archivedProjectOf(workspace, agent) == null)
+                          agent,
+                    ]),
+                    onTap: () {
+                      AppScope.scope(context).history.clear();
+                      fireAndLog(backend.focusProject(''));
+                    },
+                  ),
+                ),
+                const SizedBox(height: Space.s),
+                _Place(
+                  projectId: focused.id,
+                  header: _ProjectHeading(project: focused),
+                  folders: focused.folders,
+                  agents: backend.workspace.agentsIn(focused.id),
+                  selectedAgentId: selected,
+                ),
+              ] else ...[
+                for (final project in workspace.projects)
+                  if (!project.archived)
+                    _Place(
+                      projectId: project.id,
+                      header: _ProjectRow(project: project),
+                      folders: project.folders,
+                      agents: backend.workspace.agentsIn(project.id),
+                      selectedAgentId: selected,
+                      // On a phone, a small step, so the left edge isn't
+                      // spent on depth.
+                      indent: phone ? Space.s : Space.l,
+                    ),
+                // Out of the way, and back with a click.
+                if (workspace.projects.any((p) => p.archived))
+                  _Archived(
+                    projects: [
+                      for (final project in workspace.projects)
+                        if (project.archived) project,
+                    ],
+                  ),
+              ],
+            ];
+            final chats = chatsNewestFirst(workspace);
+            // The person's own chats, beside the projects.
+            final chatRows = _Chats(
+              chats: chats,
+              selectedId: page == AppPage.agent ? workspace.selectedChatId : '',
+            );
+            final projectsHeading = _SectionHeading(
+              label: 'Projects',
+              open: !workspace.projectsCollapsed,
+              count: workspace.projects.where((p) => !p.archived).length,
+              waiting: waitingIn([
+                for (final agent in workspace.agents)
+                  if (agent.projectId.isNotEmpty &&
+                      archivedProjectOf(workspace, agent) == null)
+                    agent,
+              ]),
+              onToggle: () => fireAndLog(
+                backend.updateSettings(
+                  UpdateSettings(
+                    projectsCollapsed: !workspace.projectsCollapsed,
+                  ),
+                ),
+              ),
+              trailing: _AskRivet(
+                starter: 'Set up a new project for ',
+                fallback: (context, close) => CreateProjectForm(close: close),
+              ),
+            );
+            final chatsHeading = _SectionHeading(
+              label: 'Chats',
+              open: !workspace.chatsCollapsed,
+              count: chats.length,
+              waiting: chats.fold(0, (sum, chat) => sum + chatWaiting(chat)),
+              onToggle: () => fireAndLog(
+                backend.updateSettings(
+                  UpdateSettings(chatsCollapsed: !workspace.chatsCollapsed),
+                ),
+              ),
+              trailing: _QuietPlus(
+                tip: 'New chat',
+                onTap: () => _Chats.startNew(context),
+              ),
+            );
+            const inset = EdgeInsets.symmetric(horizontal: Space.s);
+            if (phone) {
+              // One list, as iOS has it: each section's heading stays at
+              // the top while its section is in view.
+              return CustomScrollView(
+                slivers: [
+                  SliverPadding(
+                    padding: inset,
+                    sliver: SliverList.list(children: top),
+                  ),
+                  _phoneSection(
+                    context,
+                    projectsHeading,
+                    workspace.projectsCollapsed ? null : projects,
+                  ),
+                  _phoneSection(
+                    context,
+                    chatsHeading,
+                    workspace.chatsCollapsed ? null : [chatRows],
+                  ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(
+                      Space.s,
+                      0,
+                      Space.s,
+                      Space.m,
+                    ),
+                    sliver: SliverToBoxAdapter(
+                      child: _PhoneFooter(workspace: workspace),
+                    ),
+                  ),
+                ],
+              );
+            }
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // The traffic lights' row.
-                if (!phone) const TitleSpace(),
+                const TitleSpace(),
                 Expanded(
                   child: FocusTraversalGroup(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(
-                        Space.s,
-                        0,
-                        Space.s,
-                        Space.m,
+                    child: LayoutBuilder(
+                      builder: (context, box) => _Sections(
+                        height: box.maxHeight,
+                        top: top,
+                        projectsHeading: projectsHeading,
+                        projects: workspace.projectsCollapsed ? null : projects,
+                        chatsHeading: chatsHeading,
+                        chats: workspace.chatsCollapsed ? null : [chatRows],
                       ),
-                      children: [
-                        if (needsYou.isNotEmpty) _NeedsYou(waiting: needsYou),
-                        // On a Mac, everything that waits for the person in
-                        // one place: there only while something does.
-                        if (!phone)
-                          if (needsYouCount(workspace) case final count
-                              when count > 0) ...[
-                            _NeedsYouRow(count: count),
-                            const SizedBox(height: Space.s),
-                          ],
-                        ...(focused != null
-                            ? [
-                                if (pinned != null) ...[
-                                  _Place(
-                                    projectId: pinned.projectId,
-                                    header: null,
-                                    agents: [pinned],
-                                    selectedAgentId: selected,
-                                  ),
-                                  const SizedBox(height: Space.s),
-                                ],
-                                // What's out of sight elsewhere glows here.
-                                Glow(
-                                  store: backend.highlights,
-                                  matches: (key) => _elsewhere(
-                                    key,
-                                    workspace,
-                                    focused!.id,
-                                    shown: pinned?.id,
-                                  ),
-                                  child: _QuietRow(
-                                    label: '‹ All projects',
-                                    waiting: waitingIn([
-                                      for (final agent in workspace.agents)
-                                        if (agent.projectId != focused.id &&
-                                            agent.id != pinned?.id &&
-                                            archivedProjectOf(
-                                                  workspace,
-                                                  agent,
-                                                ) ==
-                                                null)
-                                          agent,
-                                    ]),
-                                    onTap: () {
-                                      AppScope.scope(context).history.clear();
-                                      fireAndLog(backend.focusProject(''));
-                                    },
-                                  ),
-                                ),
-                                const SizedBox(height: Space.s),
-                                _Place(
-                                  projectId: focused.id,
-                                  header: _ProjectHeading(project: focused),
-                                  folders: focused.folders,
-                                  agents: backend.workspace.agentsIn(
-                                    focused.id,
-                                  ),
-                                  selectedAgentId: selected,
-                                ),
-                              ]
-                            : [
-                                // Rivet and any other workspace agents, on
-                                // their own at the top.
-                                if (backend.workspace
-                                    .agentsIn('')
-                                    .isNotEmpty) ...[
-                                  _Place(
-                                    projectId: '',
-                                    header: null,
-                                    agents: backend.workspace.agentsIn(''),
-                                    selectedAgentId: selected,
-                                  ),
-                                  const SizedBox(height: Space.l),
-                                ],
-                                _Caption(
-                                  'Projects',
-                                  trailing: _AskRivet(
-                                    starter: 'Set up a new project for ',
-                                    fallback: (context, close) =>
-                                        CreateProjectForm(close: close),
-                                  ),
-                                ),
-                                for (final project in workspace.projects)
-                                  if (!project.archived)
-                                    _Place(
-                                      projectId: project.id,
-                                      header: _ProjectRow(project: project),
-                                      folders: project.folders,
-                                      agents: backend.workspace.agentsIn(
-                                        project.id,
-                                      ),
-                                      selectedAgentId: selected,
-                                      indent: Space.l,
-                                    ),
-                                // Out of the way, and back with a click.
-                                if (workspace.projects.any((p) => p.archived))
-                                  _Archived(
-                                    projects: [
-                                      for (final project in workspace.projects)
-                                        if (project.archived) project,
-                                    ],
-                                  ),
-                              ]),
-                        // The person's own chats, under every project.
-                        _Chats(
-                          chats: chatsNewestFirst(workspace),
-                          selectedId: page == AppPage.agent
-                              ? workspace.selectedChatId
-                              : '',
-                        ),
-                        if (phone) _PhoneFooter(workspace: workspace),
-                      ],
                     ),
                   ),
                 ),
-                if (!phone)
-                  _Footer(
-                    workspace: workspace,
-                    connected: backend.connected.value,
-                    page: page,
-                  ),
+                _Footer(
+                  workspace: workspace,
+                  connected: backend.connected.value,
+                  page: page,
+                ),
               ],
             );
           },
@@ -309,48 +362,189 @@ bool _elsewhere(
   return matchesAgents(key, others);
 }
 
-/// A section label. Labels name groups; rows are things you can act on.
-class _Caption extends StatelessWidget {
-  const _Caption(this.text, {this.trailing, this.header = false});
+/// The sidebar's two sections, Projects and Chats, on a Mac or an iPad:
+/// [top] stays above them, and each section's heading always shows,
+/// however many projects or chats there are. Open, Projects takes what it
+/// needs and scrolls past the rest of the room; Chats under it takes what
+/// it needs up to 40% of the sidebar (room for three rows at least), and
+/// scrolls past that. A folded section is only its heading. Null [projects]
+/// or [chats] is folded.
+class _Sections extends StatelessWidget {
+  const _Sections({
+    required this.height,
+    required this.top,
+    required this.projectsHeading,
+    required this.projects,
+    required this.chatsHeading,
+    required this.chats,
+  });
 
-  final String text;
+  final double height;
+  final List<Widget> top;
+  final Widget projectsHeading;
+  final List<Widget>? projects;
+  final Widget chatsHeading;
+  final List<Widget>? chats;
 
-  /// It heads a section, for VoiceOver.
-  final bool header;
+  static const _inset = EdgeInsets.symmetric(horizontal: Space.s);
 
-  /// A small button at its end, such as [_AskRivet].
-  final Widget? trailing;
+  @override
+  Widget build(BuildContext context) {
+    final projects = this.projects;
+    final chats = this.chats;
+    Widget list(List<Widget> children, {double bottom = 0}) => ListView(
+      shrinkWrap: true,
+      padding: _inset.copyWith(bottom: bottom),
+      children: children,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (top.isNotEmpty)
+          Padding(
+            padding: _inset,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: top,
+            ),
+          ),
+        Padding(padding: _inset, child: projectsHeading),
+        if (projects != null) Flexible(child: list(projects)),
+        Padding(
+          padding: _inset.copyWith(top: Space.s),
+          child: chatsHeading,
+        ),
+        if (chats != null)
+          if (projects == null)
+            Flexible(child: list(chats, bottom: Space.m))
+          else
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: math.max(height * 0.4, 3 * 28.0 + Space.m),
+              ),
+              child: list(chats, bottom: Space.m),
+            ),
+      ],
+    );
+  }
+}
+
+/// A section of the phone's drawer: its [heading], which stays at the top
+/// while the section is in view, over its [rows] (null when folded).
+Widget _phoneSection(
+  BuildContext context,
+  Widget heading,
+  List<Widget>? rows,
+) => SliverMainAxisGroup(
+  slivers: [
+    PinnedHeaderSliver(
+      child: ColoredBox(
+        color: Palette.of(context).sidebar,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.s),
+          child: heading,
+        ),
+      ),
+    ),
+    if (rows != null)
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.s),
+        sliver: SliverList.list(children: rows),
+      ),
+  ],
+);
+
+/// A section's heading, Projects or Chats: a chevron that turns, the
+/// section's name in caption, and its [trailing] "+". A tap folds the
+/// section or opens it; folded, it says how many it holds and whether any
+/// waits for the person. Open or folded is the backend's, the same on
+/// every device.
+class _SectionHeading extends StatelessWidget {
+  const _SectionHeading({
+    required this.label,
+    required this.open,
+    required this.count,
+    required this.waiting,
+    required this.onToggle,
+    required this.trailing,
+  });
+
+  final String label;
+  final bool open;
+
+  /// How many it holds, said while folded.
+  final int count;
+
+  /// How many things in it wait for the person's answer, marked while
+  /// folded.
+  final int waiting;
+  final VoidCallback onToggle;
+  final Widget trailing;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final Widget label = Semantics(
-      // A heading is an element of its own, not read into the row under it.
-      container: header,
-      header: header,
-      child: Text(
-        text,
-        style: TypeScale.of(context).caption
-            .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500),
-      ),
-    );
-    final trailing = this.trailing;
-    if (trailing == null) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.xs),
-        child: label,
-      );
-    }
-    // The same 28px as without it: the 20px button takes the padding's
-    // place.
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Space.s, Space.xs, Space.xs, Space.xs),
-      child: Row(
-        children: [
-          Expanded(child: label),
-          trailing,
-        ],
-      ),
+    return _Row(
+      onTap: onToggle,
+      builder: (context, hovered) {
+        final color = hovered ? palette.textMuted : palette.textFaint;
+        return Row(
+          children: [
+            Expanded(
+              // Said by the row itself, one element its whole height;
+              // its "+" an element of its own.
+              child: Semantics(
+                header: true,
+                button: true,
+                expanded: open,
+                label: label,
+                value: open || count == 0 ? null : '$count',
+                child: ExcludeSemantics(
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: Space.m + 2,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedRotation(
+                            turns: open ? 0.25 : 0,
+                            duration: Motion.fast,
+                            curve: Curves.easeOut,
+                            child: Chevron(color: color, down: false),
+                          ),
+                        ),
+                      ),
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TypeScale.of(context).caption.copyWith(
+                            color: color,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      if (!open && count > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(left: Space.s),
+                          child: Text(
+                            '$count',
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textFaint),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (!open && waiting > 0)
+              _needsYou(waitingLabel(label, waiting), waiting),
+            trailing,
+          ],
+        );
+      },
     );
   }
 }
@@ -479,6 +673,11 @@ class _Place extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
+    // A pipe's liaison has no row: its pipe's row speaks for it.
+    final agents = [
+      for (final agent in this.agents)
+        if (agent.pipeId.isEmpty) agent,
+    ];
     // The agents in the project's own folder (or one it no longer has),
     // then each folder's. Each is its own tree: an agent whose parent is in
     // another folder stands at its folder's top level.
@@ -506,10 +705,13 @@ class _Place extends StatelessWidget {
     // Reports sit in under their lead, up to a few levels: deeper ones
     // line up with the last, so names keep their room.
     final cap = touchFirst(context) ? 3 : 4;
+    // On a phone each level is a small step, its disclosure at the row's
+    // end as iOS's outlines have it, so depth doesn't eat the left edge.
+    final phone = isPhoneLayout(context);
     Widget branch(_Node node, List<_Node> siblings, [int depth = 0]) {
       final children = node.children;
       final open = children.isNotEmpty && !node.agent.collapsed;
-      final inset = depth < cap ? Space.l : 0.0;
+      final inset = depth < cap ? (phone ? Space.m : Space.l) : 0.0;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -522,7 +724,7 @@ class _Place extends StatelessWidget {
             selected: node.agent.id == selectedAgentId,
             onTap: () => select(node.agent),
             onReach: () => select(node.agent, reach: true),
-            gutter: gutter,
+            gutter: gutter && !phone,
             children: children,
             siblings: [for (final sibling in siblings) sibling.agent.id],
             inset: inset,
@@ -594,23 +796,25 @@ class _Place extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (final root in roots) branch(root, roots),
-                  for (final folder in folders)
-                    _FolderGroup(
-                      projectId: projectId,
-                      folder: folder,
-                      roots: _tree([
-                        for (final agent in agents)
-                          if (agent.folderId == folder.id) agent,
-                      ]),
-                      branch: branch,
-                    ),
-                  // Its pipes to other Claktories, after its agents.
+                  // Its pipes to other Claktories first, within reach
+                  // however many agents and folders follow.
                   for (final pipe in pipes)
                     _PipeRow(
                       pipe: pipe,
                       selected: pipe.id == selectedPipeId,
                       onTap: () => _selectPipe(context, pipe),
+                    ),
+                  for (final root in roots) branch(root, roots),
+                  for (final folder in folders)
+                    _FolderGroup(
+                      projectId: projectId,
+                      folder: folder,
+                      order: [for (final folder in folders) folder.id],
+                      roots: _tree([
+                        for (final agent in agents)
+                          if (agent.folderId == folder.id) agent,
+                      ]),
+                      branch: branch,
                     ),
                 ],
               ),
@@ -622,19 +826,35 @@ class _Place extends StatelessWidget {
   }
 }
 
+/// A project's folder being dragged to another place in its list.
+@immutable
+class _FolderDrag {
+  const _FolderDrag(this.projectId, this.folderId);
+
+  final String projectId;
+  final String folderId;
+}
+
 /// One of a project's folders in the sidebar: a quiet heading that folds
 /// its agents away, and its agents nested under it. Dropping an agent on
-/// the heading puts it in the folder, at its top level.
+/// the heading puts it in the folder, at its top level. The heading drags
+/// (a finger holds it first) to put the folder elsewhere in the project's
+/// list; another folder dropped on its upper or lower half goes before or
+/// after it.
 class _FolderGroup extends StatefulWidget {
   const _FolderGroup({
     required this.projectId,
     required this.folder,
+    required this.order,
     required this.roots,
     required this.branch,
   });
 
   final String projectId;
   final ProjectFolder folder;
+
+  /// The project's folders' ids, in order, this one's included.
+  final List<String> order;
   final List<_Node> roots;
   final Widget Function(_Node node, List<_Node> siblings) branch;
 
@@ -643,6 +863,79 @@ class _FolderGroup extends StatefulWidget {
 }
 
 class _FolderGroupState extends State<_FolderGroup> {
+  /// Where the folder being dragged over this one would go.
+  _Drop? _drop;
+
+  _Drop _zone(Offset global) {
+    final box = context.findRenderObject()! as RenderBox;
+    return box.globalToLocal(global).dy < box.size.height / 2
+        ? _Drop.before
+        : _Drop.after;
+  }
+
+  /// The folder [dragged] goes before when dropped at [drop] here ("" for
+  /// last); null when that's where it is already.
+  String? _beforeId(String dragged, _Drop drop) {
+    final order = widget.order;
+    final others = [
+      for (final id in order)
+        if (id != dragged) id,
+    ];
+    final at = others.indexOf(widget.folder.id) + (drop == _Drop.after ? 1 : 0);
+    final before = at < others.length ? others[at] : '';
+    final now = order.indexOf(dragged);
+    final current = now + 1 < order.length ? order[now + 1] : '';
+    return before == current ? null : before;
+  }
+
+  /// Puts the folder [folderId] before [beforeId] ("" for last), saying
+  /// why if the backend won't.
+  void _move(String folderId, String beforeId) {
+    final backend = AppScope.of(context);
+    final name = [
+      for (final folder
+          in backend.workspace.workspace.projects
+              .where((project) => project.id == widget.projectId)
+              .expand((project) => project.folders))
+        if (folder.id == folderId) folder.name,
+    ].firstOrNull;
+    backend
+        .updateFolder(
+          UpdateFolder(
+            projectId: widget.projectId,
+            folderId: folderId,
+            beforeId: beforeId,
+          ),
+        )
+        .catchError((Object error) {
+          if (!mounted || error is! RequestFailure) return;
+          unawaited(
+            showModal(
+              context,
+              (context, close) => _Refused(
+                title: "Couldn't move ${name ?? 'the folder'}",
+                why: error.message,
+                close: close,
+              ),
+            ),
+          );
+        }, test: (error) => error is RequestFailure);
+  }
+
+  /// Moving this folder one place up or down, for VoiceOver (a drag
+  /// otherwise); null at that end of the list.
+  VoidCallback? _step(int by) {
+    final order = widget.order;
+    final at = order.indexOf(widget.folder.id);
+    final to = at + by;
+    if (at < 0 || to < 0 || to >= order.length) return null;
+    // Up: before the one above. Down: before the one after the next.
+    final before = by < 0
+        ? order[to]
+        : (to + 1 < order.length ? order[to + 1] : '');
+    return () => _move(widget.folder.id, before);
+  }
+
   /// The request that puts [agent] at the top of this folder's agents,
   /// last, and from under its lead.
   ArrangeAgent _toFolder(Agent agent) {
@@ -663,6 +956,15 @@ class _FolderGroupState extends State<_FolderGroup> {
     final working = hidden.any(atWork);
     final unseen = hidden.any((agent) => agent.unseen);
     final waiting = waitingIn(hidden);
+    final headingRow = _heading(
+      context,
+      folder,
+      working: working,
+      unseen: unseen,
+      waiting: waiting,
+      hidden: hidden,
+      roots: roots,
+    );
     final heading = DragTarget<String>(
       onWillAcceptWithDetails: (details) {
         final agent = backend.workspace.agent(details.data);
@@ -697,78 +999,18 @@ class _FolderGroupState extends State<_FolderGroup> {
                 : palette.signal,
           ),
         ),
-        child: Semantics(
-          button: true,
-          label: folder.collapsed
-              ? 'Show agents in ${folder.name}'
-              : 'Hide agents in ${folder.name}',
-          child: _Row(
-            // Folded, it speaks for its agents: a quiet wave while one
-            // works, as an agent's row has.
-            underlay: working
-                ? WorkingWave(
-                    color: palette.text,
-                    peak: 0.07,
-                    radius: Radii.control - 1,
-                  )
-                : null,
-            onTap: () => fireAndLog(
-              backend.setFolderCollapsed(
-                widget.projectId,
-                folder.id,
-                !folder.collapsed,
-              ),
-            ),
-            builder: (context, hovered) {
-              final color = hovered ? palette.textMuted : palette.textFaint;
-              return Row(
-                children: [
-                  SizedBox(
-                    width: Space.m + 2,
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: AnimatedRotation(
-                        turns: folder.collapsed ? 0 : 0.25,
-                        duration: Motion.fast,
-                        curve: Curves.easeOut,
-                        child: Chevron(color: color, down: false),
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      folder.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TypeScale.of(context).caption.copyWith(
-                        color: unseen || waiting > 0 ? palette.text : color,
-                        fontWeight: unseen || waiting > 0
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  if (folder.collapsed && roots.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(left: Space.s),
-                      child: Text(
-                        '${hidden.length}',
-                        style: TypeScale.of(context).caption
-                            .copyWith(color: palette.textFaint),
-                      ),
-                    ),
-                  if (waiting > 0)
-                    _needsYou(waitingLabel(folder.name, waiting), waiting),
-                ],
-              );
-            },
-          ),
+        child: _SidebarDraggable<_FolderDrag>(
+          data: _FolderDrag(widget.projectId, folder.id),
+          dragAnchorStrategy: pointerDragAnchorStrategy,
+          feedback: _DragFeedback(name: folder.name, palette: palette),
+          childWhenDragging: Opacity(opacity: 0.4, child: headingRow),
+          child: headingRow,
         ),
       ),
     );
     final hiddenIds = {for (final agent in hidden) agent.id};
     final shown = backend.workspace.workspace.selectedAgentId;
-    return Column(
+    final group = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Glow(
@@ -785,7 +1027,9 @@ class _FolderGroupState extends State<_FolderGroup> {
           child: folder.collapsed
               ? const SizedBox(width: double.infinity)
               : Padding(
-                  padding: const EdgeInsets.only(left: Space.m + 2),
+                  padding: EdgeInsets.only(
+                    left: isPhoneLayout(context) ? Space.s : Space.m + 2,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -795,6 +1039,133 @@ class _FolderGroupState extends State<_FolderGroup> {
                 ),
         ),
       ],
+    );
+    bool ours(_FolderDrag drag) =>
+        drag.projectId == widget.projectId &&
+        widget.order.contains(drag.folderId);
+    return DragTarget<_FolderDrag>(
+      onWillAcceptWithDetails: (details) => ours(details.data),
+      onMove: (details) {
+        final drop = details.data.folderId == folder.id
+            ? null
+            : _zone(details.offset);
+        if (drop != _drop) setState(() => _drop = drop);
+      },
+      onLeave: (_) => setState(() => _drop = null),
+      onAcceptWithDetails: (details) {
+        final dragged = details.data.folderId;
+        final drop = dragged == folder.id
+            ? null
+            : _drop ?? _zone(details.offset);
+        setState(() => _drop = null);
+        if (drop == null) return;
+        if (_beforeId(dragged, drop) case final before?) _move(dragged, before);
+      },
+      builder: (context, _, _) => Stack(
+        clipBehavior: Clip.none,
+        children: [
+          group,
+          // Between folders: a signal line where it would go.
+          if (_drop != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: _drop == _Drop.before ? -1 : null,
+              bottom: _drop == _Drop.after ? -1 : null,
+              child: Container(
+                height: 2,
+                decoration: BoxDecoration(
+                  color: palette.signal,
+                  borderRadius: BorderRadius.circular(1),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _heading(
+    BuildContext context,
+    ProjectFolder folder, {
+    required bool working,
+    required bool unseen,
+    required int waiting,
+    required List<Agent> hidden,
+    required List<_Node> roots,
+  }) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    return Semantics(
+      button: true,
+      label: folder.collapsed
+          ? 'Show agents in ${folder.name}'
+          : 'Hide agents in ${folder.name}',
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Move up'): ?_step(-1),
+        const CustomSemanticsAction(label: 'Move down'): ?_step(1),
+      },
+      child: _Row(
+        // Folded, it speaks for its agents: a quiet wave while one
+        // works, as an agent's row has.
+        underlay: working
+            ? WorkingWave(
+                color: palette.text,
+                peak: 0.07,
+                radius: Radii.control - 1,
+              )
+            : null,
+        onTap: () => fireAndLog(
+          backend.setFolderCollapsed(
+            widget.projectId,
+            folder.id,
+            !folder.collapsed,
+          ),
+        ),
+        builder: (context, hovered) {
+          final color = hovered ? palette.textMuted : palette.textFaint;
+          return Row(
+            children: [
+              SizedBox(
+                width: Space.m + 2,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: AnimatedRotation(
+                    turns: folder.collapsed ? 0 : 0.25,
+                    duration: Motion.fast,
+                    curve: Curves.easeOut,
+                    child: Chevron(color: color, down: false),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  folder.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TypeScale.of(context).caption.copyWith(
+                    color: unseen || waiting > 0 ? palette.text : color,
+                    fontWeight: unseen || waiting > 0
+                        ? FontWeight.w600
+                        : FontWeight.w500,
+                  ),
+                ),
+              ),
+              if (folder.collapsed && roots.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: Space.s),
+                  child: Text(
+                    '${hidden.length}',
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textFaint),
+                  ),
+                ),
+              if (waiting > 0)
+                _needsYou(waitingLabel(folder.name, waiting), waiting),
+            ],
+          );
+        },
+      ),
     );
   }
 }
@@ -1548,6 +1919,32 @@ class _AgentRowState extends State<_AgentRow> {
                 child: Dot(color: agentColor(agent.color), size: 7),
               ),
             ),
+          // On a phone, its reports' disclosure at the row's end, a
+          // fingertip wide: right while they're folded, down while shown.
+          if (isPhoneLayout(context) && widget.children.isNotEmpty)
+            Semantics(
+              button: true,
+              label: agent.collapsed
+                  ? "Show ${agent.name}'s reports"
+                  : "Hide ${agent.name}'s reports",
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => fireAndLog(
+                  backend.setAgentCollapsed(agent.id, !agent.collapsed),
+                ),
+                child: SizedBox(
+                  width: Touch.target - Space.s,
+                  child: Center(
+                    child: AnimatedRotation(
+                      turns: agent.collapsed ? 0 : 0.25,
+                      duration: Motion.fast,
+                      curve: Curves.easeOut,
+                      child: Chevron(color: palette.textFaint, down: false),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1763,17 +2160,28 @@ class _PipeRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final waiting = pipeWaiting(pipe);
-    final unseen = pipe.unseen;
+    final workspace = AppScope.of(context).workspace.workspace;
+    // Its liaison, bound to it: no row of its own, its face at this row's
+    // end, its work as this row's wave and its waiting in this row's count.
+    final liaison = pipeLiaison(workspace, pipe);
+    final waiting = pipeWaitingAll(workspace, pipe);
+    final unseen = pipe.unseen || (liaison?.unseen ?? false);
     final stands = unseen || waiting > 0;
     final closed = pipe.state == PipeState.PIPE_STATE_CLOSED;
+    final phone = touchFirst(context);
     return Semantics(
-      label: 'Pipe',
+      label: liaison == null ? 'Pipe' : 'Pipe, liaison ${liaison.name}',
       child: _Row(
         key: ValueKey('pipe-row/${pipe.id}'),
         height: 40,
         selected: selected,
         onTap: onTap,
+        underlay: liaison != null && atWork(liaison)
+            ? WorkingWave(
+                color: agentColor(liaison.color),
+                radius: Radii.control - 1,
+              )
+            : null,
         builder: (context, hovered) => Row(
           children: [
             Padding(
@@ -1806,6 +2214,16 @@ class _PipeRow extends StatelessWidget {
                     : palette.textFaint,
               ),
             ),
+            if (liaison != null)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.s),
+                child: ExcludeSemantics(
+                  child: AgentCharacter(
+                    agent: identityOf(liaison),
+                    size: phone ? 28 : 20,
+                  ),
+                ),
+              ),
             if (waiting > 0)
               _needsYou(waitingLabel(pipe.name, waiting), waiting)
             else if (unseen)
@@ -1823,10 +2241,11 @@ class _PipeRow extends StatelessWidget {
   }
 }
 
-/// On a Mac, "Needs you" at the top of the sidebar while anything,
-/// anywhere, waits for the person's answer: the inbox glyph, the words, and
-/// the count in the needs-you pill. A click shows the Needs you page beside
-/// the conversation, or closes it.
+/// "Needs you" at the top of the sidebar while anything, anywhere, waits
+/// for the person's answer: the inbox glyph, the words, and the count in
+/// the needs-you pill. A click shows the Needs you page beside the
+/// conversation, or closes it; in a phone's drawer a tap pushes the page,
+/// the row in the drawer's sizes as its footer's places.
 class _NeedsYouRow extends StatelessWidget {
   const _NeedsYouRow({required this.count});
 
@@ -1835,33 +2254,36 @@ class _NeedsYouRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
     return _Row(
       key: const ValueKey('needs-you'),
-      selected: AppScope.pageShown(context, AppPage.inbox),
-      onTap: () => AppScope.togglePage(context, AppPage.inbox),
+      // On a phone a full row, a finger's height, as an agent's.
+      height: phone ? 40 : 28,
+      selected: !phone && AppScope.pageShown(context, AppPage.inbox),
+      onTap: phone
+          ? () => AppScope.openPage(context, AppPage.inbox)
+          : () => AppScope.togglePage(context, AppPage.inbox),
       builder: (context, hovered) => Row(
         children: [
           SizedBox(
-            width: Space.l + 2,
+            width: phone ? 32 : Space.l + 2,
             child: Align(
-              alignment: Alignment.centerLeft,
+              alignment: AlignmentDirectional.centerStart,
               child: ExtensionGlyph(
                 icon: 'inbox',
                 name: 'Needs you',
                 color: palette.text,
-                size: 14,
+                size: phone ? 18 : 14,
               ),
             ),
           ),
           Expanded(
             child: Text(
               'Needs you',
-              maxLines: 1,
+              maxLines: phone ? 2 : 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyles.body.copyWith(
-                color: palette.text,
-                fontWeight: FontWeight.w600,
-              ),
+              style: (phone ? TypeScale.of(context).body : TextStyles.body)
+                  .copyWith(color: palette.text, fontWeight: FontWeight.w600),
             ),
           ),
           _needsYou(needsYouLabel(count), count),
@@ -1927,64 +2349,56 @@ class _Chats extends StatelessWidget {
   final List<Chat> chats;
   final String selectedId;
 
-  void _new(BuildContext context) {
+  /// Opens a new chat (on a phone, in front).
+  static void startNew(BuildContext context) {
     startNewChat(context);
     _toConversation(context);
   }
+
+  void _new(BuildContext context) => startNew(context);
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final listed = chats.take(chatsListed).toList();
     final rest = chats.skip(chatsListed).toList();
-    return Padding(
-      padding: const EdgeInsets.only(top: Space.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _Caption(
-            'Chats',
-            header: true,
-            trailing: _QuietPlus(tip: 'New chat', onTap: () => _new(context)),
-          ),
-          if (chats.isEmpty)
-            _Row(
-              onTap: () => _new(context),
-              builder: (context, hovered) => Row(
-                children: [
-                  _ChatMark(
-                    color: hovered ? palette.textMuted : palette.textFaint,
-                  ),
-                  Expanded(
-                    child: Text(
-                      'New chat',
-                      style: TypeScale.of(context).body.copyWith(
-                        color: hovered ? palette.textMuted : palette.textFaint,
-                      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (chats.isEmpty)
+          _Row(
+            onTap: () => _new(context),
+            builder: (context, hovered) => Row(
+              children: [
+                _ChatMark(
+                  color: hovered ? palette.textMuted : palette.textFaint,
+                ),
+                Expanded(
+                  child: Text(
+                    'New chat',
+                    style: TypeScale.of(context).body.copyWith(
+                      color: hovered ? palette.textMuted : palette.textFaint,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          for (final chat in listed)
-            _ChatRow(
-              key: ValueKey('chat-row/${chat.id}'),
-              chat: chat,
-              selected: chat.id == selectedId,
-            ),
-          if (rest.isNotEmpty)
-            _QuietRow(
-              // One word for it in the drawer, as Needs you's See all.
-              label: isPhoneLayout(context) ? 'See all' : 'Show all',
-              waiting: rest.fold<int>(
-                0,
-                (sum, chat) => sum + chatWaiting(chat),
-              ),
-              waitingLabel: 'A chat not shown here is waiting for your answer',
-              onTap: () => _showAll(context),
-            ),
-        ],
-      ),
+          ),
+        for (final chat in listed)
+          _ChatRow(
+            key: ValueKey('chat-row/${chat.id}'),
+            chat: chat,
+            selected: chat.id == selectedId,
+          ),
+        if (rest.isNotEmpty)
+          _QuietRow(
+            // One word for it in the drawer, as Needs you's See all.
+            label: isPhoneLayout(context) ? 'See all' : 'Show all',
+            waiting: rest.fold<int>(0, (sum, chat) => sum + chatWaiting(chat)),
+            waitingLabel: 'A chat not shown here is waiting for your answer',
+            onTap: () => _showAll(context),
+          ),
+      ],
     );
   }
 
@@ -2291,107 +2705,6 @@ class _Unarchive extends StatelessWidget {
   }
 }
 
-/// On a phone, what waits for the person's answer, first in the drawer:
-/// "Needs you" and a row for each agent or pipe with something waiting,
-/// which opens it at the oldest card waiting.
-class _NeedsYou extends StatelessWidget {
-  const _NeedsYou({required this.waiting});
-
-  /// The agents, pipes and chats waiting ([_NeedsYou.of]).
-  final List<Object> waiting;
-
-  /// The agents, pipes and chats with something waiting for the person,
-  /// in the sidebar's order; archived projects' wait.
-  static List<Object> of(Workspace workspace) => [
-    for (final agent in workspace.agents)
-      if (waitingIn([agent]) > 0 && archivedProjectOf(workspace, agent) == null)
-        agent,
-    for (final pipe in workspace.pipes)
-      if (pipeWaiting(pipe) > 0) pipe,
-    for (final chat in chatsNewestFirst(workspace))
-      if (chatWaiting(chat) > 0) chat,
-  ];
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: Space.l),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Every card waiting, on one page, to answer there: See all at the
-        // heading's end, or under it at the largest text sizes.
-        if (largeText(context)) ...[
-          const _Caption('Needs you', header: true),
-          const Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: _SeeAll(),
-          ),
-        ] else
-          const _Caption('Needs you', header: true, trailing: _SeeAll()),
-        for (final item in waiting)
-          if (item is Chat)
-            _ChatRow(
-              key: ValueKey('needs-you/chat/${item.id}'),
-              chat: item,
-              selected: false,
-            )
-          else
-            _FlatRow(item: item, reach: true),
-      ],
-    ),
-  );
-}
-
-/// On a phone, "See all" at the end of the drawer's Needs you: the Needs
-/// you page, every card waiting, to answer there without opening each
-/// conversation. A finger's size; the words in `signal`, as iOS tints a
-/// section's See All.
-class _SeeAll extends StatelessWidget {
-  const _SeeAll();
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    void open() => AppScope.openPage(context, AppPage.inbox);
-    // An element of its own for VoiceOver, with its own tap: not merged
-    // into the section around it.
-    return Semantics(
-      container: true,
-      button: true,
-      label: 'See everything that needs you',
-      onTap: open,
-      excludeSemantics: true,
-      child: Pressable(
-        onTap: open,
-        builder: (context, pressed) => ConstrainedBox(
-          constraints: BoxConstraints(
-            minHeight: PhonePlatformPolicy.least(
-              context,
-              DenseList.of(context) ? Touch.denseLine : Touch.target,
-            ),
-            minWidth: PhonePlatformPolicy.least(context, Touch.target),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Space.s),
-            child: Center(
-              widthFactor: 1,
-              child: Text(
-                'See all',
-                style: TypeScale.of(context).secondary.copyWith(
-                  color: pressed
-                      ? palette.signal.withValues(alpha: 0.6)
-                      : palette.signal,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// On a phone, the drawer's tree narrowed to [query]: the agents and
 /// pipes whose names (or roles, or projects' names) have it in them, each
 /// with its project, here on the phone.
@@ -2414,13 +2727,18 @@ class SidebarSearch extends StatelessWidget {
             id.isEmpty ? '' : projectById(workspace, id)?.name ?? '';
         final found = <Object>[
           for (final agent in workspace.agents)
-            if (archivedProjectOf(workspace, agent) == null &&
+            if (agent.pipeId.isEmpty &&
+                archivedProjectOf(workspace, agent) == null &&
                 (has(agent.name) ||
                     has(agent.role) ||
                     has(projectName(agent.projectId))))
               agent,
+          // A pipe is found by its liaison's name too.
           for (final pipe in workspace.pipes)
-            if (has(pipe.name) || has(projectName(pipe.projectId))) pipe,
+            if (has(pipe.name) ||
+                has(projectName(pipe.projectId)) ||
+                has(pipeLiaison(workspace, pipe)?.name ?? ''))
+              pipe,
           for (final chat in chatsNewestFirst(workspace))
             if (has(chatTitle(chat))) chat,
         ];
@@ -2453,20 +2771,14 @@ class SidebarSearch extends StatelessWidget {
   }
 }
 
-/// An agent or a pipe on a row of its own, outside the tree (Needs you, a
-/// search): its character or portal, its name over its role or status
-/// (and with [project], its project's name), and what waits. A tap opens
-/// it; with [reach], at the oldest card waiting.
+/// An agent or a pipe on a row of its own, outside the tree (a search):
+/// its character or portal, its name over its role or status (and with
+/// [project], its project's name), and what waits. A tap opens it.
 class _FlatRow extends StatelessWidget {
-  const _FlatRow({
-    required this.item,
-    this.reach = false,
-    this.project = false,
-  });
+  const _FlatRow({required this.item, this.project = false});
 
   /// An [Agent] or a [Pipe].
   final Object item;
-  final bool reach;
   final bool project;
 
   @override
@@ -2484,7 +2796,7 @@ class _FlatRow extends StatelessWidget {
       name = item.name;
       line = pipeStatus(item);
       projectId = item.projectId;
-      waiting = pipeWaiting(item);
+      waiting = pipeWaitingAll(workspace, item);
       glyph = PortalGlyph(
         color: item.state == PipeState.PIPE_STATE_CLOSED
             ? palette.textFaint
@@ -2503,7 +2815,7 @@ class _FlatRow extends StatelessWidget {
         size: _phoneAvatar(context),
         live: true,
       );
-      onTap = () => _selectAgent(context, agent, reach: reach);
+      onTap = () => _selectAgent(context, agent);
     }
     final where = project && projectId.isNotEmpty
         ? (projectById(workspace, projectId)?.name ?? '')
@@ -2624,18 +2936,21 @@ class _PhoneFooter extends StatelessWidget {
             (color) =>
                 ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
           ),
-          // How much of each provider's limits is used, a touch and hold
-          // for its resets.
-          if (workspace.providers.any((p) => p.signedInWith.isNotEmpty))
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Space.xs,
-                Space.s,
-                Space.xs,
-                0,
-              ),
-              child: ProviderUsageCircles(providers: workspace.providers),
+          // Who's at work (a tap opens the Map), then how much of each
+          // provider's limits is used; a touch and hold for more.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.xs, Space.s, Space.xs, 0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TeamActivity(workspace: workspace),
+                const SizedBox(width: Space.xs),
+                Expanded(
+                  child: ProviderUsageCircles(providers: workspace.providers),
+                ),
+              ],
             ),
+          ),
           ForwardingsLine(
             forwards: scope.backend.forwards,
             except: workspace.hasLogin() ? workspace.login.url : '',
@@ -2759,16 +3074,20 @@ class _Footer extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.s),
               child: line,
             ),
-          if (workspace.providers.any((p) => p.signedInWith.isNotEmpty))
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Space.xs,
-                0,
-                Space.xs,
-                Space.xs,
-              ),
-              child: ProviderUsageCircles(providers: workspace.providers),
+          // Who's at work, then how much of each provider's limits is used.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.xs, 0, Space.xs, Space.xs),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TeamActivity(workspace: workspace),
+                const SizedBox(width: Space.xs),
+                Expanded(
+                  child: ProviderUsageCircles(providers: workspace.providers),
+                ),
+              ],
             ),
+          ),
           _FooterButtons(
             pages: [
               Glow(

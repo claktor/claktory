@@ -46,6 +46,11 @@ serve options:
   --service-key-statement FILE
                           the account root's word for the service key, served
                           at well-known (from service-key-statement --out)
+  --user-apps SOCKET      the user-apps worker's socket (claktory-user-apps
+                          serve --socket); without it, /v1/apps/ answers 503
+  --user-apps-uid UID     the worker's user: whatever listens on the socket
+                          must run as it, or it's sent nothing (needed with
+                          --user-apps)
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
 signing_key offline.
@@ -161,6 +166,8 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--relay",
             "--geoip",
             "--service-key-statement",
+            "--user-apps",
+            "--user-apps-uid",
         ],
         &["--trust-proxy"],
     )?;
@@ -181,6 +188,14 @@ fn serve(args: &[String]) -> Result<(), String> {
         config.email_daily_cap = cap.parse().map_err(|_| "--email-daily-cap takes a number")?;
     }
     config.admins = options.values("--admin-email");
+    config.user_apps = match (options.value("--user-apps")?, options.value("--user-apps-uid")?) {
+        (None, None) => None,
+        (Some(socket), Some(uid)) => Some(server::UserApps {
+            socket: PathBuf::from(socket),
+            uid: uid.parse().map_err(|_| "--user-apps-uid takes a number")?,
+        }),
+        _ => return Err("--user-apps and --user-apps-uid go together".to_owned()),
+    };
     let service_key = claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes());
     if let Some(path) = options.value("--service-key-statement")? {
         // A wrong one isn't served, rather than stopping the service: check-statement catches it.

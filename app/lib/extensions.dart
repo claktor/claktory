@@ -6,6 +6,7 @@ import 'characters/character.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'database.dart';
+import 'forms.dart' show FormFrame;
 import 'extension_about.dart';
 import 'highlights.dart';
 import 'identity.dart';
@@ -13,6 +14,8 @@ import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'memory.dart';
 import 'messaging.dart';
+import 'mobile/input.dart' show InputKind;
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'monitors.dart';
 import 'resources.dart';
 import 'secrets.dart' show AgentSecretsPanel;
@@ -384,16 +387,31 @@ class _ChecklistViewState extends State<ChecklistView> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final checklist = widget.checklist;
+    final now = widget.now ?? DateTime.now();
+    final store = AppScope.of(context).workspace;
+    // The person's goals, above the items.
+    final goals = _Goals(
+      checklist: checklist,
+      agentId: widget.agentId,
+      store: store,
+    );
     if (checklist.items.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(Space.l),
-        child: Text(
-          'Nothing on the checklist yet.',
-          style: TypeScale.of(context).body.copyWith(color: palette.textFaint),
-        ),
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.l),
+        children: [
+          goals,
+          Padding(
+            padding: const EdgeInsets.all(Space.s),
+            child: Text(
+              'Nothing on the checklist yet.',
+              style: TypeScale.of(context).body
+                  .copyWith(color: palette.textFaint),
+            ),
+          ),
+        ],
       );
     }
-    final now = widget.now ?? DateTime.now();
+    final goalText = {for (final goal in checklist.goals) goal.id: goal.text};
     DateTime dayOf(ChecklistItem item) {
       final added = DateTime.fromMillisecondsSinceEpoch(item.created.toInt());
       return DateTime(added.year, added.month, added.day);
@@ -438,7 +456,6 @@ class _ChecklistViewState extends State<ChecklistView> {
     _finished
       ..clear()
       ..addAll({for (final item in checklist.items) item.id: finished(item)});
-    final store = AppScope.of(context).workspace;
     // Keyed by item and section: the list keeps an item's state (an open
     // log) as others come and go, and an item that changes section starts
     // fresh in its new place, easing in.
@@ -450,7 +467,14 @@ class _ChecklistViewState extends State<ChecklistView> {
         store: highlights,
         matches: (key) => key == 'checklist_item:${widget.agentId}#${item.id}',
         side: AxisDirection.left,
-        child: _Item(item: item, store: store, added: added),
+        child: _Item(
+          item: item,
+          store: store,
+          added: added,
+          agentId: widget.agentId,
+          now: now,
+          goal: goalText[item.goal],
+        ),
       ),
     );
     if (_pinned) _followSoon();
@@ -461,68 +485,106 @@ class _ChecklistViewState extends State<ChecklistView> {
       child: Row(
         children: [
           Expanded(child: Text(left, style: caption)),
-          Text(right, style: caption),
+          // At the largest text it wraps rather than pushing past the edge.
+          Flexible(
+            child: Text(right, style: caption, textAlign: TextAlign.end),
+          ),
         ],
       ),
     );
     // On a phone the progress scrolls with the list: held above it, it'd
     // leave no room for the list at the largest text.
     final phone = isPhoneLayout(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (!phone) _Progress(items: checklist.items),
-        Expanded(
-          child: Stack(
-            children: [
-              NotificationListener<ScrollNotification>(
-                onNotification: _onScroll,
-                child: NotificationListener<ScrollMetricsNotification>(
-                  // Growth (new items, an opened log) while following.
-                  onNotification: (_) {
-                    if (_pinned) _followSoon();
-                    return false;
-                  },
-                  child: ListView(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(
-                      Space.s,
-                      0,
-                      Space.s,
-                      Space.l,
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!phone) ...[
+            _Progress(items: checklist.items),
+            // Held above the items, scrolling on its own past two fifths of
+            // the panel.
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: constraints.maxHeight.isFinite
+                    ? constraints.maxHeight * 0.4
+                    : double.infinity,
+              ),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: palette.hairline)),
+                ),
+                // With no goals there's only Add goal…: nothing to scroll.
+                child: checklist.goals.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.s,
+                        ),
+                        child: goals,
+                      )
+                    : SingleChildScrollView(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.s,
+                        ),
+                        child: goals,
+                      ),
+              ),
+            ),
+          ],
+          Expanded(
+            child: Stack(
+              children: [
+                NotificationListener<ScrollNotification>(
+                  onNotification: _onScroll,
+                  child: NotificationListener<ScrollMetricsNotification>(
+                    // Growth (new items, an opened log) while following.
+                    onNotification: (_) {
+                      if (_pinned) _followSoon();
+                      return false;
+                    },
+                    child: ListView(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(
+                        Space.s,
+                        0,
+                        Space.s,
+                        Space.l,
+                      ),
+                      children: [
+                        if (phone) ...[
+                          _Progress(items: checklist.items),
+                          goals,
+                        ],
+                        for (final (day, finishedThen) in history) ...[
+                          heading(dayLabel(day, now), doneLabel(days[day]!)),
+                          for (final done in finishedThen) item(done),
+                        ],
+                        if (outstanding.isNotEmpty) ...[
+                          heading('Outstanding', '${outstanding.length}'),
+                          for (final open in outstanding)
+                            item(open, added: dayLabel(dayOf(open), now)),
+                        ],
+                      ],
                     ),
-                    children: [
-                      if (phone) _Progress(items: checklist.items),
-                      for (final (day, finishedThen) in history) ...[
-                        heading(dayLabel(day, now), doneLabel(days[day]!)),
-                        for (final done in finishedThen) item(done),
-                      ],
-                      if (outstanding.isNotEmpty) ...[
-                        heading('Outstanding', '${outstanding.length}'),
-                        for (final open in outstanding)
-                          item(open, added: dayLabel(dayOf(open), now)),
-                      ],
-                    ],
                   ),
                 ),
-              ),
-              Positioned(
-                right: Space.m,
-                bottom: Space.m,
-                child: IgnorePointer(
-                  ignoring: _pinned,
-                  child: AnimatedOpacity(
-                    opacity: _pinned ? 0 : 1,
-                    duration: Motion.fast,
-                    curve: Curves.easeOut,
-                    child: _LatestButton(onTap: _toLatest),
+                Positioned(
+                  right: Space.m,
+                  bottom: Space.m,
+                  child: IgnorePointer(
+                    ignoring: _pinned,
+                    child: AnimatedOpacity(
+                      opacity: _pinned ? 0 : 1,
+                      duration: Motion.fast,
+                      curve: Curves.easeOut,
+                      child: _LatestButton(onTap: _toLatest),
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -605,6 +667,497 @@ class _Progress extends StatelessWidget {
   }
 }
 
+/// The goal an item serves, on its line: "Goal: Get the Android app to
+/// a…", its words cut at a word to fit beside the rest.
+String goalLine(String goal) {
+  const most = 28;
+  final words = goal.trim();
+  if (words.length <= most) return 'Goal: $words';
+  // Cut at the last whole word that fits.
+  final cut = words.substring(0, most);
+  final space = cut.lastIndexOf(' ');
+  return 'Goal: ${(space > 0 ? cut.substring(0, space) : cut).trimRight()}…';
+}
+
+/// How far [goal] has come: the items that serve it, done over all but
+/// dropped ones ("2 of 5 items done"), or "No items yet".
+String goalProgress(Goal goal, List<ChecklistItem> items) {
+  final serving = [
+    for (final item in items)
+      if (item.goal == goal.id &&
+          item.status != ChecklistStatus.CHECKLIST_STATUS_DROPPED)
+        item,
+  ];
+  if (serving.isEmpty) return 'No items yet';
+  final done = serving
+      .where((item) => item.status == ChecklistStatus.CHECKLIST_STATUS_DONE)
+      .length;
+  return '$done of ${serving.length} ${serving.length == 1 ? 'item' : 'items'} done';
+}
+
+bool _finishedGoal(Goal goal) =>
+    goal.status == ChecklistStatus.CHECKLIST_STATUS_DONE ||
+    goal.status == ChecklistStatus.CHECKLIST_STATUS_DROPPED;
+
+/// The person's goals on a checklist, above its items: the open ones, then
+/// "2 finished" folding the done and dropped ones, and Add goal…. Each
+/// says how far its items have come; its ⋯ edits, finishes, drops or
+/// removes it. With none, only Add goal….
+class _Goals extends StatefulWidget {
+  const _Goals({
+    required this.checklist,
+    required this.agentId,
+    required this.store,
+  });
+
+  final Checklist checklist;
+  final String agentId;
+  final WorkspaceStore store;
+
+  @override
+  State<_Goals> createState() => _GoalsState();
+}
+
+class _GoalsState extends State<_Goals> {
+  var _showFinished = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final goals = widget.checklist.goals;
+    final open = [
+      for (final goal in goals)
+        if (!_finishedGoal(goal)) goal,
+    ];
+    final finished = [
+      for (final goal in goals)
+        if (_finishedGoal(goal)) goal,
+    ];
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint, fontWeight: FontWeight.w500);
+    Widget row(Goal goal) => _GoalRow(
+      key: ValueKey(goal.id),
+      goal: goal,
+      items: widget.checklist.items,
+      agentId: widget.agentId,
+      store: widget.store,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (goals.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Space.s,
+              Space.m,
+              Space.s,
+              Space.xs,
+            ),
+            child: Row(
+              children: [
+                Expanded(child: Text('Goals', style: caption)),
+                Text('${open.length}', style: caption),
+              ],
+            ),
+          ),
+        for (final goal in open) row(goal),
+        if (finished.isNotEmpty) ...[
+          Semantics(
+            button: true,
+            expanded: _showFinished,
+            child: Pressable(
+              onTap: () => setState(() => _showFinished = !_showFinished),
+              builder: (context, hovered) => Container(
+                constraints: BoxConstraints(
+                  minHeight: isPhoneLayout(context) ? Touch.target : 0,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.s,
+                  vertical: Space.xs,
+                ),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        '${finished.length} finished',
+                        style: TypeScale.of(context).caption.copyWith(
+                          color: hovered
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: Space.xs),
+                    Chevron(color: palette.textFaint, down: _showFinished),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (_showFinished)
+            for (final goal in finished) row(goal),
+        ],
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Space.xs,
+            Space.xs,
+            Space.xs,
+            Space.s,
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Button(
+              label: 'Add goal…',
+              onPressed: () => showModal(
+                context,
+                (context, close) =>
+                    _GoalForm(agentId: widget.agentId, close: close),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One goal: its mark, its words, how far its items have come, and its ⋯;
+/// a click opens its log.
+class _GoalRow extends StatefulWidget {
+  const _GoalRow({
+    super.key,
+    required this.goal,
+    required this.items,
+    required this.agentId,
+    required this.store,
+  });
+
+  final Goal goal;
+  final List<ChecklistItem> items;
+  final String agentId;
+  final WorkspaceStore store;
+
+  @override
+  State<_GoalRow> createState() => _GoalRowState();
+}
+
+class _GoalRowState extends State<_GoalRow> {
+  var _open = false;
+
+  Future<void> _actions() async {
+    final goal = widget.goal;
+    final finished = _finishedGoal(goal);
+    final action = await showActions<String>(
+      context,
+      title: goal.text,
+      actions: [
+        const SheetAction('Edit…', 'edit'),
+        if (finished)
+          const SheetAction('Reopen', 'reopen')
+        else ...[
+          const SheetAction('Mark done', 'done'),
+          const SheetAction('Drop', 'drop'),
+        ],
+        const SheetAction('Remove…', 'remove', destructive: true),
+      ],
+    );
+    if (!mounted || action == null) return;
+    final backend = AppScope.of(context);
+    final agentId = widget.agentId;
+    switch (action) {
+      case 'edit':
+        await showModal(
+          context,
+          (context, close) =>
+              _GoalForm(agentId: agentId, goal: goal, close: close),
+        );
+      case 'reopen':
+        fireAndLog(
+          backend.updateGoal(
+            agentId,
+            goal.id,
+            status: ChecklistStatus.CHECKLIST_STATUS_OPEN,
+          ),
+        );
+      case 'done':
+        fireAndLog(
+          backend.updateGoal(
+            agentId,
+            goal.id,
+            status: ChecklistStatus.CHECKLIST_STATUS_DONE,
+          ),
+        );
+      case 'drop':
+        fireAndLog(
+          backend.updateGoal(
+            agentId,
+            goal.id,
+            status: ChecklistStatus.CHECKLIST_STATUS_DROPPED,
+          ),
+        );
+      case 'remove':
+        final sure = await showActions<bool>(
+          context,
+          title: 'Remove this goal?',
+          message: 'Its items stay on the checklist.',
+          actions: const [SheetAction('Remove', true, destructive: true)],
+        );
+        if (sure == true) {
+          fireAndLog(backend.updateGoal(agentId, goal.id, remove: true));
+        }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final goal = widget.goal;
+    final finished = _finishedGoal(goal);
+    final phone = isPhoneLayout(context);
+    return Semantics(
+      container: true,
+      expanded: goal.log.isEmpty ? null : _open,
+      child: Pressable(
+        onTap: goal.log.isEmpty ? null : () => setState(() => _open = !_open),
+        builder: (context, hovered) => Container(
+          constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
+          padding: const EdgeInsets.fromLTRB(
+            Space.s,
+            Space.s - 2,
+            Space.xs,
+            Space.s - 2,
+          ),
+          decoration: BoxDecoration(
+            color: hovered && goal.log.isNotEmpty ? palette.hover : null,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2.5),
+                child: StatusMark(status: goal.status),
+              ),
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      goal.text,
+                      style: TypeScale.of(context).body.copyWith(
+                        color: finished ? palette.textMuted : palette.text,
+                        decoration:
+                            goal.status ==
+                                ChecklistStatus.CHECKLIST_STATUS_DROPPED
+                            ? TextDecoration.lineThrough
+                            : null,
+                        decorationColor: palette.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            goalProgress(goal, widget.items),
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textMuted),
+                          ),
+                        ),
+                        if (goal.log.isNotEmpty) ...[
+                          const SizedBox(width: Space.s),
+                          Chevron(color: palette.textFaint, down: _open),
+                        ],
+                      ],
+                    ),
+                    if (_open) ...[
+                      const SizedBox(height: Space.s),
+                      for (final update in goal.log)
+                        _LogLine(update: update, store: widget.store),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: Space.xs),
+              GlyphButton(
+                label: 'More for ${goal.text}',
+                active: false,
+                onTap: _actions,
+                glyph: (color) => MoreGlyph(color: color),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Adding a goal, in the person's words, or changing one's words.
+class _GoalForm extends StatefulWidget {
+  const _GoalForm({required this.agentId, required this.close, this.goal});
+
+  final String agentId;
+  final VoidCallback close;
+
+  /// The goal to change; null adds one.
+  final Goal? goal;
+
+  @override
+  State<_GoalForm> createState() => _GoalFormState();
+}
+
+class _GoalFormState extends State<_GoalForm> {
+  late final _text = TextEditingController(text: widget.goal?.text ?? '');
+  var _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final text = _text.text.trim();
+    if (_saving || text.isEmpty) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final backend = AppScope.of(context);
+    final goal = widget.goal;
+    try {
+      if (goal == null) {
+        await backend.addGoal(widget.agentId, text);
+      } else if (text != goal.text) {
+        await backend.updateGoal(widget.agentId, goal.id, text: text);
+      }
+      widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = failure.message;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FormFrame(
+    title: widget.goal == null ? 'Add a goal' : 'Edit goal',
+    error: _error,
+    submitLabel: widget.goal == null ? 'Add' : 'Save',
+    onSubmit: _saving ? null : _save,
+    onCancel: widget.close,
+    fields: [
+      Field(
+        label: 'Goal',
+        note:
+            'In your words, such as: Get the Android app to a link I can '
+            'share.',
+        child: TextField(
+          controller: _text,
+          autofocus: true,
+          placeholder: 'What do you want done?',
+          semanticsLabel: 'Goal',
+          kind: InputKind.text,
+          onSubmitted: (_) => _save(),
+        ),
+      ),
+    ],
+  );
+}
+
+/// How long something has gone on, in the app's units (formatAge's,
+/// without "ago"): "under a minute", "40 min", "3 h", "1 day", "2 days".
+String blockedFor(Duration duration) {
+  if (duration.inMinutes < 1) return 'under a minute';
+  if (duration.inHours < 1) return '${duration.inMinutes} min';
+  if (duration.inDays < 1) return '${duration.inHours} h';
+  return duration.inDays == 1 ? '1 day' : '${duration.inDays} days';
+}
+
+/// What a blocked item waits on (ChecklistItem.blocked_on): "Blocked on
+/// the CI queue"; on the person with no question filed by its owning
+/// agent, in signal, "Blocked on you for 2 days · not asked yet"; with one,
+/// "Blocked on you · See question", which opens [agentId]'s conversation at
+/// the card waiting there.
+class _BlockedOn extends StatelessWidget {
+  const _BlockedOn({
+    required this.item,
+    required this.agentId,
+    required this.now,
+  });
+
+  final ChecklistItem item;
+  final String agentId;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final caption = TypeScale.of(context).caption;
+    if (item.blockedOn != 'person') {
+      return Text(
+        'Blocked on ${item.blockedOn}',
+        style: caption.copyWith(color: palette.textMuted),
+      );
+    }
+    final since = item.blockedSinceMs.toInt();
+    final waited = since == 0
+        ? null
+        : blockedFor(
+            now.difference(DateTime.fromMillisecondsSinceEpoch(since)),
+          );
+    final lead = Text(
+      'Blocked on you',
+      style: caption.copyWith(color: palette.textMuted),
+    );
+    if (!item.hasPendingAsk) {
+      return Text(
+        waited == null
+            ? 'Blocked on you · not asked yet'
+            : 'Blocked on you for $waited · not asked yet',
+        style: caption.copyWith(color: palette.signal),
+      );
+    }
+    final backend = AppScope.of(context);
+    final agent = backend.workspace.agent(agentId);
+    final waiting = agent?.waitingSeqs.firstOrNull;
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        lead,
+        Text(' · ', style: caption.copyWith(color: palette.textMuted)),
+        Semantics(
+          link: true,
+          child: Pressable(
+            onTap: waiting == null
+                ? null
+                : () => fireAndLog(() async {
+                    await backend.selectAgent(agentId);
+                    backend.reveal.reachSeq(agentId, waiting.toInt());
+                  }()),
+            builder: (context, hovered) => Text(
+              'See question',
+              style: caption.copyWith(
+                color: hovered ? palette.text : palette.textMuted,
+                decoration: TextDecoration.underline,
+                decorationColor: hovered ? palette.text : palette.textMuted,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// A small round button with a down arrow, back to the latest.
 class _LatestButton extends StatelessWidget {
   const _LatestButton({required this.onTap});
@@ -641,10 +1194,26 @@ class _LatestButton extends StatelessWidget {
 }
 
 class _Item extends StatefulWidget {
-  const _Item({required this.item, required this.store, this.added});
+  const _Item({
+    required this.item,
+    required this.store,
+    required this.now,
+    this.added,
+    this.agentId = '',
+    this.goal,
+  });
 
   final ChecklistItem item;
   final WorkspaceStore store;
+
+  /// The words of the goal it serves, if any.
+  final String? goal;
+
+  /// Whose checklist it is: an item's owning agent when it has no owner.
+  final String agentId;
+
+  /// What "now" is, for how long it has been blocked.
+  final DateTime now;
 
   /// The day it was added, shown when it isn't under that day's heading.
   final String? added;
@@ -705,7 +1274,21 @@ class _ItemState extends State<_Item> {
                         decorationColor: palette.textMuted,
                       ),
                     ),
-                    // What a blocked item waits on.
+                    // What a blocked item waits on: on the person, for how
+                    // long and whether they were asked; else the blocker.
+                    if (item.status ==
+                            ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
+                        item.blockedOn.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: _BlockedOn(
+                          item: item,
+                          agentId: item.owner.isEmpty
+                              ? widget.agentId
+                              : item.owner,
+                          now: widget.now,
+                        ),
+                      ),
                     if (item.status ==
                             ChecklistStatus.CHECKLIST_STATUS_BLOCKED &&
                         item.note.isNotEmpty)
@@ -768,6 +1351,12 @@ class _ItemState extends State<_Item> {
                               style: TypeScale.of(context).caption
                                   .copyWith(color: palette.textFaint),
                             ),
+                          if (widget.goal case final goal?)
+                            Text(
+                              goalLine(goal),
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textFaint),
+                            ),
                           if (item.log.isNotEmpty)
                             Chevron(color: palette.textFaint, down: _open),
                         ],
@@ -821,6 +1410,18 @@ class _ItemState extends State<_Item> {
                             Flexible(
                               child: Text(
                                 widget.added!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              ),
+                            ),
+                          ],
+                          if (widget.goal case final goal?) ...[
+                            const SizedBox(width: Space.s),
+                            Flexible(
+                              child: Text(
+                                goalLine(goal),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TypeScale.of(context).caption

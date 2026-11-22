@@ -36,8 +36,16 @@
 #   --receive     move a Claktory here over the network (#217): install the
 #                 release held, then run `factoryd receive`, which shows the
 #                 code to paste into the old computer's Claktory and waits;
-#                 once the move is in, start Claktory. Same constraints as
-#                 --import.
+#                 once the move is in, start Claktory. Not with --app-only.
+#                 With --json, for an agent over ssh: receive's own JSON
+#                 lines come through as they happen ({"event":"code"…},
+#                 "progress", "confirm"), and the person's yes or no about
+#                 the digits is read from this script's stdin, so it must not
+#                 be the script itself: run it as
+#                   bash -c "$(curl -fsSL <channel>/install.sh)" -- --receive --json
+#                 The last line is {"ok":…}: the installer's, once Claktory
+#                 runs with the move in, or receive's own when the move
+#                 stopped (exit 3 refused, 1 failed, 130 stopped).
 #   FACTORY_UPDATE_URL=<manifest url>  another channel, such as a file:// one
 #   install-online.sh --download-only DIR   only download and check the
 #                                           release, into DIR/<version>
@@ -51,6 +59,10 @@ MANIFEST_URL=""
 
 JSON=false
 YES=false
+# Piped into bash (curl … | bash), the script is its stdin: nothing else
+# can be read from there.
+SCRIPT_ON_STDIN=false
+[[ -n "${BASH_SOURCE[0]:-}" || -n "${BASH_EXECUTION_STRING:-}" ]] || SCRIPT_ON_STDIN=true
 
 # A string as JSON: quoted, with quotes, backslashes and control characters
 # escaped.
@@ -137,10 +149,13 @@ main() {
     YES=true
   fi
   if $receive; then
-    $JSON && stop usage 3 "--receive waits in the terminal while the move comes in: no --json. An agent runs factoryd receive itself."
     $app_only && stop usage 3 "--receive brings a whole Claktory, not only the app: no --app-only."
     [[ -z "$download_only" ]] || stop usage 3 "--receive and --download-only don't mix."
-    [[ -r /dev/tty ]] || refuse "--receive confirms the move's digits, which needs a terminal."
+    if $JSON; then
+      ! $SCRIPT_ON_STDIN || stop usage 3 "--receive --json reads the person's yes or no on stdin, and piped into bash that's the script itself: run it as bash -c \"\$(curl -fsSL <this script's address>)\" -- --receive --json"
+    else
+      [[ -r /dev/tty ]] || refuse "--receive confirms the move's digits, which needs a terminal (or --json, for an agent)."
+    fi
     YES=true
   fi
   [[ -n "$url" ]] || fail "this installer doesn't know where releases are published (set FACTORY_UPDATE_URL)."
@@ -247,6 +262,11 @@ main() {
 
   mkdir -p "$work/out"
   if [[ -n "$import_bundle" ]] || $receive; then
+    # A move brings a whole Claktory: never stop one already running here
+    # (installing held would). One held by a move that stopped carries on.
+    if [[ -x "$HOME/.factory/bin/factoryd" ]] && "$HOME/.factory/bin/factoryd" status >/dev/null 2>&1; then
+      refuse "this computer already runs a Claktory, and moving brings another here. Move to a computer without one."
+    fi
     grep -q -- --hold "$releases/$version/install-linux.sh" 2>/dev/null || grep -q -- --hold "$releases/$version/install-release.sh" 2>/dev/null ||
       refuse "Claktory $version can't move a Claktory in yet; it needs a newer release."
     local installer="install-linux.sh" installer_args=(--no-pair)
@@ -273,11 +293,29 @@ main() {
     # computer; its yes/no about the digits is read from the terminal, since
     # this script's own stdin is the curl pipe.
     local receive_status=0
-    "$HOME/.factory/bin/factoryd" receive </dev/tty >&2 || receive_status=$?
+    if $JSON; then
+      # Its events go out as they come; its own last line is kept, and
+      # given only if the move stops here (else the installer's follows).
+      set +e
+      "$HOME/.factory/bin/factoryd" receive --json | while IFS= read -r line; do
+        case "$line" in
+          '{"ok":'*) printf '%s\n' "$line" >"$work/receive-end" ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done
+      receive_status="${PIPESTATUS[0]}"
+      set -e
+      if ((receive_status != 0)); then
+        if [[ -s "$work/receive-end" ]]; then cat "$work/receive-end"; else printf '{"ok":false,"error":"receive_failed","message":"the move didn'"'"'t finish."}\n'; fi
+        exit "$receive_status"
+      fi
+    else
+      "$HOME/.factory/bin/factoryd" receive </dev/tty >&2 || receive_status=$?
+    fi
     if ((receive_status == 130)); then
       stop receive_stopped 130 "Stopped before the move finished. Claktory stays installed but not started; run this same command again to carry on."
     elif ((receive_status == 3)); then
-      stop receive_refused 3 "the move was refused; see above." --said
+      stop receive_refused 3 "the move didn't go ahead (refused or called off; see above). Nothing changed here: Claktory stays installed but not started, and running this same command again starts over with a new code."
     elif ((receive_status != 0)); then
       stop receive_failed 1 "the move didn't finish; see above. Run this same command again to carry on where it stopped."
     fi

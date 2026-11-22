@@ -24,9 +24,12 @@ pub(crate) mod devices;
 pub(crate) mod highlight;
 pub(crate) mod memory;
 pub(crate) mod monitors;
+pub(crate) mod moving;
 pub(crate) mod nudge;
+pub(crate) mod pipes;
 pub(crate) mod resources;
 pub(crate) mod secrets;
+pub(crate) mod swarm;
 pub(crate) mod tasks;
 pub(crate) mod tree;
 pub(crate) mod viewer;
@@ -47,6 +50,9 @@ pub enum OptionKind {
     Switch,
     /// A list of agent ids.
     Agents,
+    /// One of a list: each choice's value (kept in config.json) and label,
+    /// in the order shown, and the value in effect until someone chooses.
+    Choice { choices: &'static [(&'static str, &'static str)], default: &'static str },
 }
 
 pub struct OptionSpec {
@@ -205,7 +211,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 15] = [
+pub(crate) const ALL: [&dyn Extension; 18] = [
     &agents::Agents,
     &ask::Ask,
     &checklist::Checklist,
@@ -215,8 +221,11 @@ pub(crate) const ALL: [&dyn Extension; 15] = [
     &highlight::Highlight,
     &memory::Memory,
     &monitors::Monitors,
+    &moving::Move,
+    &pipes::Pipes,
     &resources::Resources,
     &secrets::Secrets,
+    &swarm::Swarm,
     &tasks::Tasks,
     &tree::Tree,
     &viewer::Viewer,
@@ -337,6 +346,14 @@ pub(crate) fn switch(agent: &AgentConfig, extension: &str, option: &str) -> bool
     settings(agent, extension).and_then(|settings| settings.get(option)).and_then(Value::as_bool).unwrap_or(default)
 }
 
+/// A choice's effective value: as written if it's one of the choices, else
+/// its default.
+pub(crate) fn choice(agent: &AgentConfig, extension: &str, option: &str) -> &'static str {
+    let Some(OptionKind::Choice { choices, default }) = option_spec(extension, option).map(|spec| spec.kind) else { return "" };
+    let written = settings(agent, extension).and_then(|settings| settings.get(option)).and_then(Value::as_str);
+    choices.iter().find(|(value, _)| Some(*value) == written).map_or(default, |(value, _)| value)
+}
+
 /// An agent list's ids, as written (ids of agents that are gone included).
 pub(crate) fn agent_list(agent: &AgentConfig, extension: &str, option: &str) -> Vec<String> {
     let listed = settings(agent, extension).and_then(|settings| settings.get(option)).and_then(Value::as_array);
@@ -351,12 +368,19 @@ pub(crate) fn validate(agent: &AgentConfig) -> Result<(), Invalid> {
             let fine = match (key.as_str(), option_spec(id, key).map(|spec| spec.kind)) {
                 ("enabled", _) | (_, Some(OptionKind::Switch)) => value.is_boolean(),
                 (_, Some(OptionKind::Agents)) => value.as_array().is_some_and(|ids| ids.iter().all(Value::is_string)),
+                (_, Some(OptionKind::Choice { choices, .. })) => {
+                    value.as_str().is_some_and(|value| choices.iter().any(|(choice, _)| *choice == value))
+                }
                 (_, None) => true,
             };
             if !fine {
                 let expected = match option_spec(id, key).map(|spec| spec.kind) {
-                    Some(OptionKind::Agents) => "a list of agent ids",
-                    _ => "true or false",
+                    Some(OptionKind::Agents) => "a list of agent ids".to_owned(),
+                    Some(OptionKind::Choice { choices, .. }) => {
+                        let values: Vec<String> = choices.iter().map(|(value, _)| format!("\"{value}\"")).collect();
+                        format!("one of {}", values.join(", "))
+                    }
+                    _ => "true or false".to_owned(),
                 };
                 return Err(Invalid::BadExtensionSetting { agent: agent.id.clone(), setting: format!("{}.{key}", unit.key()), expected });
             }
@@ -405,9 +429,16 @@ pub(crate) fn catalog() -> Vec<v1::Extension> {
         }
         let mut options = Vec::new();
         for spec in manifest.options {
-            let kind = match spec.kind {
-                OptionKind::Switch => v1::ExtensionOptionKind::Switch,
-                OptionKind::Agents => v1::ExtensionOptionKind::Agents,
+            let (kind, choices, default_choice) = match spec.kind {
+                OptionKind::Switch => (v1::ExtensionOptionKind::Switch, Vec::new(), String::new()),
+                OptionKind::Agents => (v1::ExtensionOptionKind::Agents, Vec::new(), String::new()),
+                OptionKind::Choice { choices, default } => {
+                    let choices = choices
+                        .iter()
+                        .map(|(value, label)| v1::OptionChoice { value: (*value).to_owned(), label: (*label).to_owned() })
+                        .collect();
+                    (v1::ExtensionOptionKind::Choice, choices, default.to_owned())
+                }
             };
             options.push(v1::ExtensionOption {
                 id: spec.id.to_owned(),
@@ -416,6 +447,8 @@ pub(crate) fn catalog() -> Vec<v1::Extension> {
                 default_value: spec.default_on,
                 kind: kind.into(),
                 includes_project: spec.includes_project,
+                choices,
+                default_choice,
             });
         }
         extensions.push(v1::Extension {
@@ -441,11 +474,14 @@ pub(crate) fn of_agent(config: &Config, agent: &AgentConfig) -> Vec<v1::AgentExt
         let mut options = std::collections::BTreeMap::new();
         for spec in manifest.options.iter().filter(|_| unit.instance.is_none()) {
             let value = match spec.kind {
-                OptionKind::Switch => v1::OptionValue { on: switch(agent, manifest.id, spec.id), agent_ids: Vec::new() },
+                OptionKind::Switch => v1::OptionValue { on: switch(agent, manifest.id, spec.id), ..Default::default() },
                 OptionKind::Agents => {
                     let mut ids = agent_list(agent, manifest.id, spec.id);
                     ids.retain(|id| config.agent(id).is_some());
-                    v1::OptionValue { on: false, agent_ids: ids }
+                    v1::OptionValue { agent_ids: ids, ..Default::default() }
+                }
+                OptionKind::Choice { .. } => {
+                    v1::OptionValue { choice: choice(agent, manifest.id, spec.id).to_owned(), ..Default::default() }
                 }
             };
             options.insert(spec.id.to_owned(), value);
@@ -479,6 +515,19 @@ pub(crate) fn apply_change(config: &mut Config, agent_id: &str, change: &v1::Ext
         }
         list = Some(value.agent_ids);
     }
+    if let Some(spec) = spec
+        && let OptionKind::Choice { choices, .. } = spec.kind
+    {
+        let chosen = change.value.as_ref().map(|value| value.choice.as_str()).unwrap_or_default();
+        if !choices.iter().any(|(value, _)| *value == chosen) {
+            let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
+            return Err(RequestError::Invalid(Invalid::BadExtensionSetting {
+                agent: agent_id.to_owned(),
+                setting: format!("{}.{}", unit.key(), spec.id),
+                expected: format!("one of {}", values.join(", ")),
+            }));
+        }
+    }
     let Some(agent) = config.agent_mut(agent_id) else { return Err(RequestError::UnknownAgent(agent_id.to_owned())) };
     let default = unit.default_for(agent);
     let settings = agent.extensions.entry(unit.key().to_owned()).or_default();
@@ -495,6 +544,11 @@ pub(crate) fn apply_change(config: &mut Config, agent_id: &str, change: &v1::Ext
                 let ids = list.unwrap_or_default();
                 let empty = ids.is_empty();
                 set(settings, spec.id, Value::Array(ids.into_iter().map(Value::String).collect()), empty);
+            }
+            OptionKind::Choice { default, .. } => {
+                let chosen = change.value.as_ref().map(|value| value.choice.clone()).unwrap_or_default();
+                let is_default = chosen == default;
+                set(settings, spec.id, Value::String(chosen), is_default);
             }
         }
     }

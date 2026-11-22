@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use super::{
     AccessSpec, BoxFuture, Choice, Choices, Control, Derive, Derived, ExportMeta, FlowKind, Http, Inspected, Problem, Recipe, Spec, Start,
-    Variable,
+    Variable, setting as set,
 };
 use crate::transcript::now_ms;
 
@@ -142,7 +142,6 @@ impl Cloudflare {
     /// (its sign-in at `<base>/oauth2/…`, its API at `<base>/client/v4`), to
     /// try the whole flow without Cloudflare.
     pub(crate) fn built_in() -> Option<Cloudflare> {
-        let set = |name: &str| std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
         let dev = std::env::args().any(|arg| arg == "--dev");
         let stand_in = set("FACTORY_CLOUDFLARE_BASE").filter(|_| dev).map(|base| base.trim_end_matches('/').to_owned());
         let client_id = set("FACTORY_CLOUDFLARE_CLIENT_ID").unwrap_or_else(|| CLIENT_ID.to_owned());

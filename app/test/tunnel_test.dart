@@ -128,6 +128,30 @@ class FakeTunnels implements Tunnels {
   }) async => (device: 'b' * 64, backend: 'a' * 64);
 }
 
+/// Tunnels whose open finishes only when [opens] completes.
+class _SlowTunnels extends FakeTunnels {
+  _SlowTunnels(super.tunnel, this.opens);
+
+  final Future<void> opens;
+
+  @override
+  Future<Tunnel> open({
+    required String deviceKey,
+    required String endpointId,
+    required List<String> relays,
+    List<String> addresses = const [],
+  }) async {
+    final tunnel = await super.open(
+      deviceKey: deviceKey,
+      endpointId: endpointId,
+      relays: relays,
+      addresses: addresses,
+    );
+    await opens;
+    return tunnel;
+  }
+}
+
 Backend backendWith(Tunnels tunnels, {RemoteFactory? local}) => Backend(
   workspace: WorkspaceStore(),
   transcript: TranscriptStore(),
@@ -226,6 +250,26 @@ void main() {
     expect(storage.kept.keys.containsKey(target.code), isFalse);
   });
 
+  test('a tunnel that opens after its connection closed is closed too, '
+      'never left on the relay as this device', () async {
+    final opens = Completer<void>();
+    final tunnel = FakeTunnel(1);
+    final tunnels = _SlowTunnels(tunnel, opens.future);
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await pumpEventQueue();
+    expect(tunnels.opened, hasLength(1));
+    await backend.close();
+    expect(tunnel.closed, isFalse);
+    opens.complete();
+    await pumpEventQueue();
+    expect(tunnel.closed, isTrue);
+    expect(tunnels.opened, hasLength(1));
+    // Quietly: a connection being closed shows no failure.
+    expect(backend.tunnel.value, isNull);
+  });
+
   test('a Factory with an endpoint id is reached only through its tunnel: '
       'plain ws to the tunnel\'s port and path, the token in Hello', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -248,6 +292,11 @@ void main() {
 
     final message = await hello.future.timeout(const Duration(seconds: 5));
     expect(message.hello.token, _token);
+    // The system it runs on, for the check-ins' counts (tests run as
+    // Android).
+    expect(message.hello.platform, 'android');
+    // Its release version; an unstamped build says so.
+    expect(message.hello.clientVersion, 'dev');
     // At the tunnel's own path: only that is forwarded.
     expect(asked, [tunnels.tunnel.requestPath]);
     final (key, endpoint, relays) = tunnels.opened.single;

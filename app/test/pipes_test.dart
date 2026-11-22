@@ -106,9 +106,13 @@ Finder _labeled(String label) => find.byWidgetPredicate(
 );
 
 void main() {
-  Future<Harness> show(WidgetTester tester, Workspace snapshot) async {
+  Future<Harness> show(
+    WidgetTester tester,
+    Workspace snapshot, {
+    Size size = const Size(1200, 900),
+  }) async {
     final harness = Harness(snapshot);
-    await harness.show(tester);
+    await harness.show(tester, size: size);
     await settle(tester);
     return harness;
   }
@@ -207,6 +211,57 @@ void main() {
     expect(find.textContaining('Waiting for you to send it'), findsNothing);
   });
 
+  testWidgets('a message held on its way in says why, and Let in lets it '
+      'in', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([_pipe()], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'Can you send the deck?',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+            name: 'Bo',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING,
+          )..note = 'Waiting for you: let it in, or discard it.',
+          _message(
+            2,
+            'And the logo',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+            name: 'Bo',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING,
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    // The note says it all; with none, the limits held it.
+    expect(
+      find.textContaining(
+        RegExp(r'^Waiting for you: let it in, or discard it\. · '),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        RegExp('^Over this pipe’s limits: let it in, or discard it\\. · '),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Held:'), findsNothing);
+
+    // The older message's (the list builds the newest first).
+    await tester.tap(find.text('Let in').last);
+    await settle(tester);
+    final decided = harness.last.decidePipeMessage;
+    expect(decided.seq.toInt(), 1);
+    expect(decided.allow, isTrue);
+  });
+
   testWidgets("on a phone, the pipe's header leads with Menu", (tester) async {
     final harness = Harness(_workspace([_pipe()], selected: 'pipe1'));
     var menus = 0;
@@ -264,7 +319,8 @@ void main() {
     final harness = await show(
       tester,
       _workspace([
-        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821')
+          ..suggestedLiaisonName = 'Kai',
       ], selected: 'pipe1'),
     );
 
@@ -288,7 +344,100 @@ void main() {
     expect(approve.approve, isTrue);
     expect(approve.memberIds, ['omar']);
     expect(approve.leadId, '');
-    expect(approve.liaisonName, 'Liaison');
+    // Claktory's suggestion, prefilled.
+    expect(approve.liaisonName, 'Kai');
+    // Both reviews are off for a new pipe unless the person turns them on.
+    expect(approve.hasReviewIncoming(), isTrue);
+    expect(approve.reviewIncoming, isFalse);
+    expect(approve.hasReviewOutgoing(), isTrue);
+    expect(approve.reviewOutgoing, isFalse);
+  });
+
+  testWidgets('Review incoming, turned on at approval, goes with it', (
+    tester,
+  ) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+      ], selected: 'pipe1'),
+    );
+    expect(
+      find.text(
+        'Messages from the other side reach your agents as they arrive.',
+      ),
+      findsOneWidget,
+    );
+    final incoming = find.text('Review messages before your agents read them');
+    await tester.ensureVisible(incoming);
+    await tester.tap(incoming);
+    await tester.pump();
+    expect(
+      find.text(
+        'Each message from the other side waits here until you let it in.',
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Approve'));
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    final approve = harness.last.approvePipe;
+    expect(approve.reviewIncoming, isTrue);
+    expect(approve.reviewOutgoing, isFalse);
+  });
+
+  testWidgets("a join that can't reach the other side says why, since when, "
+      'and what to check', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(state: PipeState.PIPE_STATE_JOINING)
+          ..offlineReason = 'no answer in time'
+          ..offlineSinceMs = Int64(1000),
+      ], selected: 'pipe1'),
+    );
+    expect(find.text('Can’t reach Ana yet'), findsOneWidget);
+    expect(
+      find.textContaining(
+        RegExp(
+          r'^Claktory keeps trying until the code expires\. '
+          r'Last try: no answer in time\.$',
+        ),
+      ),
+      findsOneWidget,
+    );
+    // Only when the backend says it runs on a Mac.
+    expect(find.text(pipeLocalNetworkHint), findsNothing);
+    await harness.apply(
+      tester,
+      harness.backend.workspace.workspace.deepCopy()..os = 'macos',
+    );
+    await settle(tester);
+    expect(find.text(pipeLocalNetworkHint), findsOneWidget);
+  });
+
+  testWidgets('an open pipe whose other side is offline says why', (
+    tester,
+  ) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(online: false)
+          ..offlineReason = 'the connection was lost'
+          ..offlineSinceMs = Int64(1000),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+    await settle(tester);
+    expect(
+      find.textContaining(
+        RegExp(
+          r'^Ana’s Claktory has been offline since .*: the connection was '
+          r'lost\. Messages wait until it’s back\.$',
+        ),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a loop pauses a pipe; Continue resumes it', (tester) async {
@@ -313,6 +462,8 @@ void main() {
       _workspace([
         _pipe(members: ['june'], lead: 'june'),
       ], selected: 'pipe1'),
+      // Tall enough to hold the whole form, so nothing scrolls between taps.
+      size: const Size(1200, 1500),
     );
     harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
     await settle(tester);
@@ -322,7 +473,8 @@ void main() {
     await settle(tester);
     expect(find.text('Pipe settings'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Review messages before they go out'));
+    await tester.tap(find.text('Review messages before your agents read them'));
+    await tester.pump();
     await tester.tap(find.text('Review messages before they go out'));
     await tester.pump();
     await tester.ensureVisible(find.text('Save'));
@@ -332,6 +484,8 @@ void main() {
     expect(update.pipeId, 'pipe1');
     expect(update.hasReviewOutgoing(), isTrue);
     expect(update.reviewOutgoing, isFalse);
+    expect(update.hasReviewIncoming(), isTrue);
+    expect(update.reviewIncoming, isTrue);
     expect(update.hasName(), isFalse);
     expect(update.hasMembers(), isFalse);
     expect(update.hasLimits(), isFalse);
@@ -461,6 +615,34 @@ void main() {
     expect(pads.single.rect.right, box.right - mapCell);
     expect(pads.single.rect.top, greaterThan(box.top));
     expect(pads.single.rect.left, greaterThan(box.center.dx));
+
+    // A pipe's liaison sits on its pad, which grows to hold its face.
+    final kai = _agent('kai', 'Kai')..pipeId = 'pipe1';
+    final withKai = portalPads(layout, [_pipe()], liaisons: {'pipe1': kai});
+    expect(withKai.single.liaison?.id, 'kai');
+    expect(withKai.single.rect.width, greaterThan(pads.single.rect.width));
+  });
+
+  test('a liaison leaves the Map as a chip, with its lines', () {
+    final map = ClaktoryMap(
+      nodes: [
+        MapNode(id: 'agent:june', kind: MapNodeKind.MAP_NODE_KIND_AGENT),
+        MapNode(id: 'agent:kai', kind: MapNodeKind.MAP_NODE_KIND_AGENT),
+      ],
+      edges: [
+        MapEdge(fromId: 'agent:june', toId: 'agent:kai'),
+        MapEdge(fromId: 'agent:june', toId: 'secret:aws'),
+      ],
+    );
+    final without = mapWithout(map, {'agent:kai'});
+    expect([for (final node in without.nodes) node.id], ['agent:june']);
+    expect([for (final edge in without.edges) edge.toId], ['secret:aws']);
+    expect(identical(mapWithout(map, {}), map), isTrue);
+
+    final snapshot = _workspace([_pipe()])
+      ..agents.add(_agent('kai', 'Kai')..pipeId = 'pipe1')
+      ..agents.add(_agent('lost', 'Lost')..pipeId = 'gone');
+    expect(pipeLiaisons(snapshot).keys, ['pipe1']);
   });
 
   group('limited to the pipe', () {

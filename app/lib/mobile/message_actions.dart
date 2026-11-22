@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 import '../identity.dart';
 import '../markdown.dart';
 import '../selection.dart';
+import '../transcript.dart' show AgentTints;
 import 'haptics.dart';
 import 'metrics.dart';
 import 'presentation.dart';
@@ -31,10 +32,16 @@ class MessageActions extends StatelessWidget {
     required this.text,
     required this.child,
     this.onReply,
+    this.markdown = true,
   });
 
   /// The message's words, as sent (Markdown for an agent's).
   final String text;
+
+  /// Whether [text] is Markdown, shown rendered (an agent's reply or
+  /// message); false for the person's own, shown as typed. Copy gives what
+  /// shows: Markdown's words without its markers.
+  final bool markdown;
 
   /// Quotes the message into the message box (Drafts.reply); null where
   /// there's no box to reply in.
@@ -55,9 +62,10 @@ class MessageActions extends StatelessWidget {
       container: true,
       customSemanticsActions: {
         const CustomSemanticsAction(label: 'Reply'): ?onReply,
-        const CustomSemanticsAction(label: 'Copy'): () => copyMessage(text),
+        const CustomSemanticsAction(label: 'Copy'): () =>
+            copyMessage(_copied(context)),
         const CustomSemanticsAction(label: 'Select text'): () =>
-            showMessageText(context, text),
+            showMessageText(context, text, markdown: markdown),
       },
       child: selecting == null
           ? hold(false, child)
@@ -68,6 +76,20 @@ class MessageActions extends StatelessWidget {
             ),
     );
   }
+
+  /// What Copy puts on the clipboard: what a selection of the whole
+  /// message copies, an @mention as its agent's name.
+  String _copied(BuildContext context) => markdown
+      ? markdownToPlain(
+          text,
+          agents:
+              context
+                  .getInheritedWidgetOfExactType<AgentTints>()
+                  ?.agents
+                  .values ??
+              const [],
+        )
+      : text;
 
   Future<void> _menu(BuildContext context) async {
     unawaited(Haptics.impact());
@@ -84,9 +106,9 @@ class MessageActions extends StatelessWidget {
       case _Action.reply:
         onReply?.call();
       case _Action.copy:
-        await copyMessage(text);
+        await copyMessage(_copied(context));
       case _Action.select:
-        await showMessageText(context, text);
+        await showMessageText(context, text, markdown: markdown);
       case null:
     }
   }
@@ -121,7 +143,11 @@ Future<void> copyMessage(String text) async {
 
 /// A message on its own in a tall sheet, its words selectable with the
 /// iPhone's handles and menu.
-Future<void> showMessageText(BuildContext context, String text) => showPanel(
+Future<void> showMessageText(
+  BuildContext context,
+  String text, {
+  bool markdown = true,
+}) => showPanel(
   context,
   title: 'Select text',
   tall: true,
@@ -131,7 +157,7 @@ Future<void> showMessageText(BuildContext context, String text) => showPanel(
       child: DefaultTextStyle.merge(
         style: TypeScale.of(context).body
             .copyWith(color: Palette.of(context).text),
-        child: Markdown(text),
+        child: markdown ? Markdown(text) : Text(text),
       ),
     ),
   ),

@@ -21,6 +21,10 @@ use crate::factory::Factory;
 /// has reset it too, in ms (15 s; tests make it shorter).
 static MARGIN_MS: AtomicU64 = AtomicU64::new(15_000);
 
+/// How long an agent waits for the vault to open before Needs you offers
+/// to open it, in ms (a minute; tests make it shorter).
+static LOCKED_WAIT_MS: AtomicU64 = AtomicU64::new(60_000);
+
 /// The shortest wait, whatever the reset time says, so a clock that
 /// disagrees with the provider's never makes it ask over and over (or the
 /// margin, when that's shorter).
@@ -76,22 +80,44 @@ impl Factory {
         let changed = changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
+        // A chat waits as an agent does, as "The chat".
+        let model_and_name = {
+            let inner = self.lock();
+            inner.config.agent(id).map(|agent| (agent.model.clone(), agent.name.clone())).or_else(|| self.chats.model_and_name(id))
+        };
+        let Some((model, name)) = model_and_name else { return false };
+        let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider).to_owned();
+        // The sign-ins are locked away with the person's secrets: it waits
+        // for them to open (`vault::signins`).
+        let locked = until.is_none() && self.models.sign_ins_locked(&provider).await;
         {
             let mut inner = self.lock();
-            // A chat waits as an agent does, as "The chat".
-            let model_and_name =
-                inner.config.agent(id).map(|agent| (agent.model.clone(), agent.name.clone())).or_else(|| self.chats.model_and_name(id));
-            let noun = model_and_name.map(|(model, agent)| {
-                let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider);
-                let name = inner.providers.iter().find(|known| known.id == provider).map_or(provider, |known| known.name.as_str());
-                (factory_agent::accounts::account_noun(provider, name), agent)
-            });
-            let Some((noun, name)) = noun else { return false };
+            let provider_name =
+                inner.providers.iter().find(|known| known.id == provider).map_or(provider.clone(), |known| known.name.clone());
+            let noun = factory_agent::accounts::account_noun(&provider, &provider_name);
             let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) else { return false };
             if runtime.idle {
                 return false;
             }
+            if !locked {
+                runtime.locked_since = 0;
+            } else if runtime.locked_since == 0 {
+                runtime.locked_since = crate::transcript::now_ms();
+                // After a minute, Needs you offers to open the vault
+                // (VaultState.agents_waiting).
+                let factory = Arc::downgrade(&self);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(LOCKED_WAIT_MS.load(Ordering::Relaxed))).await;
+                    if let Some(factory) = factory.upgrade() {
+                        factory.broadcast_workspace(&factory.lock());
+                    }
+                });
+            }
             let (text, notice) = match until {
+                None if locked => (
+                    format!("Waiting to use {provider_name} until your secrets unlock"),
+                    format!("{why} {name} carries on by itself once they're unlocked."),
+                ),
                 Some(at) => (
                     format!(
                         "Waiting for your {noun} usage to reset at {}",
@@ -138,6 +164,24 @@ impl Factory {
     /// every Factory in this process; tests make it shorter.
     pub fn set_usage_wait_margin(&self, margin: Duration) {
         MARGIN_MS.store(u64::try_from(margin.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// How long an agent waits for the vault to open before Needs you
+    /// offers to open it (a minute), for every Factory in this process;
+    /// tests make it shorter.
+    pub fn set_locked_wait(&self, wait: Duration) {
+        LOCKED_WAIT_MS.store(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// Whether an agent or chat has waited for the vault to open, to use
+    /// sign-ins kept in it, for a minute or more (VaultState.agents_waiting).
+    pub(crate) fn agents_waiting_for_vault(&self, inner: &crate::factory::Inner) -> bool {
+        let since = crate::transcript::now_ms() - i64::try_from(LOCKED_WAIT_MS.load(Ordering::Relaxed)).unwrap_or(i64::MAX);
+        !self.vault.is_open()
+            && inner
+                .agents
+                .values()
+                .any(|runtime| runtime.usage_wait.is_some() && runtime.locked_since != 0 && runtime.locked_since <= since)
     }
 
     /// Something changed that may give waiting agents an account to use:

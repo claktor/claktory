@@ -168,13 +168,14 @@ mod tests {
     fn the_profile_keeps_what_a_later_backend_wrote() {
         let mut config = Config::default();
         config.user.name = "Matt".into();
-        let mut text: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        let mut text: serde_json::Value =
+            serde_json::from_str(&config.to_json(std::path::Path::new("/tmp/claktory-home")).unwrap()).unwrap();
         assert!(text["user"].get("avatar").is_none(), "not written until shuffled");
         text["user"]["avatar"] = serde_json::json!({"seed": "abc", "image": "avatar.png"});
         text["user"]["pronouns"] = serde_json::json!("he");
-        let read = Config::parse(&text.to_string()).expect("a later backend's profile reads");
+        let read = Config::parse(&text.to_string(), std::path::Path::new("/tmp/claktory-home")).expect("a later backend's profile reads");
         assert_eq!(read.user.avatar.seed, "abc");
-        let written: serde_json::Value = serde_json::from_str(&read.to_json().unwrap()).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&read.to_json(std::path::Path::new("/tmp/claktory-home")).unwrap()).unwrap();
         assert_eq!(written["user"], text["user"], "and is written back as it was");
     }
 

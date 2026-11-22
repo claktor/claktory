@@ -74,6 +74,51 @@ Future<bool> Function(Uri url) openAccountPage = launchUrl;
 /// What claktory.com keeps and why, linked from the sign-in step.
 final privacyPage = Uri.parse('https://claktory.com/privacy');
 
+/// "How Claktory uses your email", a quiet link to [privacyPage]: where
+/// the person gives an email (signing a Claktory or a device in), so the
+/// privacy policy is a tap away before anything is sent. A finger's height
+/// on a phone.
+class PrivacyLink extends StatelessWidget {
+  const PrivacyLink({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final phone = isPhoneLayout(context);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Semantics(
+        link: true,
+        child: Pressable(
+          onTap: () => openAccountPage(privacyPage),
+          builder: (context, hovered) {
+            final link = Text(
+              'How Claktory uses your email',
+              style: TypeScale.of(context).caption.copyWith(
+                color: hovered ? palette.textMuted : palette.textFaint,
+                decoration: TextDecoration.underline,
+                decorationColor: hovered
+                    ? palette.textMuted
+                    : palette.textFaint,
+              ),
+            );
+            return phone
+                ? ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: Touch.target),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: 1,
+                      child: link,
+                    ),
+                  )
+                : link;
+          },
+        ),
+      ),
+    );
+  }
+}
+
 /// How long after a code is sent before another can be asked for.
 const resendAfter = Duration(seconds: 30);
 
@@ -425,7 +470,6 @@ class _SignInStepState extends State<SignInStep> {
         );
 
   Widget _emailStep(BuildContext context) {
-    final palette = Palette.of(context);
     final phone = isPhoneLayout(context);
     return ListenableBuilder(
       listenable: _email,
@@ -468,40 +512,7 @@ class _SignInStepState extends State<SignInStep> {
               ),
           ]),
           SizedBox(height: phone ? Space.s : Space.l),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Semantics(
-              link: true,
-              child: Pressable(
-                onTap: () => openAccountPage(privacyPage),
-                builder: (context, hovered) {
-                  final link = Text(
-                    'How Claktory uses your email',
-                    style: TypeScale.of(context).caption.copyWith(
-                      color: hovered ? palette.textMuted : palette.textFaint,
-                      decoration: TextDecoration.underline,
-                      decorationColor: hovered
-                          ? palette.textMuted
-                          : palette.textFaint,
-                    ),
-                  );
-                  // A finger's height on a phone.
-                  return phone
-                      ? ConstrainedBox(
-                          constraints: const BoxConstraints(
-                            minHeight: Touch.target,
-                          ),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            widthFactor: 1,
-                            child: link,
-                          ),
-                        )
-                      : link;
-                },
-              ),
-            ),
-          ),
+          const PrivacyLink(),
         ],
       ),
     );
@@ -918,8 +929,7 @@ class _AccountSettingsState extends State<AccountSettings>
           children: [
             Button(
               label: 'Delete account…',
-              onPressed: () =>
-                  openAccountPage(deleteAccountPage(account.service)),
+              onPressed: () => openDeleteAccountPage(account.service),
             ),
             Expanded(
               child: Text(
@@ -982,6 +992,11 @@ Uri accountPage(String service) {
 /// confirm step, signing in first if need be.
 Uri deleteAccountPage(String service) =>
     accountPage(service).replace(path: '/account/delete');
+
+/// Opens [deleteAccountPage] for [service]: Delete account… wherever the
+/// account shows (Settings → Account, a phone's sign-in).
+Future<bool> openDeleteAccountPage(String service) =>
+    openAccountPage(deleteAccountPage(service));
 
 /// "claktory.com" for claktory.com's service, else its host.
 String accountSiteName(String service) {

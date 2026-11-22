@@ -1181,6 +1181,8 @@ async fn check_in(factory: &Arc<Factory>) {
         platform: platform(),
         counts: Some(analytics::counts(factory)),
         periods: Vec::new(),
+        setup: Some(analytics::setup(factory)),
+        devices: Some(analytics::devices(factory)),
     };
     let base = serde_json::to_string(&body).map_or(0, |json| json.len());
     body.periods = analytics::to_send(&account.lock().saved.periods, base, now_s());
@@ -1511,7 +1513,7 @@ async fn after_move(factory: &Arc<Factory>) -> bool {
         // Moved already, its answer lost (or a crash before it was kept):
         // the new pair works if the service took it.
         Err(Failure::Refused(401, _)) => {
-            let probe = CheckIn { version: crate::update::VERSION.to_owned(), platform: platform(), counts: None, periods: Vec::new() };
+            let probe = CheckIn { version: crate::update::VERSION.to_owned(), platform: platform(), ..CheckIn::default() };
             if account.signed_as::<CheckedIn>("/v1/check-in", &probe, &pair.token, &new_key).await.is_err() {
                 tracing::warn!("the account service didn't take this Claktory's new credentials after its move; it keeps the old ones");
                 done(account);

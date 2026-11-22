@@ -268,6 +268,7 @@ List<SettingsSection> settingsSectionsOf(
       glyph: lucide('monitor'),
       children: [
         const ZoomSetting(),
+        _PaneCap(workspace: workspace),
         _Highlights(workspace: workspace),
       ],
     ),
@@ -1367,6 +1368,72 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
                 ),
               ],
             ),
+          ),
+        ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
+/// The most panes agents can open beside a conversation, counting every
+/// pane but the conversation, whoever opened it; past it, an agent's show
+/// is refused. The person's own opens aren't held to it.
+class _PaneCap extends StatefulWidget {
+  const _PaneCap({required this.workspace});
+
+  final Workspace workspace;
+
+  /// The choices: the backend takes 1 to 11.
+  static const choices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+  @override
+  State<_PaneCap> createState() => _PaneCapState();
+}
+
+class _PaneCapState extends State<_PaneCap> with SettingRequests {
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final cap = widget.workspace.settings.maxOpenPanes;
+    // 0: a Claktory from before the setting, which has no limit to change.
+    if (cap == 0) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Panes agents can open',
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 120,
+                child: Select<int>(
+                  value: cap.clamp(
+                    _PaneCap.choices.first,
+                    _PaneCap.choices.last,
+                  ),
+                  options: [
+                    for (final count in _PaneCap.choices)
+                      SelectOption(count, '$count'),
+                  ],
+                  onChanged: (count) => run(
+                    () => AppScope.of(context)
+                        .updateSettings(UpdateSettings(maxOpenPanes: count)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: Space.m),
+              Expanded(
+                child: Text(
+                  'Once this many panes are open beside a conversation, '
+                  'counting Settings, the Map and files, agents can\'t show '
+                  'you more. You can always open more yourself.',
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textMuted),
+                ),
+              ),
+            ],
           ),
         ),
         failureLine(palette),

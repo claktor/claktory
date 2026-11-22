@@ -7,6 +7,7 @@ import 'package:factory_app/layout.dart' show leaves, resize;
 import 'package:factory_app/panes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -88,6 +89,7 @@ Future<Harness> _show(
   WidgetTester tester,
   _Window window, {
   ViewNode? layout,
+  ValueListenable<bool>? hold,
 }) async {
   final harness = Harness(snapshot(layout: layout ?? _three()));
   harness.backend.files.addAll({
@@ -104,6 +106,7 @@ Future<Harness> _show(
           builder: (context, _) => PaneProjection(
             project: window.project,
             focus: window.focuses.add,
+            hold: hold,
             child: PaneLayout(
               agent: store.selectedAgent!,
               chat: const ColoredBox(color: Color(0xFF808080)),
@@ -283,5 +286,68 @@ void main() {
       expect(ids, contains('v1'), reason: 'the hidden pane stays');
       expect(window.focuses.last, 'v2');
     }, variant: iPad);
+  });
+
+  testWidgets('while held (a Pencil stroke is down), no divider or header '
+      'starts a drag; one under way carries on', (tester) async {
+    final hold = ValueNotifier(true);
+    addTearDown(hold.dispose);
+    final window = _Window(least: 200);
+    final harness = await _show(tester, window, hold: hold);
+    final divider = find.byKey(const ValueKey('divider-s1-0'));
+    final width = tester.getRect(_pane('v1')).width;
+
+    Future<void> dragDivider() async {
+      final gesture = await tester.startGesture(tester.getCenter(divider));
+      for (var i = 0; i < 5; i++) {
+        await gesture.moveBy(const Offset(20, 0));
+        await tester.pump();
+      }
+      await gesture.up();
+      await settle(tester);
+    }
+
+    await dragDivider();
+    expect(tester.getRect(_pane('v1')).width, width);
+    expect(window.resizes, isEmpty);
+    // Still drawn: the divider stays.
+    expect(divider, findsOneWidget);
+
+    // The header doesn't lift either.
+    final header = await tester.startGesture(
+      tester.getCenter(find.text('main.rs')),
+    );
+    await tester.pump();
+    await header.moveBy(const Offset(-200, 0));
+    await tester.pump();
+    expect(
+      find.byType(DropPreview).evaluate().map((e) {
+        return (e.widget as DropPreview).shown;
+      }),
+      everyElement(isFalse),
+    );
+    await header.up();
+    await settle(tester);
+    expect(_sent(harness), isEmpty);
+
+    // Let go: dividers work again.
+    hold.value = false;
+    await tester.pump();
+    await dragDivider();
+    expect(window.resizes, hasLength(1));
+
+    // A drag begun before the stroke goes on through it.
+    final gesture = await tester.startGesture(tester.getCenter(divider));
+    await gesture.moveBy(const Offset(20, 0));
+    await tester.pump();
+    hold.value = true;
+    await tester.pump();
+    final during = tester.getRect(_pane('v1')).width;
+    await gesture.moveBy(const Offset(30, 0));
+    await tester.pump();
+    expect(tester.getRect(_pane('v1')).width, lessThan(during));
+    await gesture.up();
+    await settle(tester);
+    expect(window.resizes, hasLength(2));
   });
 }

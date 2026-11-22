@@ -29,6 +29,7 @@ use serde::Serialize;
 
 use crate::home::Home;
 use crate::move_bundle::{self, Checkout, Folder, Manifest, Remote, Requires, Skipped, Source, Task, Writer};
+use crate::uploads::available as free_space;
 
 /// What's fenced at `--final`: moved into `moved/` as they are.
 pub const FENCED: [&str; 4] = ["auth.json", "vault", "account", "remote"];
@@ -781,7 +782,10 @@ fn plan_folders(
         let paths =
             std::iter::once(&project["path"]).chain(project["folders"].as_array().into_iter().flatten().map(|folder| &folder["path"]));
         for path in paths.filter_map(serde_json::Value::as_str).filter(|path| !path.is_empty()) {
-            used.entry(PathBuf::from(path)).or_default().push(id.clone());
+            // Written relative, a path is Claktory's own territory (config.rs).
+            let path = PathBuf::from(path);
+            let path = if path.is_relative() { home.join(path) } else { path };
+            used.entry(path).or_default().push(id.clone());
         }
     }
     let mut skipped = Vec::new();
@@ -1021,18 +1025,6 @@ fn git_works() -> bool {
     Command::new("git").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
 }
 
-fn free_space(dir: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    // SAFETY: statvfs writes into the struct it's given, for a valid C string.
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
-        return None;
-    }
-    #[allow(clippy::unnecessary_cast)]
-    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
-}
-
 fn available_memory() -> Option<u64> {
     let mut system = sysinfo::System::new().ok()?;
     system.refresh_memory();
@@ -1041,7 +1033,9 @@ fn available_memory() -> Option<u64> {
 }
 
 /// Whether this process runs under this Claktory's backend (an agent's
-/// command), which `--final` stops.
+/// command), which `--final` stops. Its ancestors only, from its parent up:
+/// the `factoryd` command a person runs is often the backend's own binary
+/// (the installed one links to it), which isn't running Claktory.
 fn inside_this_claktory(home: &Home) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
     let backend = home.backend().canonicalize().unwrap_or_else(|_| home.backend());
@@ -1054,7 +1048,9 @@ fn inside_this_claktory(home: &Home) -> bool {
             ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
         );
         let Some(process) = system.process(pid) else { return false };
-        if process.exe().is_some_and(|exe| exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf()) == backend) {
+        if pid.as_u32() != std::process::id()
+            && process.exe().is_some_and(|exe| exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf()) == backend)
+        {
             return true;
         }
         match process.parent() {
@@ -1276,7 +1272,12 @@ pub fn deleted_by(place: &Place) -> Vec<PathBuf> {
     for project in config["projects"].as_array().into_iter().flatten() {
         let paths =
             std::iter::once(&project["path"]).chain(project["folders"].as_array().into_iter().flatten().map(|folder| &folder["path"]));
-        work.extend(paths.filter_map(serde_json::Value::as_str).map(PathBuf::from).filter(|path| path.starts_with(home)));
+        // Written relative, a path is Claktory's own territory (config.rs).
+        let resolved = paths
+            .filter_map(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .map(|path| if path.is_relative() { home.join(path) } else { path });
+        work.extend(resolved.filter(|path| path.starts_with(home)));
     }
     let Ok(read) = std::fs::read_dir(home) else { return Vec::new() };
     let mut gone: Vec<PathBuf> = read

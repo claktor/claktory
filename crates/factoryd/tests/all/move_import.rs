@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::common::{Client, View, apply_request, create_agent, create_project, home, start, temp_dir};
+use factory_protocol::v1;
 use factoryd::home::Home;
 use factoryd::move_import::{self, ImportError, Request};
 use rusqlite::Connection;
@@ -58,6 +59,9 @@ pub(crate) async fn source() -> Source {
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &repo)).await;
+    // A second project in the workspace: Claktory's own territory, kept
+    // relative in the settings, so the move needs no map for it.
+    apply_request(&mut client, &mut view, create_project("Notes", &dir.join("home/workspace/notes"))).await;
     apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
     let home = home(&dir);
     // A monitor with paths in it, and a task that was running.
@@ -191,6 +195,11 @@ fn refused(result: Result<move_import::Imported, ImportError>) -> String {
 #[tokio::test]
 async fn a_claktory_moves_with_its_paths_folders_checkouts_vault_and_devices() {
     let source = source().await;
+    // The settings in the form every Claktory reads: absolute paths for
+    // everything, the workspace project included.
+    let text = std::fs::read_to_string(source.home.config_path()).expect("config");
+    let notes = source.home.root().join("workspace/notes");
+    assert!(text.contains(&format!("\"path\": \"{}\"", notes.display())), "{text}");
     let (path, passphrase) = bundle(&source, factoryd::update::VERSION);
     let target = temp_dir();
     let (here, user) = (Home::new(target.join("home")), target.join("user"));
@@ -208,6 +217,10 @@ async fn a_claktory_moves_with_its_paths_folders_checkouts_vault_and_devices() {
     let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(here.config_path()).expect("config")).expect("json");
     let site = user.join("site");
     assert_eq!(config["projects"][0]["path"], site.display().to_string());
+    // The old machine's absolute workspace path came out as territory:
+    // relative, under this home, with no map pair naming it.
+    assert_eq!(config["projects"][1]["path"], "workspace/notes");
+    assert!(here.root().join("workspace/notes").is_dir());
     let db = Connection::open(here.db_path()).expect("db");
     let spec: String = db.query_row("SELECT spec FROM monitors WHERE agent = 'writer'", [], |row| row.get(0)).expect("monitor");
     assert!(spec.contains(&format!("test -f {}/done", site.display())), "{spec}");
@@ -345,36 +358,119 @@ async fn an_import_is_refused_where_it_cant_go() {
     assert!(!here.root().join("import").exists(), "nothing was unpacked");
 }
 
+/// A client of a Claktory in moved mode: says hello with `token`.
+struct MovedClient(tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, u64);
+
+impl MovedClient {
+    async fn open(addr: std::net::SocketAddr) -> MovedClient {
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.expect("connect");
+        MovedClient(socket, 6)
+    }
+
+    async fn connect(addr: std::net::SocketAddr, token: &str) -> (MovedClient, v1::Error) {
+        let mut client = MovedClient::open(addr).await;
+        let hello = v1::Hello { token: token.to_owned(), ..Default::default() };
+        let answer = client.ask(v1::client_message::Body::Hello(hello)).await.expect("an answer");
+        let Some(v1::server_message::Body::Error(error)) = answer else { panic!("an error: {answer:?}") };
+        (client, error)
+    }
+
+    /// The answer, or None when the connection closed instead.
+    async fn ask(&mut self, body: v1::client_message::Body) -> Option<Option<v1::server_message::Body>> {
+        use futures_util::{SinkExt, StreamExt};
+        use prost::Message as _;
+        self.1 += 1;
+        let message = v1::ClientMessage { id: self.1, body: Some(body) };
+        self.0.send(tokio_tungstenite::tungstenite::Message::Binary(message.encode_to_vec().into())).await.ok()?;
+        let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) = self.0.next().await else { return None };
+        let answer = v1::ServerMessage::decode(bytes).expect("decode");
+        assert_eq!(answer.reply_to, self.1);
+        Some(answer.body)
+    }
+
+    async fn delete(&mut self, typed: &str) -> v1::server_message::Body {
+        let request = v1::DeleteMovedCopy { typed_word: typed.to_owned() };
+        self.ask(v1::client_message::Body::DeleteMovedCopy(request)).await.expect("an answer").expect("a body")
+    }
+}
+
+fn refusal(body: v1::server_message::Body) -> (v1::ErrorCode, String) {
+    let v1::server_message::Body::Error(error) = body else { panic!("a refusal: {body:?}") };
+    (error.code(), error.message)
+}
+
 #[tokio::test]
-async fn a_claktory_that_moved_away_runs_nothing_and_says_so() {
-    use futures_util::{SinkExt, StreamExt};
-    use prost::Message as _;
+async fn a_claktory_that_moved_away_runs_nothing_says_where_and_its_app_can_delete_the_copy() {
     let dir = temp_dir();
     let here = Home::new(dir.join("home"));
-    std::fs::create_dir_all(here.root()).expect("home");
+    std::fs::create_dir_all(here.root().join("moved/remote")).expect("home");
     std::fs::write(
         here.root().join("moved.json"),
-        r#"{"format":1,"export_id":"ab","at_ms":1763735100000,"epoch":1,"machine":"Old Mac","to":"","version":"v0.1.14","bundle":"/x"}"#,
+        r#"{"format":1,"export_id":"ab","at_ms":1763735100000,"epoch":1,"machine":"Old Mac","to":"cloud-box","to_os":"linux","version":"v0.1.14","bundle":"/x"}"#,
     )
     .expect("tombstone");
+    // The copy left behind: the fenced pairing code, its records, and the
+    // workspace, which stays.
+    std::fs::write(here.root().join("moved/remote/local-pairing"), "factory://?t=0123abcd&a=127.0.0.1%3A7420\n").expect("code");
+    std::fs::create_dir_all(here.root().join("agents/ed")).expect("agents");
+    std::fs::create_dir_all(here.root().join("workspace/notes")).expect("workspace");
+    std::fs::write(here.root().join("workspace/notes/a.md"), "kept").expect("note");
     let moved = move_import::moved::read(&here).expect("moved");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let serving = here.clone();
     tokio::spawn(async move { move_import::moved::serve(listener, &serving, moved).await });
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.expect("connect");
-    let hello = factory_protocol::v1::ClientMessage {
-        id: 7,
-        body: Some(factory_protocol::v1::client_message::Body::Hello(factory_protocol::v1::Hello::default())),
-    };
-    socket.send(tokio_tungstenite::tungstenite::Message::Binary(hello.encode_to_vec().into())).await.expect("send");
-    let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) = socket.next().await else { panic!("an answer") };
-    let answer = factory_protocol::v1::ServerMessage::decode(bytes).expect("decode");
-    let Some(factory_protocol::v1::server_message::Body::Error(error)) = answer.body else { panic!("an error: {answer:?}") };
-    assert_eq!(answer.reply_to, 7);
-    assert!(error.message.starts_with("This Claktory moved to another computer on "), "{}", error.message);
+
+    // Any client is told it moved, and where.
+    let (mut stranger, error) = MovedClient::connect(addr, "").await;
+    assert_eq!(error.code(), v1::ErrorCode::Moved);
+    assert!(error.message.starts_with("This Claktory moved to cloud-box on "), "{}", error.message);
+    let away = error.moved.expect("where it went");
+    assert_eq!((away.to.as_str(), away.to_os.as_str(), away.machine.as_str()), ("cloud-box", "linux", "Old Mac"));
+    assert_eq!((away.at_ms, away.deleted_ms), (1763735100000, 0));
     // Nothing of the Claktory was made.
     assert!(!here.db_path().exists() && !here.root().join("remote").exists());
+    // Only this computer's own app may delete the copy: with the code's
+    // token. Anyone else is told once, and let go.
+    assert!(
+        stranger.ask(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy::default())).await.is_none_or(|answer| answer.is_none())
+    );
+    assert_eq!(refusal(MovedClient::open(addr).await.delete("delete").await).0, v1::ErrorCode::Unauthorized);
+    let (mut wrong, error) = MovedClient::connect(addr, "ffff").await;
+    assert_eq!(error.code(), v1::ErrorCode::Moved);
+    assert!(
+        wrong.ask(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy::default())).await.is_none_or(|answer| answer.is_none())
+    );
+    let (mut own, _) = MovedClient::connect(addr, "0123abcd").await;
+    // Anything else it asks is answered that it moved.
+    let other = own.ask(v1::client_message::Body::SelectAgent(v1::SelectAgent::default())).await.expect("an answer").expect("a body");
+    assert_eq!(refusal(other).0, v1::ErrorCode::Moved);
+    let (code, why) = refusal(own.delete("yes").await);
+    assert_eq!((code, why.as_str()), (v1::ErrorCode::InvalidRequest, "Type delete to confirm."));
+    assert!(here.root().join("agents/ed").exists());
+    assert!(matches!(own.delete("delete").await, v1::server_message::Body::Ack(_)));
+    // Deleted, all but the workspace and moved.json; the connection closes.
+    assert!(own.ask(v1::client_message::Body::SelectAgent(v1::SelectAgent::default())).await.is_none_or(|answer| answer.is_none()));
+    assert!(!here.root().join("agents").exists() && !here.root().join("moved").exists());
+    assert_eq!(std::fs::read_to_string(here.root().join("workspace/notes/a.md")).expect("kept"), "kept");
+    // It still runs, saying so, and moving back can still stop it.
+    assert!(here.root().join("moved-mode.pid").exists());
+    let (mut again, error) = MovedClient::connect(addr, "0123abcd").await;
+    assert!(error.moved.expect("where").deleted_ms > 0);
+    // The code went with the copy: nobody can ask again.
+    assert!(
+        again.ask(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy::default())).await.is_none_or(|answer| answer.is_none())
+    );
+
+    // A Claktory that hasn't moved has no copy to delete.
+    let (addr, _factory) = start(&temp_dir()).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let answer = client.request(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy { typed_word: "delete".into() })).await;
+    assert!(
+        matches!(&answer.body, v1::server_message::Body::Error(error) if error.code() == v1::ErrorCode::InvalidRequest),
+        "{:?}",
+        answer.body
+    );
 }
 
 /// What `factoryd export` really writes, imported: the two halves agree.

@@ -12,7 +12,20 @@ import UniformTypeIdentifiers
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    // Before launching finishes, so a tap that opened the app reaches it
+    // (Notifications.swift).
+    Notifications.shared.launch()
+    return launched
+  }
+
+  // This iPhone's push token, for the push relay (Notifications.swift).
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+    Notifications.shared.received(token: deviceToken)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -32,8 +45,15 @@ import UniformTypeIdentifiers
     NetworkPath.register(with: messenger)
     // A hardware keyboard coming and going (Capabilities.swift).
     KeyboardEvents.register(with: messenger)
+    // An iPad window's controls kept clear of the app (Capabilities.swift).
+    WindowControls.start(with: messenger)
     // The iPad workbench's commands in the system's menu (CommandMenu.swift).
     CommandMenu.register(with: messenger)
+    // Documents and ink (Ink/InkChannel.swift).
+    Ink.register(with: engineBridge.pluginRegistry)
+    // Notifications: those the app shows, its pushes' taps, and this
+    // iPhone's registration for pushes (Notifications.swift, Push.swift).
+    Notifications.shared.register(with: messenger)
     deviceChannel = FlutterMethodChannel(name: "factory/device", binaryMessenger: messenger)
     deviceChannel?.setMethodCallHandler { call, result in
       switch call.method {
@@ -85,6 +105,9 @@ import UniformTypeIdentifiers
       case "cancelWebAuth":
         WebAuth.shared.cancel()
         result(nil)
+      case "share":
+        // The system's share sheet for text (lib/mobile/share.dart).
+        Self.share(call.arguments as? [String: Any] ?? [:], result)
       case "capabilities":
         // What this device is (Capabilities.swift): the iPad's workbench
         // follows its idiom, never its window's size.
@@ -122,6 +145,35 @@ import UniformTypeIdentifiers
   private static let draftsKey = "Drafts"
   /// In the keychain (app/macos/Runner/ConnectionStore.swift, the Mac's).
   private static let connections = ConnectionStore.forThisApp()
+
+  /// The share sheet for `text`, over whatever shows now. On an iPad it
+  /// points at `rect` (the Share button, in the Flutter view's points),
+  /// or sits in the middle without an arrow. True once the person sent it
+  /// somewhere; false if they closed it, or nothing could show it.
+  private static func share(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    guard let text = args["text"] as? String, !text.isEmpty,
+      let window = scene?.keyWindow ?? scene?.windows.first,
+      var top = window.rootViewController
+    else {
+      result(false)
+      return
+    }
+    while let shown = top.presentedViewController { top = shown }
+    let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    if let popover = sheet.popoverPresentationController {
+      popover.sourceView = top.view
+      if let r = args["rect"] as? [Double], r.count == 4 {
+        popover.sourceRect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+      } else {
+        popover.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+        popover.permittedArrowDirections = []
+      }
+    }
+    sheet.completionWithItemsHandler = { _, completed, _, _ in result(completed) }
+    top.present(sheet, animated: true)
+  }
 
   /// `text` as a QR code from Core Image: its modules row by row, 1 for dark.
   private static func qrCode(_ text: String) -> [String: Any]? {

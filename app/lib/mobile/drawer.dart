@@ -37,6 +37,9 @@ abstract class PhonePages {
   /// Pushes a project's Files.
   void showFiles(String projectId);
 
+  /// [PhoneRoutes.showFile].
+  bool showFile(String agentId, String path);
+
   /// The page on top, as Back closes it; null with none.
   PageTarget? get topPage;
 }
@@ -271,6 +274,14 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     if (pages == null) return;
     closeDrawer();
     pages.showFiles(projectId);
+  }
+
+  @override
+  bool showFile(String agentId, String path) {
+    final pages = _pages;
+    if (pages == null) return false;
+    closeDrawer();
+    return pages.showFile(agentId, path);
   }
 
   @override

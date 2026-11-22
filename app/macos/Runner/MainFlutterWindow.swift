@@ -51,6 +51,9 @@ class MainFlutterWindow: NSWindow {
     AudioPlayer.register(with: flutterViewController.engine.binaryMessenger)
     // The network path, to reconnect the moment it changes (NetworkPath.swift).
     NetworkPath.register(with: flutterViewController.engine.binaryMessenger)
+    // The system's notifications, and whether the person is using the app
+    // (Notifications.swift).
+    Notifications.register(with: flutterViewController.engine.binaryMessenger, window: self)
 
     windowChannel = FlutterMethodChannel(
       name: "factory/window", binaryMessenger: flutterViewController.engine.binaryMessenger)

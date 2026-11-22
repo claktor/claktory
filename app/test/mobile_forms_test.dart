@@ -15,10 +15,12 @@ import 'package:factory_app/secrets.dart' show EnvForm, SecretForm;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'phone_sizes_test.dart' show loadGeist;
 import 'phone_test.dart' show phone, workspace;
 
 /// Shows [form] in a sheet over a phone's conversation.
@@ -64,6 +66,8 @@ Widget _form({
 );
 
 void main() {
+  // Geist, as the app ships it: whether the bar's words fit depends on it.
+  setUpAll(loadGeist);
   testWidgets('Cancel, the title and the action share the top row; the '
       'fields come under them', (tester) async {
     var created = 0;
@@ -90,6 +94,41 @@ void main() {
     await tester.tap(find.text('Cancel'));
     expect(created, 1);
     expect(cancelled, 1);
+  });
+
+  testWidgets("an action too long for the bar's quarter takes half of it, "
+      'the title under it, so no word is cut short', (tester) async {
+    await _showForm(
+      tester,
+      (close) => FormFrame(
+        title: 'Save your recovery key',
+        fields: [
+          Field(
+            label: 'Name',
+            child: TextField(controller: TextEditingController()),
+          ),
+        ],
+        error: null,
+        submitLabel: "I've saved it",
+        onSubmit: () {},
+        cancelLabel: 'Not now',
+        onCancel: () {},
+      ),
+      size: const Size(375, 667),
+    );
+    final action = find.text("I've saved it");
+    final title = tester.getRect(find.text('Save your recovery key'));
+    expect(tester.getRect(action).top, lessThan(title.top));
+    // Whole: one line, not ellipsized.
+    final paragraph = tester.firstRenderObject<RenderParagraph>(
+      find.descendant(of: action, matching: find.byType(RichText)),
+    );
+    expect(paragraph.didExceedMaxLines, isFalse);
+    // A short one still shares the row with the title.
+    expect(
+      tester.getRect(find.text('Not now')).center.dy,
+      closeTo(tester.getRect(action).center.dy, 1),
+    );
   });
 
   testWidgets("the top row's words are iOS's 44pt targets, Android's 48dp", (

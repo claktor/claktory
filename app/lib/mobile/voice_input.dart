@@ -411,10 +411,14 @@ class _SlideHint extends StatelessWidget {
 
 /// Send, when recording from a tap or paused: the box's own Send.
 class PhoneVoiceSend extends StatelessWidget {
-  const PhoneVoiceSend({super.key, required this.voice});
+  const PhoneVoiceSend({super.key, required this.voice, this.accent});
 
   final PhoneVoice voice;
 
+  /// The target's color for Send ([SendButton.accent]).
+  final Color? accent;
+
   @override
-  Widget build(BuildContext context) => SendButton(onSend: voice.sendNow);
+  Widget build(BuildContext context) =>
+      SendButton(onSend: voice.sendNow, accent: accent);
 }

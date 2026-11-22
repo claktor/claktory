@@ -58,6 +58,18 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Connect a model'), findsOneWidget);
     expect(find.text('Sign in with Claude'), findsOneWidget);
+    // Before any choice: where agents' work goes, and that choosing one
+    // allows it (App Store 5.1.2(i)).
+    final consent = find.text(
+      'To work, your agents send your messages and the files and pages they '
+      'use to the AI provider you choose, such as Anthropic or OpenAI. By '
+      'choosing one below, you allow this.',
+    );
+    expect(consent, findsOneWidget);
+    expect(
+      tester.getTopLeft(consent).dy,
+      lessThan(tester.getTopLeft(find.text('Sign in with Claude')).dy),
+    );
     expect(find.text('Pro, Max or Ultra'), findsOneWidget);
     expect(find.text('Sign in with ChatGPT'), findsOneWidget);
     expect(find.text('Use an API key'), findsOneWidget);

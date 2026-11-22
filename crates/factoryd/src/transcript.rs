@@ -375,6 +375,7 @@ impl Transcript {
             (Some(Kind::ConnectProposal(shown)), Kind::ConnectProposal(updated)) => shown.id == updated.id,
             (Some(Kind::DevicePairing(shown)), Kind::DevicePairing(updated)) => shown.id == updated.id,
             (Some(Kind::AskPerson(shown)), Kind::AskPerson(updated)) => shown.id == updated.id,
+            (Some(Kind::PipeStart(shown)), Kind::PipeStart(updated)) => shown.id == updated.id,
             _ => false,
         })?;
         entry.kind = Some(kind);
@@ -416,6 +417,12 @@ impl Transcript {
             }
         }
         self.replace_shown(Kind::DevicePairing(pairing))
+    }
+
+    /// Shows an agent's card for starting a pipe as it is now (done, say);
+    /// the changed entry, or None if the conversation doesn't show it.
+    pub fn set_pipe_start(&mut self, start: v1::PipeStart) -> Option<Entry> {
+        self.replace_shown(Kind::PipeStart(start))
     }
 
     /// Shows a pipe secret approval as decided; None if it isn't shown.
@@ -618,6 +625,10 @@ impl Transcript {
                 // And a device the agent adds, with its code.
                 if let Some(pairing) = crate::extensions::devices::started(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::DevicePairing(pairing)));
+                }
+                // And a card for the person to start a pipe.
+                if let Some(start) = crate::pipes::start::started(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::PipeStart(start)));
                 }
                 changed
             }
@@ -895,6 +906,7 @@ fn waits(kind: Option<&Kind>, owner: &str) -> bool {
         Some(Kind::DevicePairing(pairing)) => {
             matches!(pairing.state(), v1::DevicePairingState::Waiting | v1::DevicePairingState::Asking)
         }
+        Some(Kind::PipeStart(start)) => start.state() == v1::PipeStartState::Waiting,
         _ => false,
     }
 }
@@ -936,6 +948,7 @@ fn user_kind(message: &UserMessage) -> Kind {
         from_id: event.id.clone(),
         summary: event.summary.clone(),
         text,
+        pipe_seqs: event.pipe_seqs.clone(),
     })
 }
 

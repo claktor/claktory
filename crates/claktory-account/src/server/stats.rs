@@ -30,13 +30,56 @@ pub fn report(conn: &Connection, now: i64) -> rusqlite::Result<String> {
         active(&week, "account_id")?,
         active(&month, "account_id")?,
     );
-    let (agents, projects, devices): (i64, i64, i64) = conn.query_row(
-        "SELECT coalesce(sum(agents), 0), coalesce(sum(projects), 0), coalesce(sum(devices), 0) FROM claktories WHERE revoked_at IS NULL",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    let daily = active(&today, "claktory_id")?;
+    let monthly = active(&month, "claktory_id")?;
+    let ratio = if monthly > 0 { format!("{}%", daily * 100 / monthly) } else { "–".to_owned() };
+    let _ = writeln!(out, "Active Claktories: daily {}, monthly {} (daily/monthly {ratio})", grouped(daily), grouped(monthly));
+    // Of those first in touch 30 days ago or more, the share in touch on
+    // their 30th day or later.
+    let (cohort, retained): (i64, i64) = conn.query_row(
+        "WITH first AS (SELECT claktory_id, min(day) AS day FROM seen_days GROUP BY claktory_id)
+         SELECT count(*), coalesce(sum(EXISTS (SELECT 1 FROM seen_days s WHERE s.claktory_id = first.claktory_id
+                                                 AND s.day >= date(first.day, '+30 days'))), 0)
+         FROM first WHERE first.day <= date(?1, '-30 days')",
+        [&today],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let _ =
-        writeln!(out, "Now, over all Claktories: {} agents, {} projects, {} devices", grouped(agents), grouped(projects), grouped(devices));
+    let share = if cohort > 0 { format!("{}%", retained * 100 / cohort) } else { "–".to_owned() };
+    let _ = writeln!(
+        out,
+        "30-day retention: {} of {} Claktories first in touch 30 or more days ago were in touch again 30 days on or later ({share})",
+        grouped(retained),
+        grouped(cohort)
+    );
+    let (agents, projects, devices, pipes, secrets, monitors): (i64, i64, i64, i64, i64, i64) = conn.query_row(
+        "SELECT coalesce(sum(agents), 0), coalesce(sum(projects), 0), coalesce(sum(devices), 0), coalesce(sum(pipes), 0),
+                coalesce(sum(secrets), 0), coalesce(sum(monitors), 0)
+         FROM claktories WHERE revoked_at IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    )?;
+    let _ = writeln!(
+        out,
+        "Now, over all Claktories: {} agents, {} projects, {} devices, {} pipes, {} secrets, {} active monitors",
+        grouped(agents),
+        grouped(projects),
+        grouped(devices),
+        grouped(pipes),
+        grouped(secrets),
+        grouped(monitors)
+    );
+    let (model, ran): (i64, i64) = conn.query_row(
+        "SELECT coalesce(sum(model_connected), 0), coalesce(sum(first_run), 0) FROM claktories WHERE revoked_at IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let _ = writeln!(
+        out,
+        "Setup reached: {} of {} Claktories connected a model, {} ran an agent",
+        grouped(model),
+        grouped(claktories),
+        grouped(ran)
+    );
 
     let (input, output, read, write): (i64, i64, i64, i64) = conn.query_row(
         "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cache_read_tokens), 0), coalesce(sum(cache_write_tokens), 0) FROM usage",
@@ -100,6 +143,42 @@ pub fn report(conn: &Connection, now: i64) -> rusqlite::Result<String> {
             "SELECT date(hour, 'unixepoch'), sum(agent_minutes) / 60, sum(runs) FROM activity WHERE hour >= ?1 GROUP BY 1 ORDER BY 1 DESC",
             &[&(hour - 30 * 86_400)],
         )?,
+    );
+    section(
+        &mut out,
+        "Updates rolled back and crashes by backend version, last 30 days",
+        rows(
+            conn,
+            "SELECT version, sum(rolled_back), sum(crashes) FROM health WHERE day >= ?1 GROUP BY version
+             ORDER BY sum(rolled_back) + sum(crashes) DESC, version",
+            &[&month],
+        )?,
+    );
+    section(
+        &mut out,
+        "Devices by system, kind and app version (Claktories)",
+        rows(
+            conn,
+            "SELECT platform || ' ' || kind || ' ' || app_version, sum(count), count(DISTINCT claktory_id) FROM claktory_devices
+             WHERE claktory_id IN (SELECT id FROM claktories WHERE revoked_at IS NULL)
+             GROUP BY platform, kind, app_version ORDER BY 2 DESC, 1",
+            &[],
+        )?,
+    );
+    section(
+        &mut out,
+        "Devices by system",
+        rows(
+            conn,
+            "SELECT platform, sum(count) FROM claktory_devices WHERE claktory_id IN (SELECT id FROM claktories WHERE revoked_at IS NULL)
+             GROUP BY platform ORDER BY 2 DESC, 1",
+            &[],
+        )?,
+    );
+    section(
+        &mut out,
+        "Devices connected per day, last 30 days",
+        rows(conn, "SELECT day, sum(count) FROM devices_connected WHERE day >= ?1 GROUP BY day ORDER BY day DESC", &[&month])?,
     );
     section(
         &mut out,

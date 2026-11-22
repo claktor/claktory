@@ -111,3 +111,136 @@ async fn the_store_serializes_writes_and_keeps_fields_it_does_not_model() {
     assert_eq!(store.read("openai-codex").await.unwrap(), None);
     assert_eq!(store.read("openrouter").await.unwrap().map(|c| c.kind()), Some("api_key"));
 }
+
+/// A credentials document as a vault keeps it: an OAuth sign-in with a
+/// second account, and a key.
+fn document() -> serde_json::Map<String, serde_json::Value> {
+    let second = json!({"type": "oauth", "access": "sk-ant-oat01-second", "refresh": "sk-ant-ort01-second", "expires": 9,
+        "factoryAccount": "b", "factoryLabel": "b@x.com", "factoryIdentity": "user-b", "factoryRefusedSince": 5});
+    json!({
+        "anthropic": {"type": "oauth", "access": "sk-ant-oat01-first", "refresh": "sk-ant-ort01-first", "expires": 7,
+            "accountId": "acct-1", "factoryAccount": "a", "factoryLabel": "a@x.com", "factoryIdentity": "user-a",
+            "factoryExhaustedUntil": 3, "factoryAccounts": [second]},
+        "openrouter": {"type": "api_key", "key": "sk-or-v1-secret", "factoryAccount": "k", "factoryIdentity": "key:0123abcd"},
+    })
+    .as_object()
+    .expect("a document")
+    .clone()
+}
+
+/// What's known of sign-ins locked away holds no key or token, nor anything
+/// made from one (an API key's identity is a hash of it): Fugo's condition.
+#[tokio::test]
+async fn an_outline_keeps_the_accounts_and_none_of_their_secrets() {
+    let outline = factory_agent::credentials::outline(&document());
+    let text = serde_json::Value::Object(outline.clone()).to_string();
+    for secret in ["sk-ant-oat01", "sk-ant-ort01", "sk-or-v1", "user-a", "user-b", "key:0123", "acct-1"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    // It reads as the accounts, their kinds, labels and states.
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.json");
+    factory_agent::credentials::write_document(&auth, &outline).unwrap();
+    let store = FileCredentialStore::new(auth);
+    let accounts = store.accounts("anthropic").await.unwrap();
+    let shown: Vec<_> = accounts
+        .iter()
+        .map(|account| (account.id.as_str(), account.label.as_str(), account.credential.kind(), account.refused_since))
+        .collect();
+    assert_eq!(shown, [("a", "a@x.com", "oauth", 0), ("b", "b@x.com", "oauth", 5)]);
+    assert_eq!(accounts[0].exhausted_until, 3);
+    assert_eq!(store.accounts("openrouter").await.unwrap()[0].credential, api_key(""));
+}
+
+/// Sign-ins made elsewhere come in as signing in again would: the same
+/// account (by who it is, else by id) is replaced and keeps its id; another
+/// is added after, with an id of its own when the one it has is taken.
+#[tokio::test]
+async fn sign_ins_made_elsewhere_are_merged_in() {
+    use factory_agent::credentials::merge;
+    let mut into = document();
+    assert!(!merge(&mut into, &document()).unwrap(), "the same sign-ins change nothing");
+    let from = json!({"anthropic": {"type": "oauth", "access": "new", "refresh": "new-r", "expires": 8, "factoryAccount": "z",
+        "factoryIdentity": "user-a", "factoryAccounts": [
+            {"type": "oauth", "access": "c", "refresh": "c-r", "expires": 1, "factoryAccount": "b", "factoryIdentity": "user-c"},
+        ]},
+        "openai": {"type": "api_key", "key": "sk-new", "factoryAccount": "1"}});
+    assert!(merge(&mut into, from.as_object().unwrap()).unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.json");
+    factory_agent::credentials::write_document(&auth, &into).unwrap();
+    let store = FileCredentialStore::new(auth);
+    let accounts = store.accounts("anthropic").await.unwrap();
+    let ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+    assert_eq!(&ids[..2], ["a", "b"]);
+    assert!(matches!(&accounts[0].credential, Credential::Oauth { access, .. } if access == "new"), "a is signed in again");
+    assert_eq!(accounts[1].identity, "user-b", "b keeps its own: c only shares its id");
+    assert_eq!((accounts.len(), accounts[2].identity.as_str()), (3, "user-c"));
+    assert!(ids[2] != "b" && !ids[2].is_empty(), "c gets an id of its own");
+    assert_eq!(store.read("openai").await.unwrap(), Some(api_key("sk-new")));
+
+    // One that can't be read is carried along as it is, never in the way of
+    // the others; it never replaces sign-ins that can be.
+    let unreadable = json!({"type": "api", "key": "sk-odd"});
+    let from = json!({"mistral": unreadable, "anthropic": unreadable, "openrouter": {"type": "api_key", "key": "sk-or-2", "factoryAccount": "k2"}});
+    assert!(merge(&mut into, from.as_object().unwrap()).unwrap());
+    assert_eq!(into["mistral"], unreadable);
+    assert_eq!(into["anthropic"]["access"], "new", "the readable ones stay");
+    assert_eq!(into["openrouter"]["factoryAccounts"][0]["key"], "sk-or-2");
+}
+
+/// Sign-ins locked away (a backing that has only their outline, and
+/// `auth.json` for those made meanwhile).
+#[derive(Default)]
+struct Locked {
+    plain: parking_lot::Mutex<serde_json::Map<String, serde_json::Value>>,
+    saved: parking_lot::Mutex<Vec<bool>>,
+}
+
+impl factory_agent::credentials::CredentialBacking for Locked {
+    fn load(&self) -> Result<factory_agent::credentials::Loaded, Error> {
+        Ok(factory_agent::credentials::Loaded {
+            all: self.plain.lock().clone(),
+            locked: Some(factory_agent::credentials::outline(&document())),
+        })
+    }
+
+    fn save(&self, all: &serde_json::Map<String, serde_json::Value>, locked: bool) -> Result<(), Error> {
+        *self.plain.lock() = all.clone();
+        self.saved.lock().push(locked);
+        Ok(())
+    }
+}
+
+/// While they're locked away, a provider's sign-ins can't be used (they
+/// wait), only shown; one signed in to meanwhile can, and is saved as made
+/// while locked. Removing those locked away waits for them to open.
+#[tokio::test]
+async fn sign_ins_locked_away_are_shown_and_a_new_one_works_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileCredentialStore::new(dir.path().join("auth.json"));
+    let backing = std::sync::Arc::new(Locked::default());
+    store.set_backing(backing.clone());
+    assert!(store.accounts("anthropic").await.unwrap_err().is_locked());
+    assert_eq!(store.accounts("openai").await.unwrap(), [], "a provider with none locked away is just signed out");
+    let shown: Vec<String> = store.outlined_accounts("anthropic").await.unwrap().into_iter().map(|account| account.id).collect();
+    assert_eq!(shown, ["a", "b"]);
+    let mut listed: Vec<String> = store.list().await.unwrap().into_iter().map(|info| info.provider_id).collect();
+    listed.sort();
+    assert_eq!(listed, ["anthropic", "openrouter"]);
+
+    // Signed in meanwhile: it's used at once.
+    store
+        .modify_accounts("anthropic", |mut accounts| async move {
+            accounts.push(factory_agent::credentials::Account::new(api_key("sk-ant-api-new")));
+            Ok(Some(accounts))
+        })
+        .await
+        .unwrap();
+    assert_eq!(*backing.saved.lock(), [true]);
+    let usable = store.accounts("anthropic").await.unwrap();
+    assert_eq!((usable.len(), &usable[0].credential), (1, &api_key("sk-ant-api-new")));
+    let shown = store.outlined_accounts("anthropic").await.unwrap();
+    assert_eq!(shown.len(), 3, "the new one, then those locked away");
+    assert!(store.delete("anthropic").await.unwrap_err().is_locked());
+}

@@ -90,10 +90,12 @@ fn control_aad(vault_id: &str, id: &str, connector: &str, generation: i64) -> Ve
 
 /// The secret's own key.
 fn dek(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str) -> Result<crypto::Key, VaultError> {
-    let (version, sealed): (u32, Vec<u8>) =
-        db.query_row("SELECT version, sealed_dek FROM secrets WHERE id = ?1", [id], crate::store::row2)?;
-    crypto::open_key(vmk, &sealed, &aad(&["dek", vault_id, id, &version.to_string()]))
-        .ok_or_else(|| VaultError::Invalid(format!("The secret {id} can't be opened: the vault was changed outside Claktory.")))
+    let (version, sealed, ask, name): (u32, Vec<u8>, bool, String) =
+        db.query_row("SELECT version, sealed_dek, ask, name FROM secrets WHERE id = ?1", [id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+    crypto::open_key(vmk, &sealed, &super::dek_aad(vault_id, id, &version.to_string(), ask))
+        .ok_or_else(|| VaultError::Invalid(format!("The secret {name} can't be opened: the vault was changed outside Claktory.")))
 }
 
 fn write_control(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str, connector: &str, control: &Control) -> Result<(), VaultError> {
@@ -162,7 +164,7 @@ impl Vault {
         self.with_unlocked_transaction(|transaction, vault_id, vmk| {
             let name = free_name(transaction, name)?;
             let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, &[])?;
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, &[], false)?;
             let now = now_ms();
             transaction.execute(
                 "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, meta)\n             VALUES (?1, ?2, ?8, 1, ?3, '', ?4, ?4, ?5, ?6, ?7)",
@@ -239,7 +241,7 @@ impl Vault {
                 .ok_or_else(|| VaultError::NoSecret(connection.to_owned()))?;
             let name = free_name(transaction, name)?;
             let id = format!("s{}", crypto::hex(&crypto::random::<6>()));
-            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values)?;
+            let sealed_dek = Self::write_values(transaction, vault_id, vmk, &id, 1, values, false)?;
             let now = now_ms();
             transaction.execute(
                 "INSERT INTO secrets (id, name, description, version, sealed_dek, owner, created, updated, kind, connector, parent, meta)\n             VALUES (?1, ?2, ?3, 1, ?4, '', ?5, ?5, ?6, ?7, ?8, ?9)",
@@ -256,14 +258,14 @@ impl Vault {
             super::check_values(values)?;
         }
         self.with_unlocked_transaction(|transaction, vault_id, vmk| {
-            let version: u32 = transaction
-                .query_row("SELECT version FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_EXPORT], |row| row.get(0))
+            let (version, ask): (u32, bool) = transaction
+                .query_row("SELECT version, ask FROM secrets WHERE id = ?1 AND kind = ?2", [id, KIND_EXPORT], crate::store::row2)
                 .optional()?
                 .ok_or_else(|| VaultError::NoSecret(id.to_owned()))?;
             let now = now_ms();
             transaction.execute("UPDATE secrets SET meta = ?2, updated = ?3 WHERE id = ?1", params![id, json(meta)?, now])?;
             if let Some(values) = values {
-                let sealed_dek = Self::write_values(transaction, vault_id, vmk, id, version + 1, values)?;
+                let sealed_dek = Self::write_values(transaction, vault_id, vmk, id, version + 1, values, ask)?;
                 transaction
                     .execute("UPDATE secrets SET version = ?2, sealed_dek = ?3 WHERE id = ?1", params![id, version + 1, sealed_dek])?;
             }

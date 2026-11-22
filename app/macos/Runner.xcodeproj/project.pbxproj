@@ -36,6 +36,7 @@
 		C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */; };
 		C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */; };
 		C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700062 /* SetupLink.swift */; };
+		C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700072 /* Notifications.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 /* End PBXBuildFile section */
 
@@ -89,6 +90,7 @@
 		C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPath.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700062 /* SetupLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupLink.swift; sourceTree = "<group>"; };
+		C0EC71002B3C4D5E6F700072 /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
 		33CEB47422A05771004F2AC0 /* Flutter-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Release.xcconfig"; sourceTree = "<group>"; };
 		33CEB47722A0578A004F2AC0 /* Flutter-Generated.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "Flutter-Generated.xcconfig"; path = "ephemeral/Flutter-Generated.xcconfig"; sourceTree = "<group>"; };
@@ -195,6 +197,7 @@
 				C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */,
 				C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */,
 				C0EC71002B3C4D5E6F700062 /* SetupLink.swift */,
+				C0EC71002B3C4D5E6F700072 /* Notifications.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -391,6 +394,7 @@
 				C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */,
 				C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */,
 				C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */,
+				C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);

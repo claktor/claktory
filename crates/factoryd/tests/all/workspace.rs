@@ -33,7 +33,7 @@ async fn created_agents_are_saved_selected_and_shared_by_every_client() {
     client.ok(create_agent("web-site", "Release Notes", "")).await;
 
     let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
-    let config = Config::parse(&text).expect("valid config");
+    let config = Config::parse(&text, &dir.join("home")).expect("valid config");
     let mut ids = Vec::new();
     for agent in &config.agents {
         ids.push(agent.id.as_str());
@@ -68,7 +68,7 @@ async fn edits_to_config_json_apply_live_and_broken_edits_keep_the_last_good_set
     let mut view = View::default();
     view.follow(&mut client, |view| view.workspace.agents.len() == 1 && view.workspace.agents[0].id == "editor").await;
     assert_eq!(view.agent("editor").prompt, "Edit the docs.");
-    let mut config = Config::parse(&edited).expect("parse");
+    let mut config = Config::parse(&edited, &dir.join("home")).expect("parse");
 
     std::fs::write(&config_path, "{ \"projects\": [").expect("write");
     view.follow(&mut client, |view| !view.workspace.config_error.is_empty()).await;
@@ -94,7 +94,7 @@ async fn edits_to_config_json_apply_live_and_broken_edits_keep_the_last_good_set
 
     // And hand edits keep applying.
     config.agents[0].name = "Copy Editor".into();
-    std::fs::write(&config_path, config.to_json().expect("json")).expect("write");
+    std::fs::write(&config_path, config.to_json(&dir.join("home")).expect("json")).expect("write");
     view.follow(&mut client, |view| view.agent("editor").name == "Copy Editor").await;
 }
 
@@ -165,7 +165,7 @@ fn select(agent_id: &str) -> client_message::Body {
 }
 
 fn read_config(dir: &Path) -> Config {
-    Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("read")).expect("parse")
+    Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("read"), &dir.join("home")).expect("parse")
 }
 
 #[tokio::test]
@@ -210,7 +210,7 @@ async fn each_new_agent_gets_the_color_least_like_the_others() {
 /// The agents' colors as config.json has them, once it has them all.
 async fn saved_colors(dir: &Path, count: usize) -> Vec<(String, String)> {
     for _ in 0..100 {
-        if let Ok(config) = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")) {
+        if let Ok(config) = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")) {
             let colors: Vec<_> = config.agents.iter().map(|agent| (agent.id.clone(), agent.color.clone())).collect();
             if colors.len() == count && colors.iter().all(|(_, color)| !color.is_empty()) {
                 return colors;
@@ -262,12 +262,13 @@ async fn colors_belong_to_agents_not_to_their_place() {
     // Written into config.json without a color, an agent keeps the one it had,
     // and a new one gets the color least like the others; both are saved.
     let next = view.workspace.next_agent_color.clone();
-    let mut config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    let mut config =
+        Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
     config.agents[2].color.clear();
     let mut editor = config.agents[3].clone();
     (editor.id, editor.name, editor.color) = ("editor".into(), "Editor".into(), String::new());
     config.agents.insert(1, editor);
-    std::fs::write(dir.join("home/config.json"), config.to_json().expect("json")).expect("write");
+    std::fs::write(dir.join("home/config.json"), config.to_json(&dir.join("home")).expect("json")).expect("write");
     view.follow(&mut client, |view| view.workspace.agents.len() == 5).await;
     let edited = pairs(&[("rivet", "blue"), ("editor", next.as_str()), ("tester", "pink"), ("builder", "violet"), ("writer", "green")]);
     assert_eq!(colors(&view), edited);
@@ -310,7 +311,7 @@ async fn agents_are_arranged_and_nested_in_the_sidebar_and_folded_for_every_devi
     apply_request(&mut client, &mut view, arrange("backend", "coordinator", "", None)).await;
     apply_request(&mut client, &mut view, arrange("frontend", "coordinator", "backend", None)).await;
     assert_eq!(tree(&view), ["rivet@", "coordinator@web", "frontend@web>coordinator", "backend@web>coordinator", "lead@app"]);
-    let config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    let config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
     // Nested is led (#234): the nesting is the lead, kept as `lead`.
     assert_eq!(config.agent("backend").and_then(|agent| agent.lead.as_deref()), Some("coordinator"));
     assert_eq!(view.agent("backend").lead_id, "coordinator");
@@ -385,7 +386,7 @@ async fn the_sidebar_and_panel_widths_are_kept_for_every_device() {
     let refused =
         other.request(client_message::Body::UpdateSettings(v1::UpdateSettings { sidebar_width: Some(-1.0), ..Default::default() })).await;
     assert!(matches!(&refused.body, Body::Error(error) if error.message.contains("sidebar_width")), "{:?}", refused.body);
-    assert!(Config::parse(r#"{"display": {"panel_width": -3}}"#).is_err());
+    assert!(Config::parse(r#"{"display": {"panel_width": -3}}"#, std::path::Path::new("/claktory")).is_err());
 }
 
 #[tokio::test]
@@ -421,8 +422,8 @@ async fn each_device_keeps_its_own_zoom() {
     assert!(!config().contains("\"display\""), "{}", config());
     client.ok(set(0.0)).await;
 
-    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 1.5}}}"#).is_ok());
-    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 3}}}"#).is_err());
+    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 1.5}}}"#, std::path::Path::new("/claktory")).is_ok());
+    assert!(Config::parse(r#"{"display": {"zoom": {"phone": 3}}}"#, std::path::Path::new("/claktory")).is_err());
 }
 
 #[tokio::test]
@@ -445,4 +446,163 @@ async fn the_vaults_unlock_window_is_a_setting() {
             .await;
         assert!(matches!(&refused.body, Body::Error(error) if error.message.contains("unlock_minutes")), "{:?}", refused.body);
     }
+}
+
+/// #249: the sidebar's Projects and Chats sections fold away the same on
+/// every device and after a restart, without touching config.json.
+#[tokio::test]
+async fn the_sidebar_sections_fold_on_every_device() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(!view.workspace.projects_collapsed && !view.workspace.chats_collapsed, "open by default");
+    let settings = dir.join("home/config.json");
+    let before = std::fs::read_to_string(&settings).expect("config");
+    let fold = |projects: Option<bool>, chats: Option<bool>| {
+        client_message::Body::UpdateSettings(v1::UpdateSettings {
+            projects_collapsed: projects,
+            chats_collapsed: chats,
+            ..Default::default()
+        })
+    };
+
+    assert!(matches!(apply_request(&mut client, &mut view, fold(Some(true), None)).await, Body::Ack(_)));
+    assert!(view.workspace.projects_collapsed && !view.workspace.chats_collapsed);
+    assert_eq!(std::fs::read_to_string(&settings).expect("config"), before, "a fold isn't a setting");
+    let (mut other, workspace, _) = Client::connect(addr).await;
+    assert!(workspace.projects_collapsed, "another device sees it folded");
+
+    // With a setting in the same request, both hold.
+    let both = v1::UpdateSettings { chats_collapsed: Some(true), user_name: Some("Matt".into()), ..Default::default() };
+    let mut other_view = View { workspace, ..View::default() };
+    apply_request(&mut other, &mut other_view, client_message::Body::UpdateSettings(both)).await;
+    assert!(other_view.workspace.chats_collapsed && other_view.workspace.projects_collapsed);
+    assert_eq!(other_view.workspace.settings.as_ref().map(|settings| settings.user_name.as_str()), Some("Matt"));
+
+    // Kept after a restart; opened again.
+    let (addr, _again) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert!(workspace.projects_collapsed && workspace.chats_collapsed);
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, fold(Some(false), Some(false))).await;
+    assert!(!view.workspace.projects_collapsed && !view.workspace.chats_collapsed);
+}
+
+#[tokio::test]
+async fn a_file_with_relative_paths_keeps_that_form_and_old_absolute_settings_stay_absolute() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home/workspace/docs")).expect("home");
+    // A file in the new form, as a move writes it: territory paths say
+    // where they are without naming the machine.
+    std::fs::write(dir.join("home/config.json"), r#"{"projects":[{"id":"docs","name":"Docs","path":"workspace/docs"}]}"#).expect("write");
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert_eq!(read_config(&dir).project("docs").expect("docs").path, dir.join("home/workspace/docs"));
+
+    // Its new projects follow: one in the workspace relative, an external
+    // one absolute. All read back absolute.
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("home/workspace/site"))).await;
+    apply_request(&mut client, &mut view, create_project("Code", &dir.join("repo"))).await;
+    let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    assert!(text.contains(r#""path": "workspace/docs""#), "{text}");
+    assert!(text.contains(r#""path": "workspace/site""#), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("repo").display())), "{text}");
+    let config = read_config(&dir);
+    assert_eq!(config.project("site").expect("site").path, dir.join("home/workspace/site"));
+    assert_eq!(config.project("code").expect("code").path, dir.join("repo"));
+
+    // A settings file from before relative forms (absolute paths for
+    // everything, this machine's included) reads as it always did, and
+    // stays so: the supervisor may go back to a backend from before, which
+    // reads only that, after any write.
+    let old = format!(r#"{{"projects":[{{"id":"docs","name":"Docs","path":"{}"}}]}}"#, dir.join("home/workspace/docs").display());
+    std::fs::write(dir.join("home/config.json"), &old).expect("write");
+    view.follow(&mut client, |view| view.workspace.projects.len() == 1 && view.workspace.projects[0].id == "docs").await;
+    assert_eq!(read_config(&dir).project("docs").expect("docs").path, dir.join("home/workspace/docs"));
+    apply_request(&mut client, &mut view, create_project("More", &dir.join("home/workspace/more"))).await;
+    let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/docs").display())), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/more").display())), "{text}");
+}
+
+#[tokio::test]
+async fn claktorys_own_writes_after_an_update_keep_old_settings_readable_by_the_version_before() {
+    // Abbacchio's chain: an updated Claktory with a pipe from before #250.
+    // Its first start fills in colors and renames the pipe's "Liaison",
+    // two settings writes; the person changes a setting too. If any of
+    // them flipped paths to the relative form, going back to the version
+    // before (the supervisor's rollback, during the update's trial or
+    // after) would leave it a file it can't read.
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home/workspace/site")).expect("home");
+    std::fs::create_dir_all(dir.join("home/bin")).expect("bin");
+    let site = dir.join("home/workspace/site");
+    let old = format!(
+        r#"{{"projects":[{{"id":"site","name":"Site","path":"{}","folders":[{{"id":"notes","name":"Notes","path":"{}"}}]}}],
+            "agents":[{{"id":"ana","name":"Ana","model":"{MODEL}","effort":"off","prompt":"","project":"site"}},
+                      {{"id":"liaison","name":"Liaison","color":"green","model":"{MODEL}","effort":"off",
+                        "prompt":"You are the liaison for the pipe \"Launch\": you read what comes through it.","project":"site"}}]}}"#,
+        site.display(),
+        site.join("notes").display()
+    );
+    std::fs::write(dir.join("home/config.json"), &old).expect("write");
+    let trial = r#"{"from":"v0.1.15","to":"v0.1.16","started":true}"#;
+    std::fs::write(dir.join("home/bin/trial.json"), trial).expect("trial");
+    let (addr, factory) = start(&dir).await;
+    let pipe = factoryd::pipes::open_for_test(&factory, "site", "Launch", &["ana", "liaison"], "ana", false);
+    factoryd::pipes::unbound_for_test(&factory, &pipe);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+        if !text.contains(r#""name": "Liaison""#) && text.contains(r#""id": "liaison""#) {
+            break text;
+        }
+        assert!(std::time::Instant::now() < deadline, "the liaison was never renamed: {text}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert!(text.contains(r#""color""#), "Ana's color was filled in: {text}");
+    let absolute = |text: &str| {
+        text.contains(&format!(r#""path": "{}""#, site.display()))
+            && text.contains(&format!(r#""path": "{}""#, site.join("notes").display()))
+    };
+    assert!(absolute(&text), "the paths kept their absolute form: {text}");
+
+    // The trial passed; the person's own changes keep it readable too.
+    std::fs::remove_file(dir.join("home/bin/trial.json")).expect("pass");
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("More", &dir.join("home/workspace/more"))).await;
+    let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    assert!(absolute(&text), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/more").display())), "{text}");
+}
+
+#[tokio::test]
+async fn a_newer_claktorys_settings_still_read_and_survive_changes() {
+    // After the supervisor goes back from an update, the file may hold
+    // settings only the newer version knows: they're kept, not refused.
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home/workspace/site")).expect("home");
+    let config = format!(
+        r#"{{"projects":[{{"id":"site","name":"Site","path":"{}","pinned":true}}],
+            "display":{{"max_open_panes":3}},"notifications":{{"agents":{{"ed":"always"}}}},
+            "agents":[{{"id":"ed","name":"Ed","model":"{MODEL}","effort":"off","prompt":"","project":"site","notify":"always"}}]}}"#,
+        dir.join("home/workspace/site").display()
+    );
+    std::fs::write(dir.join("home/config.json"), &config).expect("write");
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert!(workspace.config_error.is_empty(), "{}", workspace.config_error);
+    assert_eq!(workspace.agents.iter().find(|agent| agent.id == "ed").expect("ed").project_id, "site");
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("More", &dir.join("repo"))).await;
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("json");
+    assert_eq!(written["display"]["max_open_panes"], 3, "{written}");
+    assert_eq!(written["notifications"]["agents"]["ed"], "always");
+    assert_eq!(written["projects"][0]["pinned"], true);
+    assert_eq!(written["agents"][0]["notify"], "always");
+    assert_eq!(written["projects"][1]["id"], "more");
 }

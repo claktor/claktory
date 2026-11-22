@@ -321,7 +321,7 @@ async fn call(client: &mut Client, view: &mut View, agent: &str, tool: &str, arg
 }
 
 fn connect_option(agent: &str, on: bool) -> Request {
-    let value = v1::OptionValue { on, agent_ids: Vec::new() };
+    let value = v1::OptionValue { on, ..Default::default() };
     let change = v1::ExtensionChange { id: "secrets".into(), option_id: "connect".into(), value: Some(value), ..Default::default() };
     Request::UpdateAgent(v1::UpdateAgent { agent_id: agent.into(), extension: Some(change), ..Default::default() })
 }

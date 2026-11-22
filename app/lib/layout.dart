@@ -77,14 +77,16 @@ ViewNode viewerLeaf(String path, {String? kind}) => ViewNode(
   ),
 );
 
-/// The viewer that shows [path]: images by their extension, else text
-/// (the text viewer says when a file isn't text).
+/// The viewer that shows [path]: images and videos by their extension,
+/// else text (the text viewer says when a file isn't text).
 String viewerKindFor(String path) {
   final dot = path.lastIndexOf('.');
   final extension = dot < 0 ? '' : path.substring(dot + 1).toLowerCase();
-  return const {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}.contains(extension)
-      ? 'image'
-      : 'text';
+  if (const {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}.contains(extension)) {
+    return 'image';
+  }
+  if (const {'mp4', 'm4v', 'mov'}.contains(extension)) return 'video';
+  return 'text';
 }
 
 /// [root] without the pane [id]: a split left with one child gives way to

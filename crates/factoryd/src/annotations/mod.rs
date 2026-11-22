@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 
 use self::anchor::{Doc, Mapping, Quote, Space};
 use crate::factory::{Factory, RequestError, host_event};
+use crate::locking::lock as guard;
 use crate::transcript::now_ms;
 
 pub(crate) const SCHEMA: &str = "
@@ -117,10 +118,6 @@ struct Seen {
     stamp: Option<(SystemTime, u64)>,
     /// Empty when it couldn't be read.
     sha: String,
-}
-
-fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A file's content, as threads need it.
@@ -1183,7 +1180,7 @@ pub(crate) fn written(factory: &Factory, agent: &str, folder: &Path, path: &str)
     let path = Path::new(path);
     let path = if path.is_absolute() { path.to_path_buf() } else { folder.join(path) };
     let path = std::fs::canonicalize(&path).unwrap_or(path).display().to_string();
-    let shown = ["text", "image", "video"].iter().any(|kind| factory.viewer.paths(kind).contains(&path));
+    let shown = ["text", "image", "video", "pdf"].iter().any(|kind| factory.viewer.paths(kind).contains(&path));
     let _work = factory.comments_lock();
     let db = factory.store.db();
     let threaded = has_threads(&db, &path).unwrap_or(false);
@@ -1227,6 +1224,7 @@ fn poll(factory: &Factory) {
     let mut paths = factory.viewer.paths("text");
     paths.extend(factory.viewer.paths("image"));
     paths.extend(factory.viewer.paths("video"));
+    paths.extend(factory.viewer.paths("pdf"));
     let mut changed = Vec::new();
     {
         let mut seen = guard(&factory.annotations.seen);

@@ -1,8 +1,10 @@
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'app_views/app_view.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
@@ -14,9 +16,11 @@ import 'layout.dart';
 import 'marketplace.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'selection.dart' show Unselectable;
 import 'pane_chrome.dart';
 import 'map.dart';
 import 'mobile/haptics.dart';
+import 'mobile/device.dart' show WindowControls, windowControls;
 import 'mobile/metrics.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
@@ -74,18 +78,24 @@ class PaneProjection extends InheritedWidget {
     super.key,
     required this.project,
     required this.focus,
+    this.hold,
     required super.child,
   });
 
   final PaneView Function(ViewNode full, Size room) project;
   final void Function(String leafId) focus;
 
+  /// While true, no pane's width may start to change (an iPad's Pencil
+  /// stroke is down, and a width change drops it): the dividers and the
+  /// headers start no drag. One already under way carries on.
+  final ValueListenable<bool>? hold;
+
   static PaneProjection? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<PaneProjection>();
 
   @override
   bool updateShouldNotify(PaneProjection old) =>
-      old.project != project || old.focus != focus;
+      old.project != project || old.focus != focus || old.hold != hold;
 }
 
 /// Settings, the Marketplace and What's new open as panes in the selected
@@ -253,8 +263,30 @@ class _PaneLayoutState extends State<PaneLayout> {
   /// A divider's drag: the split's shares when it began, and its room.
   List<double> _from = const [];
 
+  /// The pane expanded as last asked here ("" for none), until the backend
+  /// has it.
+  String? _sentFocus;
+
+  /// The pane expanded to fill the window in this build, if any: it's laid
+  /// out over the window ([_portal]), and a blank holds its place.
+  String? _expanded;
+
+  /// The panes there were as one was expanded: any since are what opened
+  /// meanwhile, which the expanded view mentions.
+  Set<String>? _before;
+
+  /// Shows the expanded pane over the window, in the window's overlay, so
+  /// dialogs and menus still float above it.
+  final _portal = OverlayPortalController();
+
   /// The whole layout: as last changed here until the backend has it.
   ViewNode get _full => _sent ?? layoutOf(widget.agent);
+
+  @override
+  void initState() {
+    super.initState();
+    _portal.show();
+  }
 
   @override
   void didUpdateWidget(PaneLayout old) {
@@ -262,7 +294,38 @@ class _PaneLayoutState extends State<PaneLayout> {
     if (old.agent.id != widget.agent.id) {
       _sent = null;
       _dragged = null;
+      _sentFocus = null;
+      _before = null;
     }
+  }
+
+  /// The pane [full] has expanded, if it's still there.
+  String? _expandedIn(ViewNode full) {
+    final id = _sentFocus ?? widget.agent.layoutFocus;
+    if (id.isEmpty) return null;
+    return leaves(full).any((leaf) => leaf.id == id) ? id : null;
+  }
+
+  /// Expands pane [id] to fill the window, or with null puts it back:
+  /// the backend keeps it (`Agent.layout_focus`), so it lasts.
+  void _expand(String? id) {
+    final focus = id ?? '';
+    // Over whatever floats in the window now (a hover card, say).
+    if (id != null) {
+      _portal
+        ..hide()
+        ..show();
+    }
+    setState(() => _sentFocus = focus);
+    fireAndLog(
+      AppScope.of(context)
+          .setLayout(widget.agent.id, _full, focus: focus)
+          .whenComplete(() {
+            if (mounted && _sentFocus == focus) {
+              setState(() => _sentFocus = null);
+            }
+          }),
+    );
   }
 
   void _change(ViewNode? root) {
@@ -297,13 +360,38 @@ class _PaneLayoutState extends State<PaneLayout> {
     _keys.removeWhere((id, _) => !ids.contains(id));
     final projection = PaneProjection.maybeOf(context);
     _focus = projection?.focus;
-    if (projection == null) return _laid(full, null, _dragged ?? full, chat);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Asked every time: what fits follows the room and the focus.
-        final view = projection.project(full, constraints.biggest);
-        return _laid(full, view, _dragged ?? view.shown, chat);
-      },
+    final expanded = _expanded = _expandedIn(full);
+    if (expanded == null) _before = null;
+    final before = expanded == null ? null : (_before ??= ids);
+    return OverlayPortal(
+      controller: _portal,
+      overlayChildBuilder: (context) => expanded == null
+          ? const SizedBox.shrink()
+          : ExpandedPane(
+              agent: widget.agent,
+              opened: [
+                for (final leaf in leaves(full))
+                  if (!before!.contains(leaf.id)) leaf.leaf,
+              ],
+              onBack: () => _expand(null),
+              child: _pane(
+                full,
+                null,
+                leaves(full).firstWhere((leaf) => leaf.id == expanded),
+                chat,
+                expanded: true,
+              ),
+            ),
+      child: projection == null
+          ? _laid(full, null, _dragged ?? full, chat)
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                // Asked every time: what fits follows the room and the
+                // focus.
+                final view = projection.project(full, constraints.biggest);
+                return _laid(full, view, _dragged ?? view.shown, chat);
+              },
+            ),
     );
   }
 
@@ -361,23 +449,33 @@ class _PaneLayoutState extends State<PaneLayout> {
               right: row ? null : 0,
               top: row ? 0 : edge,
               bottom: row ? 0 : null,
-              child: ResizeHandle(
-                key: ValueKey('divider-${node.id}-$i'),
-                axis: row ? Axis.horizontal : Axis.vertical,
-                onDragStart: () => _from = shares,
-                onDrag: (delta) => setState(() {
-                  _dragShares = _dividerMoved(view, split, i, delta, room, row);
-                  _dragged = resize(laid, node.id, _dragShares);
-                }),
-                onDragEnd: () => _change(
-                  _dragged == null || view == null
-                      ? _dragged
-                      : view.resized(full, node.id, _dragShares),
-                ),
-                onReset: () => _change(
-                  view == null
-                      ? resize(full, node.id, const [])
-                      : view.resized(full, node.id, const []),
+              child: _Held(
+                hold: PaneProjection.maybeOf(context)?.hold,
+                child: ResizeHandle(
+                  key: ValueKey('divider-${node.id}-$i'),
+                  axis: row ? Axis.horizontal : Axis.vertical,
+                  onDragStart: () => _from = shares,
+                  onDrag: (delta) => setState(() {
+                    _dragShares = _dividerMoved(
+                      view,
+                      split,
+                      i,
+                      delta,
+                      room,
+                      row,
+                    );
+                    _dragged = resize(laid, node.id, _dragShares);
+                  }),
+                  onDragEnd: () => _change(
+                    _dragged == null || view == null
+                        ? _dragged
+                        : view.resized(full, node.id, _dragShares),
+                  ),
+                  onReset: () => _change(
+                    view == null
+                        ? resize(full, node.id, const [])
+                        : view.resized(full, node.id, const []),
+                  ),
                 ),
               ),
             ),
@@ -424,8 +522,19 @@ class _PaneLayoutState extends State<PaneLayout> {
     return shares;
   }
 
-  /// The pane for leaf [node]; Close and Move change [full], by id.
-  Widget _pane(ViewNode full, PaneView? view, ViewNode node, Widget chat) {
+  /// The pane for leaf [node]; Close and Move change [full], by id. The
+  /// pane expanded over the window is built there ([expanded]), with a
+  /// blank in its place here.
+  Widget _pane(
+    ViewNode full,
+    PaneView? view,
+    ViewNode node,
+    Widget chat, {
+    bool expanded = false,
+  }) {
+    if (!expanded && node.id == _expanded) {
+      return ColoredBox(color: Palette.of(context).canvas);
+    }
     final agent = widget.agent;
     final leaf = node.leaf;
     final isChat = leaf.kind == chatKind;
@@ -445,6 +554,7 @@ class _PaneLayoutState extends State<PaneLayout> {
                 projectId: leaf.path,
                 paneId: node.id,
               ),
+              _ when leaf.kind == appKind => AppPane(leaf: leaf),
               _ => Builder(builder: (context) => viewerBody(context, leaf)),
             },
           );
@@ -460,7 +570,209 @@ class _PaneLayoutState extends State<PaneLayout> {
       },
       focused: view != null && view.focused == node.id,
       onFocus: view == null ? null : () => _focus?.call(node.id),
+      expanded: expanded,
+      // The conversation is the view itself: nothing to expand it from.
+      onExpand: isChat ? null : () => _expand(expanded ? null : node.id),
       child: content,
+    );
+  }
+}
+
+/// A pane expanded to fill the window, to read in peace: over everything
+/// but the dialogs and menus floating in it, under a band with the way
+/// back ("Back to June", or Esc) and, once panes open meanwhile, a quiet
+/// note of them. The layout stays as it was under it.
+class ExpandedPane extends StatefulWidget {
+  const ExpandedPane({
+    super.key,
+    required this.agent,
+    required this.opened,
+    required this.onBack,
+    required this.child,
+  });
+
+  final Agent agent;
+
+  /// Panes opened since it was expanded, oldest first.
+  final List<ViewLeaf> opened;
+  final VoidCallback onBack;
+  final Widget child;
+
+  @override
+  State<ExpandedPane> createState() => _ExpandedPaneState();
+}
+
+class _ExpandedPaneState extends State<ExpandedPane> {
+  final _node = FocusNode(debugLabel: 'Expanded pane');
+
+  @override
+  void initState() {
+    super.initState();
+    // The keys come here, not to a message box left under it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_node.hasFocus) _node.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _key(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      widget.onBack();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: windowControls,
+    builder: (context, controls, _) => _build(context, controls),
+  );
+
+  Widget _build(BuildContext context, WindowControls controls) {
+    final palette = Palette.of(context);
+    // Where the window's controls sit, at its top left: the Mac's traffic
+    // lights; a windowed iPad's dots, which the band goes beside, level
+    // with them, as Apple's apps put their toolbars.
+    final lights = defaultTargetPlatform == TargetPlatform.macOS
+        ? 80.0
+        : Space.m + controls.leading;
+    final band = WindowDrag(
+      child: Container(
+        height: titleBarHeight,
+        padding: EdgeInsets.only(left: lights, right: Space.m),
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          border: Border(bottom: BorderSide(color: palette.hairline)),
+        ),
+        child: Row(
+          children: [
+            Flexible(
+              child: _BandChip(
+                label: 'Back to ${widget.agent.name}',
+                onTap: widget.onBack,
+                leading: (color) => Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ExtensionGlyph(
+                      icon: 'arrow-left',
+                      name: 'Back',
+                      color: color,
+                      size: 14,
+                    ),
+                    const SizedBox(width: Space.xs + 2),
+                    AgentCharacter(agent: widget.agent, size: 20),
+                  ],
+                ),
+              ),
+            ),
+            const Spacer(),
+            if (widget.opened.isNotEmpty)
+              Flexible(
+                child: _BandChip(
+                  label: widget.opened.length == 1
+                      ? '${widget.agent.name} opened '
+                            '${paneTitle(widget.opened.single, AppScope.of(context).workspace.workspace)}'
+                      : '${widget.agent.name} opened '
+                            '${widget.opened.length} more',
+                  onTap: widget.onBack,
+                  leading: (_) => const Dot(color: signal, size: 7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    final still = MediaQuery.disableAnimationsOf(context);
+    return Focus(
+      focusNode: _node,
+      onKeyEvent: _key,
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: still ? 1 : 0, end: 1),
+        duration: Motion.base,
+        curve: Curves.easeOut,
+        builder: (context, opacity, child) =>
+            Opacity(opacity: opacity, child: child),
+        child: ColoredBox(
+          color: palette.canvas,
+          child: Padding(
+            // Below an iPad's status bar, not its window controls: the
+            // band sits beside them.
+            padding: EdgeInsets.only(
+              top: math.max(
+                0,
+                MediaQuery.paddingOf(context).top - controls.top,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Unselectable(child: band),
+                Expanded(child: widget.child),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A 28px capsule in the expanded pane's band, like the agent bar's back
+/// chip: what's at its start, then [label].
+class _BandChip extends StatelessWidget {
+  const _BandChip({
+    required this.label,
+    required this.onTap,
+    required this.leading,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final Widget Function(Color color) leading;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, hovered) => AnimatedContainer(
+          duration: Motion.fast,
+          height: 28,
+          padding: const EdgeInsets.only(left: Space.s - 2, right: Space.s + 2),
+          decoration: BoxDecoration(
+            color: hovered ? palette.selected : palette.canvas,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: palette.hairline),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              leading(hovered ? palette.text : palette.textMuted),
+              const SizedBox(width: Space.xs + 2),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TypeScale.of(context).label
+                      .copyWith(color: palette.text),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -518,11 +830,18 @@ class Pane extends StatefulWidget {
     this.onClose,
     this.focused = false,
     this.onFocus,
+    this.expanded = false,
+    this.onExpand,
   });
 
   final Agent agent;
   final ViewNode node;
   final Widget child;
+
+  /// Filling the window ([ExpandedPane]); [onExpand] expands it, or puts
+  /// it back while it's expanded. Null for the conversation.
+  final bool expanded;
+  final VoidCallback? onExpand;
 
   /// The pane being read, among those a window shows (an iPad's): its
   /// header is marked on touch.
@@ -614,11 +933,13 @@ class _PaneState extends State<Pane> {
     Widget header(String details, List<Widget> controls) => PaneHeader(
       drag: PaneDrag(agent.id, node.id),
       glyph: (color) => paneGlyph(agent, node.leaf, color),
-      title: paneTitle(node.leaf),
+      title: paneTitle(node.leaf, backend.workspace.workspace),
       details: details,
       controls: controls,
       onClose: widget.onClose,
       focused: widget.focused,
+      expanded: widget.expanded,
+      onExpand: widget.onExpand,
     );
     final body = ownHeader
         ? Column(
@@ -678,10 +999,95 @@ class _PaneState extends State<Pane> {
   }
 }
 
-/// What a pane's header says it is.
-String paneTitle(ViewLeaf leaf) {
+/// A pane's kind for an app's view (ViewLeaf.app_id, view and params).
+const appKind = 'app';
+
+/// An app's view as Claktory's chrome names it: the app's name first,
+/// always, then the view's title ("Charts · Days"), since the title is the
+/// app's own words and could pass itself off as Claktory's (Fugo's rule);
+/// "This app" for an app [workspace] doesn't have (or none was given).
+String appViewTitle(ViewLeaf leaf, Workspace? workspace) {
+  final app = workspace == null ? null : _appOf(workspace, leaf.appId);
+  final name = app == null || app.name.isEmpty ? 'This app' : app.name;
+  return leaf.title.isEmpty ? name : '$name · ${leaf.title}';
+}
+
+/// An app's view in a pane: [AppView], over the backend, framed with the
+/// app's name as Claktory knows it (never a title the app chose), or
+/// "This app" while Claktory doesn't know it.
+class AppPane extends StatelessWidget {
+  const AppPane({super.key, required this.leaf});
+
+  final ViewLeaf leaf;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final name = _appOf(backend.workspace.workspace, leaf.appId)?.name;
+        // The pane's header (or a phone's page header), as a viewer has
+        // one; its title names the app ([appViewTitle]).
+        return PaneScaffold(
+          body: AppView(
+            transport: backend,
+            appId: leaf.appId,
+            appName: name ?? '',
+            view: leaf.view,
+            params: leaf.params,
+          ),
+        );
+      },
+    );
+  }
+}
+
+AppInfo? _appOf(Workspace workspace, String id) {
+  for (final app in workspace.apps) {
+    if (app.id == id) return app;
+  }
+  return null;
+}
+
+/// An app's own glyph, as Settings → Apps shows it: its Lucide icon, or
+/// its name's first letter; a dot while Claktory doesn't know the app.
+class _AppGlyph extends StatelessWidget {
+  const _AppGlyph({required this.appId, required this.color});
+
+  final String appId;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: workspace,
+      builder: (context, _) {
+        final app = _appOf(workspace.workspace, appId);
+        if (app == null) {
+          return SizedBox.square(
+            dimension: 14,
+            child: Center(child: Dot(color: color)),
+          );
+        }
+        return ExtensionGlyph(
+          icon: app.icon,
+          name: app.name,
+          color: color,
+          size: 14,
+        );
+      },
+    );
+  }
+}
+
+/// What a pane's header says it is. Give [workspace] wherever there is one:
+/// an app's view is named for its app from it (see [appViewTitle]).
+String paneTitle(ViewLeaf leaf, [Workspace? workspace]) {
   if (leaf.kind == chatKind) return 'Conversation';
   if (leaf.kind == filesKind) return 'Files';
+  if (leaf.kind == appKind) return appViewTitle(leaf, workspace);
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => 'Settings',
     AppPage.marketplace => 'Marketplace',
@@ -697,6 +1103,7 @@ String paneTitle(ViewLeaf leaf) {
 Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
   if (leaf.kind == chatKind) return AgentCharacter(agent: agent, size: 14);
   if (leaf.kind == filesKind) return FolderGlyph(color: color);
+  if (leaf.kind == appKind) return _AppGlyph(appId: leaf.appId, color: color);
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => SizedBox.square(
       dimension: 14,
@@ -747,6 +1154,8 @@ class PaneHeader extends StatelessWidget {
     this.controls = const [],
     this.onClose,
     this.focused = false,
+    this.expanded = false,
+    this.onExpand,
   });
 
   final PaneDrag drag;
@@ -759,6 +1168,14 @@ class PaneHeader extends StatelessWidget {
   /// The pane being read: on touch its header takes `selected`, so moving
   /// between panes (⌃Tab) visibly goes somewhere.
   final bool focused;
+
+  /// The pane fills the window: its header isn't a handle to move it by,
+  /// and [onExpand] (Collapse) puts it back.
+  final bool expanded;
+
+  /// Expand (or Collapse) before the ×, in the same place on every pane;
+  /// null for none.
+  final VoidCallback? onExpand;
 
   @override
   Widget build(BuildContext context) {
@@ -823,28 +1240,89 @@ class PaneHeader extends StatelessWidget {
           color: touch && focused ? palette.selected : palette.sidebar,
           border: Border(bottom: BorderSide(color: palette.hairline)),
         ),
-        child: Row(
-          children: [
-            Expanded(child: named(withDetails: true)),
-            for (final control in controls)
-              Padding(padding: const EdgeInsets.only(left: 2), child: control),
-            if (onClose != null)
-              Padding(
-                padding: const EdgeInsets.only(left: 2),
-                child: GlyphButton(
-                  label: 'Close',
-                  active: false,
-                  onTap: onClose!,
-                  glyph: (color) =>
-                      ExtensionGlyph(icon: 'x', name: 'Close', color: color),
+        child: LayoutBuilder(
+          builder: (context, constraints) => Row(
+            children: [
+              Expanded(child: named(withDetails: true)),
+              if (controls.isNotEmpty)
+                // A narrow pane clips the viewer's controls at their end
+                // (the first, the most used, stay) rather than overflowing:
+                // the glyph (and the gaps beside the title), Expand and ×
+                // always show.
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: math.max(
+                      0,
+                      constraints.maxWidth -
+                          (onExpand == null ? 0 : 30) -
+                          (onClose == null ? 0 : 30) -
+                          14 -
+                          2 * Space.s,
+                    ),
+                  ),
+                  child: UnconstrainedBox(
+                    constrainedAxis: Axis.vertical,
+                    alignment: Alignment.centerLeft,
+                    clipBehavior: Clip.hardEdge,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final control in controls)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 2),
+                            child: control,
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-          ],
+              if (onExpand != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 2),
+                  child: GlyphButton(
+                    label: '${expanded ? 'Collapse' : 'Expand'} $title',
+                    active: false,
+                    onTap: onExpand!,
+                    glyph: (color) => ExtensionGlyph(
+                      icon: expanded ? 'minimize-2' : 'maximize-2',
+                      name: expanded ? 'Collapse' : 'Expand',
+                      color: color,
+                    ),
+                  ),
+                ),
+              if (onClose != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 2),
+                  child: GlyphButton(
+                    label: 'Close',
+                    active: false,
+                    onTap: onClose!,
+                    glyph: (color) =>
+                        ExtensionGlyph(icon: 'x', name: 'Close', color: color),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
+    // Filling the window, there's nowhere to move it.
+    if (expanded) return bar;
+    final hold = PaneProjection.maybeOf(context)?.hold;
+    if (hold != null) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: hold,
+        builder: (context, held, _) => _draggable(touch, feedback, bar, held),
+      );
+    }
+    return _draggable(touch, feedback, bar, false);
+  }
+
+  /// [bar] as the pane's handle; [held], it starts no drag.
+  Widget _draggable(bool touch, Widget feedback, Widget bar, bool held) {
     if (!touch) {
       return Draggable<PaneDrag>(
+        maxSimultaneousDrags: held ? 0 : null,
         data: drag,
         dragAnchorStrategy: pointerDragAnchorStrategy,
         feedback: feedback,
@@ -852,6 +1330,7 @@ class PaneHeader extends StatelessWidget {
       );
     }
     return LongPressDraggable<PaneDrag>(
+      maxSimultaneousDrags: held ? 0 : null,
       data: drag,
       dragAnchorStrategy: pointerDragAnchorStrategy,
       feedback: feedback,
@@ -859,6 +1338,29 @@ class PaneHeader extends StatelessWidget {
       hapticFeedbackOnStart: defaultTargetPlatform != TargetPlatform.iOS,
       onDragStarted: () => fireAndLog(Haptics.selection()),
       child: bar,
+    );
+  }
+}
+
+/// [child], a divider, taking no new drag while [hold] is true; it stays
+/// drawn as it is (a stroke flips it each time).
+class _Held extends StatelessWidget {
+  const _Held({required this.hold, required this.child});
+
+  final ValueListenable<bool>? hold;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final hold = this.hold;
+    if (hold == null) return child;
+    return ValueListenableBuilder<bool>(
+      valueListenable: hold,
+      // Pointer events of a drag already under way still reach it: they
+      // go where the pointer went down.
+      builder: (context, held, child) =>
+          IgnorePointer(ignoring: held, child: child),
+      child: child,
     );
   }
 }

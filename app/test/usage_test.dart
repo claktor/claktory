@@ -44,12 +44,14 @@ ProviderUsage weekly(double percent, {String error = ''}) => ProviderUsage(
   ],
 );
 
-Finder circle(String provider, [String who = '']) => find.byWidgetPredicate(
-  (widget) =>
-      widget is Semantics &&
-      widget.properties.label ==
-          (who.isEmpty ? '$provider usage' : '$provider usage, $who'),
-);
+Finder circle(String provider, [String who = '']) =>
+    find.byWidgetPredicate((widget) {
+      if (widget is! Semantics) return false;
+      final name = who.isEmpty ? '$provider usage' : '$provider usage, $who';
+      // The account requests go to now, among several, says so after.
+      final label = widget.properties.label;
+      return label == name || label == '$name, in use';
+    });
 
 /// Hovers over [provider]'s circle until its card shows.
 Future<void> hover(
@@ -319,6 +321,45 @@ void main() {
       expect(find.text('In use'), findsOneWidget);
       expect(find.text('25%'), findsOneWidget);
       expect(find.textContaining('Signed in with'), findsNothing);
+    });
+
+    testWidgets('the one in use has a dot under its circle, and says so', (
+      tester,
+    ) async {
+      await showProviders(tester, [claude()]);
+      expect(
+        find.bySemanticsLabel('Anthropic usage, matt@home.test, in use'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp('matt@work.test, in use')),
+        findsNothing,
+      );
+      final dots = find.descendant(
+        of: find.byType(UsageRing),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is DecoratedBox &&
+              widget.decoration is BoxDecoration &&
+              (widget.decoration as BoxDecoration).shape == BoxShape.circle,
+        ),
+      );
+      expect(dots, findsOneWidget);
+      final dot = tester.getRect(dots);
+      final home = tester.getRect(circle('Anthropic', 'matt@home.test'));
+      expect(dot.width, inUseDot);
+      expect(dot.center.dx, closeTo(home.center.dx, 0.5));
+      expect(dot.top, greaterThan(home.center.dy + 9), reason: 'under it');
+    });
+
+    testWidgets('a provider with one account marks nothing', (tester) async {
+      await showProviders(tester, [
+        subscription(usage: weekly(40))
+          ..accounts.add(
+            Account(id: 'a1', label: 'matt@work.test', inUse: true),
+          ),
+      ]);
+      expect(find.bySemanticsLabel(RegExp('in use')), findsNothing);
     });
 
     testWidgets('an account at its limit says until when', (tester) async {

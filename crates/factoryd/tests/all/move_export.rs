@@ -313,3 +313,29 @@ async fn restore_stops_a_backend_in_moved_mode_so_the_claktory_can_have_its_port
     }
     assert!(home.join("auth.json").exists() && !home.join("moved.json").exists());
 }
+
+/// The `factoryd` a person runs in Terminal is often the backend's own
+/// binary (the installed command links to it): that alone isn't running
+/// inside Claktory.
+#[tokio::test]
+async fn a_final_export_runs_from_the_backends_own_binary_in_a_shell() {
+    let dir = temp_dir();
+    let (factory, _addr, _repo) = claktory(&dir).await;
+    drop(factory);
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("bin")).expect("bin");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_factoryd"), home.join("bin/factoryd")).expect("the backend");
+    std::os::unix::fs::symlink(home.join("bin/factoryd"), dir.join("factoryd")).expect("the command");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let out = Command::new(dir.join("factoryd"))
+        .args(["export", "--final", "--json", "--out"])
+        .arg(dir.join("move.claktory"))
+        .env("FACTORY_HOME", &home)
+        .env("FACTORY_PORT", port.to_string())
+        .env("HOME", &dir)
+        .output()
+        .expect("factoryd export");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(home.join("moved.json").exists() && dir.join("move.claktory").exists(), "{said}");
+}

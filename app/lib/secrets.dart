@@ -70,6 +70,7 @@ class SecretsSettings extends StatelessWidget {
                 account: backend.workspace.workspace.hasAccount()
                     ? backend.workspace.workspace.account
                     : null,
+                why: vault.lockedWhy,
               ),
               const SizedBox(height: Space.l),
             ],
@@ -137,15 +138,20 @@ class SecretsSettings extends StatelessWidget {
   }
 }
 
-/// Locked since a restart, and why: with a Claktory account, what the
-/// backend says (claktory.com can't be reached, or the account no longer
-/// opens them), or that this Claktory was removed from the account. The
-/// recovery key opens them meanwhile.
+/// Locked since a restart, and why: the backend's words
+/// (VaultState.locked_why: claktory.com can't be reached, the account no
+/// longer opens them, they open with the passphrase…), or that this
+/// Claktory was removed from the account. The recovery key opens them
+/// meanwhile.
 class _Locked extends StatelessWidget {
-  const _Locked({required this.account});
+  const _Locked({required this.account, this.why = ''});
 
   /// This Claktory's account, when it has one.
   final ClaktoryAccount? account;
+
+  /// Why they're locked, in the backend's words; empty from a backend
+  /// before it said.
+  final String why;
 
   @override
   Widget build(BuildContext context) {
@@ -153,15 +159,20 @@ class _Locked extends StatelessWidget {
     final account = this.account;
     final removed =
         account?.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
-    final why = account == null
-        ? "Secrets are locked. Agents can't use them until you unlock them."
-        : removed
-        ? 'Secrets are locked because this Claktory was removed from your '
-              'account. Sign in again to unlock them, or use your recovery '
-              'key.'
-        // Signed in: the backend's own words; none while it's asking.
-        : 'Secrets are locked. '
-              '${account.problem.isEmpty ? 'Opening them…' : account.problem}';
+    final why = removed || this.why.isEmpty
+        ? null
+        : 'Secrets are locked. ${this.why}';
+    final said =
+        why ??
+        (account == null
+            ? "Secrets are locked. Agents can't use them until you unlock them."
+            : removed
+            ? 'Secrets are locked because this Claktory was removed from your '
+                  'account. Sign in again to unlock them, or use your recovery '
+                  'key.'
+            // Signed in: the backend's own words; none while it's asking.
+            : 'Secrets are locked. '
+                  '${account.problem.isEmpty ? 'Opening them…' : account.problem}');
     return Container(
       padding: const EdgeInsets.all(Space.m),
       decoration: BoxDecoration(
@@ -173,7 +184,7 @@ class _Locked extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            why,
+            said,
             style: TypeScale.of(context).body.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.m),
@@ -303,16 +314,21 @@ class _ToggleRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Muted while it can't be changed.
                 Text(
                   label,
-                  style: TypeScale.of(context).body
-                      .copyWith(color: palette.text),
+                  style: TypeScale.of(context).body.copyWith(
+                    color: onChanged == null ? palette.textMuted : palette.text,
+                  ),
                 ),
                 if (note != null)
                   Text(
                     note!,
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textMuted),
+                    style: TypeScale.of(context).caption.copyWith(
+                      color: onChanged == null
+                          ? palette.textFaint
+                          : palette.textMuted,
+                    ),
                   ),
               ],
             ),
@@ -322,6 +338,13 @@ class _ToggleRow extends StatelessWidget {
     );
   }
 }
+
+/// The switch that makes every command using a secret wait for the
+/// person's Allow (SecretInfo.ask_each_time), and what it does.
+const askEachTimeLabel = 'Ask each time';
+const askEachTimeNote =
+    "Each command that uses it waits until you allow it. Apps can't use "
+    'it.';
 
 /// One secret: its name, what it's for, whom it's given to and when it was
 /// last used. Opened, its values (hidden, or shown for 30 seconds), Copy,
@@ -348,6 +371,9 @@ class _SecretRowState extends State<_SecretRow> {
   var _noteIsError = false;
 
   List<SecretUse>? _uses;
+
+  /// Ask each time is being set.
+  var _setting = false;
 
   @override
   void dispose() {
@@ -420,6 +446,20 @@ class _SecretRowState extends State<_SecretRow> {
     if (mounted) _say('Copied. The clipboard clears in a minute.');
   }
 
+  Future<void> _askEachTime(bool on) async {
+    setState(() {
+      _setting = true;
+      _note = null;
+    });
+    try {
+      await AppScope.of(context).setSecretAskEachTime(secret.id, on);
+    } on RequestFailure catch (failure) {
+      if (mounted) _say(failure.message, error: true);
+    } finally {
+      if (mounted) setState(() => _setting = false);
+    }
+  }
+
   Future<void> _give() async {
     final backend = AppScope.of(context);
     final given = {for (final grant in secret.grants) grant.agentId};
@@ -473,6 +513,7 @@ class _SecretRowState extends State<_SecretRow> {
             '${secret.lastUsedBy.isEmpty ? '' : ' by ${_agentName(backend, secret.lastUsedBy)}'}',
       if (secret.ownerAgentId.isNotEmpty)
         'Saved by ${_agentName(backend, secret.ownerAgentId)}',
+      if (secret.askEachTime) 'Asks each time',
     ].join(' · ');
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.xs),
@@ -681,6 +722,13 @@ class _SecretRowState extends State<_SecretRow> {
                 ),
               ),
             ),
+          const SizedBox(height: Space.m),
+          _ToggleRow(
+            label: askEachTimeLabel,
+            note: askEachTimeNote,
+            value: secret.askEachTime,
+            onChanged: _setting ? null : _askEachTime,
+          ),
           const SizedBox(height: Space.m),
           for (final grant in secret.grants)
             _GrantRow(secret: secret, grant: grant),
@@ -1080,6 +1128,7 @@ class _SecretFormState extends State<SecretForm> {
       _VariableEdit(name: variable.name, file: variable.file),
     if (widget.secret == null) _VariableEdit(),
   ];
+  var _askEachTime = false;
   var _busy = false;
   String? _error;
 
@@ -1140,7 +1189,12 @@ class _SecretFormState extends State<SecretForm> {
     final backend = AppScope.of(context);
     try {
       if (editing == null) {
-        await backend.createSecret(name, _description.text.trim(), entries);
+        await backend.createSecret(
+          name,
+          _description.text.trim(),
+          entries,
+          askEachTime: _askEachTime,
+        );
       } else {
         await backend.updateSecret(
           editing.id,
@@ -1189,6 +1243,16 @@ class _SecretFormState extends State<SecretForm> {
           ),
         ),
         if (!_named) ..._values(palette, editing),
+        // Once it's made, its row has the switch.
+        if (editing == null) ...[
+          const SizedBox(height: Space.m),
+          _ToggleRow(
+            label: askEachTimeLabel,
+            note: askEachTimeNote,
+            value: _askEachTime,
+            onChanged: (on) => setState(() => _askEachTime = on),
+          ),
+        ],
         const SizedBox(height: Space.l),
       ],
       error: _error,
@@ -1553,6 +1617,9 @@ String agentSecretsSummary(List<String> names) {
 
 /// In an agent's settings: a toggle for each secret, on while it's given
 /// to the agent. Taking back confirms.
+/// While the agent is limited to a pipe (Agent.quarantined) its secrets
+/// don't work: the toggles are greyed and take no taps (its settings say
+/// why, above them).
 class AgentSecretsField extends StatefulWidget {
   const AgentSecretsField({super.key, required this.agent});
 
@@ -1619,7 +1686,11 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
                           value: secret.grants.any(
                             (grant) => grant.agentId == widget.agent.id,
                           ),
-                          onChanged: (value) => _set(secret, value),
+                          // Off while it's limited to a pipe, which its
+                          // settings say above: nothing to change here.
+                          onChanged: widget.agent.quarantined
+                              ? null
+                              : (value) => _set(secret, value),
                         ),
                       ),
                     if (_error != null)
@@ -1993,6 +2064,7 @@ String secretRequestSummary(
         request.agentId;
     return 'Asks you to add a secret for $asker: $name';
   }
+  if (request.generate.isNotEmpty) return 'Asks for ${keyKind(request)}';
   if (request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED) {
     final admin = [
       for (final agent in workspace.agents)
@@ -2007,6 +2079,11 @@ String secretRequestSummary(
       ? 'Asks for ${request.secretName}'
       : 'Asks for a secret: $name';
 }
+
+/// What a generate request (SecretRequest.generate) asks for: "a new SSH
+/// key".
+String keyKind(SecretRequest request) =>
+    request.generate.startsWith('ssh-') ? 'a new SSH key' : 'a new key';
 
 /// An agent's request for a secret, in its conversation and in Needs you:
 /// what it needs and why, in its color. With an admin agent to pass it to
@@ -2112,6 +2189,13 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       request.state == SecretRequestState.SECRET_REQUEST_STATE_PENDING ||
       request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
 
+  /// A key for Claktory to make (SecretRequest.generate): Generate, never
+  /// a values form or the admin agent.
+  bool get _generates => request.generate.isNotEmpty;
+
+  /// A generated key asks each time it's used, unless the person says not.
+  var _askEach = true;
+
   /// The admin agent's add-secret card for the request it collects.
   bool get _collect =>
       request.collecting &&
@@ -2121,7 +2205,11 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
 
   /// The person approves the need, and the admin agent does the rest.
   bool get _approves =>
-      !widget.direct && !_collect && !_names && request.adminAgentId.isNotEmpty;
+      !widget.direct &&
+      !_collect &&
+      !_names &&
+      !_generates &&
+      request.adminAgentId.isNotEmpty;
 
   Future<void> _give(List<SecretInfo> secrets) async {
     if (_deciding) return;
@@ -2160,6 +2248,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         description: adding ? _description.text.trim() : '',
         aliases: aliases,
         asIs: missing.isNotEmpty && aliases.isEmpty,
+        comment: _comment.text.trim(),
         entries: [
           if (adding)
             for (final value in _values)
@@ -2169,6 +2258,24 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                 file: value.file,
               ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _generate() async {
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'Enter a name for the key.');
+      return;
+    }
+    await _decide(
+      () => AppScope.of(context).decideSecretRequest(
+        request.agentId,
+        request.id,
+        approve: true,
+        name: name,
+        askEachTime: _askEach,
+        comment: _comment.text.trim(),
       ),
     );
   }
@@ -2268,7 +2375,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       );
     }
     final String title;
-    if (_collect) {
+    if (_generates) {
+      title = '$name asks for ${keyKind(request)}';
+    } else if (_collect) {
       title =
           '$adminName asks you to add a secret for $name: '
           '${request.newSecret.name}';
@@ -2279,7 +2388,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     } else {
       title = '$name asks for a secret: ${request.newSecret.name}';
     }
-    if (pending && !_names && _adding == null && !_approves) {
+    if (pending && !_names && !_generates && _adding == null && !_approves) {
       // Chooses the secret that looks like the one asked for, if any;
       // otherwise adds the one it describes.
       final closest = closestSecret(request.newSecret, secrets);
@@ -2336,7 +2445,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             ),
           ],
           const SizedBox(height: Space.m),
-          if (pending && _approves)
+          if (pending && _generates)
+            ..._generating(context, palette, name)
+          else if (pending && _approves)
             ..._approval(context, palette, name, adminName)
           else if (pending)
             ..._pending(context, palette, name, secrets)
@@ -2505,19 +2616,68 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         ),
       ),
       const SizedBox(height: Space.m),
-      ActionLine(
-        lead: TextField(
-          controller: _comment,
-          placeholder: 'Tell $agent why (optional)',
-          semanticsLabel: 'Tell $agent why (optional)',
+      _noteAndDismiss(agent),
+    ];
+  }
+
+  /// A note for the agent, sent with whatever the person decides, and
+  /// Dismiss. Enter sends nothing: the note may be for giving.
+  Widget _noteAndDismiss(String agent) => ActionLine(
+    lead: TextField(
+      controller: _comment,
+      placeholder: 'Note for $agent (optional)',
+      semanticsLabel: 'Note for $agent (optional)',
+      kind: InputKind.text,
+    ),
+    action: Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
+  );
+
+  /// A key for Claktory to make: its name (also the key's comment), whom
+  /// it's for (the agent asked; not to be widened here), Ask each time (on
+  /// to start with), Generate, and the note and Dismiss.
+  List<Widget> _generating(
+    BuildContext context,
+    Palette palette,
+    String agent,
+  ) {
+    final type = TypeScale.of(context);
+    return [
+      Field(
+        label: 'Name',
+        note: "Also the key's comment",
+        child: TextField(
+          controller: _name,
           kind: InputKind.text,
-          onSubmitted: (_) => _dismiss(),
-        ),
-        action: Button(
-          label: 'Dismiss',
-          onPressed: _deciding ? null : _dismiss,
+          semanticsLabel: 'Name',
         ),
       ),
+      Text(
+        request.grantToNobody ? 'For no one' : 'For $agent',
+        style: type.body.copyWith(color: palette.textMuted),
+      ),
+      const SizedBox(height: Space.m),
+      _ToggleRow(
+        label: askEachTimeLabel,
+        note: askEachTimeNote,
+        value: _askEach,
+        onChanged: (on) => setState(() => _askEach = on),
+      ),
+      const SizedBox(height: Space.m),
+      ActionLine(
+        lead: Text(
+          _error ?? 'No one ever sees its private half, $agent included.',
+          style: type.caption.copyWith(
+            color: _error == null ? palette.textFaint : palette.danger,
+          ),
+        ),
+        action: Button(
+          label: 'Generate',
+          primary: true,
+          onPressed: _deciding ? null : _generate,
+        ),
+      ),
+      const SizedBox(height: Space.m),
+      _noteAndDismiss(agent),
     ];
   }
 
@@ -2727,8 +2887,12 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         : request.secretName;
     // Approved first, it may have been the admin agent that gave it.
     final byAdmin =
+        !_generates &&
         request.approvedMs > 0 &&
         request.state == SecretRequestState.SECRET_REQUEST_STATE_GRANTED;
+    // A key Claktory made: to the agent, or to no one as it asked.
+    final generated =
+        request.state == SecretRequestState.SECRET_REQUEST_STATE_GENERATED;
     return [
       // Who decided: the person (not when it expired, the agent took it
       // back, or it may have been the admin agent).
@@ -2750,6 +2914,10 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                         ? 'Expired'
                         : dismissed
                         ? 'Dismissed'
+                        : generated
+                        ? 'Given to no one'
+                        : _generates
+                        ? 'Given to $agent'
                         : byAdmin
                         ? '$agent got $given'
                         : 'Gave $given to $agent',
@@ -2780,8 +2948,49 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
       ],
+      if (request.publicKey.isNotEmpty) ...[
+        const SizedBox(height: Space.m),
+        _PublicKey(request.publicKey),
+      ],
     ];
   }
+}
+
+/// A generated key's public half, with Copy, and that it's safe to share.
+class _PublicKey extends StatefulWidget {
+  const _PublicKey(this.line);
+
+  final String line;
+
+  @override
+  State<_PublicKey> createState() => _PublicKeyState();
+}
+
+class _PublicKeyState extends State<_PublicKey> {
+  var _copied = false;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      ActionLine(
+        lead: CodeBlock(widget.line),
+        action: Button(
+          label: _copied ? 'Copied' : 'Copy',
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: widget.line));
+            if (mounted) setState(() => _copied = true);
+          },
+        ),
+      ),
+      const SizedBox(height: Space.xs),
+      Text(
+        'Public key: safe to share, such as with GitHub or a server.',
+        style: TypeScale.of(context).caption
+            .copyWith(color: Palette.of(context).textFaint),
+      ),
+    ],
+  );
 }
 
 /// One of the request card's two ways to give: Choose one or Add new. The

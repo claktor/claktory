@@ -24,9 +24,9 @@ regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
 keywords = ["/users/", "/home/"]
 
 [[rules.allowlists]]
-description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex)"
+description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries)"
 regexTarget = "match"
-regexes = ['''^/(?:Users|home)/(?:me|mex|x|you|user|runner|linuxbrew|Shared)$''']
+regexes = ['''^/(?:Users|home)/(?:me|mex|x|you|user|runner|linuxbrew|Shared|someone|myself)$''']
 
 [[rules.allowlists]]
 description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"
@@ -61,6 +61,11 @@ regexTarget = "secret"
 regexes = ['''^(?:[a-z]{2,3}-)?0123456789abcdef$''']
 
 [[allowlists]]
+description = "The Android credential tests' made-up secrets (CredentialStoreTest.kt, KeystoreStoreTest.kt): base64 of the plain words iroh-key-secret and iroh-instrumentation, values the tests check never appear unsealed on disk; no credential behind them"
+regexTarget = "secret"
+regexes = ['''^(?:aXJvaC1rZXktc2VjcmV0|aXJvaC1pbnN0cnVtZW50YXRpb24=)$''']
+
+[[allowlists]]
 description = "The account-root ceremony test's service key (crates/claktory-account/src/protocol.rs, a_statement_signed_with_openssl_as_the_ceremony_does_holds, since 97fc7f2c): the bytes 0x00 to 0x1f in order, base64url, standing in for a service's Ed25519 public key in a key statement. A public key's place, counting bytes, no private material; the statement's real keys come from the service, never the repository"
 regexTarget = "secret"
 regexes = ['''^AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8$''']
@@ -77,3 +82,15 @@ commits = [
   "94266178fd45504f72941283f6891f43c6f821a8",
   "6345f3678176965a600332e446880180c2954558",
 ]
+[[allowlists]]
+description = "The redactor tests' made-up PEM keys (crates/factory-agent/src/secrets.rs, a_pem_keys_armor_stays_and_its_body_is_hidden): an OpenSSH armor around only the format's fixed header (openssh-key-v1, cipher none, one key) or around the words 'ssh-ed25519 … Claktory Test Key Only Fake Key' in base64, written with \\n escapes in a Rust string; no key material"
+regexTarget = "secret"
+regexes = ['''^-----BEGIN OPENSSH PRIVATE KEY-----\\n(?:b3BlbnNzaC1rZXktdjEAAAAABG5vbmUA\\nAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\\n-----END|c3NoLWVkMjU1MTkAAAAgQ2xha3Rvcnkg\\n(?:VGVzdCBLZXkgT25seSBGYWtlIEtleQ==\\n-----END|";\n))''']
+[[allowlists]]
+description = "scripts/sign-clapp.sh's check for an OpenSSH key file: the armor line as a grep pattern, followed by the script's own shell and Python (which converts the key it's given), not a key"
+regexTarget = "secret"
+regexes = ['''^-----BEGIN OPENSSH PRIVATE KEY-----' "\$key"; then\n  python3 - "\$key" "\$work/key\.pem" <<'PY'\n''']
+[[allowlists]]
+description = "The recovery key tests' made-up key (app/test/recovery_key_test.dart): the alphabet and digits in order, in the recovery key's groups of four"
+regexTarget = "secret"
+regexes = ['''^ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345-6789$''']

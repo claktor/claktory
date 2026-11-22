@@ -88,7 +88,7 @@ async fn extension_tools_say_what_they_did_in_details() {
         ])
     );
     let listed = details(client, view, "checklist_list", json!({"status": "all", "limit": 1})).await;
-    assert_eq!(listed, json!({"agent": "builder", "shown": 1, "total": 2}));
+    assert_eq!(listed, json!({"agent": "builder", "shown": 1, "total": 2, "goals": 0}));
     let item = details(client, view, "checklist_item", json!({"id": 1})).await;
     assert_eq!(item, json!({"agent": "builder", "id": 1, "text": "Fix login", "status": "done", "owner": "writer"}));
 

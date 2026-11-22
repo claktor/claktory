@@ -15,7 +15,7 @@ fn idle(view: &View, agent: &str) -> bool {
 }
 
 fn answer(seq: u64, dismiss: bool, text: &str) -> client_message::Body {
-    client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: text.into() })
+    client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: text.into(), ..Default::default() })
 }
 
 /// A Factory with a project "Site" and its agent Builder.
@@ -172,4 +172,163 @@ async fn at_most_three_wait_and_they_survive_a_restart() {
         let (_, shown) = ask(&mut client, &mut view, title, true).await;
         assert!(shown.is_some(), "{title}");
     }
+}
+
+/// Builder calls ask_person with `args`; what the tool said, and the card.
+async fn ask_with(client: &mut Client, view: &mut View, args: serde_json::Value) -> (String, Option<(u64, v1::AskPerson)>) {
+    let before = view.entries.len();
+    apply_request(client, view, send_message("builder", &format!("call ask_person {args}"))).await;
+    view.follow(client, |view| view.entries.len() >= before + 3 && idle(view, "builder")).await;
+    let new = &view.entries[before..];
+    let output = new.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::ToolCall(call)) => Some(call.output.clone()),
+        _ => None,
+    });
+    let card = new.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::AskPerson(ask)) => Some((entry.seq, ask.clone())),
+        _ => None,
+    });
+    (output.expect("a tool call"), card)
+}
+
+fn comment(path: &str, exact: &str, body: &str, send_now: bool) -> client_message::Body {
+    let quote = serde_json::json!({"type": "TextQuoteSelector", "exact": exact, "prefix": "", "suffix": ""}).to_string();
+    client_message::Body::CreateThread(v1::CreateThread {
+        agent_id: "builder".into(),
+        path: path.into(),
+        kind: "markdown".into(),
+        version_sha256: String::new(),
+        selectors: vec![v1::Selector { json: quote }],
+        body: body.into(),
+        send_now,
+        suggestion: None,
+    })
+}
+
+#[tokio::test]
+async fn a_review_ask_names_a_file_it_can_read_and_is_told_how_many_comments_the_person_left() {
+    let dir = temp_dir();
+    let (_factory, mut client, mut view) = setup(&dir).await;
+    std::fs::create_dir_all(dir.join("site")).expect("site");
+    std::fs::write(dir.join("site/plan.md"), "# Plan\n\nShip on Monday.\n\nThen tell everyone.\n").expect("plan");
+    std::fs::write(dir.join("site/blob.bin"), [0u8, 1, 2, 3, 0, 9]).expect("blob");
+    std::fs::write(dir.join("elsewhere.md"), "# Not yours\n").expect("elsewhere");
+
+    // Only a file it can read, and one comments work on.
+    let refused = |said: &str, card: &Option<(u64, v1::AskPerson)>| said.ends_with("Nothing was asked.") && card.is_none();
+    let args = |review: &str| serde_json::json!({"title": "Review the plan", "body": "Is Monday right?", "review": review});
+    let (said, made) = ask_with(&mut client, &mut view, args("missing.md")).await;
+    assert!(refused(&said, &made) && said.starts_with("There's no file"), "{said}");
+    let outside = dir.join("elsewhere.md").display().to_string();
+    let (said, made) = ask_with(&mut client, &mut view, args(&outside)).await;
+    assert!(refused(&said, &made) && said.contains("isn't in your folders"), "{said}");
+    let (said, made) = ask_with(&mut client, &mut view, args("blob.bin")).await;
+    assert!(refused(&said, &made) && said.contains("isn't a file comments work on"), "{said}");
+
+    // Relative to its folder; the card names it in full.
+    let (said, made) = ask_with(&mut client, &mut view, args("plan.md")).await;
+    let path = std::fs::canonicalize(dir.join("site/plan.md")).expect("real").display().to_string();
+    assert!(said.starts_with(&format!("Asked the person to review {path}")), "{said}");
+    let (seq, shown) = made.expect("a card");
+    assert_eq!((shown.review_path.as_str(), shown.state()), (path.as_str(), AskPersonState::Pending));
+    assert_eq!(view.agent("builder").waiting_seqs, [seq]);
+
+    // The person comments on it, one comment sent at once and one not yet;
+    // approving sends the one left, and says how many.
+    let sent = apply_request(&mut client, &mut view, comment(&path, "Ship on Monday.", "Tuesday, after the review.", true)).await;
+    assert!(matches!(sent, Body::Thread(_)), "{sent:?}");
+    let draft = apply_request(&mut client, &mut view, comment(&path, "Then tell everyone.", "Only the team first.", false)).await;
+    assert!(matches!(draft, Body::Thread(_)), "{draft:?}");
+    assert!(matches!(apply_request(&mut client, &mut view, answer(seq, false, "")).await, Body::Ack(_)));
+    assert_eq!(card(&view, seq).review_path, path);
+    let answered = |view: &View| {
+        view.entries.iter().find_map(|entry| match &entry.kind {
+            Some(Kind::Event(event)) if event.text.contains("answered your question \"Review the plan\"") => Some(event.text.clone()),
+            _ => None,
+        })
+    };
+    view.follow(&mut client, |view| answered(view).is_some() && idle(view, "builder")).await;
+    let text = answered(&view).expect("told");
+    assert!(text.contains(&format!("They left 2 comments on {path}; they came to you as comments")), "{text}");
+    let unsent =
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("Only the team first.")));
+    assert!(unsent, "the comment not sent yet came to Builder");
+
+    // A review ask with no comments says so.
+    let (_, made) =
+        ask_with(&mut client, &mut view, serde_json::json!({"title": "Look again", "body": "Anything else?", "review": path})).await;
+    let (seq, _) = made.expect("a card");
+    apply_request(&mut client, &mut view, answer(seq, true, "")).await;
+    let again = told(&mut client, &mut view, 1).await;
+    let dismissed = view.entries.iter().rev().find_map(|entry| match &entry.kind {
+        Some(Kind::Event(event)) if event.text.contains("dismissed your question \"Look again\"") => Some(event.text.clone()),
+        _ => None,
+    });
+    let dismissed = dismissed.unwrap_or(again);
+    assert!(dismissed.contains(&format!("They left no comments on {path}.")), "{dismissed}");
+}
+
+#[tokio::test]
+async fn a_pdf_review_is_answered_with_drawings_of_its_pages_which_the_agent_is_told_of() {
+    let dir = temp_dir();
+    let (_factory, mut client, mut view) = setup(&dir).await;
+    std::fs::create_dir_all(dir.join("site")).expect("site");
+    std::fs::write(dir.join("site/paper.pdf"), b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF\n").expect("pdf");
+
+    // A PDF is a file to review.
+    let args = serde_json::json!({"title": "Mark up the paper", "body": "Circle what's wrong.", "review": "paper.pdf"});
+    let (said, made) = ask_with(&mut client, &mut view, args.clone()).await;
+    let path = std::fs::canonicalize(dir.join("site/paper.pdf")).expect("real").display().to_string();
+    assert!(said.starts_with(&format!("Asked the person to review {path}")), "{said}");
+    let (seq, _) = made.expect("a card");
+
+    // Drawings are the agent's uploads, or the answer is refused.
+    let uploads = dir.join("home/agents/builder/uploads/2026-11-22");
+    std::fs::create_dir_all(&uploads).expect("uploads");
+    let page = |name: &str| {
+        let path = uploads.join(name);
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("png");
+        v1::Attachment { path: path.display().to_string(), name: name.into(), size: 8, mime: "image/png".into() }
+    };
+    let (third, seventh) = (page("paper-p3.png"), page("paper-p7.png"));
+    std::fs::write(dir.join("stray.png"), b"\x89PNG\r\n\x1a\n").expect("stray");
+    let stray = v1::Attachment { path: dir.join("stray.png").display().to_string(), name: "stray.png".into(), ..Default::default() };
+    let drawn = |attachments: Vec<v1::Attachment>, dismiss: bool| {
+        client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: String::new(), attachments })
+    };
+    let refused = apply_request(&mut client, &mut view, drawn(vec![third.clone(), stray], false)).await;
+    let Body::Error(error) = refused else { panic!("{refused:?}") };
+    assert!(error.message.ends_with("isn't one of this agent's uploads."), "{}", error.message);
+    assert_eq!(card(&view, seq).state(), AskPersonState::Pending, "nothing was decided");
+
+    // Answered with two pages: the card keeps them, and the agent is told
+    // which pages, by path.
+    let reply = apply_request(&mut client, &mut view, drawn(vec![third.clone(), seventh.clone()], false)).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
+    let decided = card(&view, seq);
+    let kept: Vec<&str> = decided.answer_attachments.iter().map(|attachment| attachment.name.as_str()).collect();
+    assert_eq!((decided.state(), kept), (AskPersonState::Answered, vec!["paper-p3.png", "paper-p7.png"]));
+    let text = told(&mut client, &mut view, 1).await;
+    assert!(
+        text.contains(&format!(
+            "They left no comments on {path}.\n\nThe person drew on 2 pages (pages 3 and 7); look at them with read_image: {}, {}",
+            third.path, seventh.path
+        )),
+        "{text}"
+    );
+
+    // Dismissed with one: the same line after the dismissal's.
+    let (_, made) = ask_with(&mut client, &mut view, args).await;
+    let (again, _) = made.expect("a card");
+    let one = client_message::Body::AnswerAsk(v1::AnswerAsk {
+        agent_id: "builder".into(),
+        seq: again,
+        dismiss: true,
+        text: String::new(),
+        attachments: vec![third.clone()],
+    });
+    assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
+    let text = told(&mut client, &mut view, 2).await;
+    assert!(text.starts_with("The person dismissed your question \"Mark up the paper\""), "{text}");
+    assert!(text.contains(&format!("The person drew on 1 page (page 3); look at it with read_image: {}", third.path)), "{text}");
 }

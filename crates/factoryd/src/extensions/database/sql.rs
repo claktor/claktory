@@ -78,11 +78,15 @@ fn private(table: &str) -> bool {
 }
 
 /// What `target`'s statements may do. Writes to factory.db are already
-/// impossible: it's opened read only.
-fn authorize(target: &Target, context: &AuthContext<'_>) -> Authorization {
+/// impossible: it's opened read only. `private_everywhere` keeps the
+/// private tables unreadable in any database (an app's query: an agent
+/// could make its own database factory.db's copy).
+fn authorize(target: &Target, private_everywhere: bool, context: &AuthContext<'_>) -> Authorization {
     match context.action {
         AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
-        AuthAction::Read { table_name, .. } if *target == Target::Factory && private(table_name) => Authorization::Deny,
+        AuthAction::Read { table_name, .. } if (private_everywhere || *target == Target::Factory) && private(table_name) => {
+            Authorization::Deny
+        }
         AuthAction::Function { function_name } if function_name.eq_ignore_ascii_case("load_extension") => Authorization::Deny,
         _ => Authorization::Allow,
     }
@@ -109,23 +113,49 @@ pub(crate) fn open(home: &Home, target: &Target, create: bool) -> Result<Option<
             db.pragma_update(None, "max_page_count", MAX_BYTES / page_size.max(512)).map_err(failed)?;
             db
         }
-        Target::Factory => {
-            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-            let db = Connection::open_with_flags(&path, flags).map_err(failed)?;
-            db.pragma_update(None, "query_only", true).map_err(failed)?;
-            db
-        }
+        Target::Factory => read_only(&path).map_err(failed)?,
     };
-    db.busy_timeout(BUSY_TIMEOUT).map_err(failed)?;
-    let deadline = Instant::now() + TIME_LIMIT;
-    db.progress_handler(10_000, Some(move || Instant::now() > deadline)).map_err(failed)?;
-    let target = target.clone();
-    db.authorizer(Some(move |context: AuthContext<'_>| authorize(&target, &context))).map_err(failed)?;
+    guard(&mut db, target, false).map_err(failed)?;
     Ok(Some(db))
 }
 
+/// Opens `target` for an app's query (`crate::apps::data`): read only
+/// whichever it is, even an agent's own database, with the same time limit
+/// and authorizer, the private tables unreadable in it too; None when an
+/// agent's database doesn't exist yet. An agent's database that's a link
+/// (to factory.db, say) isn't opened.
+pub(crate) fn open_read_only(home: &Home, target: &Target) -> Result<Option<Connection>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let path = path(home, target);
+    let Ok(found) = std::fs::symlink_metadata(&path) else { return Ok(None) };
+    if matches!(target, Target::Own(_)) && (!found.file_type().is_file() || found.nlink() > 1) {
+        return Err("This database is a link to another file, so it can't be read.".to_owned());
+    }
+    let failed = |error: rusqlite::Error| format!("The database couldn't be opened: {error}");
+    let mut db = read_only(&path).map_err(failed)?;
+    guard(&mut db, target, true).map_err(failed)?;
+    Ok(Some(db))
+}
+
+fn read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let db = Connection::open_with_flags(path, flags)?;
+    db.pragma_update(None, "query_only", true)?;
+    Ok(db)
+}
+
+/// Every connection's limits: how long it waits and runs, and what its
+/// statements may touch.
+fn guard(db: &mut Connection, target: &Target, private_everywhere: bool) -> rusqlite::Result<()> {
+    db.busy_timeout(BUSY_TIMEOUT)?;
+    let deadline = Instant::now() + TIME_LIMIT;
+    db.progress_handler(10_000, Some(move || Instant::now() > deadline))?;
+    let target = target.clone();
+    db.authorizer(Some(move |context: AuthContext<'_>| authorize(&target, private_everywhere, &context)))
+}
+
 /// An error from SQLite, said so the agent can fix its call.
-fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
+pub(crate) fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
     let text = error.to_string();
     if text.contains("interrupted") {
         return format!("It ran longer than {}s and was stopped; narrow it (WHERE, LIMIT, an index).", TIME_LIMIT.as_secs());
@@ -148,7 +178,7 @@ fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
 }
 
 /// `params` as SQL values: a JSON array of null, numbers, strings and booleans.
-fn params(params: Option<&Value>) -> Result<Vec<SqlValue>, String> {
+pub(crate) fn params(params: Option<&Value>) -> Result<Vec<SqlValue>, String> {
     let Some(params) = params.filter(|params| !params.is_null()) else { return Ok(Vec::new()) };
     let Some(list) = params.as_array() else { return Err("params must be a list, e.g. [1, \"a\"], for ?1, ?2…".to_owned()) };
     list.iter()

@@ -15,7 +15,9 @@
 //! included) can make, approve or change one: only the person, from the app.
 
 pub(crate) mod agents;
+pub(crate) mod bound;
 pub(crate) mod quarantine;
+pub(crate) mod start;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -228,7 +230,11 @@ pub(crate) struct Record {
     pub members: Vec<String>,
     pub lead: String,
     pub limits: Limits,
+    /// Review outgoing: agents' messages wait for the person's Send.
     pub review: bool,
+    /// Review incoming: the other side's messages wait for the person's
+    /// Let in before any agent reads them.
+    pub review_incoming: bool,
     pub digits: String,
     pub invite_expires: i64,
     /// This side's person approved it; the other side's did.
@@ -240,6 +246,9 @@ pub(crate) struct Record {
     /// When the lead was last woken, and the last incoming message it was told of.
     pub woke: i64,
     pub told: u64,
+    /// Incoming messages let in after the lead was told of later ones: it's
+    /// told of them at its next wake all the same.
+    pub untold: Vec<u64>,
     /// Agents' messages in a row with no person writing on either side.
     pub quiet: u32,
     /// Hashes of the latest agents' messages, to tell repeats.
@@ -250,6 +259,25 @@ pub(crate) struct Record {
     /// Quarantine came to this pipe: made since, or its liaisons were
     /// quarantined once at start (a person's release after stays).
     pub quarantine_set: bool,
+    /// The agent bound to it (`bound`): its liaison, shown in it rather
+    /// than beside it; empty when none.
+    pub bound: String,
+    /// Binding came to this pipe: made since, or its liaison was bound once
+    /// at start.
+    pub bind_set: bool,
+    /// Who chose its name: true when the person typed it (an invite, a join
+    /// with a name, a rename), false when it came from the other side (a
+    /// join without one). None in pipes from before it: those with a peer
+    /// count as named by the other side. Agents that list pipes (Rivet's
+    /// pipes_list) never see a name the other side chose.
+    pub named_here: Option<bool>,
+    /// While JOINING: why the other Claktory can't be reached yet, in a
+    /// short line, and since when (the join keeps retrying); empty once
+    /// it connects. Runtime state, not kept across restarts.
+    #[serde(skip)]
+    pub offline_reason: String,
+    #[serde(skip)]
+    pub offline_since: i64,
 }
 
 impl Record {
@@ -260,6 +288,12 @@ impl Record {
 
     pub(crate) fn peer_who(&self) -> String {
         self.peer.as_ref().map_or_else(|| "the other side".to_owned(), PeerRecord::who)
+    }
+
+    /// Members that can run commands on this computer: every one not
+    /// quarantined.
+    pub(crate) fn can_run_commands(&self) -> Vec<String> {
+        self.members.iter().filter(|id| !self.quarantined.contains(id)).cloned().collect()
     }
 
     pub(crate) fn peer_claktory(&self) -> String {
@@ -340,6 +374,11 @@ impl Pipes {
     pub(crate) fn deselect(&self) {
         self.data().selected = None;
     }
+
+    /// The pipe is shown.
+    pub(crate) fn show(&self, id: &str) {
+        self.data().selected = Some(id.to_owned());
+    }
 }
 
 /// The transport's way back in, for every Factory.
@@ -375,6 +414,10 @@ pub(crate) fn start(factory: &Arc<Factory>) {
         close_with(factory, &id, "The invite expired before anyone used it.");
     }
     quarantine::upgrade(factory);
+    bound::upgrade(factory);
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(start::expire(Arc::downgrade(factory)));
+    }
 }
 
 type Loaded = (BTreeMap<String, Record>, BTreeMap<String, Taint>);
@@ -749,6 +792,11 @@ pub(crate) fn messages(factory: &Factory, pipe: &str, before: u64, limit: u32) -
     (found, earlier)
 }
 
+/// How many of the other side's messages wait for the person to let them in.
+pub(crate) fn waiting_incoming(factory: &Factory, pipe: &str) -> u32 {
+    counted(factory, pipe, &[Author::TheirAgent, Author::TheirPerson], &[MessageState::HeldIncoming], i64::MAX / 2)
+}
+
 /// The pipe's messages that wait for the person, by seq.
 fn waiting(factory: &Factory, pipe: &str) -> Vec<u64> {
     let db = factory.store.db();
@@ -801,12 +849,17 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                     file_mb_left: record.limits.file_mb.saturating_sub(mb),
                 }),
                 review_outgoing: record.review,
+                review_incoming: record.review_incoming,
+                folder: record.folder.clone(),
+                suggested_liaison_name: if record.state == State::Closed { String::new() } else { bound::suggest(&inner.config, record) },
                 digits: if record.state == State::Approval { record.digits.clone() } else { String::new() },
                 invite_expires_ms: if record.state == State::Invited { record.invite_expires } else { 0 },
                 online: link.online,
                 last_seen_ms: link.last_seen_ms,
                 queued: link.queued,
                 unseen: record.unseen,
+                offline_reason: if record.state == State::Joining { record.offline_reason.clone() } else { link.reason.clone() },
+                offline_since_ms: if record.state == State::Joining { record.offline_since } else { link.offline_since_ms },
                 waiting_seqs: waiting(factory, &record.id),
                 quarantined_ids: record.quarantined.iter().filter(|id| members.contains(id)).cloned().collect(),
                 can_run_commands_ids: members.iter().filter(|id| !record.quarantined.contains(id)).cloned().collect(),
@@ -994,9 +1047,10 @@ fn new_record(factory: &Factory, project: &str, name: &str, purpose: &str, state
         state,
         created: now_ms(),
         purpose: purpose.trim().to_owned(),
-        review: true,
         next_seq: 1,
         quarantine_set: true,
+        bind_set: true,
+        named_here: Some(true),
         ..Record::default()
     })
 }
@@ -1020,13 +1074,21 @@ fn known(factory: &Factory, id: &str) -> Result<Record, RequestError> {
 
 /// CreatePipeInvite: a pipe from `project`, INVITED, and its code.
 pub(crate) async fn create_invite(factory: &Arc<Factory>, request: &v1::CreatePipeInvite) -> Result<v1::PipeInvite, RequestError> {
+    // From an agent's card (#244): only while it waits.
+    if !request.start_id.is_empty() {
+        start::check(factory, &request.start_id, v1::PipeStartKind::Invite)?;
+    }
     let mut record = new_record(factory, &request.project_id, &request.name, &request.purpose, State::Invited)?;
     let side = mine(factory, &record.project, &record.name, &record.purpose);
     let (code, expires) = pipe_link::invite(factory, &record.id, &side).await.map_err(pipe_error)?;
     record.invite_expires = expires;
     let id = record.id.clone();
+    let made = record.clone();
     insert(factory, record);
     line(factory, &id, "Invite made. Send its code to the other person; it works once, for 10 minutes.");
+    if !request.start_id.is_empty() {
+        start::done(factory, &request.start_id, &made, true);
+    }
     Ok(v1::PipeInvite { pipe_id: id, code })
 }
 
@@ -1041,33 +1103,75 @@ pub(crate) fn read_invite(code: &str) -> Result<v1::PipeInvitePreview, RequestEr
 /// APPROVAL once the other Claktory answers.
 pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> Result<(), RequestError> {
     let code = request.code.trim().to_owned();
+    if !request.start_id.is_empty() {
+        start::check(factory, &request.start_id, v1::PipeStartKind::Accept)?;
+    }
     let side = pipe_link::read_invite(&code).map_err(pipe_error)?;
     let peer = PeerRecord::from_side(&side, "");
     let name = if request.name.trim().is_empty() { peer.pipe_name.clone() } else { request.name.clone() };
     let mut record = new_record(factory, &request.project_id, &name, &request.purpose, State::Joining)?;
+    record.named_here = Some(!request.name.trim().is_empty());
     let reaching = peer.claktory.clone();
     record.peer = Some(peer);
     let id = record.id.clone();
     let mine = mine(factory, &record.project, &record.name, &record.purpose);
+    let made = record.clone();
     insert(factory, record);
+    if !request.start_id.is_empty() {
+        // Named only if this side chose the name: the inviter's isn't repeated to an agent.
+        start::done(factory, &request.start_id, &made, !request.name.trim().is_empty());
+    }
     factory.pipes.data().selected = Some(id.clone());
     factory.broadcast_workspace(&factory.lock());
     send_transcript(factory, &id);
     line(factory, &id, format!("Reaching {reaching}…"));
     let factory = factory.clone();
     tokio::spawn(async move {
-        match pipe_link::join(&factory, &id, &code, &mine).await {
-            Ok((peer, digits)) => {
-                change(&factory, &id, |record| {
-                    record.peer = Some(PeerRecord::from_side(&peer.side, &peer.endpoint_id));
-                    record.digits = digits;
-                    if record.state == State::Joining {
-                        record.state = State::Approval;
+        // The first dial can fail for a passing reason: the other machine's
+        // way there isn't up yet, or macOS is still asking its person about
+        // the local network. Unreachable retries until the code's own
+        // expiry ends it (join refuses an expired code); anything else is
+        // definitive and closes the pipe as before.
+        let mut backoff = std::time::Duration::from_secs(1);
+        let mut said = String::new();
+        loop {
+            match pipe_link::join(&factory, &id, &code, &mine).await {
+                Ok((peer, digits)) => {
+                    change(&factory, &id, |record| {
+                        record.peer = Some(PeerRecord::from_side(&peer.side, &peer.endpoint_id));
+                        record.digits = digits;
+                        record.offline_reason.clear();
+                        record.offline_since = 0;
+                        if record.state == State::Joining {
+                            record.state = State::Approval;
+                        }
+                    });
+                    line(&factory, &id, "Connected. Check that both screens show the same four digits, then approve or turn it down.");
+                    return;
+                }
+                Err(PipeError::Unreachable(reason)) => {
+                    if !factory.pipes.get(&id).is_some_and(|record| record.state == State::Joining) {
+                        // Turned down or deleted meanwhile: nothing to reach.
+                        return;
                     }
-                });
-                line(&factory, &id, "Connected. Check that both screens show the same four digits, then approve or turn it down.");
+                    if said != reason {
+                        change(&factory, &id, |record| {
+                            record.offline_reason.clone_from(&reason);
+                            if record.offline_since == 0 {
+                                record.offline_since = now_ms();
+                            }
+                        });
+                        line(&factory, &id, format!("Couldn't reach {reaching} yet ({reason}). Trying again…"));
+                        said = reason;
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                }
+                Err(error) => {
+                    close_with(&factory, &id, &format!("Couldn't connect: {error}"));
+                    return;
+                }
             }
-            Err(error) => close_with(&factory, &id, &format!("Couldn't connect: {error}")),
         }
     });
     Ok(())
@@ -1104,6 +1208,7 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         change(factory, &record.id, |record| {
             record.members.push(liaison.clone());
             record.quarantined.push(liaison.clone());
+            record.bound.clone_from(&liaison);
         });
         lead = liaison;
     }
@@ -1117,6 +1222,12 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     let opened = change(factory, &record.id, |record| {
         record.members = members;
         record.lead = lead;
+        if let Some(review) = request.review_incoming {
+            record.review_incoming = review;
+        }
+        if let Some(review) = request.review_outgoing {
+            record.review = review;
+        }
         // Its new liaison's already are; the others' are told just below.
         record.quarantined.retain(|id| quarantined.contains(id));
         record.approved = true;
@@ -1128,6 +1239,9 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         make_folders(factory, &record);
     }
     quarantine::set(factory, &record.id, quarantined);
+    if request.review_outgoing.is_none() {
+        review_with_commands(factory, &record.id, &[]);
+    }
     if opened {
         line(factory, &record.id, "You approved it, and so did the other side: the pipe is open.");
     } else {
@@ -1201,7 +1315,7 @@ async fn make_liaison(factory: &Arc<Factory>, record: &Record, name: &str) -> Re
         .await?;
     // Making it showed its conversation: the pipe stays shown.
     if let Some(selected) = selected {
-        select(factory, &selected)?;
+        select(factory, &selected).await?;
     }
     Ok(id)
 }
@@ -1212,11 +1326,16 @@ pub(crate) async fn add_liaison(factory: &Arc<Factory>, request: &v1::AddPipeLia
     if record.state == State::Closed {
         return Err(RequestError::Pipe("This pipe is closed.".to_owned()));
     }
-    let name = request.name.trim();
-    if name.is_empty() {
-        return Err(RequestError::Empty("name"));
+    let bound = factory.lock().config.agent(&record.bound).map(|agent| agent.name.clone());
+    if let Some(name) = bound.filter(|_| record.members.contains(&record.bound)) {
+        return Err(RequestError::Pipe(format!("This pipe already has its liaison, {name}.")));
     }
-    let id = make_liaison(factory, &record, name).await?;
+    // No name: the one the app suggests (Pipe.suggested_liaison_name).
+    let name = match request.name.trim() {
+        "" => bound::suggest(&factory.lock().config, &record),
+        name => name.to_owned(),
+    };
+    let id = make_liaison(factory, &record, &name).await?;
     // Quarantined from the moment it's made: it's never told of it, as it
     // never had more.
     change(factory, &record.id, |record| {
@@ -1227,6 +1346,7 @@ pub(crate) async fn add_liaison(factory: &Arc<Factory>, request: &v1::AddPipeLia
             record.quarantined.push(id.clone());
         }
         record.lead = id.clone();
+        record.bound = id.clone();
     });
     make_folders(factory, &record);
     Ok(())
@@ -1265,9 +1385,13 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
         return Err(RequestError::Pipe("A pipe's limits must allow at least one message.".to_owned()));
     }
     let review_off = request.review_outgoing == Some(false) && record.review;
+    let incoming = request.review_incoming.filter(|review| *review != record.review_incoming);
     change(factory, &record.id, |record| {
-        if let Some(name) = &request.name {
+        if let Some(name) = &request.name
+            && name.trim() != record.name
+        {
             record.name = name.trim().to_owned();
+            record.named_here = Some(true);
         }
         if let Some(prompt) = &request.prompt {
             record.prompt = prompt.trim().to_owned();
@@ -1291,14 +1415,57 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
         if let Some(review) = request.review_outgoing {
             record.review = review;
         }
+        if let Some(review) = request.review_incoming {
+            record.review_incoming = review;
+        }
     });
     if review_off {
         line(factory, &record.id, "Review outgoing is off: agents' messages go out without waiting for you.");
     }
+    match incoming {
+        Some(true) => line(
+            factory,
+            &record.id,
+            "Review incoming is on: each message from the other side waits for you to let it in before your agents read it.",
+        ),
+        Some(false) => line(
+            factory,
+            &record.id,
+            "Review incoming is off: messages from the other side reach your agents as they arrive. Messages already waiting still wait for you.",
+        ),
+        None => {}
+    }
     // Who's quarantined: as chosen, or as it was among the members left.
     let now = factory.pipes.get(&record.id).map(|record| record.quarantined).unwrap_or_default();
     quarantine::set(factory, &record.id, quarantined.unwrap_or(now));
+    bound::unbind_if_gone(factory, &record);
+    if request.review_outgoing.is_none() {
+        review_with_commands(factory, &record.id, &record.can_run_commands());
+    }
     Ok(())
+}
+
+/// Whether Review outgoing turns itself on when a member that can run
+/// commands joins a pipe (Fugo's suggestion): the person's decision, off
+/// until they make it.
+const REVIEW_WITH_COMMANDS: bool = false;
+
+/// With `REVIEW_WITH_COMMANDS`, turns Review outgoing on when the pipe has a
+/// member that can run commands it didn't have (`before`), saying so.
+fn review_with_commands(factory: &Factory, pipe: &str, before: &[String]) {
+    if !REVIEW_WITH_COMMANDS {
+        return;
+    }
+    let Some(record) = factory.pipes.get(pipe) else { return };
+    if record.review || record.can_run_commands().iter().all(|id| before.contains(id)) {
+        return;
+    }
+    change(factory, pipe, |record| record.review = true);
+    line(
+        factory,
+        pipe,
+        "Review outgoing is on because an agent of this pipe can run commands on this computer: each message from your agents waits for you to send it.",
+    );
 }
 
 /// SetPipeState: pause, resume, close or delete.
@@ -1350,6 +1517,7 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
             if record.state != State::Closed {
                 return Err(RequestError::Pipe("Close the pipe before deleting it.".to_owned()));
             }
+            bound::delete_with(factory, &record);
             delete(factory, &id);
         }
         v1::PipeAction::Unspecified => return Err(RequestError::Pipe("No action given.".to_owned())),
@@ -1397,9 +1565,14 @@ pub(crate) fn project_gone(factory: &Arc<Factory>, project: &str) {
 }
 
 /// SelectPipe: shown in every client's main pane.
-pub(crate) fn select(factory: &Arc<Factory>, id: &str) -> Result<(), RequestError> {
-    known(factory, id)?;
-    factory.pipes.data().selected = Some(id.to_owned());
+/// With its bound agent's conversation, as the selected agent's.
+pub(crate) async fn select(factory: &Arc<Factory>, id: &str) -> Result<(), RequestError> {
+    let record = known(factory, id)?;
+    let bound = factory.lock().config.agent(&record.bound).filter(|_| record.members.contains(&record.bound)).map(|agent| agent.id.clone());
+    match bound {
+        Some(bound) => factory.show_with_pipe(&bound, id).await?,
+        None => factory.pipes.show(id),
+    }
     change(factory, id, |record| record.unseen = false);
     send_transcript(factory, id);
     Ok(())
@@ -1523,6 +1696,12 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
                 forget_held(&message);
             }
             set_state(factory, &record.id, message.seq, MessageState::Received, Some(""));
+            // Let in after later ones the lead was told of: told at its next wake.
+            change(factory, &record.id, |record| {
+                if message.seq <= record.told && !record.untold.contains(&message.seq) {
+                    record.untold.push(message.seq);
+                }
+            });
             agents::wake(factory, &record.id);
         }
         (MessageState::HeldIncoming, false) => {
@@ -1688,11 +1867,10 @@ impl pipe_link::Store for Link {
         if incoming_bytes(factory, pipe) + arriving > u64::from(record.limits.file_mb) * 1_048_576 {
             return Err(format!("Over this side's limit of {} MB of files a day.", record.limits.file_mb));
         }
-        let held = over_incoming(factory, &record);
-        if held.is_some()
-            && counted(factory, pipe, &[Author::TheirAgent, Author::TheirPerson], &[MessageState::HeldIncoming], i64::MAX / 2)
-                >= MAX_HELD_INCOMING
-        {
+        // Over the limits, or Review incoming: held whoever they say wrote it.
+        let held = over_incoming(factory, &record)
+            .or_else(|| record.review_incoming.then(|| "Waiting for you: let it in, or discard it.".to_owned()));
+        if held.is_some() && waiting_incoming(factory, pipe) >= MAX_HELD_INCOMING {
             return Err("Too many messages already wait for this side's person.".to_owned());
         }
         // Held, its files wait out of every agent's reach until it's let in.
@@ -1730,6 +1908,12 @@ impl pipe_link::Store for Link {
         count_for_loop(factory, pipe, author, &message.text);
         if state == MessageState::Received {
             agents::wake(factory, pipe);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // It waits for the person: Needs you shows it on every device
+            // (Pipe.waiting_seqs), and it notifies. Later, as in
+            // link_changed: the transport may hold its own locks.
+            let factory = factory.clone();
+            runtime.spawn(async move { factory.broadcast_workspace(&factory.lock()) });
         }
         Ok(())
     }
@@ -1860,6 +2044,24 @@ pub fn upgrade_for_test(factory: &Arc<Factory>, pipe: &str) {
 #[doc(hidden)]
 pub fn start_for_test(factory: &Arc<Factory>) {
     quarantine::upgrade(factory);
+    bound::upgrade(factory);
+}
+
+/// Tests: the pipe as if kept from before binding, and Claktory starting
+/// again.
+#[doc(hidden)]
+pub fn unbound_for_test(factory: &Arc<Factory>, pipe: &str) {
+    change(factory, pipe, |record| {
+        record.bind_set = false;
+        record.bound.clear();
+    });
+    bound::upgrade(factory);
+}
+
+/// Tests: agents' cards for starting pipes, as if `later_ms` had passed.
+#[doc(hidden)]
+pub fn expire_starts_for_test(factory: &Arc<Factory>, later_ms: i64) {
+    start::expire_before(factory, crate::transcript::now_ms() + later_ms - start::WAITS_MS);
 }
 
 /// Tests: whether `agent` is quarantined for a pipe.

@@ -554,7 +554,7 @@ class _PromptViewState extends State<_PromptView> {
 }
 
 /// A provider in Settings → Providers: the accounts signed in to it, in the
-/// order requests try them (drag to reorder, or Use first), each with who
+/// order requests try them (drag to reorder, or Use this one), each with who
 /// it is, its plan, how much of its limits it used, whether requests go to
 /// it now and Sign out; then the ways to sign in, or once it has an account
 /// to add another without replacing any; and the sign-in in progress.
@@ -669,6 +669,16 @@ class _ProviderCardState extends State<ProviderCard> {
               ),
               onUpdate: (update) =>
                   _run(() => scope.backend.updateAccount(update)),
+              // Into the usual sign-in, adding: the same account replaces
+              // itself in place, and another one never overwrites a
+              // working one.
+              onSignInAgain: (account) => _run(
+                () => scope.login.start(
+                  provider.id,
+                  account.methodId.isEmpty ? 'oauth' : account.methodId,
+                  addAccount: true,
+                ),
+              ),
             ),
             if (accounts.length > 1) ...[
               const SizedBox(height: Space.xs),
@@ -680,9 +690,9 @@ class _ProviderCardState extends State<ProviderCard> {
               ),
             ],
           ],
-          // How long the provider keeps a conversation ready, where
-          // Claktory can choose it (Anthropic only, for now).
-          if (provider.cacheTtl.isNotEmpty) ...[
+          // How long the provider keeps a conversation ready: a choice
+          // where Claktory can make it, else a line saying how long.
+          if (cacheChoices(provider).isNotEmpty) ...[
             const SizedBox(height: Space.m),
             Wrap(
               spacing: Space.m,
@@ -697,13 +707,16 @@ class _ProviderCardState extends State<ProviderCard> {
                 SizedBox(
                   width: 140,
                   child: Select(
-                    value: provider.cacheTtl,
+                    value: cacheLifetime(provider),
                     options: [
-                      if (provider.cacheTtl != '5m' &&
-                          provider.cacheTtl != '1h')
-                        SelectOption(provider.cacheTtl, provider.cacheTtl),
-                      const SelectOption('5m', '5 minutes'),
-                      const SelectOption('1h', '1 hour'),
+                      if (!cacheChoices(provider)
+                          .contains(cacheLifetime(provider)))
+                        SelectOption(
+                          cacheLifetime(provider),
+                          cacheLifetimeLabel(cacheLifetime(provider)),
+                        ),
+                      for (final choice in cacheChoices(provider))
+                        SelectOption(choice, cacheLifetimeLabel(choice)),
                     ],
                     onChanged: (ttl) => _run(
                       () => scope.backend.updateSettings(
@@ -716,11 +729,19 @@ class _ProviderCardState extends State<ProviderCard> {
                 ),
               ],
             ),
-            const SizedBox(height: Space.xs),
+            if (cacheCaption(provider) case final caption?) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                caption,
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textMuted),
+              ),
+            ],
+          ] else if (provider.cacheLifetime.isNotEmpty) ...[
+            const SizedBox(height: Space.m),
             Text(
-              '${provider.name} keeps a conversation ready so the next '
-              'message is cheaper. An hour costs a bit more each time (2× '
-              'instead of 1.25×) and saves money after longer breaks.',
+              '${provider.name} keeps conversations ready for '
+              '${cacheLifetimeLabel(provider.cacheLifetime)}.',
               style: TypeScale.of(context).caption
                   .copyWith(color: palette.textMuted),
             ),
@@ -766,7 +787,7 @@ class _ProviderCardState extends State<ProviderCard> {
 
 /// A provider's accounts, one row each with hairlines between, in the order
 /// requests try them. With more than one, each row Claktory keeps has a grip
-/// to drag it to another place, and Use first; a key from the environment
+/// to drag it to another place, and Use this one; a key from the environment
 /// stays last, as the backend keeps it.
 class _AccountList extends StatelessWidget {
   const _AccountList({
@@ -774,12 +795,14 @@ class _AccountList extends StatelessWidget {
     required this.onMove,
     required this.onSignOut,
     required this.onUpdate,
+    required this.onSignInAgain,
   });
 
   final Provider provider;
   final void Function(Account account, int position) onMove;
   final void Function(Account account) onSignOut;
   final Future<void> Function(UpdateAccount update) onUpdate;
+  final void Function(Account account) onSignInAgain;
 
   @override
   Widget build(BuildContext context) {
@@ -825,6 +848,7 @@ class _AccountList extends StatelessWidget {
               onUseFirst: index == 0 || !kept ? null : () => onMove(account, 0),
               onSignOut: kept ? () => onSignOut(account) : null,
               onUpdate: onUpdate,
+              onSignInAgain: () => onSignInAgain(account),
             ),
           ),
         );
@@ -851,6 +875,7 @@ class _AccountRow extends StatefulWidget {
     required this.onUseFirst,
     required this.onSignOut,
     required this.onUpdate,
+    required this.onSignInAgain,
   });
 
   final Provider provider;
@@ -864,6 +889,9 @@ class _AccountRow extends StatefulWidget {
   final VoidCallback? onUseFirst;
   final VoidCallback? onSignOut;
   final Future<void> Function(UpdateAccount update) onUpdate;
+
+  /// The provider refused to refresh it (Account.sign_in_again).
+  final VoidCallback onSignInAgain;
 
   @override
   State<_AccountRow> createState() => _AccountRowState();
@@ -927,16 +955,56 @@ class _AccountRowState extends State<_AccountRow> {
         );
         final details = [
           if (account.plan.isNotEmpty) account.plan,
-          if (!account.outOfCredit) state.text,
+          // Its own lines below say these.
+          if (!account.outOfCredit && !account.signInAgain) state.text,
           if (weekly != null)
             '${formatPercent(weekly.usedPercent)} of the weekly limit used',
         ];
         final billing = _billingUrl(provider.id);
         final danger = TypeScale.of(context).caption
             .copyWith(color: palette.danger);
+        // Its actions: beside the account, wrapping under each other when
+        // there's no room; on a phone under its name, so each reads on one
+        // line.
+        final phone = isPhoneLayout(context);
+        final buttons = <Widget>[
+          if (name != null) ...[
+            Button(label: 'Save', primary: true, onPressed: _saveName),
+            Button(label: 'Cancel', onPressed: _stopRenaming),
+          ] else ...[
+            if (account.signInAgain)
+              Button(
+                label: 'Sign in again…',
+                primary: true,
+                onPressed: widget.onSignInAgain,
+              ),
+            if (account.outOfCredit)
+              Button(
+                label: 'Try again',
+                onPressed: () => widget.onUpdate(
+                  UpdateAccount(
+                    providerId: provider.id,
+                    accountId: account.id,
+                    retry: true,
+                  ),
+                ),
+              ),
+            if (key && account.canSignOut)
+              Button(label: 'Rename', onPressed: _rename),
+            if (widget.onUseFirst != null)
+              Button(label: 'Use this one', onPressed: widget.onUseFirst),
+            if (widget.onSignOut != null)
+              Button(label: 'Sign out', onPressed: widget.onSignOut),
+          ],
+        ];
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: Space.s),
           child: Row(
+            // On a phone the actions sit under the name: the circle stays
+            // by the name, not the middle of the buttons.
+            crossAxisAlignment: phone
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.center,
             children: [
               if (widget.grip)
                 Semantics(
@@ -986,6 +1054,9 @@ class _AccountRowState extends State<_AccountRow> {
                             .copyWith(color: palette.text),
                       ),
                     Text(details.join(' · '), style: caption),
+                    // Requests skip it until it's signed in to again.
+                    if (account.signInAgain)
+                      Text('Sign-in expired', style: danger),
                     if (account.outOfCredit)
                       Wrap(
                         children: [
@@ -1006,50 +1077,28 @@ class _AccountRowState extends State<_AccountRow> {
                           Text('.', style: danger),
                         ],
                       ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: Space.s),
-              // Its actions, wrapping under each other when there's no
-              // room in a row.
-              Flexible(
-                child: Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: Space.xs,
-                  runSpacing: Space.xs,
-                  children: [
-                    if (name != null) ...[
-                      Button(
-                        label: 'Save',
-                        primary: true,
-                        onPressed: _saveName,
+                    if (phone && buttons.isNotEmpty) ...[
+                      const SizedBox(height: Space.s),
+                      Wrap(
+                        spacing: Space.s,
+                        runSpacing: Space.s,
+                        children: buttons,
                       ),
-                      Button(label: 'Cancel', onPressed: _stopRenaming),
-                    ] else ...[
-                      if (account.outOfCredit)
-                        Button(
-                          label: 'Try again',
-                          onPressed: () => widget.onUpdate(
-                            UpdateAccount(
-                              providerId: provider.id,
-                              accountId: account.id,
-                              retry: true,
-                            ),
-                          ),
-                        ),
-                      if (key && account.canSignOut)
-                        Button(label: 'Rename', onPressed: _rename),
-                      if (widget.onUseFirst != null)
-                        Button(
-                          label: 'Use first',
-                          onPressed: widget.onUseFirst,
-                        ),
-                      if (widget.onSignOut != null)
-                        Button(label: 'Sign out', onPressed: widget.onSignOut),
                     ],
                   ],
                 ),
               ),
+              if (!phone && buttons.isNotEmpty) ...[
+                const SizedBox(width: Space.s),
+                Flexible(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: Space.xs,
+                    runSpacing: Space.xs,
+                    children: buttons,
+                  ),
+                ),
+              ],
             ],
           ),
         );
@@ -1102,4 +1151,44 @@ class _GripPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_GripPainter old) => old.color != color;
+}
+
+/// The lifetimes the person can choose for how long [provider] keeps a
+/// conversation ready, default first; a backend from before the choices
+/// came (#281) offers Anthropic's two through its cache_ttl alone.
+List<String> cacheChoices(Provider provider) {
+  if (provider.cacheTtlChoices.isNotEmpty) return provider.cacheTtlChoices;
+  return provider.cacheTtl.isEmpty ? const [] : const ['5m', '1h'];
+}
+
+/// How long [provider] keeps a conversation ready now.
+String cacheLifetime(Provider provider) => provider.cacheLifetime.isNotEmpty
+    ? provider.cacheLifetime
+    : provider.cacheTtl;
+
+/// "5 minutes", "30 minutes", "1 hour", "12 hours"; as it's sent for one
+/// this app doesn't know.
+String cacheLifetimeLabel(String lifetime) => switch (lifetime) {
+  '5m' => '5 minutes',
+  '30m' => '30 minutes',
+  '1h' => '1 hour',
+  '12h' => '12 hours',
+  _ => lifetime,
+};
+
+/// What choosing a longer lifetime costs and saves, for the choices
+/// [provider] offers.
+String? cacheCaption(Provider provider) {
+  final choices = cacheChoices(provider);
+  if (choices.contains('12h')) {
+    return '12 hours costs about twice as much each time a conversation is '
+        'made ready. It pays off only if you often come back to '
+        'conversations between 30 minutes and 12 hours later.';
+  }
+  if (choices.contains('1h')) {
+    return '${provider.name} keeps a conversation ready so the next message '
+        'is cheaper. An hour costs a bit more each time (2× instead of '
+        '1.25×) and saves money after longer breaks.';
+  }
+  return null;
 }

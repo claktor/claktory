@@ -91,8 +91,14 @@ fn same_json_compares_numbers_by_value() {
 #[test]
 fn an_event_reaches_the_model_tagged_with_where_it_is_from_and_reloads_as_an_event() {
     use factory_agent::types::{Event, EventSource};
-    let event =
-        Event { source: EventSource::Agent, from: "Builder".into(), id: "builder".into(), summary: String::new(), transient: false };
+    let event = Event {
+        source: EventSource::Agent,
+        from: "Builder".into(),
+        id: "builder".into(),
+        summary: String::new(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+    };
     let message = UserMessage::event("The tests pass.", event.clone(), 7);
     let seen = message.for_model();
     assert_eq!(seen.event, None);
@@ -180,8 +186,14 @@ fn attached_files_reach_the_model_as_tags_after_the_text_and_images_only_when_sm
 #[test]
 fn text_inside_an_event_cannot_close_it_or_pass_itself_off_as_the_person() {
     use factory_agent::types::{Event, EventSource};
-    let event =
-        |from: &str| Event { source: EventSource::App, from: from.into(), id: "telegram".into(), summary: String::new(), transient: false };
+    let event = |from: &str| Event {
+        source: EventSource::App,
+        from: from.into(),
+        id: "telegram".into(),
+        summary: String::new(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+    };
     let text = |message: &UserMessage| match &message.for_model().content {
         factory_agent::types::UserContent::Parts(parts) => parts
             .iter()

@@ -109,6 +109,44 @@ class _HostState extends State<_Host> {
 Finder _key(String key) => find.byKey(ValueKey(key));
 
 void main() {
+  testWidgets('the tier is the window\'s, whatever room the workbench is '
+      'given and whatever the keyboard covers', (tester) async {
+    asIPad();
+    // Less than a compact window's least height left either way: a banner
+    // took the rest, or the keyboard (which the workbench keeps clear of).
+    for (final (room, keyboard) in [(400.0, 0.0), (null, 700.0)]) {
+      final focus = WorkbenchFocus();
+      addTearDown(focus.dispose);
+      final host = _Host(agent: _wren(), panel: false);
+      await Harness(Workspace()).show(
+        tester,
+        size: const Size(744, 1133),
+        home: MediaQuery(
+          data: MediaQueryData(
+            size: const Size(744, 1133),
+            padding: const EdgeInsets.only(top: 32),
+            viewPadding: const EdgeInsets.only(top: 32, bottom: 20),
+            viewInsets: EdgeInsets.only(bottom: keyboard),
+          ),
+          child: WorkbenchScope(
+            focus: focus,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: room == null ? host : SizedBox(height: room, child: host),
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      final context = tester.element(find.byType(Workbench));
+      expect(
+        windowTier(context, const Size(744, 1133)),
+        WorkbenchTier.focused,
+      );
+      expect(_key('workbench-panes'), findsOneWidget);
+    }
+  });
+
   group('the full tier', () {
     testWidgets('pins the sidebar beside the content, and ⌃⌘S hides it', (
       tester,
@@ -176,6 +214,23 @@ void main() {
       await tester.tap(_key('workbench-sidebar'));
       await tester.pump();
       await tester.tap(find.text('June'));
+      await tester.pump();
+      expect(_key('workbench-sidebar-over'), findsNothing);
+    });
+
+    testWidgets('⌃⌘S closes the sidebar it opened over the window', (
+      tester,
+    ) async {
+      await _show(tester, const Size(1024, 1366));
+      await tester.tap(_key('workbench-sidebar'));
+      await tester.pump();
+      await tester.pump();
+      expect(_key('workbench-sidebar-over'), findsOneWidget);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.control);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.control);
       await tester.pump();
       expect(_key('workbench-sidebar-over'), findsNothing);
     });

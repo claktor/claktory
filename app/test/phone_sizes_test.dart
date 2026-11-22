@@ -54,7 +54,7 @@ const _phones =
 
 /// Geist, as the app ships it, so text is as wide as on the phone (the
 /// test font's squares overflow where Geist doesn't, and the reverse).
-Future<void> _loadFonts() async {
+Future<void> loadGeist() async {
   Future<void> family(String name, List<String> files) async {
     final loader = FontLoader(name);
     for (final file in files) {
@@ -127,7 +127,7 @@ Workspace _workspace() => Workspace(
 );
 
 void main() {
-  setUpAll(_loadFonts);
+  setUpAll(loadGeist);
 
   for (final MapEntry(key: name, value: phone) in _phones.entries) {
     group(name, () {

@@ -129,6 +129,8 @@ pub(crate) async fn serve_stream<S: Stream>(
             can_confirm: hello.can_confirm,
             kind,
             name: &hello.device_name,
+            platform: &hello.platform,
+            app_version: &hello.client_version,
         };
         if let Some(peer) = &peer {
             let connected = match factory.authorize(&knock, peer).await {
@@ -180,6 +182,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     // Only a client let in counts as an app trying an updated backend: one
     // turned away (another user's, say) can't make an update roll back.
     factory.health.connecting();
+    crate::account::analytics::device_connected(&factory.store.db(), &device.device.id);
     let claktory = factory.identity();
     let welcome = Welcome {
         protocol_version: PROTOCOL_VERSION,
@@ -206,6 +209,8 @@ pub(crate) async fn serve_stream<S: Stream>(
         endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
         workspace_patches,
         files,
+        views: crate::apps::Viewer::new(&factory),
+        presence: factory.notify.connect(&device.device.id),
     };
     session(&mut socket, &factory, connection, device.closed.clone()).await?;
     tracing::info!("client disconnected");
@@ -231,6 +236,10 @@ struct Connection {
     workspace_patches: bool,
     /// The project whose files it shows on their own (WatchFiles).
     files: crate::explorer::Watch,
+    /// The app views it shows (OpenAppView); their messages come through it.
+    views: crate::apps::Viewer,
+    /// Whether the person is using its app now (SetActive).
+    presence: crate::notify::Presence,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is the
@@ -241,7 +250,7 @@ async fn session<S: Stream>(
     connection: Connection,
     unpaired: Arc<tokio::sync::Notify>,
 ) -> Result<(), ConnectionError> {
-    let mut vault_session = crate::vault::requests::Session::new(connection.device.clone());
+    let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
     let mut sent = Workspaces::new(connection.workspace_patches);
     let mut events = sync(socket, &mut sent, factory).await?;
     factory.health.served();
@@ -270,6 +279,7 @@ async fn session<S: Stream>(
                 flush(socket, &mut sent, &mut events, factory).await?;
                 send(socket, message.id, reply).await?;
             }
+            body = connection.views.next() => send(socket, 0, body).await?,
             event = events.recv() => match event {
                 Ok(event) => forward(socket, &mut sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
@@ -364,6 +374,7 @@ async fn handle(
                 role,
                 lead_id,
                 fallback_model,
+                notify,
             } = request;
             let change = AgentChange {
                 name: name.as_deref(),
@@ -379,6 +390,7 @@ async fn handle(
                 role: role.as_deref(),
                 lead: lead_id.as_deref(),
                 fallback_model: fallback_model.as_deref(),
+                notify: notify.map(|mode| v1::NotifyMode::try_from(mode).unwrap_or_default()),
             };
             factory.update_agent(&agent_id, change).await
         }
@@ -434,8 +446,8 @@ async fn handle(
         Some(Request::SetAgentCollapsed(request)) => factory.set_agent_collapsed(&request.agent_id, request.collapsed),
         Some(Request::CreateFolder(request)) => factory.create_folder(&request.project_id, &request.name, &request.path).await,
         Some(Request::UpdateFolder(request)) => {
-            let v1::UpdateFolder { project_id, folder_id, name, path } = request;
-            factory.update_folder(&project_id, &folder_id, name.as_deref(), path.as_deref()).await
+            let v1::UpdateFolder { project_id, folder_id, name, path, before_id } = request;
+            factory.update_folder(&project_id, &folder_id, name.as_deref(), path.as_deref(), before_id.as_deref()).await
         }
         Some(Request::DeleteFolder(request)) => factory.delete_folder(&request.project_id, &request.folder_id).await,
         Some(Request::SetHighlights(request)) => factory.set_highlights(request.on).await,
@@ -503,7 +515,9 @@ async fn handle(
             | Request::UninstallApp(_)
             | Request::GrantApp(_)
             | Request::SubscribeApp(_)
-            | Request::SetAppSecret(_),
+            | Request::SetAppSecret(_)
+            | Request::GrantAppSource(_)
+            | Request::PinApp(_),
         ) if !factory.apps.available() => return error(ErrorCode::InvalidRequest, "Apps aren't available in this Claktory yet."),
         Some(Request::InstallLocalApp(request)) => {
             return match factory.install_local_app(&request).await {
@@ -517,6 +531,11 @@ async fn handle(
         Some(Request::GrantApp(request)) => factory.grant_app(&request).await,
         Some(Request::SubscribeApp(request)) => factory.subscribe_app(&request).await,
         Some(Request::SetAppSecret(request)) => factory.set_app_secret(&request).await,
+        Some(Request::GrantAppSource(request)) => factory.grant_app_source(&request).await,
+        Some(Request::PinApp(request)) => factory.pin_app(&request),
+        Some(Request::OpenAppView(request)) => return factory.open_app_view(&connection.views, &request),
+        Some(Request::AppViewAction(request)) => return factory.app_view_action(&request),
+        Some(Request::CloseAppView(request)) => return factory.close_app_view(&connection.views, &request.surface_id),
         Some(Request::LoadUsage(request)) => {
             return match factory.load_usage(&request) {
                 Ok(report) => Body::UsageReport(report),
@@ -579,6 +598,9 @@ async fn handle(
         Some(Request::GrantSecret(request)) => {
             return answer(vault::grant_secret(factory, vault_session, &request).await, Body::VaultSession);
         }
+        Some(Request::SetSecretAskEachTime(request)) => {
+            return answer(vault::set_ask_each_time(factory, vault_session, &request).await, Body::VaultSession);
+        }
         Some(Request::RevealSecret(request)) => {
             return answer(vault::reveal_secret(factory, vault_session, &request).await, Body::SecretValue);
         }
@@ -604,13 +626,14 @@ async fn handle(
         Some(Request::UpdatePipe(request)) => crate::pipes::update(factory, &request),
         Some(Request::SetPipeState(request)) => crate::pipes::set_pipe_state(factory, &request),
         Some(Request::SelectPipe(request)) => {
-            crate::pipes::select(factory, &request.pipe_id).inspect(|()| crate::chats::leave_for_pipe(factory))
+            crate::pipes::select(factory, &request.pipe_id).await.inspect(|()| crate::chats::leave_for_pipe(factory))
         }
         Some(Request::SendPipeMessage(request)) => crate::pipes::send_person(factory, &request),
         Some(Request::DecidePipeMessage(request)) => crate::pipes::decide_message(factory, &request),
         Some(Request::LoadPipeMessages(request)) => return answer(crate::pipes::load_messages(factory, &request), Body::PipeMessagePage),
         Some(Request::DecideSecretApproval(request)) => crate::pipes::agents::decide(factory, &request).await,
         Some(Request::AddPipeLiaison(request)) => crate::pipes::add_liaison(factory, &request).await,
+        Some(Request::DismissPipeStart(request)) => crate::pipes::start::dismiss(factory, &request),
         // Chats (#213): `crate::chats`.
         Some(Request::CreateChat(request)) => {
             crate::chats::create(factory, &request.text, &request.client_id, Some(connection.sent_from.clone())).await
@@ -635,6 +658,8 @@ async fn handle(
         Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request).await,
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
+        Some(Request::CheckRecoveryKey(_)) => return answer(vault::check_recovery_key(factory, vault_session), Body::RecoveryKeyCheck),
+        Some(Request::ConfirmRecoveryKey(request)) => vault::confirm_recovery_key(factory, vault_session, &request),
         Some(Request::DecideProposal(request)) => {
             // A chat's proposal names the chat instead of an agent.
             let from = if request.chat_id.is_empty() { &request.agent_id } else { &request.chat_id };
@@ -645,14 +670,20 @@ async fn handle(
         }
         Some(Request::ReadFile(request)) => {
             let content =
-                tokio::task::spawn_blocking(move || crate::extensions::viewer::read_file(&request.path, request.offset, request.max_bytes))
+                tokio::task::spawn_blocking(move || crate::extensions::viewer::read_requested(&request))
                     .await;
             return match content {
                 Ok(content) => Body::FileContent(content),
                 Err(problem) => error(ErrorCode::Internal, problem.to_string()),
             };
         }
-        Some(Request::SetLayout(request)) => crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root),
+        Some(Request::SetLayout(request)) => {
+            crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root, request.focus.as_deref())
+        }
+        Some(Request::AddGoal(request)) => crate::extensions::checklist::person_add_goal(factory, &request),
+        Some(Request::UpdateGoal(request)) => crate::extensions::checklist::person_update_goal(factory, &request),
+        // Only a Claktory that moved away answers this (move_import::moved).
+        Some(Request::DeleteMovedCopy(_)) => return error(ErrorCode::InvalidRequest, "This Claktory hasn't moved to another computer."),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
         Some(Request::ApproveDevice(request)) => factory.approve_device(&request.device_id).await,
         Some(Request::DenyDevice(request)) => factory.deny_device(&request.device_id).await,
@@ -686,6 +717,16 @@ async fn handle(
                 Ok(answer) => Body::UsageResetAnswer(answer),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
+        }
+        // Notifications: `crate::notify`.
+        Some(Request::SetActive(request)) => {
+            connection.presence.set_active(request.active);
+            Ok(())
+        }
+        Some(Request::RegisterNotifications(request)) => crate::notify::push::register(factory, &connection.zoom_device, &request),
+        Some(Request::SendTestNotification(_)) => {
+            crate::notify::send_test(factory);
+            Ok(())
         }
         None => return error(ErrorCode::UnknownMessage, "unknown message"),
     };
@@ -794,5 +835,5 @@ fn answer<T>(result: Result<T, RequestError>, body: impl FnOnce(T) -> Body) -> B
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Body {
-    Body::Error(v1::Error { code: code.into(), message: message.into() })
+    Body::Error(v1::Error { code: code.into(), message: message.into(), ..Default::default() })
 }

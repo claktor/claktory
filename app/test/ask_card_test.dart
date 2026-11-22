@@ -147,4 +147,56 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('from an agent that read a pipe, it says where it may come '
+      'from, under who asks', (tester) async {
+    final workspace = _workspace()
+      ..pipes.add(
+        Pipe(
+          id: 'pp',
+          name: 'Acme launch',
+          peer: PipePeer(claktoryName: "Ana's Claktory"),
+        ),
+      );
+    final harness = Harness(workspace);
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          _entry()
+            ..askPerson.taint.addAll([
+              PipeTaint(pipeName: 'Acme launch', pipeId: 'pp'),
+              PipeTaint(
+                pipeName: 'Old pipe',
+                pipeId: 'gone',
+                viaNames: ['Liaison', 'Bruno'],
+              ),
+            ]),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    final read = find.text(
+      "from June, which reads the pipe with Ana's Claktory",
+    );
+    final heard = find.text(
+      'from Bruno, which heard from the pipe “Old pipe” via Liaison',
+    );
+    expect(read, findsOneWidget);
+    expect(heard, findsOneWidget);
+    final header = tester.getTopLeft(find.text('June needs your answer')).dy;
+    final title = tester.getTopLeft(find.text('Restart the helper as root')).dy;
+    expect(tester.getTopLeft(read).dy, inExclusiveRange(header, title));
+  });
+
+  testWidgets('from an agent that read no pipe, no such line', (tester) async {
+    final harness = Harness(_workspace());
+    harness.backend.transcript.load(
+      Transcript(agentId: 'june', entries: [_entry()]),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.textContaining('which reads the pipe'), findsNothing);
+  });
 }

@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'avatar.dart';
 import 'backend.dart' show fireAndLog;
 import 'canvas.dart';
+import 'characters/character.dart' show AgentCharacter, identityOf;
 import 'controls.dart';
 import 'identity.dart';
 import 'map_card.dart';
@@ -92,11 +93,22 @@ class _MapViewState extends State<MapView> {
   /// Lays the map out again only when it changed: the workspace comes
   /// again with every agent's every step.
   MapLayout _layoutFor(Workspace workspace) {
-    final order = sidebarOrder(workspace);
+    // A pipe's liaison sits on its pipe's pad, not as a chip of its own.
+    final liaisons = pipeLiaisons(workspace);
+    final order = sidebarOrder(workspace)
+      ..removeWhere(
+        (id, _) => liaisons.values.any((agent) => id == 'agent:${agent.id}'),
+      );
     if (_laidOut != workspace.map || !_sameOrder(order)) {
       _laidOut = workspace.map;
       _order = order;
-      _layout = layoutMap(workspace.map, order: order, you: true);
+      _layout = layoutMap(
+        mapWithout(workspace.map, {
+          for (final agent in liaisons.values) 'agent:${agent.id}',
+        }),
+        order: order,
+        you: true,
+      );
     }
     return _layout;
   }
@@ -340,7 +352,11 @@ class _MapViewState extends State<MapView> {
                   _GridPainter(transform, palette.hairline),
               child: _Board(
                 layout: layout,
-                pads: portalPads(layout, workspace.pipes),
+                pads: portalPads(
+                  layout,
+                  workspace.pipes,
+                  liaisons: pipeLiaisons(workspace),
+                ),
                 person: workspace.person,
                 hidden: _hidden,
                 focus: pinned,
@@ -459,7 +475,11 @@ class _MapViewState extends State<MapView> {
                                       _GridPainter(transform, palette.hairline),
                                   child: _Board(
                                     layout: layout,
-                                    pads: portalPads(layout, workspace.pipes),
+                                    pads: portalPads(
+                                      layout,
+                                      workspace.pipes,
+                                      liaisons: pipeLiaisons(workspace),
+                                    ),
                                     person: workspace.person,
                                     hidden: _hidden,
                                     focus: focus,
@@ -961,6 +981,34 @@ bool _samePads(List<PortalPad> a, List<PortalPad> b) {
   return true;
 }
 
+/// The agents bound to a pipe the workspace has (Agent.pipe_id), by the
+/// pipe's id: each shows on its pipe's pad rather than as a chip.
+Map<String, Agent> pipeLiaisons(Workspace workspace) {
+  final pipes = {for (final pipe in workspace.pipes) pipe.id};
+  return {
+    for (final agent in workspace.agents)
+      if (pipes.contains(agent.pipeId)) agent.pipeId: agent,
+  };
+}
+
+/// [map] without the nodes [ids] and their lines.
+@visibleForTesting
+ClaktoryMap mapWithout(ClaktoryMap map, Set<String> ids) {
+  if (ids.isEmpty || !map.nodes.any((node) => ids.contains(node.id))) {
+    return map;
+  }
+  return ClaktoryMap(
+    nodes: [
+      for (final node in map.nodes)
+        if (!ids.contains(node.id)) node,
+    ],
+    edges: [
+      for (final edge in map.edges)
+        if (!ids.contains(edge.fromId) && !ids.contains(edge.toId)) edge,
+    ],
+  );
+}
+
 /// How far a pipe's line reaches out of its project's box, past its top.
 const portalReach = mapCell * 2;
 
@@ -971,9 +1019,13 @@ class PortalPad {
     required this.boxId,
     required this.rect,
     required this.label,
+    this.liaison,
   });
 
   final Pipe pipe;
+
+  /// Its liaison, whose face ends the pad.
+  final Agent? liaison;
 
   /// Its project's box ("project:…").
   final String boxId;
@@ -990,7 +1042,11 @@ class PortalPad {
 /// title's line, right to left in the order they were made. They take at
 /// most half the box; past that, they show only their portals.
 @visibleForTesting
-List<PortalPad> portalPads(MapLayout layout, List<Pipe> pipes) {
+List<PortalPad> portalPads(
+  MapLayout layout,
+  List<Pipe> pipes, {
+  Map<String, Agent> liaisons = const {},
+}) {
   if (pipes.isEmpty) return const [];
   final style = TextStyles.caption.copyWith(fontWeight: FontWeight.w500);
   final pads = <PortalPad>[];
@@ -1007,8 +1063,13 @@ List<PortalPad> portalPads(MapLayout layout, List<Pipe> pipes) {
         pipe.peer.claktoryName.isNotEmpty ? pipe.peer.claktoryName : pipe.name,
     ];
     final widths = [
-      for (final label in labels)
-        math.min(_padMaxWidth, _padBare + _textWidth(label, style)),
+      for (var i = 0; i < here.length; i++)
+        math.min(
+          _padMaxWidth + (liaisons.containsKey(here[i].id) ? _padFace : 0),
+          _padBare +
+              _textWidth(labels[i], style) +
+              (liaisons.containsKey(here[i].id) ? _padFace : 0),
+        ),
     ];
     final gaps = Space.xs * (here.length - 1);
     final full = widths.fold(0.0, (sum, width) => sum + width) + gaps <= room;
@@ -1028,6 +1089,7 @@ List<PortalPad> portalPads(MapLayout layout, List<Pipe> pipes) {
             _padHeight,
           ),
           label: full ? labels[i] : '',
+          liaison: full ? liaisons[here[i].id] : null,
         ),
       );
       right = left - Space.xs;
@@ -1037,6 +1099,10 @@ List<PortalPad> portalPads(MapLayout layout, List<Pipe> pipes) {
 }
 
 const _padHeight = 20.0;
+
+/// What a liaison's face adds to its pipe's pad: the space before it and
+/// the face.
+const _padFace = Space.xs + 14.0;
 const _padMaxWidth = 150.0;
 
 /// A pad's width besides its label: padding, the portal and the space
@@ -1072,9 +1138,15 @@ class _PortalPadView extends StatelessWidget {
     final pipe = pad.pipe;
     final color = pad.closed ? palette.textFaint : pipeColor;
     final status = pipeStatus(pipe);
+    final liaison = pad.liaison;
     return HoverCard(
-      card: (context) =>
-          Text(status.isEmpty ? pipe.name : '${pipe.name} · $status'),
+      card: (context) => Text(
+        [
+          pipe.name,
+          if (status.isNotEmpty) status,
+          if (liaison != null) liaison.name,
+        ].join(' · '),
+      ),
       child: Semantics(
         button: true,
         label: 'Pipe ${pipe.name}',
@@ -1112,6 +1184,10 @@ class _PortalPadView extends StatelessWidget {
                         ),
                       ),
                     ),
+                  ],
+                  if (liaison != null) ...[
+                    const SizedBox(width: Space.xs),
+                    AgentCharacter(agent: identityOf(liaison), size: 14),
                   ],
                 ],
               ),

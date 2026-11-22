@@ -44,6 +44,7 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::home::Home;
 use crate::transcript::now_ms;
+use crate::uploads::available as free_bytes;
 
 pub(crate) use map::PathMap;
 pub use map::parse_pair;
@@ -191,6 +192,21 @@ pub enum ImportError {
     Refused(String),
     #[error("{0}")]
     Failed(String),
+    /// The other computer called the move off after the digits were
+    /// confirmed: nothing moved, and nothing changed here.
+    #[error("{0}")]
+    CalledOff(String),
+}
+
+impl ImportError {
+    /// The exit code that says it: 3 when there's nothing to fix but what
+    /// it says (refused, or called off), 1 when it failed.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            ImportError::Refused(_) | ImportError::CalledOff(_) => 3,
+            ImportError::Failed(_) => 1,
+        }
+    }
 }
 
 fn failed(what: &str, error: impl std::fmt::Display) -> ImportError {
@@ -284,6 +300,9 @@ pub fn needs_passphrase(home: &Home, bundle: &Path) -> bool {
     bundle.is_file() && load_state(home).ok().flatten().is_none_or(|state| state.step == Step::Unpack)
 }
 
+/// How long `lock` waits for an import's lock before saying another holds it.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Holds `<home>/import/lock` while it lives, so two imports never run at once.
 struct Lock(#[allow(dead_code)] std::fs::File);
 
@@ -296,9 +315,16 @@ fn lock(home: &Home) -> Result<Lock, ImportError> {
         .write(true)
         .open(dir(home).join("lock"))
         .map_err(|error| failed("Can't lock the import", error))?;
+    // A lock just let go can stay held a moment longer: a process forked
+    // meanwhile (to run a command) shares the open file until it execs. So
+    // it's tried for a little while before another import counts as running.
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
     // SAFETY: flock(2) on a file this holds open.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(ImportError::Refused("Another factoryd import is running for this Claktory.".to_owned()));
+    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if std::time::Instant::now() >= deadline {
+            return Err(ImportError::Refused("Another factoryd import is running for this Claktory.".to_owned()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(Lock(file))
 }
@@ -693,18 +719,6 @@ fn network_kind(stat: &libc::statfs) -> Option<String> {
     }
 }
 
-fn free_bytes(root: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(root.as_os_str().as_bytes()).ok()?;
-    // SAFETY: statvfs(3) into a zeroed struct of its own type.
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(path.as_ptr(), &raw mut stat) } != 0 {
-        return None;
-    }
-    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
-    Some(u64::from(stat.f_bavail as u64) * u64::from(stat.f_frsize as u64))
-}
-
 // ---- 3. prepare ----
 
 /// What prepare changes, copied from the bundle into `<home>/import/work`.
@@ -725,7 +739,7 @@ fn prepare(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Re
         }
     }
     let work_home = Home::new(work.clone());
-    repath_config(&work_home, map)?;
+    repath_config(&work_home, home.root(), map)?;
     repath_records(&work_home, manifest, map)?;
     if work.join("vault/vault.db").exists() {
         let vault = crate::vault::Vault::open(work.join("vault"));
@@ -754,18 +768,22 @@ fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Project and folder paths in config.json.
-fn repath_config(home: &Home, map: &PathMap) -> Result<(), ImportError> {
-    let path = home.config_path();
+/// Project and folder paths in config.json: parsed and written against
+/// `root`, where the file will live, so the source's territory paths
+/// (relative, or absolute under the source's home and mapped here by the
+/// map's home pair) come out relative to this home, and only external
+/// folders keep the map's say.
+fn repath_config(work: &Home, root: &Path, map: &PathMap) -> Result<(), ImportError> {
+    let path = work.config_path();
     let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
-    let mut config = Config::parse(&text).map_err(|error| failed("The bundle's settings can't be read", error))?;
+    let mut config = Config::parse(&text, root).map_err(|error| failed("The bundle's settings can't be read", error))?;
     for project in &mut config.projects {
         project.path = map.path_or_same(&project.path);
         for folder in &mut project.folders {
             folder.path = map.path_or_same(&folder.path);
         }
     }
-    let text = config.to_json().map_err(|error| failed("Can't write the settings", error))?;
+    let text = config.to_json(root).map_err(|error| failed("Can't write the settings", error))?;
     crate::remote::write_private(&path, text.as_bytes()).map_err(|error| failed("Can't write the settings", error))
 }
 
@@ -895,8 +913,10 @@ fn old_app(work: &Home) -> Result<Option<String>, ImportError> {
                     device.code_expires = Some(now_ms() + OLD_APP_CODE_DAYS * 24 * 60 * 60 * 1000);
                 }
                 let key = crate::remote::secret_key(work).map_err(|error| failed("The bundle's tunnel key can't be read", error))?;
-                let config =
-                    std::fs::read_to_string(work.config_path()).ok().and_then(|text| Config::parse(&text).ok()).unwrap_or_default();
+                let config = std::fs::read_to_string(work.config_path())
+                    .ok()
+                    .and_then(|text| Config::parse(&text, work.root()).ok())
+                    .unwrap_or_default();
                 let relays = config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
                 let identity = crate::remote::Identity {
                     name: config.claktory_name(),
@@ -1127,7 +1147,7 @@ fn restore_checkout(home: &Home, checkout: &Checkout, map: &PathMap, bundle: &Pa
 /// The folder the agent works in, from the moved settings: its checkout's
 /// source; the repository itself if the settings don't say.
 fn tree_source(home: &Home, checkout: &Checkout, repo: &Path) -> PathBuf {
-    let config = std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text).ok());
+    let config = std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text, home.root()).ok());
     config
         .as_ref()
         .and_then(|config| config.agent(&checkout.agent).map(|agent| crate::runner::source_folder(home, config, agent)))
@@ -1140,7 +1160,8 @@ fn tree_source(home: &Home, checkout: &Checkout, repo: &Path) -> PathBuf {
 /// One event for each agent: where it is now, the paths, its checkout, the
 /// tasks the move stopped, and the tools missing here. Once.
 fn tell(home: &Home, manifest: &Manifest, map: &PathMap, state: &State) -> Result<(), ImportError> {
-    let config = std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text).ok()).unwrap_or_default();
+    let config =
+        std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text, home.root()).ok()).unwrap_or_default();
     let mut db = Connection::open(home.db_path()).map_err(|error| failed("Can't open the records", error))?;
     let records = |error: rusqlite::Error| failed("Can't tell the agents", error);
     let transaction = db.transaction().map_err(records)?;
@@ -1263,7 +1284,7 @@ fn verify(home: &Home, manifest: &Manifest, map: &PathMap) -> Result<(), ImportE
     let broken = |what: String| ImportError::Failed(format!("The import didn't verify: {what}. Run factoryd import again."));
     if home.config_path().exists() {
         let text = std::fs::read_to_string(home.config_path()).map_err(|error| broken(format!("the settings can't be read ({error})")))?;
-        Config::parse(&text).map_err(|error| broken(format!("the settings can't be read ({error})")))?;
+        Config::parse(&text, home.root()).map_err(|error| broken(format!("the settings can't be read ({error})")))?;
     }
     let db = Connection::open(home.db_path()).map_err(|error| broken(format!("the records can't be opened ({error})")))?;
     let check: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|error| broken(error.to_string()))?;

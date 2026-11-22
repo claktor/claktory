@@ -52,6 +52,7 @@ fn period(id: &str, now: i64, usage: Vec<Usage>) -> Period {
         to: hour + 3600,
         usage,
         activity: vec![Activity { hour, agent_minutes: 90, agents_working: 2, runs: 4 }],
+        ..Period::default()
     }
 }
 
@@ -59,8 +60,9 @@ fn check_in(periods: Vec<Period>) -> CheckIn {
     CheckIn {
         version: "v0.1.9".into(),
         platform: "macos-arm64".into(),
-        counts: Some(Counts { agents: 12, projects: 3, devices: 2 }),
+        counts: Some(Counts { agents: 12, projects: 3, devices: 2, ..Counts::default() }),
         periods,
+        ..CheckIn::default()
     }
 }
 
@@ -82,7 +84,7 @@ async fn a_check_in_records_its_periods_once() {
     instance.advance(3600);
     let mut again =
         check_in(vec![body.periods[0].clone(), period("period-0000000000000002", instance.now(), vec![usage("claude-opus-4-8", 1, 1)])]);
-    again.counts = Some(Counts { agents: 13, projects: 3, devices: 2 });
+    again.counts = Some(Counts { agents: 13, projects: 3, devices: 2, ..Counts::default() });
     let checked: CheckedIn = instance.signed(&claktory, "POST", "/v1/check-in", &again, None).await.json();
     assert_eq!(checked.periods_recorded, 1, "the first was recorded already");
 
@@ -94,7 +96,7 @@ async fn a_check_in_records_its_periods_once() {
 
     let conn = db::open(&instance.db).unwrap();
     let saved = db::claktory(&conn, &claktory.id).unwrap().unwrap();
-    assert_eq!(saved.counts, Some(Counts { agents: 13, projects: 3, devices: 2 }));
+    assert_eq!(saved.counts, Some(Counts { agents: 13, projects: 3, devices: 2, ..Counts::default() }));
     assert_eq!(saved.location.describe().as_deref(), Some("Amsterdam, North Holland, Netherlands"));
     let (minutes, runs): (i64, i64) = conn
         .query_row("SELECT sum(agent_minutes), sum(runs) FROM activity WHERE claktory_id = ?1", [&claktory.id], |row| {
@@ -133,7 +135,7 @@ async fn periods_out_of_range_are_ignored_and_the_rest_recorded() {
 
     instance.advance(1);
     let mut body = check_in(vec![]);
-    body.counts = Some(Counts { agents: 2_000_000, projects: 1, devices: 1 });
+    body.counts = Some(Counts { agents: 2_000_000, projects: 1, devices: 1, ..Counts::default() });
     let answer = instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await;
     assert_eq!((answer.status, answer.error().as_str()), (400, "invalid_request"));
 
@@ -222,7 +224,10 @@ async fn deleting_an_account_keeps_only_anonymous_totals() {
     let instance = start_located().await;
     let mut claktory = Claktory::new("203.0.113.50");
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
-    let body = check_in(vec![period("period-0000000000000040", instance.now(), vec![usage("claude-opus-4-8", 7000, 0)])]);
+    let mut body = check_in(vec![period("period-0000000000000040", instance.now(), vec![usage("claude-opus-4-8", 7000, 0)])]);
+    body.periods[0].devices_connected = Some(1);
+    body.periods[0].health = vec![Health { version: "v0.1.16".into(), rolled_back: 1, crashes: 0 }];
+    body.devices = Some(vec![DeviceCount { platform: "ios".into(), kind: "phone".into(), app_version: "v0.1.16".into(), count: 1 }]);
     instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await;
     let before: PublicStats = instance.send("GET", "/v1/stats/public", Vec::new(), &[]).await.json();
 
@@ -235,7 +240,9 @@ async fn deleting_an_account_keeps_only_anonymous_totals() {
     let linked: i64 = conn
         .query_row(
             "SELECT (SELECT count(*) FROM usage WHERE claktory_id != '') + (SELECT count(*) FROM activity WHERE claktory_id != '')
-             + (SELECT count(*) FROM seen_days WHERE claktory_id = ?1) + (SELECT count(*) FROM periods)",
+             + (SELECT count(*) FROM seen_days WHERE claktory_id = ?1) + (SELECT count(*) FROM periods)
+             + (SELECT count(*) FROM health WHERE claktory_id != '') + (SELECT count(*) FROM claktory_devices)
+             + (SELECT count(*) FROM devices_connected)",
             [&claktory.id],
             |row| row.get(0),
         )
@@ -294,4 +301,89 @@ fn a_geoip_file_places_public_addresses() {
     let quad9_v6 = geoip.locate("2620:fe::fe".parse().unwrap());
     assert!(quad9_v6.is_some_and(|place| place.country.is_some()), "IPv6 too");
     assert_eq!(geoip.locate("10.0.0.1".parse().unwrap()), None);
+}
+
+/// #119: what exists (pipes, secrets, monitors, devices by kind), how far
+/// setup got, and how each backend version fares after updates, counted
+/// and never named; the admin page adds them up.
+#[tokio::test]
+async fn a_check_in_counts_devices_setup_and_update_health() {
+    let instance = start_located().await;
+    let mut claktory = Claktory::new("203.0.113.80");
+    instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    let now = instance.now();
+    let mut first = period("period-0000000000000080", now, vec![]);
+    first.devices_connected = Some(2);
+    first.health = vec![Health { version: "v0.1.16".into(), rolled_back: 1, crashes: 2 }];
+    let mut body = check_in(vec![first]);
+    body.counts = Some(Counts { agents: 4, projects: 2, devices: 3, pipes: 1, secrets: 5, monitors: 2 });
+    body.setup = Some(Setup { model_connected: true, first_run: false });
+    let device = |platform: &str, kind: &str, count| DeviceCount {
+        platform: platform.into(),
+        kind: kind.into(),
+        app_version: "v0.1.16".into(),
+        count,
+    };
+    body.devices = Some(vec![device("macos", "laptop", 1), device("ios", "phone", 1), device("ipados", "tablet", 1)]);
+    let checked: CheckedIn = instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await.json();
+    assert_eq!((checked.periods_recorded, checked.periods_ignored), (1, 0));
+
+    // Its answer lost, the same period comes again: its health isn't added twice.
+    instance.advance(1);
+    let again: CheckedIn = instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await.json();
+    assert_eq!(again.periods_recorded, 0);
+
+    // Later: a step reached stays reached, devices are as they are now.
+    instance.advance(3600);
+    let mut later = check_in(vec![]);
+    later.counts = None;
+    later.setup = Some(Setup { model_connected: false, first_run: true });
+    later.devices = Some(vec![device("macos", "laptop", 1), device("android", "phone", 2)]);
+    instance.signed(&claktory, "POST", "/v1/check-in", &later, None).await;
+
+    let conn = db::open(&instance.db).unwrap();
+    let report = stats::report(&conn, instance.now()).unwrap();
+    for text in [
+        "Active Claktories: daily 1, monthly 1 (daily/monthly 100%)",
+        "30-day retention: 0 of 0 Claktories",
+        "Setup reached: 1 of 1 Claktories connected a model, 1 ran an agent",
+        "  v0.1.16: 1 (2)",
+        "  android phone v0.1.16: 2 (1)",
+        "  macos laptop v0.1.16: 1 (1)",
+        "Devices by system:\n  android: 2\n  macos: 1",
+        "2026-11-20: 2",
+    ] {
+        assert!(report.contains(text), "{text} in {report}");
+    }
+    assert!(!report.contains("ipados"), "devices are as the last check-in says: {report}");
+
+    // A device kind or version that isn't a label is refused.
+    instance.advance(1);
+    let mut odd = check_in(vec![]);
+    odd.devices = Some(vec![device("ios<b>", "phone", 1)]);
+    let answer = instance.signed(&claktory, "POST", "/v1/check-in", &odd, None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (400, "invalid_request"));
+
+    // The person's data says it all too.
+    let cookie = crate::web::web_sign_in(&instance, "matt@example.com", "192.0.2.80").await;
+    let data = crate::web::get(&instance, "/account/data", &cookie).await.value();
+    let sent = &data["claktories"][0];
+    assert_eq!(sent["counts"]["secrets"], 5);
+    assert_eq!(sent["setup"]["first_run"], true);
+    assert_eq!(sent["devices"][0]["platform"], "android");
+    assert_eq!(sent["health"][0]["crashes"], 2);
+    assert_eq!(sent["devices_connected"][0]["count"], 2);
+
+    // A Claktory from before devices were counted leaves the list as it
+    // was; one with none left says so.
+    let devices =
+        || -> i64 { db::open(&instance.db).unwrap().query_row("SELECT count(*) FROM claktory_devices", [], |row| row.get(0)).unwrap() };
+    instance.advance(1);
+    instance.signed(&claktory, "POST", "/v1/check-in", &check_in(vec![]), None).await;
+    assert_eq!(devices(), 2, "none sent: kept");
+    instance.advance(1);
+    let mut none = check_in(vec![]);
+    none.devices = Some(vec![]);
+    instance.signed(&claktory, "POST", "/v1/check-in", &none, None).await;
+    assert_eq!(devices(), 0, "an empty list: none now");
 }

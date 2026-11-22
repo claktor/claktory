@@ -27,12 +27,12 @@ fn turn(agent: &str, extension: &str, on: bool) -> client_message::Body {
 }
 
 fn set_switch(agent: &str, option: &str, on: bool) -> client_message::Body {
-    let value = v1::OptionValue { on, agent_ids: Vec::new() };
+    let value = v1::OptionValue { on, ..Default::default() };
     change(agent, v1::ExtensionChange { id: "agents".into(), option_id: option.into(), value: Some(value), ..Default::default() })
 }
 
 fn grant(agent: &str, others: &[&str]) -> client_message::Body {
-    let value = v1::OptionValue { on: false, agent_ids: others.iter().map(|other| (*other).to_owned()).collect() };
+    let value = v1::OptionValue { on: false, agent_ids: others.iter().map(|other| (*other).to_owned()).collect(), ..Default::default() };
     change(agent, v1::ExtensionChange { id: "agents".into(), option_id: "also".into(), value: Some(value), ..Default::default() })
 }
 
@@ -99,8 +99,11 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "memory",
             "memory:factory",
             "monitors",
+            "move",
+            "pipes",
             "resources",
             "secrets",
+            "swarm",
             "tasks",
             "tree",
             "viewer",
@@ -118,6 +121,8 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
     assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "a new Factory's Rivet points at things");
     assert!(view.agent("rivet").extensions[6].enabled && !builder[6].enabled, "admins add the person's devices");
+    assert!(view.agent("rivet").extensions[11].enabled && !builder[11].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins start pipes for the person");
     assert!(builder[3].enabled, "comments on unless turned off");
     assert!(
         !builder[4].enabled
@@ -742,13 +747,266 @@ async fn an_idle_agent_with_work_outstanding_is_reminded_once_until_something_ch
     let off = v1::ExtensionChange {
         id: "checklist".into(),
         option_id: "nudge".into(),
-        value: Some(v1::OptionValue { on: false, agent_ids: Vec::new() }),
+        value: Some(v1::OptionValue { on: false, agent_ids: Vec::new(), ..Default::default() }),
         ..Default::default()
     };
     ack(apply_request(&mut client, &mut view, change("lead", off)).await);
     call(&mut client, &mut view, "lead", "checklist_update", reopen).await;
     quiet(&mut client, &mut view).await;
     assert_eq!(reminders(&view), 2);
+}
+
+#[tokio::test]
+async fn an_item_blocked_on_the_person_with_nothing_asked_reminds_its_owner_daily() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_nudge_after(std::time::Duration::from_millis(150));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Worker", "")).await;
+    ack(apply_request(&mut client, &mut view, turn("lead", "checklist", true)).await);
+    let reminded = |view: &View| {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) if event.summary.ends_with("with nothing asked") => Some(event.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let quiet = async |client: &mut Client, view: &mut View| {
+        // Long enough for a reminder to come, if one would.
+        let until = tokio::time::Instant::now() + std::time::Duration::from_millis(700);
+        while let Ok(message) = tokio::time::timeout_at(until, client.receive()).await {
+            if let Some(body) = &message.body {
+                view.apply(body);
+            }
+        }
+    };
+
+    // The worker asks the person something first: its blocker is covered.
+    call(&mut client, &mut view, "worker", "ask_person", r#"{"title":"Which logo?","body":"Round or square?"}"#).await;
+
+    // Two items block on the person (however the person is named): Lead's
+    // own, and one owned by the worker.
+    call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Fix login","Choose the logo"]}"#).await;
+    let blocked = r#"{"updates":[{"id":1,"status":"blocked","blocked_on":"person"},{"id":2,"status":"blocked","blocked_on":"The Person","owner":"worker"}]}"#;
+    assert_eq!(
+        call(&mut client, &mut view, "lead", "checklist_update", blocked).await,
+        "#1 blocked, blocks on person; #2 blocked, blocks on person, owner worker."
+    );
+
+    // Lead is told of its own, once; the worker's is covered by its ask.
+    apply_request(&mut client, &mut view, select("lead")).await;
+    view.follow(&mut client, |view| !reminded(view).is_empty()).await;
+    let events = reminded(&view);
+    assert_eq!((events[0].from.as_str(), events[0].summary.as_str()), ("Claktory", "Reminder: 1 blocked item with nothing asked"));
+    assert_eq!(
+        events[0].text,
+        "1 checklist item blocks on the person and you have no question waiting for them: #1 Fix login. \
+         A decision that gates work is asked the day it blocks: file ask_person now, one card per real decision \
+         (only pure preferences batch into one question) — or note on the item why you can't ask yet."
+    );
+    quiet(&mut client, &mut view).await;
+    assert_eq!(reminded(&view).len(), 1, "not again for a day");
+
+    // The panel shows what each blocks on, since when, and that the
+    // worker's already has a question pending.
+    let open = client_message::Body::OpenPanel(v1::OpenPanel { extension_id: "checklist".into(), agent_id: String::new() });
+    ack(apply_request(&mut client, &mut view, open).await);
+    let items = match view.extension_view.as_ref().and_then(|view| view.body.clone()) {
+        Some(v1::extension_view::Body::Checklist(checklist)) => checklist.items.clone(),
+        other => panic!("expected the checklist, got {other:?}"),
+    };
+    let shown: Vec<(u32, &str, bool, bool)> =
+        items.iter().map(|item| (item.id, item.blocked_on.as_str(), item.blocked_since_ms > 0, item.has_pending_ask)).collect();
+    assert_eq!(shown, [(1, "person", true, false), (2, "person", true, true)]);
+
+    // The worker itself was never reminded.
+    apply_request(&mut client, &mut view, select("worker")).await;
+    assert_eq!(reminded(&view).len(), 0);
+
+    // Unblocked, nothing is left for the daily reminder; an item from before
+    // blocked_on existed, whose note reads as waiting on the person, gets its
+    // owner told once to mark it (the sweep, re-armed here by clearing its
+    // flag and Lead's daily gate).
+    call(&mut client, &mut view, "lead", "checklist_update", r#"{"updates":[{"id":1,"status":"open"},{"id":2,"status":"done"}]}"#).await;
+    call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Old parked work"]}"#).await;
+    call(
+        &mut client,
+        &mut view,
+        "lead",
+        "checklist_update",
+        r#"{"updates":[{"id":3,"status":"blocked","note":"waiting for the API key"}]}"#,
+    )
+    .await;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.busy_timeout(std::time::Duration::from_secs(5)).expect("busy timeout");
+    db.execute("DELETE FROM checklist_nudges", []).expect("clear");
+    drop(db);
+    apply_request(&mut client, &mut view, select("lead")).await;
+    view.follow(&mut client, |view| reminded(view).len() >= 2).await;
+    let sweep = &reminded(&view)[1];
+    assert!(
+        sweep.text.starts_with(
+            "Some blocked items on the books look like they wait on the person. \
+             If so, set blocked_on: \"person\" on each with checklist_update. \
+             1 checklist item blocks on the person"
+        ),
+        "{}",
+        sweep.text
+    );
+    assert!(sweep.text.contains("#3 Old parked work"), "{}", sweep.text);
+}
+
+#[tokio::test]
+async fn the_persons_goals_sit_above_the_items_and_a_check_in_comes_as_often_as_chosen() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_nudge_after(std::time::Duration::from_millis(150));
+    // A minute of check-in lasts 20ms: "every 15 minutes" is 300ms.
+    factory.set_nudge_minute(std::time::Duration::from_millis(20));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
+    ack(apply_request(&mut client, &mut view, turn("lead", "checklist", true)).await);
+    apply_request(&mut client, &mut view, select("lead")).await;
+    let events = |view: &View, summary: &str| {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) if event.summary.starts_with(summary) => Some(event.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // The person adds a goal in the app; the agent is told.
+    let goal = v1::AddGoal { agent_id: "lead".into(), text: " A link to the Android app I can share ".into() };
+    ack(apply_request(&mut client, &mut view, client_message::Body::AddGoal(goal)).await);
+    view.follow(&mut client, |view| !events(view, "Goal G1 added").is_empty() && idle(view, "lead")).await;
+    assert_eq!(
+        events(&view, "Goal G1 added")[0].text,
+        "The person added a goal to your checklist: G1 \"A link to the Android app I can share\". Link the items that serve it with \
+         goal: 1 on checklist_add or checklist_update, and add items for what it still needs."
+    );
+    let empty = v1::AddGoal { agent_id: "lead".into(), text: "  ".into() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::AddGoal(empty)).await, Body::Error(_)));
+
+    // An agent with its Checklist off has no tools for goals: refused, and
+    // it's told nothing.
+    apply_request(&mut client, &mut view, create_agent("site", "Scout", "")).await;
+    let off = v1::AddGoal { agent_id: "scout".into(), text: "Map the docs".into() };
+    let refused = apply_request(&mut client, &mut view, client_message::Body::AddGoal(off)).await;
+    let Body::Error(error) = refused else { panic!("{refused:?}") };
+    assert_eq!(error.message, "Scout's Checklist is off.");
+    let off = v1::UpdateGoal { agent_id: "scout".into(), goal_id: 1, status: v1::ChecklistStatus::Done.into(), ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::UpdateGoal(off)).await, Body::Error(_)));
+    apply_request(&mut client, &mut view, select("scout")).await;
+    assert!(view.entries.is_empty(), "{:?}", describe(&view.entries));
+    apply_request(&mut client, &mut view, select("lead")).await;
+
+    // Items serve it; the list shows the goal first, with how far it is.
+    let added = call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Build the APK"],"goal":1}"#).await;
+    assert_eq!(added, "Added #1.");
+    let refused = call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Other"],"goal":5}"#).await;
+    assert!(refused.contains("No goal G5 on your checklist"), "{refused}");
+    let listed = call(&mut client, &mut view, "lead", "checklist_list", "{}").await;
+    let lines: Vec<&str> = listed.lines().collect();
+    assert_eq!(lines[0], "G1 [ ] A link to the Android app I can share (0/1 item done)");
+    assert!(lines[1].starts_with("#1 [ ] Build the APK \u{2192} G1 "), "{listed}");
+    let said = call(
+        &mut client,
+        &mut view,
+        "lead",
+        "checklist_goals",
+        r#"{"add":["Fewer search outages"],"updates":[{"id":2,"status":"dropped"}]}"#,
+    )
+    .await;
+    assert_eq!(said, "Added G2; G2 dropped.");
+
+    // The panel has the goals above the items, the person's entry with no author.
+    let open = client_message::Body::OpenPanel(v1::OpenPanel { extension_id: "checklist".into(), agent_id: String::new() });
+    ack(apply_request(&mut client, &mut view, open).await);
+    let checklist = match view.extension_view.as_ref().and_then(|view| view.body.clone()) {
+        Some(v1::extension_view::Body::Checklist(checklist)) => checklist,
+        other => panic!("expected the checklist, got {other:?}"),
+    };
+    let goals: Vec<(u32, &str, v1::ChecklistStatus)> =
+        checklist.goals.iter().map(|goal| (goal.id, goal.text.as_str(), goal.status())).collect();
+    assert_eq!(
+        goals,
+        [
+            (1, "A link to the Android app I can share", v1::ChecklistStatus::Open),
+            (2, "Fewer search outages", v1::ChecklistStatus::Dropped)
+        ]
+    );
+    assert_eq!((checklist.goals[0].log[0].text.as_str(), checklist.goals[0].log[0].author.as_str()), ("Added", ""));
+    assert_eq!(checklist.items[0].goal, 1);
+
+    // The person marks it done, then reopens it; the agent hears each.
+    let update = |status: v1::ChecklistStatus| {
+        client_message::Body::UpdateGoal(v1::UpdateGoal {
+            agent_id: "lead".into(),
+            goal_id: 1,
+            status: status.into(),
+            ..Default::default()
+        })
+    };
+    ack(apply_request(&mut client, &mut view, update(v1::ChecklistStatus::Done)).await);
+    view.follow(&mut client, |view| events(view, "Goal G1 changed").len() == 1 && idle(view, "lead")).await;
+    assert_eq!(events(&view, "Goal G1 changed")[0].text, "The person marked goal G1 done on your checklist.");
+    assert!(matches!(apply_request(&mut client, &mut view, update(v1::ChecklistStatus::Blocked)).await, Body::Error(_)));
+    ack(apply_request(&mut client, &mut view, update(v1::ChecklistStatus::Open)).await);
+    view.follow(&mut client, |view| events(view, "Goal G1 changed").len() == 2 && idle(view, "lead")).await;
+
+    // The check-in is a choice, off until chosen; only its choices are taken.
+    let option = &view.workspace.extensions.iter().find(|extension| extension.id == "checklist").expect("checklist").options;
+    let every = option.iter().find(|option| option.id == "nudge_every").expect("nudge_every");
+    assert_eq!((every.kind(), every.default_choice.as_str(), every.choices.len()), (v1::ExtensionOptionKind::Choice, "off", 6));
+    assert_eq!((every.choices[2].value.as_str(), every.choices[2].label.as_str()), ("30m", "Every 30 minutes"));
+    let choose = |choice: &str| {
+        let value = v1::OptionValue { choice: choice.into(), ..Default::default() };
+        change(
+            "lead",
+            v1::ExtensionChange { id: "checklist".into(), option_id: "nudge_every".into(), value: Some(value), ..Default::default() },
+        )
+    };
+    assert!(matches!(apply_request(&mut client, &mut view, choose("7m")).await, Body::Error(_)));
+    ack(apply_request(&mut client, &mut view, choose("15m")).await);
+    assert_eq!(config(&dir)["agents"][1]["extensions"]["checklist"]["nudge_every"], "15m");
+    let chosen = |view: &View| {
+        let extension = view.agent("lead").extensions.iter().find(|extension| extension.id == "checklist").cloned().expect("checklist");
+        extension.options["nudge_every"].choice.clone()
+    };
+    assert_eq!(chosen(&view), "15m");
+
+    // Idle with a goal and an item: it's checked in on, again and again.
+    view.follow(&mut client, |view| events(view, "Check-in").len() >= 2 && idle(view, "lead")).await;
+    let check_in = &events(&view, "Check-in")[0];
+    assert_eq!((check_in.from.as_str(), check_in.summary.as_str()), ("Claktory", "Check-in: 1 goal, 1 item"));
+    assert_eq!(
+        check_in.text,
+        "Check-in (every 15 minutes): 1 open goal: G1 A link to the Android app I can share (0/1 done); 1 outstanding item: \
+         #1 Build the APK. See whether anything can be driven further: a step you can take now, an item to hand to someone, \
+         or a question for the person (ask_person). If nothing can move yet, stop without a reply."
+    );
+
+    // Off again: no more.
+    ack(apply_request(&mut client, &mut view, choose("off")).await);
+    assert!(config(&dir)["agents"][1]["extensions"]["checklist"].get("nudge_every").is_none(), "the default isn't written");
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    let before = events(&view, "Check-in").len();
+    let until = tokio::time::Instant::now() + std::time::Duration::from_millis(900);
+    while let Ok(message) = tokio::time::timeout_at(until, client.receive()).await {
+        if let Some(body) = &message.body {
+            view.apply(body);
+        }
+    }
+    assert_eq!(events(&view, "Check-in").len(), before);
 }
 
 #[tokio::test]

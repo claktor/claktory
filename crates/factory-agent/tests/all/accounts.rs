@@ -1273,3 +1273,141 @@ async fn a_sign_in_the_provider_wont_refresh_is_refused() {
     assert_eq!(refused(&failed), Some(Refused { account: "s".into(), method: "oauth".into() }));
     assert!(!refresh_refused(500, "invalid_grant") && !refresh_refused(429, ""), "a passing failure isn't a refusal");
 }
+
+/// As `Revoked`, counting the refreshes it's asked for, and signing in
+/// again with a fresh token.
+struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+
+impl OAuthFlow for Counted {
+    fn name(&self) -> &str {
+        "Counted (subscription)"
+    }
+
+    fn is_subscription(&self) -> bool {
+        true
+    }
+
+    fn login<'a>(&'a self, _interaction: &'a dyn AuthInteraction) -> AuthFuture<'a, Result<Credential, Error>> {
+        let fresh = Credential::Oauth {
+            access: "fresh".into(),
+            refresh: "r-fresh".into(),
+            expires: now_ms() + 3_600_000,
+            account_id: None,
+            extra: serde_json::Map::new(),
+        };
+        Box::pin(async move { Ok(fresh) })
+    }
+
+    fn refresh<'a>(&'a self, credential: Credential, cancel: CancellationToken) -> AuthFuture<'a, Result<Credential, Error>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Revoked.refresh(credential, cancel)
+    }
+
+    fn to_auth(&self, _credential: &Credential) -> Result<RequestAuth, Error> {
+        Ok(RequestAuth::default())
+    }
+}
+
+/// rivet-move.md §3 P2: a sign-in the provider won't refresh is marked, so
+/// it's skipped (the next account takes the request) and its token endpoint
+/// isn't asked again, until it's signed in to again.
+#[tokio::test]
+async fn a_refused_sign_in_is_skipped_until_it_is_signed_in_to_again() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let mut model = crate::support::luna();
+    model.provider = "revoked".into();
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Provider {
+        id: "revoked",
+        name: "Revoked",
+        base_url: "http://127.0.0.1:9",
+        api_key: None,
+        oauth: Some(Arc::new(Counted(refreshes.clone()))),
+        models: vec![model.clone()],
+        api: None,
+        limits: None,
+        plan: None,
+        identity: None,
+        reset: None,
+        check_key: None,
+    };
+    let mut stale = account("s", "s@x.com", "stale");
+    stale["expires"] = json!(0);
+    store_accounts(&file, "revoked", vec![stale.clone(), account("t", "t@x.com", "good")]);
+    let registry = Registry::with_providers(FileCredentialStore::new(file.clone()), no_env(), vec![provider]);
+    let flags = |accounts: Vec<factory_agent::providers::models::AccountInfo>| {
+        accounts.into_iter().map(|account| (account.id, account.sign_in_again, account.in_use)).collect::<Vec<_>>()
+    };
+
+    // The first is refused: marked, and the request goes on to the second
+    // (nothing answers at this base URL, so it fails there, but not refused).
+    let failed = failure(&registry, &model).await;
+    assert_eq!(refused(&failed), None, "the second account took it: {failed:?}");
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let accounts = registry.accounts("revoked").await.expect("accounts");
+    assert_eq!(flags(accounts), [("s".into(), true, false), ("t".into(), false, true)]);
+    // Kept with the sign-in, so a restart knows.
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
+    assert!(stored["revoked"]["factoryRefusedSince"].as_u64().is_some_and(|since| since > 0), "{stored}");
+    // Skipped from now on: its token endpoint isn't asked again.
+    failure(&registry, &model).await;
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // With only refused sign-ins left, it says to sign in again, once, and
+    // marks whose, for the conversation's Sign in again.
+    store_accounts(&file, "revoked", vec![stale]);
+    let failed = failure(&registry, &model).await;
+    assert_eq!(failed.error_message.as_deref(), Some("Revoked no longer accepts your Revoked sign-in. Sign in again to use it."));
+    assert_eq!(refused(&failed), Some(Refused { account: "s".into(), method: "oauth".into() }));
+    failure(&registry, &model).await;
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 2, "once for this account, then skipped");
+
+    // Signed in to again, it's taken again. (This provider can't say who a
+    // sign-in is, so it's made anew in the first's place; one that can keeps
+    // the account's id.)
+    registry.login_account("revoked", "oauth", &Login::new("unused"), false).await.expect("signed in");
+    let accounts = registry.accounts("revoked").await.expect("accounts");
+    assert_eq!(accounts.iter().map(|account| (account.sign_in_again, account.in_use)).collect::<Vec<_>>(), [(false, true)]);
+}
+
+fn no_limits(
+    _base_url: String,
+    _auth: RequestAuth,
+) -> futures_util::future::BoxFuture<'static, Result<factory_agent::limits::AccountUsage, Error>> {
+    Box::pin(async { Ok(factory_agent::limits::AccountUsage::default()) })
+}
+
+/// A usage read finds the refusal too, before any agent's request: the
+/// account is marked, and later reads skip it without refreshing.
+#[tokio::test]
+async fn a_usage_read_marks_a_refused_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let mut model = crate::support::luna();
+    model.provider = "revoked".into();
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Provider {
+        id: "revoked",
+        name: "Revoked",
+        base_url: "http://127.0.0.1:9",
+        api_key: None,
+        oauth: Some(Arc::new(Counted(refreshes.clone()))),
+        models: vec![model],
+        api: None,
+        limits: Some(no_limits),
+        plan: None,
+        identity: None,
+        reset: None,
+        check_key: None,
+    };
+    let mut stale = account("s", "s@x.com", "stale");
+    stale["expires"] = json!(0);
+    store_accounts(&file, "revoked", vec![stale]);
+    let registry = Registry::with_providers(FileCredentialStore::new(file), no_env(), vec![provider]);
+    let read = registry.account_usage("revoked", Some("s")).await.expect_err("refused");
+    assert!(read.is_refused(), "{read}");
+    assert!(registry.accounts("revoked").await.expect("accounts")[0].sign_in_again);
+    assert!(registry.account_usage("revoked", Some("s")).await.expect("skipped").is_none());
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

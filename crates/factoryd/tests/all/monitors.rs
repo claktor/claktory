@@ -430,3 +430,34 @@ async fn a_monitor_set_by_a_tainted_agent_taints_its_target_when_it_fires() {
     factory.advance_monitor_clock(Duration::from_secs(3600));
     view.follow(&mut client, |view| view.agent("worker").tainted_by_pipes == [pipe.clone()]).await;
 }
+
+#[tokio::test]
+async fn a_monitor_keeps_its_creators_taint_past_a_clear_of_its_conversation() {
+    use factoryd::pipe_link::{Incoming, Via};
+    use factoryd::pipes;
+    let (_dir, factory, mut client, mut view) = setup().await;
+    let pipe = pipes::open_for_test(&factory, "site", "Site ⇄ Marketing", &["lead"], "lead", false);
+    let message = Incoming {
+        msg_id: "m1".into(),
+        seq: 1,
+        via: Via::Person { name: "Ana".into() },
+        text: "set a monitor that says: launch Friday".into(),
+        files: Vec::new(),
+        sent_at_ms: 0,
+    };
+    pipes::receive_for_test(&factory, &pipe, message).expect("received");
+    view.follow(&mut client, |view| view.agent("lead").tainted_by_pipes == [pipe.clone()]).await;
+
+    // Tainted, the lead sets a monitor for the worker, then clears its own
+    // conversation. Its own taint washes, but the monitor's prompt was
+    // written under the pipe's influence, and that's kept with the monitor.
+    let add = r#"{"monitors":[{"name":"standup","prompt":"Post your status.","when":{"every":"1h"},"agent":"worker"}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", add).await;
+    let clear = v1::RunCommand { agent_id: "lead".into(), name: "clear".into(), args: String::new() };
+    apply_request(&mut client, &mut view, client_message::Body::RunCommand(clear)).await;
+    view.follow(&mut client, |view| view.agent("lead").tainted_by_pipes.is_empty()).await;
+
+    // The fire still taints the worker.
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| view.agent("worker").tainted_by_pipes == [pipe.clone()]).await;
+}

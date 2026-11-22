@@ -392,6 +392,9 @@ pub struct Event {
     /// settings).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
+    /// Pipe: the pipe's messages it brings, by their number in the pipe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipe_seqs: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

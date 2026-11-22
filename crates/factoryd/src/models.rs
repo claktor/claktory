@@ -1,7 +1,11 @@
 //! Model providers: what agents can use and how Factory signs in to them.
 //! Behind a trait so tests can script a provider.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use factory_agent::auth::AuthInteraction;
+use factory_agent::credentials::CredentialBacking;
 use factory_agent::providers::models::Notes;
 use factory_agent::{Error, Model, StreamFn};
 use factory_protocol::v1;
@@ -85,6 +89,23 @@ pub trait Models: Send + Sync {
     /// changing. True when any account was marked.
     fn forget_spent<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(async { Ok(false) })
+    }
+    /// The file its sign-ins are kept in, `auth.json`; None when they're
+    /// kept no other way (a scripted provider).
+    fn auth_path(&self) -> Option<PathBuf> {
+        None
+    }
+    /// Keeps the sign-ins with `backing` from now on (the vault's).
+    fn keep_sign_ins_with(&self, _backing: Arc<dyn CredentialBacking>) {}
+    /// Takes in sign-ins kept elsewhere meanwhile (see
+    /// `vault::signins`); whether any changed.
+    fn take_in_sign_ins(&self) -> BoxFuture<'_, Result<bool, Error>> {
+        Box::pin(async { Ok(false) })
+    }
+    /// Whether the provider's sign-ins are locked away with the person's
+    /// secrets now, so its requests wait until they open.
+    fn sign_ins_locked<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
     }
 }
 
@@ -181,6 +202,7 @@ impl Models for Registry {
                         exhausted_until: i64::try_from(account.exhausted_until).unwrap_or(0),
                         out_of_credit: account.out_of_credit,
                         method_id: account.kind.to_owned(),
+                        sign_in_again: account.sign_in_again,
                     });
                 }
                 providers.push(v1::Provider {
@@ -193,6 +215,8 @@ impl Models for Registry {
                     plan: String::new(),
                     accounts,
                     cache_ttl: String::new(),
+                    cache_lifetime: String::new(),
+                    cache_ttl_choices: Vec::new(),
                 });
             }
             providers
@@ -305,5 +329,21 @@ impl Models for Registry {
 
     fn forget_spent<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(Registry::forget_spent(self, provider, account_arg(account)))
+    }
+
+    fn auth_path(&self) -> Option<PathBuf> {
+        Some(Registry::auth_path(self).to_path_buf())
+    }
+
+    fn keep_sign_ins_with(&self, backing: Arc<dyn CredentialBacking>) {
+        self.set_backing(backing);
+    }
+
+    fn take_in_sign_ins(&self) -> BoxFuture<'_, Result<bool, Error>> {
+        Box::pin(self.take_in())
+    }
+
+    fn sign_ins_locked<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(self.is_locked(provider))
     }
 }

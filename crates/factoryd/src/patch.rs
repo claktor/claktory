@@ -343,7 +343,7 @@ mod tests {
     fn maps_encode_the_same_every_time() {
         let mut options = BTreeMap::new();
         for id in ["a", "b", "c", "d", "e", "f"] {
-            options.insert(id.to_owned(), v1::OptionValue { on: true, agent_ids: Vec::new() });
+            options.insert(id.to_owned(), v1::OptionValue { on: true, ..Default::default() });
         }
         let extension = v1::AgentExtension { id: "x".into(), enabled: true, options };
         let mut sent = Workspaces::new(true);

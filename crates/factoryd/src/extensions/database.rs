@@ -10,7 +10,7 @@
 //! in one place, `access`, and every statement runs through `sql::open`, so
 //! sharing a database between agents can hook in there later.
 
-mod sql;
+pub(crate) mod sql;
 
 use std::sync::Arc;
 

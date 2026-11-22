@@ -26,3 +26,19 @@ pub fn models(provider: &str) -> Vec<Model> {
         .filter_map(|model| serde_json::from_value(model.clone()).ok())
         .collect()
 }
+
+/// Whether `provider`'s model `id` caches for a lifetime it's asked for
+/// (OpenAI's GPT-5.6 and later; `openai::has_cache_lifetime`). Read once.
+pub fn has_cache_lifetime(provider: &str, id: &str) -> bool {
+    static KNOWN: std::sync::OnceLock<hashbrown::HashSet<String>> = std::sync::OnceLock::new();
+    KNOWN
+        .get_or_init(|| {
+            ["openai", "openai-codex"]
+                .into_iter()
+                .flat_map(|provider| models(provider).into_iter().map(move |model| (provider, model)))
+                .filter(|(_, model)| crate::providers::openai::has_cache_lifetime(model))
+                .map(|(provider, model)| format!("{provider}/{}", model.id))
+                .collect()
+        })
+        .contains(&format!("{provider}/{id}"))
+}

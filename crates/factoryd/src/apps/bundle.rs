@@ -18,8 +18,10 @@ use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// The WIT world apps are built for.
+/// The WIT world apps are built for, which every apps host runs.
 pub(crate) const WORLD: &str = "claktory:app@1";
+/// The world of apps with views (WIT 1.1).
+pub(crate) const WORLD_VIEWS: &str = "claktory:app@1.1";
 /// The most a bundle may weigh.
 pub(crate) const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// What the signature is made over, before the files' lines.
@@ -61,6 +63,14 @@ pub(crate) struct Manifest {
     pub events: Vec<EventSpec>,
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
+    /// The views the person can open; the first is its main one. Only
+    /// for world 1.1.
+    #[serde(default)]
+    pub views: Vec<ViewSpec>,
+    /// The data it asks to read, each granted by the person or not. Only
+    /// for world 1.1.
+    #[serde(default)]
+    pub data: Vec<DataSpec>,
 }
 
 fn default_memory() -> u32 {
@@ -107,6 +117,44 @@ pub(crate) struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct ViewSpec {
+    pub id: String,
+    pub title: String,
+}
+
+/// A `[[data]]` source an app asks to read.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct DataSpec {
+    /// "factory-records" (factory.db) or "agent-database" (an agent's own).
+    pub kind: String,
+    /// For "agent-database": an agent's id, or "*" for any the person
+    /// chooses.
+    #[serde(default)]
+    pub agent: String,
+    /// Why it asks, for the person.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Words Claktory shows as an app's own (its name, its views' titles): up
+/// to 40 letters, digits, spaces and -, never saying Claktory, even with
+/// letters that read alike in a sans-serif font ("CIaktory", "C1aktory").
+fn plain(text: &str, what: &str) -> Result<(), String> {
+    if text.trim() != text || text.chars().count() > 40 || !text.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-') {
+        return Err(format!("the {what} \"{text}\" has to be up to 40 letters, digits, spaces and -"));
+    }
+    let folded = text.to_ascii_lowercase().replace([' ', '-'], "").replace(['i', '1'], "l").replace('0', "o");
+    if folded.contains("claktory") {
+        return Err(format!("the {what} \"{text}\" can't say Claktory: only Claktory itself does"));
+    }
+    Ok(())
+}
+
+/// The kinds of `[[data]]`.
+pub(crate) const FACTORY_RECORDS: &str = "factory-records";
+pub(crate) const AGENT_DATABASE: &str = "agent-database";
+
 fn no_parameters() -> serde_json::Value {
     serde_json::json!({"type": "object", "properties": {}})
 }
@@ -131,12 +179,57 @@ impl Manifest {
         if self.name.trim().is_empty() {
             return bad("it has no name".to_owned());
         }
+        // Its name frames its views ("From Telegram") and its fields ("Telegram
+        // gets what you type here"): plain letters, so no app can pass itself
+        // off as Claktory with a name like "Claktory" or a lookalike of it.
+        if let Err(why) = plain(&self.name, "name") {
+            return bad(why);
+        }
         if self.version.trim().is_empty() || self.version.len() > 64 || self.version.contains(['/', '\\']) || self.version.starts_with('.')
         {
             return bad(format!("the version \"{}\" can't be used", self.version));
         }
-        if self.world != WORLD {
-            return Err(format!("This app needs a different version of Claktory ({}; this one runs {WORLD}).", self.world));
+        if self.world != WORLD && self.world != WORLD_VIEWS {
+            return Err(format!("This app needs a different version of Claktory ({}; this one runs {WORLD_VIEWS}).", self.world));
+        }
+        if !self.views.is_empty() && self.world != WORLD_VIEWS {
+            return bad(format!("views need world = \"{WORLD_VIEWS}\""));
+        }
+        if !self.data.is_empty() && self.world != WORLD_VIEWS {
+            return bad(format!("[[data]] needs world = \"{WORLD_VIEWS}\""));
+        }
+        let mut sources = BTreeSet::new();
+        for data in &self.data {
+            match data.kind.as_str() {
+                FACTORY_RECORDS if data.agent.is_empty() => {}
+                FACTORY_RECORDS => return bad("factory-records names no agent".to_owned()),
+                AGENT_DATABASE if data.agent == "*" || (!data.agent.is_empty() && data.agent.len() <= 64) => {}
+                AGENT_DATABASE => return bad("agent-database needs agent = \"*\" or an agent's id".to_owned()),
+                other => return bad(format!("the data kind \"{other}\" isn't factory-records or agent-database")),
+            }
+            if !sources.insert((data.kind.as_str(), data.agent.as_str())) {
+                return bad(format!("the data \"{}\" is there twice", data.kind));
+            }
+        }
+        let mut views = BTreeSet::new();
+        for view in &self.views {
+            if view.id.is_empty()
+                || view.id.len() > 32
+                || !view.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            {
+                return bad(format!("the view \"{}\" has to be named with lowercase letters, digits, - and _", view.id));
+            }
+            if !views.insert(view.id.as_str()) {
+                return bad(format!("the view \"{}\" is there twice", view.id));
+            }
+            if view.title.trim().is_empty() {
+                return bad(format!("the view \"{}\" has no title", view.id));
+            }
+            // Shown after the app's name, and alone where a surface forgets
+            // it: held to the same rule (Fugo).
+            if let Err(why) = plain(&view.title, &format!("view \"{}\"'s title", view.id)) {
+                return bad(why);
+            }
         }
         for host in &self.hosts {
             let name = host.strip_prefix("*.").unwrap_or(host);
@@ -213,6 +306,11 @@ impl Manifest {
 
     pub(crate) fn secret(&self, name: &str) -> Option<&SecretSpec> {
         self.secrets.iter().find(|secret| secret.name == name)
+    }
+
+    /// The view `id`; empty for its first.
+    pub(crate) fn view(&self, id: &str) -> Option<&ViewSpec> {
+        if id.is_empty() { self.views.first() } else { self.views.iter().find(|view| view.id == id) }
     }
 }
 
@@ -383,5 +481,56 @@ parameters = { type = "object", required = ["text"], properties = { text = { typ
         assert!(Manifest::parse(&world).unwrap_err().contains("needs a different version of Claktory"));
         let host = text.replace("api.telegram.org", "http://127.0.0.1:8123");
         assert!(Manifest::parse(&host).unwrap_err().contains("isn't a host name"));
+
+        for name in [
+            "Claktory",
+            "claktory vault",
+            "Clak-tory Security",
+            "Сlaktory",
+            "CIaktory",
+            "C1aktory",
+            "CLAKT0RY",
+            "Telegram\u{200b}",
+            " Telegram",
+            "Tele/gram",
+        ] {
+            let named = text.replace("name = \"Telegram\"", &format!("name = \"{name}\""));
+            assert!(Manifest::parse(&named).is_err(), "{name} refused");
+        }
+        let named = text.replace("name = \"Telegram\"", "name = \"Charts 2-day\"");
+        assert_eq!(Manifest::parse(&named).expect("a plain name").name, "Charts 2-day");
+
+        let views = format!("{text}\n[[views]]\nid = \"main\"\ntitle = \"Charts\"\n\n[[views]]\nid = \"day-by-day\"\ntitle = \"Days\"\n");
+        assert!(Manifest::parse(&views).unwrap_err().contains("views need world = \"claktory:app@1.1\""));
+        let views = views.replace("claktory:app@1\"", "claktory:app@1.1\"");
+        let manifest = Manifest::parse(&views).expect("valid with views");
+        assert_eq!(manifest.view("").map(|view| view.title.as_str()), Some("Charts"));
+        assert_eq!(manifest.view("day-by-day").map(|view| view.title.as_str()), Some("Days"));
+        assert!(manifest.view("nope").is_none());
+        let twice = views.replace("day-by-day", "main");
+        assert!(Manifest::parse(&twice).unwrap_err().contains("the view \"main\" is there twice"));
+        let untitled = views.replace("title = \"Days\"", "title = \" \"");
+        assert!(Manifest::parse(&untitled).unwrap_err().contains("has no title"));
+        for title in ["Claktory Settings", "CIaktory", "Days\u{200b}", "Days: all", " Days"] {
+            let titled = views.replace("title = \"Days\"", &format!("title = \"{title}\""));
+            assert!(Manifest::parse(&titled).is_err(), "{title} refused");
+        }
+        let named = views.replace("day-by-day", "Day By Day");
+        assert!(Manifest::parse(&named).unwrap_err().contains("lowercase letters, digits, - and _"));
+
+        let data = "\n[[data]]\nkind = \"factory-records\"\nreason = \"Charts of your usage\"\n\n[[data]]\nkind = \"agent-database\"\nagent = \"*\"\n";
+        assert!(Manifest::parse(&format!("{text}{data}")).unwrap_err().contains("[[data]] needs world = \"claktory:app@1.1\""));
+        let manifest = Manifest::parse(&format!("{views}{data}")).expect("valid with data");
+        let kinds: Vec<(&str, &str)> = manifest.data.iter().map(|data| (data.kind.as_str(), data.agent.as_str())).collect();
+        assert_eq!(kinds, [("factory-records", ""), ("agent-database", "*")]);
+        for (wrong, why) in [
+            ("kind = \"agent-database\"\n", "needs agent = \"*\" or an agent's id"),
+            ("kind = \"factory-records\"\nagent = \"lea\"\n", "factory-records"),
+            ("kind = \"factory-records\"\n", "is there twice"),
+            ("kind = \"files\"\n", "isn't factory-records or agent-database"),
+        ] {
+            let error = Manifest::parse(&format!("{views}{data}\n[[data]]\n{wrong}")).unwrap_err();
+            assert!(error.contains(why), "{wrong}: {error}");
+        }
     }
 }

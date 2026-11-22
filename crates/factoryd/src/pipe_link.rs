@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -123,13 +123,18 @@ pub struct Incoming {
 }
 
 /// Whether the peer can be reached, as last seen. Cached: cheap to read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkStatus {
     pub online: bool,
     /// When it was last reached, in ms since 1970; 0 if never.
     pub last_seen_ms: i64,
     /// Messages waiting to reach it.
     pub queued: u32,
+    /// Why it can't be reached, in a short line; empty while online, and
+    /// before anything has tried.
+    pub reason: String,
+    /// When reaching it started failing, in ms since 1970; 0 while online.
+    pub offline_since_ms: i64,
 }
 
 /// Why the transport can't do what the store asked. Each says it so the app
@@ -248,8 +253,14 @@ const LABEL: &[u8] = b"claktory pipe frame v1\n";
 const MAX_PAYLOAD: usize = 256 * 1024;
 /// At most this big, a reply.
 const MAX_REPLY: usize = 256 * 1024;
-/// How long dialing the peer may take.
-const DIAL: Duration = Duration::from_secs(15);
+/// How long dialing the peer may take, in ms (15 s; tests shorten it).
+static DIAL_MS: AtomicU64 = AtomicU64::new(15_000);
+
+/// Shortens every pipe dial, for every Factory in this process: tests
+/// exercising failed dials would otherwise wait the whole 15 s each try.
+pub fn set_dial(timeout: Duration) {
+    DIAL_MS.store(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
 /// How long the peer may take to answer a frame (its files' time aside).
 const ANSWER: Duration = Duration::from_secs(30);
 /// How often an idle link checks that its peer is there.
@@ -628,17 +639,18 @@ async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: 
         }
     }
     let connecting = endpoint.connect(addr, ALPN_PIPE);
-    match tokio::time::timeout(DIAL, connecting).await {
+    match tokio::time::timeout(Duration::from_millis(DIAL_MS.load(Ordering::Relaxed)), connecting).await {
         Ok(Ok(connection)) => Ok(connection),
         Ok(Err(error)) => Err(format!("{error:#}")),
         Err(_) => Err("no answer in time".to_owned()),
     }
 }
 
-/// The relays a peer may point this Claktory at: https only. A plain
-/// http relay would carry this side's traffic readable by whatever host
-/// the peer named. What the person pasted (an invite code's relays)
-/// is taken as it is.
+/// The relays a peer may point this Claktory at: https only. The tunnel
+/// is end to end, so a relay never reads pipe traffic; the rule is about
+/// where the dial goes: an http relay URL could point it at any host the
+/// peer names, this machine's own network included. What the person
+/// pasted (an invite code's relays) is taken as it is.
 fn peer_relays(relays: Vec<String>) -> Vec<String> {
     relays.into_iter().filter(|relay| relay.parse::<RelayUrl>().is_ok_and(|url| url.scheme() == "https")).collect()
 }
@@ -652,6 +664,9 @@ fn peer_addresses(addresses: Vec<String>) -> Vec<String> {
 }
 
 fn dialable(ip: IpAddr) -> bool {
+    // An IPv4 address mapped into IPv6 ([::ffff:127.0.0.1]) is judged as
+    // its IPv4 self.
+    let ip = ip.to_canonical();
     match ip {
         IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast()),
         IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80),
@@ -1064,7 +1079,7 @@ pub fn close(factory: &Arc<Factory>, pipe: &str) {
 
 /// Whether the peer can be reached, as last seen (cached).
 pub fn status(factory: &Factory, pipe: &str) -> LinkStatus {
-    lock(&factory.remote.pipes.workers).get(pipe).map(|worker| *lock(&worker.status)).unwrap_or_default()
+    lock(&factory.remote.pipes.workers).get(pipe).map(|worker| lock(&worker.status).clone()).unwrap_or_default()
 }
 
 /// Forgets a link for good: its row, its queue, its key.
@@ -1100,16 +1115,26 @@ fn queued(factory: &Factory, pipe: &str) -> u32 {
     factory.store.db().query_row("SELECT COUNT(*) FROM pipe_outbox WHERE pipe = ?1 AND control = 0", [pipe], |row| row.get(0)).unwrap_or(0)
 }
 
-/// Sets what `status` says, telling the store when online or the queue
-/// changed (not for last seen alone).
+/// The peer couldn't be reached: why, and since when (kept from the
+/// first failure).
+fn offline(status: &mut LinkStatus, reason: &str) {
+    status.online = false;
+    status.reason = reason.lines().next().unwrap_or_default().to_owned();
+    if status.offline_since_ms == 0 {
+        status.offline_since_ms = now_ms();
+    }
+}
+
+/// Sets what `status` says, telling the store when online, the queue or
+/// the reason changed (not for last seen alone).
 fn set_status(factory: &Arc<Factory>, pipe: &str, worker: &Worker, change: impl FnOnce(&mut LinkStatus)) {
     let (before, after) = {
         let mut status = lock(&worker.status);
-        let before = *status;
+        let before = status.clone();
         change(&mut status);
-        (before, *status)
+        (before, status.clone())
     };
-    if (before.online, before.queued) != (after.online, after.queued)
+    if (before.online, before.queued, &before.reason) != (after.online, after.queued, &after.reason)
         && let Some(store) = store()
     {
         store.link_changed(factory, pipe, after);
@@ -1154,7 +1179,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
                 Ok(dialed) => connection = Some(dialed),
                 Err(error) => {
                     tracing::debug!(pipe, %error, "can't reach a pipe's peer");
-                    set_status(&strong, &pipe, &worker, |status| status.online = false);
+                    set_status(&strong, &pipe, &worker, |status| offline(status, &error));
                     drop(strong);
                     let _ = tokio::time::timeout(backoff, worker.wake.notified()).await;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -1194,7 +1219,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             Err(error) => {
                 tracing::debug!(pipe, %error, "a pipe's peer didn't answer");
                 connection = None;
-                set_status(&strong, &pipe, &worker, |status| status.online = false);
+                set_status(&strong, &pipe, &worker, |status| offline(status, &error));
                 drop(strong);
                 let _ = tokio::time::timeout(backoff, worker.wake.notified()).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -1210,6 +1235,8 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         set_status(&strong, &pipe, &worker, |status| {
             status.online = true;
             status.last_seen_ms = seen;
+            status.reason.clear();
+            status.offline_since_ms = 0;
         });
         if reply.code == "closed" {
             if !link.closed
@@ -1497,5 +1524,28 @@ fn clear_old(root: &Path) {
                 let _ = std::fs::remove_dir_all(message.path());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The established-link paths (a dial or exchange that fails) call
+    // `offline`; two Factories in one test process always find each
+    // other's real addresses once joined, so the recording is pinned here.
+    #[test]
+    fn offline_keeps_the_first_failure_time_and_one_line() {
+        let mut status = LinkStatus { online: true, ..LinkStatus::default() };
+        offline(&mut status, "no answer in time\nand a second line");
+        assert!(!status.online);
+        assert_eq!(status.reason, "no answer in time");
+        let since = status.offline_since_ms;
+        assert!(since > 0);
+
+        // A later, different failure updates the reason, not the start.
+        offline(&mut status, "connection lost");
+        assert_eq!(status.reason, "connection lost");
+        assert_eq!(status.offline_since_ms, since);
     }
 }

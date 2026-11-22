@@ -522,7 +522,7 @@ fn write_settings(home: &Path, account_port: Option<u16>, model: bool) -> Result
         }
     }
     config.remote = Some(factoryd::config::RemoteConfig { relays: vec![format!("{NOWHERE}/")], ..Default::default() });
-    let text = config.to_json().map_err(|error| Failure::failed(error.to_string()))?;
+    let text = config.to_json(home).map_err(|error| Failure::failed(error.to_string()))?;
     std::fs::write(home.join("config.json"), text).map_err(|error| Failure::failed(format!("Can't write the settings: {error}")))
 }
 

@@ -44,6 +44,13 @@ message Frame {
     // A tool call from an agent: answered with CallResult (or Done with an
     // error when the app doesn't run).
     Call call = 15;
+    // Views (WIT 1.1): the person opened one of the app's views as a
+    // surface, did something in it, or no longer shows it. Each answered
+    // with Done (with an error when the app has no views, doesn't run, or
+    // refused).
+    ViewOpen view_open = 16;
+    ViewAction view_action = 17;
+    ViewClosed view_closed = 18;
     // ---- host → factoryd ----
     // The answer to Hello.
     Ready ready = 30;
@@ -62,8 +69,17 @@ message Frame {
     // deadline, a limit hit). The host doesn't restart it: factoryd does,
     // with backoff, by sending Start again.
     Crashed crashed = 36;
+    // The app sends a message to one of its open surfaces: answered with
+    // Done, its error saying why factoryd refused it.
+    PushView push_view = 37;
+    // The app asks for its data sources: answered with DataSourceList.
+    GetDataSources get_data_sources = 38;
+    // The app runs a query: answered with DataAnswer.
+    DataQuery data_query = 39;
     // ---- factoryd → host, answers ----
     SecretValue secret_value = 50;
+    DataSourceList data_source_list = 51;
+    DataAnswer data_answer = 52;
   }
 }
 
@@ -75,7 +91,8 @@ message Hello {
 message Ready {
   // The host's version, for the log.
   string version = 1;
-  // The WIT worlds it runs, e.g. "claktory:app@1".
+  // The WIT worlds it runs: "claktory:app@1", and "claktory:app@1.1" (views)
+  // from hosts that run apps with views.
   repeated string worlds = 2;
 }
 
@@ -95,7 +112,7 @@ message Load {
   uint32 storage_mb = 7;
   // Not empty: call upgrade(upgrade_from) before the next start(), once.
   string upgrade_from = 8;
-  // The WIT world it was built for ("claktory:app@1").
+  // The WIT world it was built for ("claktory:app@1", "claktory:app@1.1").
   string world = 9;
 }
 
@@ -168,4 +185,74 @@ message Crashed {
   string app_id = 1;
   // What happened, a sentence for the person ("It ran out of memory (32 MB).").
   string error = 2;
+}
+
+message ViewOpen {
+  string app_id = 1;
+  // As the manifest's [[views]] names it.
+  string view = 2;
+  // A JSON object ("{}" for none).
+  string params = 3;
+  // Its surface's id, which the app's messages name.
+  string surface = 4;
+}
+
+message ViewAction {
+  string app_id = 1;
+  string surface = 2;
+  // One A2UI v1.0 renderer message, JSON, checked by factoryd.
+  string message = 3;
+}
+
+message ViewClosed {
+  string app_id = 1;
+  string surface = 2;
+}
+
+message PushView {
+  string app_id = 1;
+  string surface = 2;
+  // One A2UI v1.0 message, JSON, as the app sent it.
+  string message = 3;
+}
+
+message GetDataSources {
+  string app_id = 1;
+}
+
+message DataSourceList {
+  repeated DataSource sources = 1;
+}
+
+message DataSource {
+  // "factory-records", or "agent:<agent id>".
+  string id = 1;
+  // For the person ("Claktory's records").
+  string label = 2;
+  bool granted = 3;
+}
+
+message DataQuery {
+  string app_id = 1;
+  // DataSource.id.
+  string source = 2;
+  string sql = 3;
+  // A JSON array, or empty.
+  string params = 4;
+}
+
+message DataAnswer {
+  // The rows, JSON (as data-query answers them), when it worked.
+  string json = 1;
+  DataError error = 2;
+  // Why, for INVALID and FAILED.
+  string message = 3;
+}
+
+enum DataError {
+  DATA_ERROR_NONE = 0;
+  DATA_ERROR_NOT_GRANTED = 1;
+  DATA_ERROR_UNKNOWN_SOURCE = 2;
+  DATA_ERROR_INVALID = 3;
+  DATA_ERROR_FAILED = 4;
 }

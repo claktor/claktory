@@ -97,6 +97,15 @@ fn main() -> ExitCode {
         let rest: Vec<String> = args[at + 1..].iter().filter(|arg| *arg != "--dev").cloned().collect();
         return if args[at] == "export" { factoryd::move_export::main(dev, &rest) } else { factoryd::move_source::main(dev, &rest) };
     }
+    // Backing the vault up off this computer, and restoring it: the backup
+    // goes to stdout, so no logs there.
+    if let Some(at) = args.iter().position(|arg| arg != "--dev")
+        && args[at] == "vault"
+    {
+        let dev = args.iter().any(|arg| arg == "--dev");
+        let rest: Vec<String> = args[at + 1..].iter().filter(|arg| *arg != "--dev").cloned().collect();
+        return factoryd::vault::backup::main(dev, &rest);
+    }
     // The commands for setting Claktory up from a shell, with --json: they
     // talk to the running backend, and print one JSON line, so no logs.
     if let Some(code) = factoryd::cli::dispatch(&args) {
@@ -221,7 +230,7 @@ async fn run() -> Result<(), MainError> {
         }
         [unpair, device @ ..] if unpair == "unpair" && !device.is_empty() => {
             let device = factoryd::remote::unpair(&instance.home, &device.join(" "))?;
-            println!("Unpaired {} ({}): it can't connect any more.", device.name, device.id);
+            println!("Removed {} ({}): it can't connect any more.", device.name, device.id);
             Ok(())
         }
         [devices] if devices == "devices" => {
@@ -241,7 +250,7 @@ async fn run() -> Result<(), MainError> {
         }
         // From before the private tunnel, which needs no switch.
         [remote, ..] if remote == "remote" => {
-            println!("Remote access is on while devices are paired: pair one with factoryd pair NAME.");
+            println!("Other devices can connect once you've added one: run factoryd pair NAME.");
             Ok(())
         }
         _ => Err(MainError::Usage),
@@ -306,7 +315,7 @@ fn import(instance: &Instance, args: &[String]) -> Result<(), MainError> {
         // refused (nothing to fix but what it says), 1 when it failed.
         Err(error) => {
             eprintln!("{error}");
-            std::process::exit(if matches!(error, ImportError::Refused(_)) { 3 } else { 1 });
+            std::process::exit(error.exit_code().into());
         }
     }
 }
@@ -409,7 +418,7 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
         }
         Err(error) => {
             eprintln!("{error}");
-            std::process::exit(if matches!(error, ImportError::Refused(_)) { 3 } else { 1 });
+            std::process::exit(error.exit_code().into());
         }
     }
 }
@@ -655,6 +664,7 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     if let Some(handed) = handed {
         factory.take_vault_key(handed);
     }
+    factoryd::backend_started(&factory);
     // A move a restart interrupted while copying carries on.
     factoryd::move_run::resume(&factory);
     // Factories installed from published releases download newer ones.
@@ -672,6 +682,7 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         _ = terminate.recv() => {
             tracing::info!("stopping");
             factory.finish_writes(Duration::from_secs(5)).await;
+            factoryd::backend_stopped(&home);
         }
     }
     Ok(())

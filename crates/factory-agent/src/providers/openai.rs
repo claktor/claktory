@@ -8,10 +8,18 @@ use crate::providers::{
     Provider, api_key, check_cancelled, clamp_max_tokens, client, client_api_key, insert_reasoning_effort, model_params, prompt_cache_key,
     response_text, stream_effort, user_agent_header,
 };
-use crate::stream::{EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel, pending_message};
+use crate::stream::{CacheTtl, EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel, pending_message};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent};
 
 const MIN_OUTPUT_TOKENS: u64 = 16;
+
+/// Whether `model` caches for a lifetime it's asked for (GPT-5.6 and later:
+/// at least 30 minutes, or 12 hours when asked), which its catalog entry
+/// shows by pricing cache writes. Earlier models keep theirs for as long as
+/// OpenAI likes, which Claktory can't know.
+pub fn has_cache_lifetime(model: &Model) -> bool {
+    model.cost.cache_write > 0.0
+}
 const ERROR_PREFIX: &str = "OpenAI API error";
 
 pub fn provider() -> Provider {
@@ -75,6 +83,10 @@ fn build_params(
     params.insert("stream".into(), json!(true));
     if let Some(session) = &options.session_id {
         params.insert("prompt_cache_key".into(), json!(prompt_cache_key(session)));
+    }
+    // Its own 30 minutes are asked for by sending nothing.
+    if options.cache_ttl == CacheTtl::TwelveHours && has_cache_lifetime(model) {
+        params.insert("prompt_cache_options".into(), json!({"ttl": "12h"}));
     }
     params.insert("store".into(), json!(false));
     params.insert("max_output_tokens".into(), json!(max_tokens.max(MIN_OUTPUT_TOKENS)));

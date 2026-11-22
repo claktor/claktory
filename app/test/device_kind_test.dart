@@ -126,4 +126,32 @@ void main() {
     expect(await deviceNameOf(TargetPlatform.iOS, shortestSide: 393), 'iPhone');
     expect(await deviceNameOf(TargetPlatform.iOS, shortestSide: 820), 'iPad');
   });
+
+  test('the platform told in Hello: iPadOS apart from iOS', () {
+    expect(platformOf(TargetPlatform.iOS, DeviceKind.DEVICE_KIND_PHONE), 'ios');
+    expect(
+      platformOf(TargetPlatform.iOS, DeviceKind.DEVICE_KIND_TABLET),
+      'ipados',
+    );
+    expect(
+      platformOf(TargetPlatform.android, DeviceKind.DEVICE_KIND_TABLET),
+      'android',
+    );
+    expect(
+      platformOf(TargetPlatform.macOS, DeviceKind.DEVICE_KIND_LAPTOP),
+      'macos',
+    );
+    expect(
+      platformOf(TargetPlatform.linux, DeviceKind.DEVICE_KIND_DESKTOP),
+      'linux',
+    );
+    expect(
+      platformOf(TargetPlatform.windows, DeviceKind.DEVICE_KIND_DESKTOP),
+      'windows',
+    );
+    expect(
+      platformOf(TargetPlatform.fuchsia, DeviceKind.DEVICE_KIND_UNSPECIFIED),
+      '',
+    );
+  });
 }

@@ -145,7 +145,12 @@ At start, then hourly while running. Everything but `version` and
 {
   "version": "v0.1.9",
   "platform": "macos-arm64",
-  "counts": {"agents": 12, "projects": 3, "devices": 2},
+  "counts": {"agents": 12, "projects": 3, "devices": 2, "pipes": 1, "secrets": 4, "monitors": 2},
+  "setup": {"model_connected": true, "first_run": true},
+  "devices": [
+    {"platform": "macos", "kind": "laptop", "app_version": "v0.1.16", "count": 1},
+    {"platform": "ios", "kind": "phone", "app_version": "v0.1.16", "count": 1}
+  ],
   "periods": [
     {
       "id": "p-01HZX…",
@@ -157,12 +162,29 @@ At start, then hourly while running. Everything but `version` and
       ],
       "activity": [
         {"hour": 1763643600, "agent_minutes": 95, "agents_working": 3, "runs": 7}
+      ],
+      "devices_connected": 2,
+      "health": [
+        {"version": "v0.1.16", "rolled_back": 1, "crashes": 0}
       ]
     }
   ]
 }
 ```
-- `counts`: how many agents, projects and paired devices the Claktory has now.
+- `counts`: how many agents, projects and paired devices the Claktory has now;
+  newer Claktories also its pipes, secrets and active monitors (0 when left
+  out). Claktory sends `secrets` only roughly, as 0, 1, 10 or 50 (at least
+  that many).
+- `setup`: the steps of setup it has reached, each true for good once
+  reached: `model_connected` (a model provider signed in), `first_run` (an
+  agent ran).
+- `devices`: its paired devices that have connected (this computer's own app
+  among them), counted by `platform` ("macos", "ios", "android"…), `kind`
+  ("desktop", "laptop", "phone", "tablet") and `app_version` ("v0.1.16",
+  "dev"), each a label (1–40 of `A-Z a-z 0-9 . _ + -`, "unknown" when the app
+  didn't say), at most 100 entries; never a device's name. Replaces the
+  previous check-in's (an empty list: none now); left out, the previous
+  list stays.
 - `periods`: what happened since the last accepted check-in. The Claktory
   makes a period when it checks in, keeps the ones not yet accepted (offline,
   say) and sends them all with its next check-in, oldest first, 400 at most
@@ -179,6 +201,13 @@ At start, then hourly while running. Everything but `version` and
     spent working, summed over agents; `agents_working`, the most working at
     once; `runs`, the runs started (a prompt or event through to the agent's
     reply).
+  - `devices_connected` (optional): how many of its paired devices connected
+    in the period.
+  - `health` (optional): per backend `version` (a label; "unknown" when the
+    supervisor couldn't tell), at most 20: `rolled_back`, how often an update
+    to it didn't start and the supervisor went back, and `crashes`, how often
+    it stopped without stopping cleanly (a crash, or the computer losing
+    power). Added up across periods.
   - A period that's out of range (ends in the future, starts more than 90
     days ago, a malformed id, an hour outside it, more `agent_minutes` than
     `agents_working` × 60, a value no Claktory could have) is left out and
@@ -188,11 +217,12 @@ At start, then hourly while running. Everything but `version` and
 (relays empty until Claktory runs its own; `epoch` is the current one, so a
 backend notices a new one it missed; `periods_recorded` counts the periods
 new to the service). Updates the Claktory's last contact, version,
-platform and counts. The service also notes where the request came from:
+platform, counts, setup and devices. The service also notes where the request came from:
 country, region and city, from its IP with an offline GeoIP file, keeping
 only the place, never the IP.
 Errors: `401 unauthorized`, `403 revoked`, `400 invalid_request` (malformed,
-a count above 1,000,000, or more than 400 periods).
+a count above 1,000,000, a label out of form, more than 100 kinds of
+device, or more than 400 periods).
 
 ### `GET /v1/stats/public`
 For anyone, no sign-in:
@@ -288,25 +318,65 @@ of devices still signed in. For Claktory's own relays,
 later: `claktory-account relay-access` runs beside a relay and answers its
 `access.http` checks from this list.
 
+### User-level apps: `/v1/apps/…` (signed, or device signed)
+Apps a person keeps at the account rather than in a Claktory (DMs first) run
+in the user-apps worker, a process of its own with its own database and none
+of the service's keys (`crates/claktory-user-apps`, whose README has the
+contract). The service authenticates each call and forwards it there, with who
+it's from:
+- a Claktory's signed request (`Bearer` token), for itself or for one of its
+  agents: `?agent=<id>&incarnation=<incarnation>` on the call, which its
+  signature covers, both once;
+- a person's device-signed request (`Device`), with the account's Claktories
+  signed in now and their epochs. A device names no agent.
+
+What the worker answers is passed on only as JSON with an app's status, and
+signed like every answer. Without a worker (`--user-apps SOCKET
+--user-apps-uid UID`), while it's down, or when what listens there doesn't
+run as the worker's user: `503 app_unavailable`.
+
+Grants (which agent of which Claktory may use what in an app) live with the
+app's data:
+- `PUT /v1/apps/grants` (signed) `{"app", "agent": {"id", "incarnation"},
+  "scopes", "resources": [{"kind", "id"}], "expires_ms"}` → the grant;
+- `GET /v1/apps/grants` → `{"grants": […]}`, the Claktory's own (signed) or
+  the account's (device signed), live ones only;
+- `DELETE /v1/apps/grants/<id>` → `204`, one of the account's (device
+  signed) or the Claktory's own (signed).
+
+A grant holds only under the epoch it was made in: signing in again,
+signing out or being removed ends it. Refusals: `400 invalid_request`,
+`403 not_granted`, `404 not_found`, `429 rate_limited`. `GET
+/v1/apps/whoami` answers with the caller as the worker got it.
+
 ### Web: `/account`
 Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, recent unlocks with their IP, and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
 model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
 (name, platform, last seen), each with **Remove** (its key is unbound);
-**Delete account** (its Claktories' usage stays only in anonymous totals; `GET /account/delete` opens its confirm step directly, after the emailed-code sign-in if need be, for apps to link to);
+**Agents' access**, the grants agents on its Claktories hold in the user-level
+apps (agent, Claktory, app, what it may do, how many conversations, since
+when), each with **Remove**, asked of the user-apps worker, so it works with
+every Claktory off;
+**Delete account** (its Claktories' usage and backend versions' health stay only in anonymous totals; their devices are deleted; `GET /account/delete` opens its confirm step directly, after the emailed-code sign-in if need be, for apps to link to);
 **Download my data** (JSON, everything kept about the account). Whoever runs
 the service (`--admin-email`) also gets **Usage counts** at `/account/admin`,
-the same report as `claktory-account stats`, including the emails the mail
+the same report as `claktory-account stats` (daily and monthly active
+Claktories and 30-day retention, from the days each checked in; totals of
+their counts, setup reached, each backend version's rollbacks and crashes,
+and their devices by system, kind and app version: totals only, never one
+Claktory's), including the emails the mail
 provider refused today and yesterday, by why. The first refusal of a kind
 each day (the account isn't entitled to send, sending is turned off, the
 token is refused, the sending is throttled…) is also emailed to them, and
 logged.
 
 ### `GET /mark.png`
-Claktory's mark, as the sign-in emails show it from `--public-url`: a PNG,
-cached a week, and not counted against the IP's requests a minute, since mail
-providers fetch it through a few image proxies.
+Claktory's mark, as sign-in emails sent before v0.1.16 showed it from
+`--public-url`: a PNG, cached a week, and not counted against the IP's
+requests a minute, since mail providers fetch it through a few image proxies.
+Emails now draw the mark in HTML and load nothing (Gmail hides remote images).
 
 ## Error codes
 
@@ -327,4 +397,6 @@ providers fetch it through a few image proxies.
 | 410 | `code_expired` | |
 | 429 | `rate_limited` | `retry_after` |
 | 500 | `internal` | the service's fault; try again later |
+| 403 | `not_granted` | an app call no grant allows |
 | 503 | `email_unavailable` | |
+| 503 | `app_unavailable` | the user-apps worker isn't configured, running or answering rightly |

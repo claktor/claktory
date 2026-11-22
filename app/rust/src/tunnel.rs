@@ -14,9 +14,14 @@
 //! closed before it reaches iroh.
 
 use std::{
+    future::Future,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
-    time::Duration,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
@@ -50,6 +55,36 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
 const REQUEST_LINE_MAX: usize = 1024;
+
+/// How long the old endpoint has to close before a new one is made in its
+/// place: its sockets may be dead (iOS reclaims a suspended app's), so it's
+/// not waited on longer (the Dart side bounds closing a tunnel the same).
+/// One that hasn't closed by then (still dialling its home relay, say) is
+/// said so in the log and dropped, which aborts it and its relay
+/// connections (iroh logs "Endpoint dropped without calling
+/// `Endpoint::close`", expected here); the new one may then meet it at the
+/// relay for a moment, where the newer wins.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// An endpoint younger than this isn't made afresh by [Tunnel::reconnect]:
+/// it was just made, and timeouts that call reconnect in a row mustn't make
+/// one every few seconds.
+pub const REBUILD_AFTER: Duration = Duration::from_secs(5);
+
+/// The longest [REBUILD_AFTER] grows to while rebuilds reach nothing: an
+/// app retrying in the background (Doze cuts its network) calls reconnect
+/// every few seconds, and a new endpoint each time would only cost battery.
+const REBUILD_AFTER_MAX: Duration = Duration::from_secs(300);
+
+/// How old the endpoint must be before reconnect makes it afresh, after
+/// [unanswered] rebuilds in a row that no connection followed: [base],
+/// doubled for each, up to [REBUILD_AFTER_MAX].
+fn rebuild_age(base: Duration, unanswered: u32) -> Duration {
+    base.saturating_mul(1 << unanswered.min(8)).min(REBUILD_AFTER_MAX.max(base))
+}
+
+/// Makes the device's endpoint, the first time and after [Tunnel::reconnect].
+pub type MakeEndpoint = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<Endpoint>> + Send>> + Send + Sync>;
 
 /// A new device key: 32 random bytes as lowercase hex, made on the device.
 pub fn generate_key() -> String {
@@ -158,11 +193,24 @@ pub struct Tunnel {
     path: String,
     shared: Arc<Shared>,
     accept: JoinHandle<()>,
-    watch: JoinHandle<()>,
 }
 
 struct Shared {
-    endpoint: Endpoint,
+    /// The device's endpoint, made afresh by [Tunnel::reconnect]; None
+    /// while that's under way, or when making it failed (the next dial
+    /// tries again). Held while it's made, so a dial waits for it.
+    endpoint: AsyncMutex<Slot>,
+    /// Makes it; None when it can only be told the network changed.
+    make: Option<MakeEndpoint>,
+    /// How old an endpoint must be before reconnect makes a new one.
+    rebuild_after: Duration,
+    /// Rebuilds since the last connection made, to back off ([rebuild_age]).
+    unanswered: AtomicU32,
+    /// When a connection was last made: the endpoint works, whatever its
+    /// age, and isn't made afresh for [rebuild_age] after.
+    connected_at: Mutex<Option<Instant>>,
+    /// Follows the current endpoint's home relay.
+    relay_watch: Mutex<Option<JoinHandle<()>>>,
     backend: EndpointAddr,
     /// The connection streams open on; dialled by the first socket that
     /// finds none open.
@@ -176,47 +224,78 @@ struct Shared {
     cancel_dials: tokio::sync::Notify,
 }
 
+/// The current endpoint and when it was made.
+struct Slot {
+    endpoint: Option<Endpoint>,
+    made: Instant,
+    /// Set by [Tunnel::close]: nothing is made any more.
+    closed: bool,
+}
+
 impl Tunnel {
     /// Listens on 127.0.0.1 at a random port and forwards to [backend]
     /// through [endpoint]. Nothing is dialled until the app connects.
+    /// [reconnect](Self::reconnect) can only tell this endpoint the network
+    /// changed; [open_with](Self::open_with) can make it afresh.
     pub async fn open(endpoint: Endpoint, backend: EndpointAddr) -> anyhow::Result<Self> {
+        Self::start(endpoint, None, REBUILD_AFTER, backend).await
+    }
+
+    /// As [open](Self::open), with an endpoint [make] makes, now and again
+    /// whenever [reconnect](Self::reconnect) finds it older than
+    /// [rebuild_after].
+    pub async fn open_with(make: MakeEndpoint, rebuild_after: Duration, backend: EndpointAddr) -> anyhow::Result<Self> {
+        let endpoint = make().await?;
+        Self::start(endpoint, Some(make), rebuild_after, backend).await
+    }
+
+    async fn start(
+        endpoint: Endpoint,
+        make: Option<MakeEndpoint>,
+        rebuild_after: Duration,
+        backend: EndpointAddr,
+    ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = listener.local_addr()?.port();
         // A key's 32 bytes are as random as any: the system's CSPRNG.
         let path: Arc<str> = format!("/{}", hex::encode(SecretKey::generate().to_bytes())).into();
         let shared = Arc::new(Shared {
-            endpoint,
+            endpoint: AsyncMutex::new(Slot { endpoint: Some(endpoint.clone()), made: Instant::now(), closed: false }),
+            make,
+            rebuild_after,
+            unanswered: AtomicU32::new(0),
+            connected_at: Mutex::new(None),
+            relay_watch: Mutex::new(None),
             backend,
             connection: AsyncMutex::new(None),
             status: Mutex::new(Status::default()),
             forwards: AsyncMutex::new(None),
             cancel_dials: tokio::sync::Notify::new(),
         });
+        shared.watch_relay(&endpoint);
         let accept = tokio::spawn({
             let shared = shared.clone();
             let path = path.clone();
             async move {
-                while let Ok((socket, _)) = listener.accept().await {
-                    let _ = socket.set_nodelay(true);
-                    tokio::spawn(forward(socket, shared.clone(), path.clone()));
-                }
-            }
-        });
-        // Whether this device reaches its home relay, as it changes.
-        let watch = tokio::spawn({
-            let shared = shared.clone();
-            async move {
-                let mut relays = shared.endpoint.home_relay_status();
                 loop {
-                    let connected = relays.get().iter().any(|relay| relay.is_connected());
-                    shared.status.lock().unwrap().relay_connected = connected;
-                    if relays.updated().await.is_err() {
-                        break;
+                    match listener.accept().await {
+                        Ok((socket, _)) => {
+                            let _ = socket.set_nodelay(true);
+                            tokio::spawn(forward(socket, shared.clone(), path.clone()));
+                        }
+                        // The system took the port back (iOS does, from an
+                        // app suspended with its screen locked): nothing
+                        // reaches the tunnel any more, so it says so, and
+                        // the app opens a new one.
+                        Err(error) => {
+                            shared.failed(&format!("The tunnel's local port closed: {error}"), Failure::Other);
+                            break;
+                        }
                     }
                 }
             }
         });
-        Ok(Self { port, path: path.to_string(), shared, accept, watch })
+        Ok(Self { port, path: path.to_string(), shared, accept })
     }
 
     /// The loopback port the app connects to: ws://127.0.0.1:<port><path>.
@@ -237,38 +316,90 @@ impl Tunnel {
     /// dial in flight is told to give up (it may be stuck on a dead path,
     /// and sockets would queue behind it), the connection is closed, so
     /// the backend sees this session end now rather than when it times
-    /// out, and iroh looks at the network again. The next socket dials
-    /// afresh. A failure from before says nothing about now.
+    /// out, and the endpoint is made afresh. The next socket dials on the
+    /// new one, waiting for it if it's still being made. A failure from
+    /// before says nothing about now.
+    ///
+    /// Made afresh because telling iroh the network changed isn't enough:
+    /// back on the same network (a phone unlocked on the same Wi-Fi), it
+    /// finds nothing changed and keeps its sockets and its relay
+    /// connection, which a suspended app's may have lost, so every dial
+    /// waits out its timeout (netwatch doesn't look for sleep on phones).
+    /// The old endpoint is closed before the new one is made, so the relay
+    /// never sees two with this device's key. One made, or that made a
+    /// connection, less than [REBUILD_AFTER] ago is only told the network
+    /// changed, and that wait doubles with each rebuild no connection
+    /// followed ([rebuild_age]).
     pub async fn reconnect(&self) {
-        self.shared.cancel_dials.notify_waiters();
+        let shared = &self.shared;
+        shared.cancel_dials.notify_waiters();
         {
             // Free at once, or as soon as the cancelled dial lets go.
-            let mut slot = self.shared.connection.lock().await;
+            let mut slot = shared.connection.lock().await;
             if let Some(connection) = slot.take() {
                 connection.close(0u32.into(), b"");
             }
         }
-        {
-            let mut status = self.shared.status.lock().unwrap();
-            status.phase = Phase::Idle;
-            status.path = Path::None;
-            status.error.clear();
-            status.failure = Failure::None;
+        if let Some(connection) = shared.forwards.lock().await.take() {
+            connection.close(0u32.into(), b"");
         }
-        self.shared.endpoint.network_change().await;
+        shared.reset_status();
+        let mut slot = shared.endpoint.lock().await;
+        if slot.closed {
+            return;
+        }
+        // Since it was made or last worked, whichever is later.
+        let quiet = match *shared.connected_at.lock().unwrap() {
+            Some(at) => slot.made.elapsed().min(at.elapsed()),
+            None => slot.made.elapsed(),
+        };
+        let young = quiet < rebuild_age(shared.rebuild_after, shared.unanswered.load(Ordering::Relaxed));
+        let Some(make) = shared.make.clone().filter(|_| !young || slot.endpoint.is_none()) else {
+            if let Some(endpoint) = slot.endpoint.clone() {
+                drop(slot);
+                endpoint.network_change().await;
+            }
+            return;
+        };
+        if let Some(old) = slot.endpoint.take() {
+            shared.stop_relay_watch();
+            if tokio::time::timeout(CLOSE_TIMEOUT, old.close()).await.is_err() {
+                // Logcat's only (android.rs): nothing reads it elsewhere.
+                #[cfg(any(target_os = "android", test))]
+                tracing::warn!("The old endpoint didn't close within {} s; making the new one anyway.", CLOSE_TIMEOUT.as_secs());
+            }
+        }
+        shared.status.lock().unwrap().relay_connected = false;
+        match make().await {
+            Ok(endpoint) => {
+                shared.watch_relay(&endpoint);
+                slot.endpoint = Some(endpoint);
+                slot.made = Instant::now();
+                shared.unanswered.fetch_add(1, Ordering::Relaxed);
+            }
+            // Left for the next dial to make; until then, nothing failed.
+            Err(_) => slot.endpoint = None,
+        }
     }
 
     /// Stops listening and closes the connection and the endpoint.
     pub async fn close(&self) {
         self.accept.abort();
-        self.watch.abort();
+        self.shared.stop_relay_watch();
         if let Some(connection) = self.shared.connection.lock().await.take() {
             connection.close(0u32.into(), b"closed");
         }
         if let Some(connection) = self.shared.forwards.lock().await.take() {
             connection.close(0u32.into(), b"closed");
         }
-        self.shared.endpoint.close().await;
+        let endpoint = {
+            let mut slot = self.shared.endpoint.lock().await;
+            slot.closed = true;
+            slot.endpoint.take()
+        };
+        if let Some(endpoint) = endpoint {
+            endpoint.close().await;
+        }
     }
 }
 
@@ -293,13 +424,15 @@ impl Dialer {
         {
             return Ok(open.clone());
         }
-        let dial = self.0.endpoint.connect(self.0.backend.clone(), ALPN_FORWARD);
+        let endpoint = self.0.endpoint().await.map_err(|error| ForwardingFailure::Failed(error.to_string()))?;
+        let dial = endpoint.connect(self.0.backend.clone(), ALPN_FORWARD);
         let connection = match tokio::time::timeout(DIAL_TIMEOUT, dial).await {
             Ok(Ok(connection)) => connection,
             Ok(Err(error)) if refused_alpn(&error) => return Err(ForwardingFailure::Unsupported),
             Ok(Err(error)) => return Err(ForwardingFailure::Failed(explain_connect(&error).0)),
             Err(_) => return Err(ForwardingFailure::Failed(format!("Nothing answered within {} seconds.", DIAL_TIMEOUT.as_secs()))),
         };
+        self.0.connected();
         *slot = Some(connection.clone());
         Ok(connection)
     }
@@ -317,7 +450,7 @@ fn refused_alpn(error: &ConnectError) -> bool {
 impl Drop for Tunnel {
     fn drop(&mut self) {
         self.accept.abort();
-        self.watch.abort();
+        self.shared.stop_relay_watch();
     }
 }
 
@@ -421,9 +554,9 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Dials the backend offering [ALPN_COMPRESSED], then [ALPN].
-async fn dial(shared: &Shared) -> Result<Connection, ConnectError> {
+async fn dial(shared: &Shared, endpoint: &Endpoint) -> Result<Connection, ConnectError> {
     let options = ConnectOptions::new().with_additional_alpns(vec![ALPN.to_vec()]);
-    Ok(shared.endpoint.connect_with_opts(shared.backend.clone(), ALPN_COMPRESSED, options).await?.await?)
+    Ok(endpoint.connect_with_opts(shared.backend.clone(), ALPN_COMPRESSED, options).await?.await?)
 }
 
 /// The open connection, or a new one; None when it can't be made (the
@@ -435,9 +568,17 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
     {
         return Some(open.clone());
     }
+    // Waits while reconnect makes it afresh.
+    let endpoint = match shared.endpoint().await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            shared.failed(&format!("This device couldn't start its side of the tunnel: {error}"), Failure::Other);
+            return None;
+        }
+    };
     shared.status.lock().unwrap().phase = Phase::Dialing;
     let dialled = tokio::select! {
-        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared)) => dialled,
+        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared, &endpoint)) => dialled,
         // `reconnect`: this dial may be stuck on a path that's gone. Give
         // up quietly; the next socket dials afresh on what the network is
         // now.
@@ -476,6 +617,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         status.failure = Failure::None;
         status.path = path_of(&connection);
     }
+    shared.connected();
     tokio::spawn(follow(connection.clone(), shared.clone()));
     *slot = Some(connection.clone());
     Some(connection)
@@ -524,6 +666,64 @@ fn path_of(connection: &Connection) -> Path {
 }
 
 impl Shared {
+    /// The current endpoint, made now if there's none (making it failed
+    /// before); waits while [Tunnel::reconnect] makes it.
+    async fn endpoint(self: &Arc<Self>) -> anyhow::Result<Endpoint> {
+        let mut slot = self.endpoint.lock().await;
+        if let Some(endpoint) = &slot.endpoint {
+            return Ok(endpoint.clone());
+        }
+        let make = self.make.as_ref().filter(|_| !slot.closed).ok_or_else(|| anyhow::anyhow!("the tunnel is closed"))?;
+        let endpoint = make().await?;
+        self.watch_relay(&endpoint);
+        slot.endpoint = Some(endpoint.clone());
+        slot.made = Instant::now();
+        Ok(endpoint)
+    }
+
+    /// Follows whether [endpoint] reaches its home relay, in place of the
+    /// one followed before.
+    fn watch_relay(self: &Arc<Self>, endpoint: &Endpoint) {
+        let shared = Arc::downgrade(self);
+        let mut relays = endpoint.home_relay_status();
+        let watch = tokio::spawn(async move {
+            loop {
+                let connected = relays.get().iter().any(|relay| relay.is_connected());
+                let Some(shared) = shared.upgrade() else { break };
+                shared.status.lock().unwrap().relay_connected = connected;
+                drop(shared);
+                if relays.updated().await.is_err() {
+                    break;
+                }
+            }
+        });
+        if let Some(old) = self.relay_watch.lock().unwrap().replace(watch) {
+            old.abort();
+        }
+    }
+
+    fn stop_relay_watch(&self) {
+        if let Some(watch) = self.relay_watch.lock().unwrap().take() {
+            watch.abort();
+        }
+    }
+
+    /// A connection was made: rebuilds start from the first wait again,
+    /// and none is made for that long.
+    fn connected(&self) {
+        self.unanswered.store(0, Ordering::Relaxed);
+        *self.connected_at.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// Nothing failed, nothing's connected: what reconnect starts from.
+    fn reset_status(&self) {
+        let mut status = self.status.lock().unwrap();
+        status.phase = Phase::Idle;
+        status.path = Path::None;
+        status.error.clear();
+        status.failure = Failure::None;
+    }
+
     fn failed(&self, said: &str, failure: Failure) {
         let mut status = self.status.lock().unwrap();
         status.phase = Phase::Failed;
@@ -848,6 +1048,155 @@ mod tests {
             assert_eq!(connection.alpn(), expected);
             tunnel.close().await;
         }
+    }
+
+    /// Makes a device endpoint with one key each time, after [delay], and
+    /// keeps every one it made.
+    fn maker(delay: Duration) -> (MakeEndpoint, Arc<Mutex<Vec<Endpoint>>>) {
+        let key = parse_key(&generate_key()).unwrap();
+        let made = Arc::new(Mutex::new(Vec::<Endpoint>::new()));
+        let make: MakeEndpoint = Arc::new({
+            let made = made.clone();
+            move || {
+                let (key, made) = (key.clone(), made.clone());
+                Box::pin(async move {
+                    tokio::time::sleep(delay).await;
+                    // Never two at once with this key: every one made
+                    // before is closed by now.
+                    assert!(made.lock().unwrap().iter().all(Endpoint::is_closed), "an endpoint with this key is still open");
+                    let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).secret_key(key).bind().await?;
+                    made.lock().unwrap().push(endpoint.clone());
+                    Ok(endpoint)
+                })
+            }
+        });
+        (make, made)
+    }
+
+    /// The socket echoes what it's sent.
+    async fn echoes(socket: &mut TcpStream, bytes: &[u8]) {
+        socket.write_all(bytes).await.unwrap();
+        let mut got = vec![0u8; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").unwrap();
+        assert_eq!(got, bytes);
+    }
+
+    #[tokio::test]
+    async fn reconnect_makes_the_endpoint_afresh_closing_the_old_one_first() {
+        let backend = echo_backend().await;
+        let (make, made) = maker(Duration::ZERO);
+        let tunnel = Tunnel::open_with(make, Duration::ZERO, backend.addr()).await.unwrap();
+        let (port, path) = (tunnel.port(), tunnel.path().to_owned());
+        let mut before = ask(&tunnel).await;
+        echoes(&mut before, b"before").await;
+
+        tunnel.reconnect().await;
+        assert_eq!(tunnel.status().phase, Phase::Idle, "nothing failed");
+        assert!(tunnel.status().error.is_empty());
+        {
+            let made = made.lock().unwrap();
+            assert_eq!(made.len(), 2, "a new endpoint");
+            assert!(made[0].is_closed(), "the old one closed");
+            assert!(!made[1].is_closed());
+            assert_eq!(made[0].id(), made[1].id(), "the same device");
+        }
+        // The same port and path, a new connection on the new endpoint.
+        assert_eq!((tunnel.port(), tunnel.path()), (port, path.as_str()));
+        let mut after = ask(&tunnel).await;
+        echoes(&mut after, b"after").await;
+        assert_eq!(tunnel.status().phase, Phase::Connected);
+        tunnel.close().await;
+        assert!(made.lock().unwrap().iter().all(Endpoint::is_closed));
+        // Nothing is made after it's closed.
+        tunnel.reconnect().await;
+        assert_eq!(made.lock().unwrap().len(), 2, "closed stays closed");
+    }
+
+    #[tokio::test]
+    async fn a_young_endpoint_is_only_told_the_network_changed() {
+        let backend = echo_backend().await;
+        let (make, made) = maker(Duration::ZERO);
+        let tunnel = Tunnel::open_with(make, Duration::from_secs(3600), backend.addr()).await.unwrap();
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"one").await;
+        for _ in 0..3 {
+            tunnel.reconnect().await;
+        }
+        assert_eq!(made.lock().unwrap().len(), 1, "never made again in a row");
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"two").await;
+        tunnel.close().await;
+    }
+
+    #[test]
+    fn rebuilds_back_off_to_five_minutes() {
+        let base = Duration::from_secs(5);
+        let ages: Vec<u64> = (0..9).map(|n| rebuild_age(base, n).as_secs()).collect();
+        assert_eq!(ages, [5, 10, 20, 40, 80, 160, 300, 300, 300]);
+        assert_eq!(rebuild_age(base, u32::MAX), REBUILD_AFTER_MAX);
+        assert_eq!(rebuild_age(Duration::ZERO, 5), Duration::ZERO);
+        assert_eq!(rebuild_age(Duration::from_secs(3600), 3), Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn rebuilds_no_connection_followed_wait_longer_until_one_does() {
+        let backend = echo_backend().await;
+        let (make, made) = maker(Duration::ZERO);
+        let base = Duration::from_millis(300);
+        let tunnel = Tunnel::open_with(make, base, backend.addr()).await.unwrap();
+        let count = || made.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tunnel.reconnect().await;
+        assert_eq!(count(), 2, "old enough: made afresh");
+        // Nothing connected on it: the next waits twice as long.
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tunnel.reconnect().await;
+        assert_eq!(count(), 2, "backing off");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tunnel.reconnect().await;
+        assert_eq!(count(), 3, "old enough again");
+        // A connection made: back to the first wait.
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"hello").await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tunnel.reconnect().await;
+        assert_eq!(count(), 4, "reset by the connection");
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_just_connected_isnt_made_afresh() {
+        let backend = echo_backend().await;
+        let (make, made) = maker(Duration::ZERO);
+        let tunnel = Tunnel::open_with(make, Duration::from_millis(500), backend.addr()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        // Old, but it connects now (back on the network after a while).
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"works").await;
+        tunnel.reconnect().await;
+        assert_eq!(made.lock().unwrap().len(), 1, "it works: only told the network changed");
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"still").await;
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_socket_during_a_reconnect_waits_for_the_new_endpoint() {
+        let backend = echo_backend().await;
+        let (make, made) = maker(Duration::from_millis(400));
+        let tunnel = Arc::new(Tunnel::open_with(make, Duration::ZERO, backend.addr()).await.unwrap());
+        let reconnecting = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { tunnel.reconnect().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = tunnel.status();
+        assert_eq!((status.phase, status.failure), (Phase::Idle, Failure::None), "reconnecting, not failed");
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"waited").await;
+        reconnecting.await.unwrap();
+        assert_eq!(made.lock().unwrap().len(), 2);
+        tunnel.close().await;
     }
 
     #[test]

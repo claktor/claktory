@@ -145,6 +145,9 @@ pub enum RequestError {
     /// A comment that can't be made or changed so, and why.
     #[error("{0}")]
     Comments(String),
+    /// A checklist goal that can't be added or changed so, and why.
+    #[error("{0}")]
+    Checklist(String),
     /// A usage breakdown that can't be made so, and why.
     #[error("{0}")]
     Usage(String),
@@ -223,6 +226,7 @@ impl RequestError {
             | RequestError::Upload(_)
             | RequestError::Connect(_)
             | RequestError::Comments(_)
+            | RequestError::Checklist(_)
             | RequestError::Usage(_)
             | RequestError::Reset(_)
             | RequestError::Pipe(_)
@@ -237,7 +241,8 @@ impl RequestError {
                 match error {
                     VaultError::Locked => v1::ErrorCode::VaultLocked,
                     VaultError::ProofRequired => v1::ErrorCode::ProofRequired,
-                    VaultError::WrongProof(_) => v1::ErrorCode::WrongProof,
+                    VaultError::WrongProof(_) | VaultError::WrongGroup(_) => v1::ErrorCode::WrongProof,
+                    VaultError::TooManyTries(_) => v1::ErrorCode::RateLimited,
                     VaultError::NotGranted { .. } => v1::ErrorCode::NotGranted,
                     VaultError::NoSecret(_) | VaultError::NoRequest(_) => v1::ErrorCode::NotFound,
                     VaultError::NoVault | VaultError::Exists | VaultError::Invalid(_) => v1::ErrorCode::InvalidRequest,
@@ -272,6 +277,8 @@ pub struct AgentChange<'a> {
     /// The model a refused step is retried on; empty for the Claktory-wide
     /// default.
     pub fallback_model: Option<&'a str>,
+    /// Whether it notifies the person (`crate::notify`).
+    pub notify: Option<v1::NotifyMode>,
 }
 
 /// What a client starts from: the state now, and the events that follow it.
@@ -305,6 +312,8 @@ pub struct Factory {
     queued_sent: Mutex<Option<v1::QueuedMessages>>,
     /// How long an agent sits idle with work outstanding before it's reminded, in ms.
     nudge_after: std::sync::atomic::AtomicU64,
+    /// How long a minute of the Checklist's `nudge_every` lasts, in ms.
+    nudge_minute: std::sync::atomic::AtomicU64,
     /// How often background tasks are checked for running long, in ms.
     task_check_every: std::sync::atomic::AtomicU64,
     /// Wakes the usage monitor, so a new sign-in's usage and plan are read at once.
@@ -339,6 +348,9 @@ pub struct Factory {
     pub(crate) annotations: crate::annotations::State,
     /// The secrets agents use (`crate::vault`).
     pub(crate) vault: crate::vault::Vault,
+    /// Told whenever the vault changes, so the sign-ins in it are taken up
+    /// when it opens (`vault::signins::monitor`).
+    pub(crate) vault_moved: Arc<tokio::sync::Notify>,
     /// The apps installed, as they run (`crate::apps`).
     pub(crate) apps: crate::apps::Apps,
     /// Hides the vault's values in what agents and the app are shown.
@@ -361,6 +373,9 @@ pub struct Factory {
     pub(crate) voices: crate::speech::voice::Voices,
     /// The person's chats (`crate::chats`).
     pub(crate) chats: crate::chats::Chats,
+    /// Notifications: who's using Claktory where, and what was seen
+    /// (`crate::notify`).
+    pub(crate) notify: crate::notify::State,
     /// Notified when a project is unarchived: its agents read what waited.
     unarchived: tokio::sync::Notify,
 }
@@ -421,6 +436,7 @@ pub(crate) fn host_event(summary: String) -> factory_agent::Event {
         id: String::new(),
         summary,
         transient: false,
+        pipe_seqs: Vec::new(),
     }
 }
 
@@ -512,6 +528,9 @@ pub(crate) struct Runtime {
     /// The reset time its conversation last said it waits for, so a wait
     /// that starts again for the same one isn't said twice.
     pub(crate) wait_said: Option<Option<u64>>,
+    /// Since when it has waited for the vault to open, to use sign-ins kept
+    /// in it (`crate::waits`), in ms since 1970; 0 when it doesn't.
+    pub(crate) locked_since: i64,
 }
 
 impl Runtime {
@@ -585,13 +604,19 @@ impl Factory {
         }
         let mut created = false;
         let (config, config_error) = match tokio::fs::read_to_string(home.config_path()).await {
-            Ok(text) => match Config::parse(&text) {
+            Ok(text) => match Config::parse(&text, home.root()) {
                 Ok(mut config) => {
+                    // After going back from an update, most likely: say so at once.
+                    for unknown in config.unknown_keys() {
+                        tracing::warn!(%unknown, "config.json: keeping a setting this version doesn't know");
+                    }
                     // Agents from before colors were saved keep theirs from now
                     // on, and a default prompt nobody edited becomes this
                     // version's.
                     if config.keep_colors(None) | config.follow_default_prompts() {
-                        write_atomic(&home.config_path(), config.to_json()?.as_bytes()).await?;
+                        // Like every write, in the file's form: a rollback
+                        // must find a file the older backend still reads.
+                        write_atomic(&home.config_path(), config.to_json_keeping_form(home.root(), &text)?.as_bytes()).await?;
                     }
                     (config, None)
                 }
@@ -603,7 +628,7 @@ impl Factory {
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let config = Config::default();
-                write_atomic(&home.config_path(), config.to_json()?.as_bytes()).await?;
+                write_atomic(&home.config_path(), config.to_json(home.root())?.as_bytes()).await?;
                 created = true;
                 (config, None)
             }
@@ -646,6 +671,7 @@ impl Factory {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let presences = crate::characters::presences(&store.db())?;
         let viewer = crate::extensions::viewer::State::load(&store);
+        let web = crate::extensions::web::State::new(&home);
         let remote = crate::remote::State::new(&home);
         let key_color = crate::remote::key_color(&home);
         let key_seed = crate::remote::key_seed(&home);
@@ -665,12 +691,13 @@ impl Factory {
             health: crate::update::Health::default(),
             queued_sent: Mutex::new(None),
             nudge_after: std::sync::atomic::AtomicU64::new(30_000),
+            nudge_minute: std::sync::atomic::AtomicU64::new(60_000),
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
             capacity: Arc::default(),
             resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
-            web: crate::extensions::web::State::default(),
+            web,
             characters: crate::characters::State::new(presences),
             remote,
             resources: crate::extensions::resources::State::default(),
@@ -682,6 +709,7 @@ impl Factory {
             annotations: crate::annotations::State::default(),
             redaction: factory_agent::Redaction::new(factory_agent::Redactor::new(&vault.every_variable())),
             vault,
+            vault_moved: Arc::default(),
             apps: crate::apps::Apps::default(),
             account,
             onboarding,
@@ -690,10 +718,22 @@ impl Factory {
             pipes: crate::pipes::Pipes::default(),
             voices: crate::speech::voice::Voices::new(),
             chats,
+            notify: crate::notify::State::default(),
             unarchived: tokio::sync::Notify::new(),
             key_color,
             key_seed,
         });
+        // The sign-ins are kept in the vault (rivet-move.md §3, P2).
+        let sign_ins = factory
+            .models
+            .auth_path()
+            .map(|auth| Arc::new(crate::vault::signins::SignIns::new(Arc::downgrade(&factory), &factory.home, auth)));
+        if let Some(sign_ins) = &sign_ins {
+            factory.models.keep_sign_ins_with(sign_ins.clone());
+            // The models were read from `auth.json`; once the sign-ins moved
+            // into the vault, they're there.
+            factory.refresh_models().await;
+        }
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
         crate::pipes::start(&factory);
@@ -709,6 +749,7 @@ impl Factory {
         tokio::spawn(watch(Arc::downgrade(&factory)));
         tokio::spawn(crate::usage::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::nudge::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::extensions::swarm::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tasks::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::monitors::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::characters::monitor(Arc::downgrade(&factory)));
@@ -719,11 +760,15 @@ impl Factory {
         tokio::spawn(crate::extensions::tree::caches::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::idle::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::vault::requests::monitor(Arc::downgrade(&factory)));
+        if let Some(sign_ins) = sign_ins {
+            tokio::spawn(crate::vault::signins::monitor(Arc::downgrade(&factory), sign_ins));
+        }
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::apps::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::model::check(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
+        tokio::spawn(crate::notify::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -757,6 +802,16 @@ impl Factory {
 
     pub(crate) fn nudge_after(&self) -> Duration {
         Duration::from_millis(self.nudge_after.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// How long a minute of the Checklist's periodic check-in
+    /// (`nudge_every`) lasts; tests make it shorter.
+    pub fn set_nudge_minute(&self, minute: Duration) {
+        self.nudge_minute.store(u64::try_from(minute.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn nudge_minute(&self) -> i64 {
+        i64::try_from(self.nudge_minute.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 
     /// How often background tasks are checked for running long (a minute);
@@ -837,7 +892,14 @@ impl Factory {
             .edit_config(|config| {
                 let id = config::unique_id(name, "project", |id| config.project(id).is_some());
                 let path = chosen.unwrap_or_else(|| workspace.join(&id));
-                config.projects.push(ProjectConfig { id, name: name.to_owned(), path: path.clone(), folders: Vec::new(), archived: false });
+                config.projects.push(ProjectConfig {
+                    id,
+                    name: name.to_owned(),
+                    path: path.clone(),
+                    folders: Vec::new(),
+                    archived: false,
+                    other: Default::default(),
+                });
                 Ok(path)
             })
             .await?;
@@ -945,6 +1007,7 @@ impl Factory {
                     avatar: Default::default(),
                     lead: None,
                     fallback_model: String::new(),
+                    other: Default::default(),
                 };
                 let lead = lead.trim();
                 if !lead.is_empty()
@@ -987,6 +1050,7 @@ impl Factory {
         crate::extensions::ask::forget(&self.store, id)?;
         crate::extensions::devices::forget(self, id).await?;
         crate::extensions::viewer::forget(self, id)?;
+        crate::pipes::start::forget(&self.store, id)?;
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -1046,7 +1110,49 @@ impl Factory {
             name,
             color,
             default_fallback_model,
+            projects_collapsed,
+            chats_collapsed,
+            max_open_panes,
+            notifications,
         } = request;
+        // The sidebar's sections, folded or open: the workspace's UI state
+        // (#249), not settings, so a fold alone leaves config.json alone.
+        let folds = projects_collapsed.is_some() || chats_collapsed.is_some();
+        if folds {
+            self.set_sections_collapsed(projects_collapsed, chats_collapsed)?;
+        }
+        // So is the pane limit: in factory.db, as an older backend after a
+        // rollback would refuse a config.json that held it.
+        if let Some(panes) = max_open_panes {
+            self.set_max_open_panes(panes)?;
+        }
+        // And the notification settings (`crate::notify`).
+        let notified = notifications.is_some();
+        if let Some(notifications) = &notifications {
+            crate::notify::update(self, notifications)?;
+        }
+        let only_folds = (folds || max_open_panes.is_some() || notified)
+            && model.is_none()
+            && effort.is_none()
+            && compact_at.is_none()
+            && ram_percent.is_none()
+            && disk_free_gb.is_none()
+            && disk_free_percent.is_none()
+            && cpu_percent.is_none()
+            && build_cache_gb.is_none()
+            && sidebar_width.is_none()
+            && panel_width.is_none()
+            && user_name.is_none()
+            && vault_unlock_minutes.is_none()
+            && idle_compaction.is_none()
+            && idle_compaction_short_cache.is_none()
+            && cache_ttl.is_none()
+            && name.is_none()
+            && color.is_none()
+            && default_fallback_model.is_none();
+        if only_folds {
+            return Ok(());
+        }
         let (model, effort) = (model.as_deref(), effort.as_deref());
         let models = self.lock().models.clone();
         self.edit_config(|config| {
@@ -1109,9 +1215,17 @@ impl Factory {
                     ttl => {
                         let Some(ttl) = factory_agent::CacheTtl::parse(ttl) else {
                             return Err(RequestError::Invalid(crate::config::Invalid::BadPromptCache(format!(
-                                "{key}: ttl \"{ttl}\" isn't 5m or 1h"
+                                "{key}: ttl \"{ttl}\" isn't 5m, 30m, 1h or 12h"
                             ))));
                         };
+                        // What config.json can hold but this version doesn't
+                        // write: the backend it rolls back to would refuse it.
+                        let provider = key.split_once('/').map_or(key.as_str(), |(provider, _)| provider);
+                        if crate::config::cache_ttl_choices(provider).contains(&ttl)
+                            && !crate::config::cache_ttl_offered(provider).contains(&ttl)
+                        {
+                            return Err(RequestError::Invalid(crate::config::Invalid::PromptCacheNotOffered(key)));
+                        }
                         config.prompt_cache.insert(key, ttl);
                     }
                 }
@@ -1152,7 +1266,8 @@ impl Factory {
     /// the broken file as config.broken.json.
     pub async fn restore_settings(&self) -> Result<(), RequestError> {
         let _files = self.files.lock().await;
-        let text = self.lock().config.to_json()?;
+        let read = self.config_text().await;
+        let text = self.lock().config.to_json_keeping_form(self.home.root(), &read)?;
         let path = self.home.config_path();
         match tokio::fs::copy(&path, path.with_file_name("config.broken.json")).await {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
@@ -1166,6 +1281,7 @@ impl Factory {
     }
 
     pub async fn update_agent(&self, id: &str, change: AgentChange<'_>) -> Result<(), RequestError> {
+        let notify = change.notify;
         self.edit_config(|config| {
             if let Some(project) = change.project
                 && !project.is_empty()
@@ -1187,6 +1303,8 @@ impl Factory {
                 role,
                 lead,
                 fallback_model,
+                // Kept in factory.db, after the change (`crate::notify`).
+                notify: _,
             } = change;
             if let Some(extension) = extension {
                 crate::extensions::apply_change(config, id, extension)?;
@@ -1248,6 +1366,9 @@ impl Factory {
             Ok(())
         })
         .await?;
+        if let Some(mode) = notify {
+            crate::notify::set_mode(self, id, crate::notify::Mode::from_proto(mode))?;
+        }
         self.refresh_view(id);
         Ok(())
     }
@@ -1260,12 +1381,26 @@ impl Factory {
     }
 
     pub async fn select_agent(&self, id: &str) -> Result<(), RequestError> {
+        self.show_agent(id, None).await
+    }
+
+    /// A pipe's bound agent (#250), shown with its pipe: its conversation
+    /// streams as the selected agent's while the pipe is what's shown.
+    pub(crate) async fn show_with_pipe(&self, id: &str, pipe: &str) -> Result<(), RequestError> {
+        self.show_agent(id, Some(pipe)).await
+    }
+
+    /// Shows the agent's conversation: alone (in place of a pipe's or a
+    /// chat's), or with its pipe's.
+    async fn show_agent(&self, id: &str, pipe: Option<&str>) -> Result<(), RequestError> {
         self.known_agent(id)?;
         self.ensure_loaded(id).await?;
         let mut inner = self.lock();
         inner.state.selected_agent = Some(id.to_owned());
-        // An agent's conversation in place of a pipe's or a chat's.
-        self.pipes.deselect();
+        match pipe {
+            Some(pipe) => self.pipes.show(pipe),
+            None => self.pipes.deselect(),
+        }
         crate::chats::leave(self, &mut inner);
         // Opening the agent is seeing what it did.
         inner.state.unseen.remove(id);
@@ -1424,6 +1559,9 @@ impl Factory {
         if let Err(error) = crate::extensions::devices::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read the devices it adds; they show as waiting");
         }
+        if let Err(error) = crate::pipes::start::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read its cards for starting pipes; they show as waiting");
+        }
         match self.vault.requests_of(id) {
             Ok(requests) => {
                 for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
@@ -1483,6 +1621,7 @@ impl Factory {
             || crate::proposals::pending_of(&self.store, id)
             || crate::extensions::ask::pending_of(&self.store, id)
             || crate::extensions::devices::waiting_of(&self.store, id)
+            || crate::pipes::start::waiting_of(&self.store, id)
     }
 
     /// Changes the config in memory and on disk, or changes nothing.
@@ -1490,6 +1629,7 @@ impl Factory {
         let _files = self.files.lock().await;
         // Start from the file, not memory: an agent may have edited it since the last poll.
         self.sync_config().await;
+        let read = self.config_text().await;
         let (result, text) = {
             let mut inner = self.lock();
             if inner.config_error.is_some() {
@@ -1500,13 +1640,20 @@ impl Factory {
             config.keep_colors(Some(&inner.config));
             config.follow_default_prompts();
             config.validate()?;
-            let text = config.to_json()?;
+            let text = config.to_json_keeping_form(self.home.root(), &read)?;
             self.apply_config(&mut inner, config);
             self.broadcast_workspace(&inner);
             (result, text)
         };
         write_atomic(&self.home.config_path(), text.as_bytes()).await?;
         Ok(result)
+    }
+
+    /// config.json as it is now, for the form the next write keeps
+    /// (`Config::to_json_keeping_form`); empty, so all absolute, when it
+    /// can't be read. Callers hold `files`.
+    async fn config_text(&self) -> String {
+        tokio::fs::read_to_string(self.home.config_path()).await.unwrap_or_default()
     }
 
     async fn reload_config(&self) {
@@ -1523,7 +1670,7 @@ impl Factory {
                 return;
             }
         };
-        let mut parsed = Config::parse(&text);
+        let mut parsed = Config::parse(&text, self.home.root());
         // An agent written in without a color gets one, and a shipped prompt
         // written in becomes this version's, saved.
         if let Ok(config) = &mut parsed {
@@ -1544,6 +1691,9 @@ impl Factory {
                     return;
                 }
                 tracing::info!("config.json reloaded");
+                for unknown in config.unknown_keys() {
+                    tracing::warn!(%unknown, "config.json: keeping a setting this version doesn't know");
+                }
                 for unknown in crate::extensions::unknown_settings(&config) {
                     tracing::warn!(%unknown, "config.json: ignoring an extension setting");
                 }
@@ -1567,7 +1717,7 @@ impl Factory {
     /// the file changed since `read`.
     async fn save_filled_in(&self, read: &str, config: &Config) {
         let path = self.home.config_path();
-        let saved = match config.to_json() {
+        let saved = match config.to_json_keeping_form(self.home.root(), read) {
             Ok(text) if tokio::fs::read_to_string(&path).await.is_ok_and(|now| now == read) => {
                 write_atomic(&path, text.as_bytes()).await.map_err(|error| error.to_string())
             }
@@ -1766,7 +1916,7 @@ impl Factory {
                 };
                 let id = config::unique_id(name, "folder", |id| project.folder(id).is_some());
                 let path = chosen.unwrap_or_else(|| project.path.join(&id));
-                project.folders.push(FolderConfig { id, name: name.to_owned(), path: path.clone() });
+                project.folders.push(FolderConfig { id, name: name.to_owned(), path: path.clone(), other: Default::default() });
                 Ok(path)
             })
             .await?;
@@ -1776,7 +1926,16 @@ impl Factory {
     }
 
     /// Renames a project's folder, or points it at another folder on disk.
-    pub async fn update_folder(&self, project: &str, id: &str, name: Option<&str>, path: Option<&str>) -> Result<(), RequestError> {
+    /// Renames a project's folder, points it elsewhere, or moves it in the
+    /// project's list (`before`: the folder it goes before, "" for last).
+    pub async fn update_folder(
+        &self,
+        project: &str,
+        id: &str,
+        name: Option<&str>,
+        path: Option<&str>,
+        before: Option<&str>,
+    ) -> Result<(), RequestError> {
         let name = name.map(str::trim);
         if name == Some("") {
             return Err(RequestError::Empty("name"));
@@ -1784,6 +1943,12 @@ impl Factory {
         let chosen = path.map(folder_path).transpose()?.flatten();
         let path = self
             .edit_config(|config| {
+                if let Some(before) = before {
+                    let Some(found) = config.projects.iter_mut().find(|candidate| candidate.id == project) else {
+                        return Err(RequestError::UnknownProject(project.to_owned()));
+                    };
+                    crate::arrange::move_folder(&mut found.folders, id, before)?;
+                }
                 let folder = folder_mut(config, project, id)?;
                 if let Some(name) = name {
                     name.clone_into(&mut folder.name);
@@ -1852,6 +2017,36 @@ impl Factory {
         Ok(())
     }
 
+    /// Folds the sidebar's Projects or Chats section away, or opens it; None
+    /// leaves one as it is.
+    fn set_sections_collapsed(&self, projects: Option<bool>, chats: Option<bool>) -> Result<(), RequestError> {
+        let mut inner = self.lock();
+        let before = (inner.state.projects_collapsed, inner.state.chats_collapsed);
+        inner.state.projects_collapsed = projects.unwrap_or(before.0);
+        inner.state.chats_collapsed = chats.unwrap_or(before.1);
+        if (inner.state.projects_collapsed, inner.state.chats_collapsed) != before {
+            self.broadcast_workspace(&inner);
+            self.store.save_state(&inner.state)?;
+        }
+        Ok(())
+    }
+
+    /// The most panes `show` keeps open besides the conversation; 0 for the
+    /// default.
+    fn set_max_open_panes(&self, panes: u32) -> Result<(), RequestError> {
+        if panes > config::MAX_OPEN_PANES {
+            let why = format!("max_open_panes must be from 1 to {}, or 0 for the default", config::MAX_OPEN_PANES);
+            return Err(RequestError::Invalid(Invalid::BadDisplay(why)));
+        }
+        let mut inner = self.lock();
+        if inner.state.max_open_panes != panes {
+            inner.state.max_open_panes = panes;
+            self.broadcast_workspace(&inner);
+            self.store.save_state(&inner.state)?;
+        }
+        Ok(())
+    }
+
     /// Folds an agent's nested agents away in the sidebar, or shows them.
     pub fn set_agent_collapsed(&self, id: &str, collapsed: bool) -> Result<(), RequestError> {
         let mut inner = self.lock();
@@ -1894,7 +2089,10 @@ impl Factory {
     /// Sends the workspace, and the selected agent's queue if it changed:
     /// every change to a queue is followed by this, for the sidebar's count.
     pub(crate) fn broadcast_workspace(&self, inner: &Inner) {
-        self.send(Body::Workspace(self.workspace(inner)));
+        let workspace = self.workspace(inner);
+        // What newly waits for the person, or answers them, notifies.
+        crate::notify::observe(self, inner, &workspace);
+        self.send(Body::Workspace(workspace));
         let queued = self.queued_of(inner);
         let mut sent = self.queued_sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if *sent != queued {
@@ -2009,6 +2207,7 @@ impl Factory {
                 avatar_face_override: None,
                 role: agent.role.clone(),
                 layout: self.viewer.layout(&agent.id),
+                layout_focus: self.viewer.focus(&agent.id),
                 default_prompt: Config::default_prompt(agent).unwrap_or_default().to_owned(),
                 waiting_seqs: runtime.and_then(|runtime| runtime.transcript.as_ref()).map(Transcript::waiting_seqs).unwrap_or_default(),
                 lead_id: inner.config.lead(agent).map(|lead| lead.id.clone()).unwrap_or_default(),
@@ -2016,11 +2215,18 @@ impl Factory {
                 usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
                 tainted_by_pipes: self.pipes.tainted(&agent.id),
                 quarantined: self.pipes.quarantined(&agent.id),
+                pipe_id: self.pipes.bound_pipe(&agent.id),
                 fallback_model: agent.fallback_model.clone(),
+                notify: crate::notify::settings(self).mode(&agent.id).to_proto().into(),
             });
         }
         let config = &inner.config;
         let mut vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
+        if vault.exists && !vault.unlocked {
+            vault.agents_waiting = self.agents_waiting_for_vault(inner);
+            let problem = self.account.view(&inner.config.account).map(|account| account.problem).unwrap_or_default();
+            vault.locked_why = crate::vault::signins::locked_why(&self.vault, problem);
+        }
         // Given to an agent quarantined for a pipe, a secret isn't usable by it.
         for secret in &mut vault.secrets {
             for grant in &secret.grants {
@@ -2038,14 +2244,18 @@ impl Factory {
         let (pipes, selected_pipe_id) = crate::pipes::view(self, inner);
         let (chats, selected_chat_id) = crate::chats::view(self, inner);
         v1::Workspace {
+            os: std::env::consts::OS.to_owned(),
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
             apps,
             apps_available: self.apps.available(),
+            pinned_apps: crate::apps::pins::view(self, config),
             pipes,
             speech_model: Some(self.speech.view()),
             chats,
             selected_chat_id,
             r#move: self.moving.view(),
+            projects_collapsed: inner.state.projects_collapsed,
+            chats_collapsed: inner.state.chats_collapsed,
             selected_pipe_id,
             person: Some(crate::person::person(config, &self.key_seed, self.account.signed_in_as(&config.account))),
             projects,
@@ -2087,7 +2297,16 @@ impl Factory {
                         usage: if signed_in { inner.usage.get(&first).cloned().or_else(|| provider.usage.clone()) } else { None },
                         plan: if signed_in { inner.plans.get(&first).cloned().unwrap_or_default() } else { String::new() },
                         accounts,
-                        cache_ttl: config.cache_ttl(&provider.id).map(|ttl| ttl.as_str().to_owned()).unwrap_or_default(),
+                        cache_ttl: config
+                            .cache_ttl(&provider.id)
+                            .filter(|_| crate::config::cache_ttl_choices(&provider.id).contains(&factory_agent::CacheTtl::OneHour))
+                            .map(|ttl| ttl.as_str().to_owned())
+                            .unwrap_or_default(),
+                        cache_lifetime: config.cache_ttl(&provider.id).map(|ttl| ttl.as_str().to_owned()).unwrap_or_default(),
+                        cache_ttl_choices: crate::config::cache_ttl_offered(&provider.id)
+                            .iter()
+                            .map(|ttl| ttl.as_str().to_owned())
+                            .collect(),
                         ..provider.clone()
                     }
                 })
@@ -2118,6 +2337,8 @@ impl Factory {
                 color: config.claktory_color(self.key_color).to_owned(),
                 onboarding: Some(self.onboarding.view()),
                 default_fallback_model: config.default_fallback_model.clone(),
+                max_open_panes: config::open_panes(inner.state.max_open_panes),
+                notifications: Some(crate::notify::settings(self).to_proto()),
             }),
         }
     }
@@ -2256,7 +2477,11 @@ async fn resume_unarchived(factory: Weak<Factory>) {
 /// releases, whoever made them.
 async fn watch(factory: Weak<Factory>) {
     let (config_path, auth_path, release_path) = match factory.upgrade() {
-        Some(factory) => (factory.home.config_path(), factory.home.auth_path(), factory.home.releases().join("latest")),
+        Some(factory) => (
+            factory.home.config_path(),
+            factory.models.auth_path().unwrap_or_else(|| factory.home.auth_path()),
+            factory.home.releases().join("latest"),
+        ),
         None => return,
     };
     let mut config_stamp = stamp(&config_path).await;
@@ -2283,7 +2508,12 @@ async fn watch(factory: Weak<Factory>) {
         }
         let auth_now = stamp(&auth_path).await;
         if auth_now != auth_stamp {
-            auth_stamp = auth_now;
+            // A sign-in made elsewhere (`factoryd login`), into the vault.
+            if let Err(error) = factory.models.take_in_sign_ins().await {
+                tracing::warn!(%error, "could not take in the sign-ins in auth.json");
+            }
+            // What was taken in is written there again, or emptied.
+            auth_stamp = stamp(&auth_path).await;
             factory.refresh_models().await;
         }
         factory.refresh_explorer().await;
@@ -2338,6 +2568,7 @@ impl Factory {
         let mut hidden = self.vault.every_variable();
         hidden.extend(self.broker.hidden(&self.vault));
         self.redaction.set(factory_agent::Redactor::new(&hidden));
+        self.vault_moved.notify_one();
         self.broadcast_workspace(&self.lock());
         // An app's secret given or taken back may start or stop it.
         self.apps.poke();

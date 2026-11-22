@@ -3,7 +3,9 @@ use std::future::Future;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, fchown};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
@@ -12,6 +14,18 @@ use crate::errors::{AgentError, AgentFailure, Error};
 
 fn corrupt(file: &Path) -> AgentFailure {
     AgentFailure::CorruptCredentials { file: file.display().to_string() }
+}
+
+/// The credentials document in `file` (`auth.json`): by provider id; empty
+/// when there's no file.
+pub fn read_document(file: &Path) -> Result<Map<String, Value>, Error> {
+    Ok(read_json(file)?.and_then(|value| value.as_object().cloned()).unwrap_or_default())
+}
+
+/// Writes the credentials document to `file`, as `auth.json` is written:
+/// 0600, through a temp file, keeping the file's owner.
+pub fn write_document(file: &Path, all: &Map<String, Value>) -> Result<(), Error> {
+    write_json(file, &Value::Object(all.clone()))
 }
 
 fn read_json(file: &Path) -> Result<Option<Value>, Error> {
@@ -89,6 +103,7 @@ const ACCOUNT_IDENTITY: &str = "factoryIdentity";
 const EXHAUSTED_UNTIL: &str = "factoryExhaustedUntil";
 const FABLE_EXHAUSTED_UNTIL: &str = "factoryFableExhaustedUntil";
 const OUT_OF_CREDIT: &str = "factoryOutOfCredit";
+const REFUSED_SINCE: &str = "factoryRefusedSince";
 const MORE_ACCOUNTS: &str = "factoryAccounts";
 
 /// One account signed in to a provider: its credential and what Factory
@@ -115,6 +130,10 @@ pub struct Account {
     /// An API key that ran out of credit: since when, in ms since 1970; 0
     /// when it has credit as far as Factory knows.
     pub out_of_credit_since: u64,
+    /// The provider refused to refresh its sign-in: since when, in ms since
+    /// 1970; 0 when it hasn't. Skipped until it's signed in to again, which
+    /// makes it anew.
+    pub refused_since: u64,
     pub credential: Credential,
 }
 
@@ -130,6 +149,7 @@ impl Account {
             exhausted_until: 0,
             fable_exhausted_until: 0,
             out_of_credit_since: 0,
+            refused_since: 0,
             credential,
         }
     }
@@ -143,10 +163,11 @@ fn account_from(value: &Value, position: usize) -> Result<Account, Error> {
     let exhausted_until = object.remove(EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
     let fable_exhausted_until = object.remove(FABLE_EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
     let out_of_credit_since = object.remove(OUT_OF_CREDIT).and_then(|value| value.as_u64()).unwrap_or(0);
+    let refused_since = object.remove(REFUSED_SINCE).and_then(|value| value.as_u64()).unwrap_or(0);
     let credential =
         if value.is_object() { serde_json::from_value(Value::Object(object))? } else { serde_json::from_value(value.clone())? };
     let id = if id.is_empty() { (position + 1).to_string() } else { id };
-    Ok(Account { id, label, identity, exhausted_until, fable_exhausted_until, out_of_credit_since, credential })
+    Ok(Account { id, label, identity, exhausted_until, fable_exhausted_until, out_of_credit_since, refused_since, credential })
 }
 
 fn account_value(account: &Account) -> Result<Value, Error> {
@@ -167,6 +188,9 @@ fn account_value(account: &Account) -> Result<Value, Error> {
         }
         if account.out_of_credit_since != 0 {
             object.insert(OUT_OF_CREDIT.into(), Value::from(account.out_of_credit_since));
+        }
+        if account.refused_since != 0 {
+            object.insert(REFUSED_SINCE.into(), Value::from(account.refused_since));
         }
     }
     Ok(value)
@@ -201,25 +225,184 @@ fn accounts_value(accounts: &[Account]) -> Result<Option<Value>, Error> {
     Ok(Some(value))
 }
 
-/// Credentials on disk, by provider id, each provider's accounts in the
-/// order requests try them; writes are serialized because a provider
-/// refreshes tokens inside `modify`.
-pub struct FileCredentialStore {
+/// The fields of a stored credential that are no secret, nor made from one:
+/// what an outline keeps.
+const OUTLINED: [&str; 7] = ["type", ACCOUNT_ID, ACCOUNT_LABEL, EXHAUSTED_UNTIL, FABLE_EXHAUSTED_UNTIL, OUT_OF_CREDIT, REFUSED_SINCE];
+
+fn outline_value(value: &Value) -> Value {
+    let Some(object) = value.as_object() else { return Value::Object(Map::new()) };
+    let mut outlined: Map<String, Value> =
+        object.iter().filter(|(key, _)| OUTLINED.contains(&key.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect();
+    // Empty in place of the secrets, so it reads as a credential of its kind.
+    let blanks = match object.get("type").and_then(Value::as_str) {
+        Some("oauth") => vec![("access", Value::from("")), ("refresh", Value::from("")), ("expires", Value::from(0))],
+        _ => vec![("key", Value::from(""))],
+    };
+    for (key, blank) in blanks {
+        outlined.insert(key.to_owned(), blank);
+    }
+    if let Some(more) = object.get(MORE_ACCOUNTS).and_then(Value::as_array) {
+        outlined.insert(MORE_ACCOUNTS.to_owned(), Value::Array(more.iter().map(outline_value).collect()));
+    }
+    Value::Object(outlined)
+}
+
+/// The credentials document without its credentials: each provider's
+/// accounts, their ids, kinds, labels and states, with the keys and tokens
+/// (and anything made from them, such as an identity) left out. What's known
+/// of the sign-ins while they're locked away.
+pub fn outline(all: &Map<String, Value>) -> Map<String, Value> {
+    all.iter().map(|(provider_id, value)| (provider_id.clone(), outline_value(value))).collect()
+}
+
+/// Brings the sign-ins in `from` (a credentials document written elsewhere:
+/// `factoryd login` with no Claktory running, sign-ins made while they were
+/// locked away, an older Claktory's) into `into`, as signing in to each
+/// again would: one with the same identity or id replaces it, keeping its
+/// id; any other is added after the provider's others. Whether `into` changed.
+pub fn merge(into: &mut Map<String, Value>, from: &Map<String, Value>) -> Result<bool, Error> {
+    let mut changed = false;
+    for (provider_id, value) in from {
+        let Ok(mut accounts) = parse_accounts(into.get(provider_id)) else {
+            // What's kept can't be read either: the newer one is kept, as it is.
+            changed |= into.get(provider_id) != Some(value);
+            into.insert(provider_id.clone(), value.clone());
+            continue;
+        };
+        let Ok(from_accounts) = parse_accounts(Some(value)) else {
+            // One this can't read (edited by hand, or a newer Claktory's) is
+            // carried along as it is, unless it would replace sign-ins this
+            // can read: those are kept, and it's left out.
+            if accounts.is_empty() {
+                into.insert(provider_id.clone(), value.clone());
+                changed = true;
+            } else {
+                tracing::warn!(provider = %provider_id, "left out a sign-in that can't be read: the ones kept for this provider stay");
+            }
+            continue;
+        };
+        for account in from_accounts {
+            // The same id is the same account unless they say they're two.
+            let agrees = |known: &Account| known.identity.is_empty() || account.identity.is_empty() || known.identity == account.identity;
+            let same = accounts
+                .iter()
+                .position(|known| !account.identity.is_empty() && known.identity == account.identity)
+                .or_else(|| accounts.iter().position(|known| known.id == account.id && agrees(known)));
+            match same {
+                Some(position) if accounts[position] == Account { id: accounts[position].id.clone(), ..account.clone() } => {}
+                Some(position) => {
+                    accounts[position] = Account { id: accounts[position].id.clone(), ..account };
+                    changed = true;
+                }
+                None => {
+                    let id = if accounts.iter().any(|known| known.id == account.id) {
+                        Account::new(account.credential.clone()).id
+                    } else {
+                        account.id.clone()
+                    };
+                    accounts.push(Account { id, ..account });
+                    changed = true;
+                }
+            }
+        }
+        if let Some(value) = accounts_value(&accounts)? {
+            into.insert(provider_id.clone(), value);
+        }
+    }
+    Ok(changed)
+}
+
+/// The credentials document as read from where it's kept. Not Debug: it
+/// holds tokens.
+#[derive(Clone, Default)]
+pub struct Loaded {
+    /// The credentials to use and change.
+    pub all: Map<String, Value>,
+    /// The outline of sign-ins that are locked away (`outline`), while they
+    /// are: `all` then holds only sign-ins made meanwhile.
+    pub locked: Option<Map<String, Value>>,
+}
+
+/// Where the credentials document is kept: `auth.json`, or somewhere a
+/// Claktory keeps it sealed (its vault). Calls come one at a time, under the
+/// store's lock.
+pub trait CredentialBacking: Send + Sync {
+    fn load(&self) -> Result<Loaded, Error>;
+    /// Keeps `all`, as `load` gave it: `locked` when it was loaded while the
+    /// sign-ins were locked away.
+    fn save(&self, all: &Map<String, Value>, locked: bool) -> Result<(), Error>;
+    /// Takes in what was kept elsewhere meanwhile (see `merge`); whether
+    /// anything changed.
+    fn take_in(&self) -> Result<bool, Error> {
+        Ok(false)
+    }
+}
+
+/// The credentials in a file of their own, `auth.json`.
+pub struct FileBacking {
     path: PathBuf,
+}
+
+impl FileBacking {
+    pub fn new(path: PathBuf) -> FileBacking {
+        FileBacking { path }
+    }
+}
+
+impl CredentialBacking for FileBacking {
+    fn load(&self) -> Result<Loaded, Error> {
+        Ok(Loaded { all: read_document(&self.path)?, locked: None })
+    }
+
+    fn save(&self, all: &Map<String, Value>, _locked: bool) -> Result<(), Error> {
+        write_document(&self.path, all)
+    }
+}
+
+/// The error for sign-ins that are locked away until the person opens
+/// their secrets.
+pub fn locked_error(provider_id: &str) -> Error {
+    tracing::debug!(provider = provider_id, "sign-ins locked away");
+    Error::Models { code: crate::errors::LOCKED, message: "Your sign-ins are locked with your secrets.".to_owned() }
+}
+
+/// Credentials by provider id, each provider's accounts in the order
+/// requests try them, kept by its backing (`auth.json` unless given
+/// another); writes are serialized because a provider refreshes tokens
+/// inside `modify`.
+pub struct FileCredentialStore {
+    /// Its file, `auth.json`: where it keeps them unless given a backing.
+    path: PathBuf,
+    backing: RwLock<Arc<dyn CredentialBacking>>,
     lock: Mutex<()>,
 }
 
 impl FileCredentialStore {
     pub fn new(path: PathBuf) -> FileCredentialStore {
-        FileCredentialStore { path, lock: Mutex::new(()) }
+        FileCredentialStore { backing: RwLock::new(Arc::new(FileBacking::new(path.clone()))), path, lock: Mutex::new(()) }
     }
 
-    fn read_all(&self) -> Result<Map<String, Value>, Error> {
-        Ok(read_json(&self.path)?.and_then(|value| value.as_object().cloned()).unwrap_or_default())
+    /// Its file, `auth.json`.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Writes a provider's accounts into `all`; none removes the provider.
-    fn write_accounts(&self, mut all: Map<String, Value>, provider_id: &str, accounts: &[Account]) -> Result<(), Error> {
+    /// Keeps the credentials with `backing` from now on.
+    pub fn set_backing(&self, backing: Arc<dyn CredentialBacking>) {
+        *self.backing.write() = backing;
+    }
+
+    fn backing(&self) -> Arc<dyn CredentialBacking> {
+        self.backing.read().clone()
+    }
+
+    fn load(&self) -> Result<Loaded, Error> {
+        self.backing().load()
+    }
+
+    /// Writes a provider's accounts into `loaded`; none removes the provider.
+    fn write_accounts(&self, loaded: Loaded, provider_id: &str, accounts: &[Account]) -> Result<(), Error> {
+        let Loaded { mut all, locked } = loaded;
         match accounts_value(accounts)? {
             Some(value) => {
                 all.insert(provider_id.to_owned(), value);
@@ -228,7 +411,13 @@ impl FileCredentialStore {
                 all.remove(provider_id);
             }
         }
-        write_json(&self.path, &Value::Object(all))
+        self.backing().save(&all, locked.is_some())
+    }
+
+    /// Takes in sign-ins kept elsewhere meanwhile (`CredentialBacking::take_in`).
+    pub async fn take_in(&self) -> Result<bool, Error> {
+        let _guard = self.lock.lock().await;
+        self.backing().take_in()
     }
 
     /// The credential of the provider's first account.
@@ -236,14 +425,44 @@ impl FileCredentialStore {
         Ok(self.accounts(provider_id).await?.into_iter().next().map(|account| account.credential))
     }
 
-    /// The provider's accounts, in the order requests try them.
+    /// The provider's accounts, in the order requests try them. While
+    /// sign-ins are locked away, those made meanwhile; none of them, and some
+    /// locked away, is `locked_error`.
     pub async fn accounts(&self, provider_id: &str) -> Result<Vec<Account>, Error> {
-        parse_accounts(self.read_all()?.get(provider_id))
+        let loaded = self.load()?;
+        if !loaded.all.contains_key(provider_id) && loaded.locked.as_ref().is_some_and(|locked| locked.contains_key(provider_id)) {
+            return Err(locked_error(provider_id));
+        }
+        parse_accounts(loaded.all.get(provider_id))
+    }
+
+    /// The provider's accounts as far as they're known, to show: while
+    /// sign-ins are locked away, those made meanwhile, then the outline of
+    /// those locked away (credentials empty).
+    pub async fn outlined_accounts(&self, provider_id: &str) -> Result<Vec<Account>, Error> {
+        let loaded = self.load()?;
+        let mut accounts = parse_accounts(loaded.all.get(provider_id))?;
+        if let Some(locked) = &loaded.locked {
+            for account in parse_accounts(locked.get(provider_id))? {
+                if !accounts.iter().any(|known| known.id == account.id) {
+                    accounts.push(account);
+                }
+            }
+        }
+        Ok(accounts)
+    }
+
+    /// The provider's accounts locked away now (outlined); empty while
+    /// they're open.
+    pub async fn locked_accounts(&self, provider_id: &str) -> Result<Vec<Account>, Error> {
+        parse_accounts(self.load()?.locked.as_ref().and_then(|locked| locked.get(provider_id)))
     }
 
     pub async fn list(&self) -> Result<Vec<CredentialInfo>, Error> {
-        Ok(self
-            .read_all()?
+        let loaded = self.load()?;
+        let mut all = loaded.locked.unwrap_or_default();
+        all.extend(loaded.all);
+        Ok(all
             .iter()
             .map(|(provider_id, credential)| CredentialInfo {
                 provider_id: provider_id.clone(),
@@ -261,15 +480,15 @@ impl FileCredentialStore {
         Fut: Future<Output = Result<Option<Credential>, Error>>,
     {
         let _guard = self.lock.lock().await;
-        let all = self.read_all()?;
-        let mut accounts = parse_accounts(all.get(provider_id))?;
+        let loaded = self.load()?;
+        let mut accounts = parse_accounts(loaded.all.get(provider_id))?;
         let current = accounts.first().map(|account| account.credential.clone());
         let Some(next) = f(current.clone()).await? else { return Ok(current) };
         match accounts.first_mut() {
             Some(first) => first.credential = next.clone(),
             None => accounts.push(Account::new(next.clone())),
         }
-        self.write_accounts(all, provider_id, &accounts)?;
+        self.write_accounts(loaded, provider_id, &accounts)?;
         Ok(Some(next))
     }
 
@@ -281,13 +500,13 @@ impl FileCredentialStore {
         Fut: Future<Output = Result<Option<Credential>, Error>>,
     {
         let _guard = self.lock.lock().await;
-        let all = self.read_all()?;
-        let mut accounts = parse_accounts(all.get(provider_id))?;
+        let loaded = self.load()?;
+        let mut accounts = parse_accounts(loaded.all.get(provider_id))?;
         let Some(position) = accounts.iter().position(|account| account.id == account_id) else { return Ok(None) };
         let current = accounts[position].credential.clone();
         let Some(next) = f(Some(current.clone())).await? else { return Ok(Some(current)) };
         accounts[position].credential = next.clone();
-        self.write_accounts(all, provider_id, &accounts)?;
+        self.write_accounts(loaded, provider_id, &accounts)?;
         Ok(Some(next))
     }
 
@@ -300,20 +519,24 @@ impl FileCredentialStore {
         Fut: Future<Output = Result<Option<Vec<Account>>, Error>>,
     {
         let _guard = self.lock.lock().await;
-        let all = self.read_all()?;
-        let accounts = parse_accounts(all.get(provider_id))?;
+        let loaded = self.load()?;
+        let accounts = parse_accounts(loaded.all.get(provider_id))?;
         let Some(next) = f(accounts.clone()).await? else { return Ok(accounts) };
-        self.write_accounts(all, provider_id, &next)?;
+        self.write_accounts(loaded, provider_id, &next)?;
         Ok(next)
     }
 
-    /// Removes all of the provider's accounts.
+    /// Removes all of the provider's accounts. Not while some are locked
+    /// away: they'd come back when they open.
     pub async fn delete(&self, provider_id: &str) -> Result<(), Error> {
         let _guard = self.lock.lock().await;
-        let mut all = self.read_all()?;
+        let Loaded { mut all, locked } = self.load()?;
+        if locked.as_ref().is_some_and(|locked| locked.contains_key(provider_id)) {
+            return Err(locked_error(provider_id));
+        }
         if all.remove(provider_id).is_none() {
             return Ok(());
         }
-        write_json(&self.path, &Value::Object(all))
+        self.backing().save(&all, locked.is_some())
     }
 }

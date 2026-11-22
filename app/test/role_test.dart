@@ -3,6 +3,7 @@ import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/forms.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/sidebar.dart';
+import 'package:factory_app/transcript.dart' show senderName;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -96,7 +97,8 @@ void main() {
             seq: Int64(1),
             event: Event(
               source: EventSource.EVENT_SOURCE_AGENT,
-              from: 'Mike',
+              // Signed as the receiving agent read it (#251).
+              from: 'Mike (Coordinator)',
               fromId: 'mike',
               text: 'Take the next task.',
             ),
@@ -109,6 +111,48 @@ void main() {
     expect(sender, findsOneWidget);
     expect(tester.widget<NameThenRole>(sender).role, 'Coordinator');
     expect(find.text('Mike  Coordinator'), findsOneWidget);
+  });
+
+  test("a sender's name leaves its signature's role and project out, once "
+      'the app knows it (#251)', () {
+    final agents = {
+      'mike': mike(),
+      'ana': Agent(id: 'ana', name: 'Ana', role: 'Frontend'),
+      'old': Agent(id: 'old', name: 'Ana (old)'),
+      'sam': Agent(id: 'sam', name: 'Samuel', role: 'Backend'),
+    };
+    String shown(String from, String fromId) =>
+        senderName(Event(from: from, fromId: fromId), agents);
+    expect(shown('Mike (Coordinator)', 'mike'), 'Mike');
+    expect(shown('Ana (Frontend, Web Site)', 'ana'), 'Ana');
+    expect(shown('Rivet (admin)', 'gone'), 'Rivet (admin)', reason: 'unknown');
+    expect(shown('Ana (old)', 'old'), 'Ana (old)', reason: 'its own name');
+    expect(shown('Sam (Backend)', 'sam'), 'Sam', reason: 'renamed since');
+    expect(shown('Mike', 'mike'), 'Mike');
+  });
+
+  testWidgets("an unknown sender's message keeps its whole signature", (
+    tester,
+  ) async {
+    final harness = Harness(workspace(agents: [builder(working: false)]));
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          Entry(
+            seq: Int64(1),
+            event: Event(
+              source: EventSource.EVENT_SOURCE_AGENT,
+              from: 'Sam (Backend)',
+              fromId: 'sam',
+              text: 'Done.',
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    expect(find.text('Sam (Backend)'), findsOneWidget);
   });
 
   testWidgets('the new agent form sends the role', (tester) async {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/widgets.dart';
 
 import 'app_update.dart';
@@ -8,6 +9,7 @@ import 'backend.dart';
 import 'changelog.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/platform_policy.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'tell_rivet.dart';
@@ -106,9 +108,20 @@ int compareVersions(String a, String b) {
 }
 
 /// Whether to offer [Workspace.latestRelease]: the backend or this app is
-/// older than it.
+/// older than it. Never in the Android app ([updatesHere]).
 bool updateOffered(Workspace workspace, String appVersion) =>
-    restartsBackend(workspace) || isNewer(workspace.latestRelease, appVersion);
+    updatesHere &&
+    (restartsBackend(workspace) ||
+        isNewer(workspace.latestRelease, appVersion));
+
+/// Whether this app offers Claktory's updates and installs them: not the
+/// Android app, whose new version is a new APK from its link, so it never
+/// shows the update banner or touches the installer. The Android app is
+/// Android with Android's own policy, a touch one (tests run as Android
+/// with the desktop policy unless they turn Android's on).
+bool get updatesHere =>
+    defaultTargetPlatform != TargetPlatform.android ||
+    !PhonePlatformPolicy.current.touch;
 
 /// Whether installing the latest release replaces the backend, which
 /// restarts it; a release that only changed the app leaves it running.

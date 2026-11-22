@@ -164,7 +164,10 @@ others_port() {
   listener="$(ss -ltnpH "sport = :$PORT" 2>/dev/null)"
   [[ -n "$listener" ]] || return 1
   [[ "$(id -u)" == 0 ]] && return 1
-  [[ "$listener" != *pid=* ]]
+  [[ "$listener" != *pid=* ]] || return 1
+  # factoryd isn't dumpable (it keeps the vault from other processes), so
+  # ss can't name it even to its own user: it's ours if we run a factoryd.
+  ! pgrep -u "$(id -u)" -x factoryd >/dev/null 2>&1
 }
 running=false
 for _ in $(seq 150); do

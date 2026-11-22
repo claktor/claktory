@@ -10,11 +10,12 @@
 //! service accepts them, so none is lost while it can't be reached, and one
 //! sent twice is recorded once, by its id.
 
-use claktory_account::protocol::{self as api, Activity, Counts, Period, Usage};
+use claktory_account::protocol::{self as api, Activity, Counts, DeviceCount, Health, Period, Setup, Usage};
 use factory_agent::{AgentEvent, Message};
 use rusqlite::{Connection, params};
 
 use crate::factory::Factory;
+use crate::home::Home;
 
 pub(crate) const SCHEMA: &str = "
 -- Model calls by UTC hour, provider and model: the tokens check-ins at
@@ -34,6 +35,26 @@ CREATE TABLE model_usage (
 -- When a run last had a model's answer, in ms since 1970: where a run
 -- Claktory stopped in (interrupted) really ended.
 ALTER TABLE runs ADD COLUMN last_call INTEGER;
+";
+
+/// #119: what check-ins count of the devices that connect, of how backend
+/// versions fare after updates, and of how far setup got.
+pub(crate) const HEALTH: &str = "
+-- Paired devices (this computer's own app among them) that connected, by
+-- UTC hour: check-ins count them per period, never naming one.
+CREATE TABLE device_hours (hour INTEGER NOT NULL, device TEXT NOT NULL, PRIMARY KEY (hour, device));
+-- Backend versions rolled back after an update, or stopped without
+-- stopping cleanly, by UTC hour.
+CREATE TABLE backend_health (
+    hour INTEGER NOT NULL,
+    version TEXT NOT NULL,
+    rolled_back INTEGER NOT NULL DEFAULT 0,
+    crashes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, version)
+);
+-- Steps reached once (model_connected, first_run), and each rollback
+-- already counted (rollback:<SHA-256 of what the supervisor wrote>).
+CREATE TABLE reached (step TEXT PRIMARY KEY);
 ";
 
 const HOUR: i64 = 3600;
@@ -101,7 +122,127 @@ pub(super) fn counts(factory: &Factory) -> Counts {
         .map(|devices| devices.iter().filter(|device| !device.local && !device.endpoint_id.is_empty()).count())
         .unwrap_or(0);
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    Counts { agents: count(agents), projects: count(projects), devices: count(devices) }
+    let pipes = factory.pipes.all().len();
+    let secrets = factory.vault.state(|_, _| false).secrets.len();
+    let monitors: i64 =
+        factory.store.db().query_row("SELECT count(*) FROM monitors WHERE state = 'active'", [], |row| row.get(0)).unwrap_or(0);
+    Counts {
+        agents: count(agents),
+        projects: count(projects),
+        devices: count(devices),
+        pipes: count(pipes),
+        secrets: secrets_bucket(count(secrets)),
+        monitors: count(usize::try_from(monitors).unwrap_or(0)),
+    }
+}
+
+/// How many secrets, said only roughly (0, 1, 10 or 50: at least that
+/// many): enough to see that the vault is used, too little to single out a
+/// Claktory with many (Fugo).
+fn secrets_bucket(secrets: u32) -> u32 {
+    match secrets {
+        0 => 0,
+        1..10 => 1,
+        10..50 => 10,
+        _ => 50,
+    }
+}
+
+/// A label the service takes (1–40 of `A-Z a-z 0-9 . _ + -`), or "unknown".
+fn label(text: &str) -> String {
+    let text = text.trim();
+    if api::valid_label(text) { text.to_owned() } else { "unknown".to_owned() }
+}
+
+/// The paired devices that have connected (this computer's own app among
+/// them), counted by system, kind and app version as each last said.
+pub(super) fn devices(factory: &Factory) -> Vec<DeviceCount> {
+    let devices = crate::remote::devices(&factory.home).unwrap_or_default();
+    let mut counted: std::collections::BTreeMap<(String, String, String), u32> = std::collections::BTreeMap::new();
+    for device in devices.iter().filter(|device| device.last_seen.is_some() && (device.local || !device.endpoint_id.is_empty())) {
+        let kind = match factory_protocol::v1::DeviceKind::try_from(device.app_kind).unwrap_or_default() {
+            factory_protocol::v1::DeviceKind::Desktop => "desktop",
+            factory_protocol::v1::DeviceKind::Laptop => "laptop",
+            factory_protocol::v1::DeviceKind::Phone => "phone",
+            factory_protocol::v1::DeviceKind::Tablet => "tablet",
+            factory_protocol::v1::DeviceKind::Unspecified => "unknown",
+        };
+        *counted.entry((label(&device.app_platform), kind.to_owned(), label(&device.app_version))).or_default() += 1;
+    }
+    counted.into_iter().map(|((platform, kind, app_version), count)| DeviceCount { platform, kind, app_version, count }).collect()
+}
+
+/// How far setup got: each step, once reached, stays reached.
+pub(super) fn setup(factory: &Factory) -> Setup {
+    let connected = !factory.lock().models.is_empty();
+    let db = factory.store.db();
+    // A run that reached a model: one without (no model to run on) isn't
+    // an agent running yet.
+    let ran = db.query_row("SELECT EXISTS (SELECT 1 FROM runs WHERE last_call IS NOT NULL)", [], |row| row.get::<_, bool>(0)).unwrap_or(false);
+    let reached = |step: &str, now: bool| {
+        if now {
+            let _ = db.execute("INSERT OR IGNORE INTO reached (step) VALUES (?1)", [step]);
+        }
+        now || db.query_row("SELECT EXISTS (SELECT 1 FROM reached WHERE step = ?1)", [step], |row| row.get::<_, bool>(0)).unwrap_or(false)
+    };
+    Setup { model_connected: reached("model_connected", connected), first_run: reached("first_run", ran) }
+}
+
+/// A device was let in: counted in this hour's devices that connected.
+pub(crate) fn device_connected(db: &Connection, device: &str) {
+    let hour = crate::transcript::now_ms() / 1000 / HOUR * HOUR;
+    if let Err(error) = db.execute("INSERT OR IGNORE INTO device_hours (hour, device) VALUES (?1, ?2)", params![hour, device]) {
+        tracing::warn!(%error, "could not count a device connecting");
+    }
+}
+
+/// Where a running backend says so; left behind, it stopped without
+/// stopping cleanly.
+fn running_path(home: &Home) -> std::path::PathBuf {
+    home.root().join("backend-running")
+}
+
+fn note_health(db: &Connection, version: &str, rolled_back: u32, crashes: u32) {
+    let hour = crate::transcript::now_ms() / 1000 / HOUR * HOUR;
+    let noted = db.execute(
+        "INSERT INTO backend_health (hour, version, rolled_back, crashes) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (hour, version) DO UPDATE SET rolled_back = rolled_back + excluded.rolled_back, crashes = crashes + excluded.crashes",
+        params![hour, label(version), rolled_back, crashes],
+    );
+    if let Err(error) = noted {
+        tracing::warn!(%error, "could not count the backend's health");
+    }
+}
+
+/// At the backend's start: counts the backend before it if it stopped
+/// without stopping cleanly, and the update the supervisor rolled back, if
+/// that's new; then says this one runs. For check-ins' health.
+pub fn backend_started(factory: &Factory) {
+    let home = &factory.home;
+    let db = factory.store.db();
+    if let Ok(version) = std::fs::read_to_string(running_path(home)) {
+        tracing::warn!(version = %version.trim(), "the backend before this one stopped without stopping cleanly");
+        note_health(&db, &version, 0, 1);
+    }
+    if let Ok(failed) = std::fs::read(home.update_failed_path()) {
+        let key = format!("rollback:{}", api::hex(api::sha256(&failed)));
+        if db.execute("INSERT OR IGNORE INTO reached (step) VALUES (?1)", [&key]).unwrap_or(0) == 1 {
+            let version = serde_json::from_slice::<serde_json::Value>(&failed)
+                .ok()
+                .and_then(|failed| failed["version"].as_str().map(str::to_owned))
+                .unwrap_or_default();
+            note_health(&db, &version, 1, 0);
+        }
+    }
+    if let Err(error) = std::fs::write(running_path(home), crate::update::VERSION) {
+        tracing::warn!(%error, "could not note that the backend runs");
+    }
+}
+
+/// The backend stops cleanly (asked to, handing over to an update, or
+/// freezing for a move): not a crash.
+pub fn backend_stopped(home: &Home) {
+    let _ = std::fs::remove_file(running_path(home));
 }
 
 /// The models' names as the app shows them ("Claude Opus 4.8"), by
@@ -118,6 +259,8 @@ pub(super) fn names(factory: &Factory) -> Names {
 /// deletes usage too old to report.
 pub(super) fn new_periods(db: &Connection, since: i64, now: i64, names: &Names) -> rusqlite::Result<Vec<Period>> {
     db.execute("DELETE FROM model_usage WHERE hour < ?1", [now - KEEP])?;
+    db.execute("DELETE FROM device_hours WHERE hour < ?1", [now - KEEP])?;
+    db.execute("DELETE FROM backend_health WHERE hour < ?1", [now - KEEP])?;
     let to = now / HOUR * HOUR;
     let mut from = since.max(to - OLDEST);
     let mut periods = Vec::new();
@@ -129,10 +272,25 @@ pub(super) fn new_periods(db: &Connection, since: i64, now: i64, names: &Names) 
             to: end,
             usage: usage(db, from, end, names)?,
             activity: activity(db, from, end, now)?,
+            devices_connected: Some(db.query_row(
+                "SELECT count(DISTINCT device) FROM device_hours WHERE hour >= ?1 AND hour < ?2",
+                [from, end],
+                |row| row.get(0),
+            )?),
+            health: health(db, from, end)?,
         });
         from = end;
     }
     Ok(periods)
+}
+
+/// Each backend version rolled back or crashed in [from, to).
+fn health(db: &Connection, from: i64, to: i64) -> rusqlite::Result<Vec<Health>> {
+    let mut statement = db.prepare(
+        "SELECT version, SUM(rolled_back), SUM(crashes) FROM backend_health WHERE hour >= ?1 AND hour < ?2
+         GROUP BY version ORDER BY version LIMIT 20",
+    )?;
+    statement.query_map([from, to], |row| Ok(Health { version: row.get(0)?, rolled_back: row.get(1)?, crashes: row.get(2)? }))?.collect()
 }
 
 fn usage(db: &Connection, from: i64, to: i64, names: &Names) -> rusqlite::Result<Vec<Usage>> {
@@ -252,7 +410,14 @@ mod tests {
         )
         .expect("runs");
         db.execute_batch(SCHEMA).expect("schema");
+        db.execute_batch(HEALTH).expect("health");
         db
+    }
+
+    #[test]
+    fn secrets_are_counted_only_roughly() {
+        let buckets: Vec<u32> = [0, 1, 9, 10, 49, 50, 4000].into_iter().map(secrets_bucket).collect();
+        assert_eq!(buckets, [0, 1, 1, 10, 10, 50, 50]);
     }
 
     #[test]
@@ -310,6 +475,16 @@ mod tests {
         for activity in &period.activity {
             assert!(activity.agent_minutes <= activity.agents_working * 60);
         }
+        assert_eq!(period.devices_connected, Some(0));
+        assert!(period.health.is_empty());
+        for (h, device) in [(hour, "phone"), (hour + HOUR, "phone"), (hour + HOUR, "mac"), (hour + 2 * HOUR, "ipad")] {
+            db.execute("INSERT INTO device_hours VALUES (?1, ?2)", params![h, device]).expect("device_hours");
+        }
+        db.execute("INSERT INTO backend_health VALUES (?1, 'v0.1.16', 1, 0), (?2, 'v0.1.16', 0, 2)", [hour, hour + HOUR])
+            .expect("backend_health");
+        let again = &new_periods(&db, hour, hour + 2 * HOUR + 59, &names).expect("periods")[0];
+        assert_eq!(again.devices_connected, Some(2), "each device once, in the period only");
+        assert_eq!(again.health, [Health { version: "v0.1.16".into(), rolled_back: 1, crashes: 2 }]);
 
         assert!(new_periods(&db, hour + 2 * HOUR, hour + 2 * HOUR + 3000, &names).expect("periods").is_empty(), "no whole hour yet");
         // After two days offline: a period a day.

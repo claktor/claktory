@@ -128,6 +128,32 @@ void main() {
       expect(claktories.selected.key, '', reason: "this Mac's instead");
     });
 
+    test('opening one that makes its device key opens it once, not twice', () {
+      // A backend's first connection makes this device's key for its
+      // Claktory and keeps it, which changes the connections while the
+      // Claktory is being opened: that must not open a second, live
+      // connection to it as the same device.
+      final app = _App(localBackend: false);
+      final opened = <String>[];
+      final claktories = Claktories(
+        connections: app.connections,
+        localBackend: false,
+        open: (target) {
+          opened.add(target?.code ?? '');
+          if (target != null) app.connections.deviceKey(target);
+          return app.open(target);
+        },
+        drafts: app.drafts,
+      );
+      addTearDown(claktories.dispose);
+      final nixos = parsePairingCode(_nixos)!;
+      app.connections.use(nixos);
+      expect(opened, ['', _nixos]);
+      expect(claktories.selected.target, nixos);
+      expect(claktories.selected.backend, same(app.backends[_nixos]));
+      expect(app.connections.deviceKey(nixos), isNotEmpty);
+    });
+
     test('a phone shows another paired one when the one showing goes', () {
       final app = _App();
       final claktories = Claktories(

@@ -2,10 +2,19 @@
 # Builds Claktory for iPhone (com.claktory.app) for the App Store and
 # uploads it to App Store Connect, where it shows up in TestFlight.
 #
-#   scripts/testflight.sh [--no-upload]
+#   scripts/testflight.sh [--no-upload] [--ipad]
 #
 # --no-upload archives and signs it, and leaves the .ipa in
 # app/build/ios/testflight/, without sending it anywhere.
+#
+# --ipad builds it for iPhone and iPad (device family 1,2) at build time
+# only: the project and app/ios/Runner/Info.plist stay iPhone-only. Xcode
+# makes the iPad icon sizes from the one 1024 icon, and the archived app
+# gets all four iPad orientations, which iPad multitasking requires (App
+# Store Connect refuses it otherwise, error 90474). Xcode warns while
+# archiving that not every orientation is supported: it checks the source
+# Info.plist, not the archived one, so the warning is expected. An iPad
+# build is for internal testers only until we commit to iPad support.
 #
 # It signs automatically (Xcode makes or renews the certificate and profile
 # it needs) and uploads with an App Store Connect API key. It needs, from
@@ -25,12 +34,20 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 upload=true
+ipad=false
 for arg in "$@"; do
   case "$arg" in
     --no-upload) upload=false ;;
-    *) echo "usage: scripts/testflight.sh [--no-upload]" >&2; exit 2 ;;
+    --ipad) ipad=true ;;
+    *) echo "usage: scripts/testflight.sh [--no-upload] [--ipad]" >&2; exit 2 ;;
   esac
 done
+family=()
+devices="iPhone"
+if $ipad; then
+  family=(TARGETED_DEVICE_FAMILY=1,2)
+  devices="iPhone and iPad"
+fi
 
 settings="$HOME/.appstoreconnect/claktory.env"
 if [ -f "$settings" ]; then
@@ -99,7 +116,7 @@ auth=(
   -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 )
 
-echo "Building Claktory $version ($build) for iPhone…"
+echo "Building Claktory $version ($build) for $devices…"
 cd "$root/app"
 # Flutter's half (the Dart code, its assets and the tunnel's Rust library),
 # then Xcode's archive of it. The bundle id, com.claktory.app, comes from
@@ -111,14 +128,34 @@ cd "$root/app"
 # the export's distribution certificate and App Store profile need none.
 # Its build folder is its own, kept between runs: the shared DerivedData is
 # also every other build's on this Mac, and other Xcode versions'.
-flutter build ios --release --config-only --build-name "$version" --build-number "$build"
+# FACTORY_VERSION stamps the version the app shows and checks its backend
+# against (app/lib/update.dart); unstamped, the app reads "dev".
+flutter build ios --release --config-only --build-name "$version" --build-number "$build" --dart-define=FACTORY_VERSION="v$version"
 cd ios
 xcodebuild archive -quiet \
   -workspace Runner.xcworkspace -scheme Runner -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
   -derivedDataPath "$root/app/build/ios/testflight-derived" \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
-  CODE_SIGNING_ALLOWED=NO
+  CODE_SIGNING_ALLOWED=NO ${family[@]+"${family[@]}"}
+
+app_dir="$archive/Products/Applications/Runner.app"
+if $ipad; then
+  # The archive is unsigned and the export signs it, so the archived app's
+  # Info.plist can still change here. The iPhone's own orientations
+  # (UISupportedInterfaceOrientations) stay as they are.
+  plist="$app_dir/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Delete :UISupportedInterfaceOrientations~ipad' "$plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy \
+    -c 'Add :UISupportedInterfaceOrientations~ipad array' \
+    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationPortrait' \
+    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationPortraitUpsideDown' \
+    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationLandscapeLeft' \
+    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationLandscapeRight' \
+    "$plist"
+  /usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' "$plist" | grep -qE '^[[:space:]]*2$' || { echo "--ipad: no iPad in UIDeviceFamily" >&2; exit 1; }
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations~ipad' "$plist" | grep -c UIInterfaceOrientation)" = 4 ] || { echo "--ipad: iPad orientations missing" >&2; exit 1; }
+fi
 
 # Every binary the app embeds must be loadable by the phone's dyld. A stale
 # build cache can slip an old dylib in: the tunnel's Rust library, linked
@@ -128,7 +165,6 @@ xcodebuild archive -quiet \
 # anything is signed or uploaded: 8-aligned symbol and string tables, and
 # the modern LC_BUILD_VERSION stamp (its absence means an old toolchain
 # linked the binary).
-app_dir="$archive/Products/Applications/Runner.app"
 problems=""
 for binary in "$app_dir/Runner" "$app_dir"/Frameworks/*.framework/*; do
   [ -f "$binary" ] || continue
@@ -162,6 +198,35 @@ if [ -n "$problems" ]; then
   exit 1
 fi
 
+# The export signs with the entitlements it finds on the archived code, and
+# an unsigned archive has none: the app would reach TestFlight without push,
+# time-sensitive notifications or its keychain groups (it did on 2026-11-22),
+# and automatic signing would never turn Push on for the App IDs. So sign
+# the archive ad hoc with the project's entitlements, its build variables
+# filled in, and an App Store build's aps-environment; the export re-signs
+# all of it with the distribution certificate and keeps them.
+entitlements() { # SOURCE BUNDLE_ID OUT
+  sed -e "s/\$(AppIdentifierPrefix)/$CLAKTORY_TEAM_ID./g" -e "s/\$(PRODUCT_BUNDLE_IDENTIFIER)/$2/g" "$1" >"$3"
+  if /usr/libexec/PlistBuddy -c 'Print :aps-environment' "$3" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c 'Set :aps-environment production' "$3"
+  fi
+}
+signing="$(mktemp -d)"
+trap 'rm -rf "$signing"' EXIT
+for framework in "$app_dir"/Frameworks/*; do
+  [ -e "$framework" ] || continue
+  codesign --force --sign - "$framework"
+done
+for appex in "$app_dir"/PlugIns/*.appex; do
+  [ -e "$appex" ] || continue
+  name="$(basename "$appex" .appex)"
+  entitlements "$root/app/ios/$name/$name.entitlements" \
+    "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Info.plist")" "$signing/$name.entitlements"
+  codesign --force --sign - --entitlements "$signing/$name.entitlements" "$appex"
+done
+entitlements "$root/app/ios/Runner/Runner.entitlements" com.claktory.app "$signing/Runner.entitlements"
+codesign --force --sign - --entitlements "$signing/Runner.entitlements" "$app_dir"
+
 destination=export
 $upload && destination=upload
 options="$out/ExportOptions.plist"
@@ -184,8 +249,17 @@ xcodebuild -exportArchive -quiet \
   -archivePath "$archive" -exportOptionsPlist "$options" -exportPath "$out" \
   "${auth[@]}"
 
+# Uploading exports straight to App Store Connect and leaves no .ipa here;
+# --no-upload does, and gets the same check on what would be sent.
+if $ipad && ! $upload; then
+  unzip -p "$out"/*.ipa 'Payload/Runner.app/Info.plist' | plutil -p - | grep -q '"UISupportedInterfaceOrientations~ipad"' || {
+    echo "--ipad: the exported .ipa lost its iPad orientations" >&2
+    exit 1
+  }
+fi
 if $upload; then
-  echo "Uploaded Claktory $version ($build). It shows in TestFlight once App Store Connect has processed it, usually within half an hour."
+  echo "Uploaded Claktory $version ($build) for $devices. It shows in TestFlight once App Store Connect has processed it, usually within half an hour."
+  if $ipad; then echo "An iPad build: internal testers only. Keep it out of every external group."; fi
 else
-  echo "Built $out (Claktory $version, build $build); not uploaded."
+  echo "Built $out (Claktory $version, build $build, for $devices); not uploaded."
 fi

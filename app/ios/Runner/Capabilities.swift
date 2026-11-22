@@ -111,3 +111,148 @@ final class KeyboardEvents: NSObject, FlutterStreamHandler {
     observers = []
   }
 }
+
+/// The window's controls (the close, minimize and arrange buttons an iPad
+/// window has at its top left) cover what the app draws there, and
+/// Flutter's safe area doesn't know them. Two answers, as UIKit's corner
+/// adaptation gives them:
+///
+/// - The root view's safe area grows on top to the controls' bottom (the
+///   vertical adaptation), so a screen with no toolbar of its own (the
+///   phone's routes in a narrow window, sheets) starts below them.
+/// - factory/device/window_controls sends {leading, top}: how far right a
+///   toolbar's leading items move to clear them (the horizontal
+///   adaptation) and how much of the top padding is theirs, so the iPad's
+///   workbench keeps its toolbar at the status bar, as Apple's apps do.
+///
+/// Nothing changes where there are no controls (an iPhone, iPadOS before
+/// 26).
+final class WindowControls: UIView {
+  private static var observer: NSObjectProtocol?
+  private static var events: FlutterEventChannel?
+  private static var handler: Events?
+  private static var last: [String: Double] = ["leading": 0, "top": 0]
+
+  /// Watches every window of every scene as it comes to the front, and
+  /// says what it finds on factory/device/window_controls.
+  static func start(with messenger: FlutterBinaryMessenger) {
+    guard observer == nil else { return }
+    let handler = Events()
+    Self.handler = handler
+    events = FlutterEventChannel(
+      name: "factory/device/window_controls", binaryMessenger: messenger)
+    events?.setStreamHandler(handler)
+    observer = NotificationCenter.default.addObserver(
+      forName: UIScene.didActivateNotification, object: nil, queue: .main
+    ) { note in
+      (note.object as? UIWindowScene)?.windows.forEach(watch)
+    }
+    for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+      scene.windows.forEach(watch)
+    }
+  }
+
+  /// Sends the last word to a listener as it starts listening, then each
+  /// change.
+  private final class Events: NSObject, FlutterStreamHandler {
+    var sink: FlutterEventSink?
+
+    func onListen(withArguments arguments: Any?, eventSink: @escaping FlutterEventSink)
+      -> FlutterError?
+    {
+      sink = eventSink
+      eventSink(WindowControls.last)
+      return nil
+    }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+      sink = nil
+      return nil
+    }
+  }
+
+  /// Watches [window] from now on; once per window.
+  private static func watch(_ window: UIWindow?) {
+    // The app's own window only, never the keyboard's, an alert's or a
+    // sheet's (UIKit's own root view controllers); and only on an iPad,
+    // where windows have controls (an iPhone's landscape corners would
+    // otherwise count as such).
+    guard UIDevice.current.userInterfaceIdiom == .pad, let window,
+      window.rootViewController is FlutterViewController,
+      !window.subviews.contains(where: { $0 is WindowControls })
+    else { return }
+    let watch = WindowControls(frame: window.bounds)
+    watch.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    watch.isHidden = true
+    watch.isUserInteractionEnabled = false
+    window.insertSubview(watch, at: 0)
+  }
+
+  /// A view pinned to one of the window's corner-adapted safe areas: its
+  /// size changes whenever that area does (the app going full screen or
+  /// into a window, the controls showing or hiding), which the window's
+  /// own bounds and safe area don't always.
+  private final class Probe: UIView {
+    var changed: (() -> Void)?
+
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      changed?()
+    }
+  }
+
+  private var probes: [Probe] = []
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    probes.forEach { $0.removeFromSuperview() }
+    probes = []
+    guard #available(iOS 26.0, *), let window else { return }
+    for axis in [UIView.LayoutRegion.AdaptivityAxis.vertical, .horizontal] {
+      let probe = Probe()
+      probe.isHidden = true
+      probe.isUserInteractionEnabled = false
+      probe.translatesAutoresizingMaskIntoConstraints = false
+      probe.changed = { [weak self] in self?.update() }
+      addSubview(probe)
+      let guide = window.layoutGuide(for: .safeArea(cornerAdaptation: axis))
+      NSLayoutConstraint.activate([
+        probe.topAnchor.constraint(equalTo: guide.topAnchor),
+        probe.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
+        probe.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+        probe.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+      ])
+      probes.append(probe)
+    }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    update()
+  }
+
+  override func safeAreaInsetsDidChange() {
+    super.safeAreaInsetsDidChange()
+    update()
+  }
+
+  private func update() {
+    guard #available(iOS 26.0, *), let window,
+      let root = window.rootViewController
+    else { return }
+    // The window's own safe area isn't the root view controller's, so
+    // what's added there never feeds back into this.
+    let safe = window.safeAreaInsets
+    let vertical = window.edgeInsets(for: .safeArea(cornerAdaptation: .vertical))
+    let horizontal = window.edgeInsets(for: .safeArea(cornerAdaptation: .horizontal))
+    let top = max(0, (vertical.top - safe.top).rounded())
+    let leading = max(0, (horizontal.left - safe.left).rounded())
+    if root.additionalSafeAreaInsets.top != top {
+      root.additionalSafeAreaInsets.top = top
+    }
+    let now = ["leading": Double(leading), "top": Double(top)]
+    guard now != Self.last else { return }
+    Self.last = now
+    Self.handler?.sink?(now)
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "channel": "claktory/ink/<view_id>",
+  "direction": "dart_to_native",
+  "method": "attach",
+  "arguments": null,
+  "result": null
+}

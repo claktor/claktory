@@ -11,9 +11,13 @@
 //! never give itself anything: grants, subscriptions and secrets come only
 //! from the person.
 
+pub(crate) mod a2ui;
 pub(crate) mod bundle;
+pub(crate) mod data;
 mod events;
 pub(crate) mod host;
+pub(crate) mod pins;
+pub(crate) mod surfaces;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -25,6 +29,7 @@ use factory_protocol::v1;
 use serde::{Deserialize, Serialize};
 
 pub use host::{AppsLink, Launcher};
+pub(crate) use surfaces::Viewer;
 
 use crate::config::Config;
 use crate::factory::{Factory, RequestError, host_event};
@@ -43,7 +48,6 @@ const CRASHES_TO_PAUSE: usize = 3;
 
 /// An installed app, in config.json's `apps`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub id: String,
     pub version: String,
@@ -64,10 +68,17 @@ pub struct AppConfig {
     /// Its secrets' ids in the vault, by the manifest's names.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, String>,
+    /// The data sources the person let it read (`data`'s ids).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     /// The version it was updated from, until it has started once (its
     /// upgrade() runs first).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub upgrade_from: String,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`crate::config::Unknown`).
+    #[serde(flatten)]
+    pub other: crate::config::Unknown,
 }
 
 fn yes() -> bool {
@@ -101,6 +112,10 @@ pub(crate) struct Apps {
     /// How the host starts; a stand-in in tests.
     launcher: Mutex<Option<Launcher>>,
     pub(crate) events: events::Events,
+    /// The views open now.
+    surfaces: surfaces::Surfaces,
+    /// The dock's pins.
+    pins: pins::Pins,
 }
 
 #[derive(Default)]
@@ -142,6 +157,8 @@ impl Default for Apps {
             busy: tokio::sync::Mutex::default(),
             launcher: Mutex::default(),
             events: events::Events::default(),
+            surfaces: surfaces::Surfaces::default(),
+            pins: pins::Pins::default(),
         }
     }
 }
@@ -295,6 +312,8 @@ pub(crate) fn infos(factory: &Factory, config: &Config, vault: &v1::VaultState) 
             description: manifest.description.clone(),
             installed_ms: app.installed_ms,
             publisher_key: bundle::short_key(&app.key),
+            views: manifest.views.iter().map(|view| v1::AppViewSpec { id: view.id.clone(), title: view.title.clone() }).collect(),
+            sources: data::infos(config, manifest, app),
         });
     }
     infos.sort_by_key(|info| info.name.to_lowercase());
@@ -571,6 +590,7 @@ async fn reconcile(factory: &Arc<Factory>) -> Option<Duration> {
                 world: manifest.world.clone(),
             };
             let _ = std::fs::create_dir_all(folder(factory, &app.id).join("data"));
+            surfaces::app_not_running(factory, &app.id);
             let answer = done_of(host.ask(Body::Load(load), LIFECYCLE_DEADLINE).await);
             let mut state = factory.apps.state();
             let runtime = state.apps.entry(app.id.clone()).or_default();
@@ -616,6 +636,7 @@ async fn reconcile(factory: &Arc<Factory>) -> Option<Duration> {
             match answer {
                 Ok(()) => {
                     tracing::info!(app = %app.id, version = %app.version, "app started");
+                    surfaces::app_running(factory, &app.id);
                     if !app.upgrade_from.is_empty() {
                         let id = app.id.clone();
                         let _ = factory
@@ -641,6 +662,7 @@ async fn reconcile(factory: &Arc<Factory>) -> Option<Duration> {
                 tracing::warn!(app = %app.id, %problem, "the apps host couldn't stop an app");
             }
             factory.apps.state().apps.entry(app.id.clone()).or_default().running = false;
+            surfaces::app_not_running(factory, &app.id);
             changed = true;
         }
     }
@@ -771,6 +793,7 @@ fn host_gone(factory: &Arc<Factory>, which: &Weak<Host>) {
         }
     }
     tracing::warn!("the apps host stopped");
+    surfaces::app_stopped(factory, None, &|_| "Apps stopped. They'll start again in a moment.".to_owned());
     factory.apps_changed();
     factory.apps.poke();
 }
@@ -799,6 +822,14 @@ fn crashed(factory: &Arc<Factory>, app: &str, problem: &str) -> Option<Duration>
         }
     };
     tracing::warn!(app, problem, paused, "an app crashed");
+    let problem_text = problem.to_owned();
+    surfaces::app_stopped(factory, Some(app), &|name| {
+        if paused {
+            format!("The {name} app crashed, so Claktory paused it. {problem_text}")
+        } else {
+            format!("The {name} app stopped: {problem_text} It starts again in a moment.")
+        }
+    });
     if paused {
         let name = factory.apps.manifest(app).map_or_else(|| app.to_owned(), |manifest| manifest.name.clone());
         let text = format!(
@@ -828,6 +859,17 @@ fn handler(factory: Weak<Factory>) -> host::Handler {
                 host.answer(id, Body::SecretValue(answer));
             }
             Body::Emit(emitted) => events::emit(&factory, emitted),
+            Body::PushView(pushed) => {
+                let error = surfaces::push(&factory, &pushed).err().unwrap_or_default();
+                host.answer(id, Body::Done(wire::Done { error }));
+            }
+            Body::GetDataSources(asked) => host.answer(id, Body::DataSourceList(data::list(&factory, &asked.app_id))),
+            Body::DataQuery(asked) => {
+                tokio::spawn(async move {
+                    let answer = data::query(&factory, asked).await;
+                    host.answer(id, Body::DataAnswer(answer));
+                });
+            }
             Body::SetStatus(status) => {
                 let installed = factory.lock().config.apps.iter().any(|app| app.id == status.app_id);
                 if installed {
@@ -967,7 +1009,9 @@ impl Factory {
                     grants: BTreeMap::new(),
                     subscriptions: BTreeMap::new(),
                     secrets: BTreeMap::new(),
+                    sources: Vec::new(),
                     upgrade_from: String::new(),
+                    other: crate::config::Unknown::new(),
                 }),
             }
             Ok(())
@@ -984,6 +1028,7 @@ impl Factory {
             runtime.crashes.clear();
             runtime.retry_at = None;
         }
+        pins::installed(self, &id, installed.is_none(), !bundle.manifest.views.is_empty());
         // An older version's files go once this one is in place.
         if let Some(before) = before.filter(|before| *before != version) {
             let _ = tokio::fs::remove_dir_all(folder(self, &id).join(before)).await;
@@ -1017,7 +1062,9 @@ impl Factory {
             if manifest.storage_mb > before.storage_mb {
                 added.push(format!("Store up to {} MB", manifest.storage_mb));
             }
+            added.extend(data::added(&before, manifest));
         }
+        let sources = data::requested(&self.lock().config, manifest);
         v1::AppPermissions {
             path: if from_path { path.to_owned() } else { String::new() },
             sha256: bundle.sha256.clone(),
@@ -1037,6 +1084,7 @@ impl Factory {
             storage_mb: manifest.storage_mb,
             installed_version,
             added,
+            sources,
         }
     }
 
@@ -1072,6 +1120,8 @@ impl Factory {
             })
             .await?;
         // The host forgets it before its files go.
+        surfaces::app_uninstalled(self, &id);
+        pins::uninstalled(self, &id);
         self.apps.poke();
         let _busy = self.apps.busy.lock().await;
         let grantee = grantee(&id);
@@ -1252,5 +1302,22 @@ pub(crate) fn forget_agent(config: &mut Config, gone: &str) {
             agents.retain(|agent| agent != gone);
         }
         app.subscriptions.retain(|_, agents| !agents.is_empty());
+        data::forget_agent(app, gone);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_apps_settings_from_a_newer_claktory_are_kept() {
+        let text =
+            r#"{"id":"charts","version":"0.2.0","key":"k","sha256":"s","installed_ms":1,"sources":["factory-records"],"pinned":{"a":1}}"#;
+        let app: AppConfig = serde_json::from_str(text).expect("read despite the key it doesn't know");
+        assert_eq!(app.sources, ["factory-records"]);
+        assert_eq!(app.other["pinned"], serde_json::json!({"a": 1}));
+        let written: serde_json::Value = serde_json::to_value(&app).expect("written");
+        assert_eq!(written, serde_json::from_str::<serde_json::Value>(text).expect("JSON"));
     }
 }

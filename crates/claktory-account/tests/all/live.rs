@@ -115,7 +115,7 @@ async fn a_claktory_signs_in_unlocks_and_checks_in_with_a_running_service() {
     let check_in = CheckIn {
         version: "v0.1.9".into(),
         platform: "linux-aarch64".into(),
-        counts: Some(Counts { agents: 3, projects: 1, devices: 1 }),
+        counts: Some(Counts { agents: 3, projects: 1, devices: 1, ..Counts::default() }),
         periods: vec![Period {
             id: b64(&random_32()[..18]),
             from: hour,
@@ -131,7 +131,9 @@ async fn a_claktory_signs_in_unlocks_and_checks_in_with_a_running_service() {
                 cache_write_tokens: 0,
             }],
             activity: vec![Activity { hour, agent_minutes: 1, agents_working: 1, runs: 1 }],
+            ..Period::default()
         }],
+        ..CheckIn::default()
     };
     let (status, body) = live.signed(&key, &signed_in.machine_token, "POST", "/v1/check-in", &check_in).await;
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));

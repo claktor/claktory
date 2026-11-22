@@ -752,8 +752,14 @@ impl Factory {
         frame.apps = apps;
         frame.pipes = pipes;
         // Left out of compaction: the next frame says it all.
-        let event =
-            Event { source: EventSource::Host, from: "Claktory".to_owned(), id: String::new(), summary: String::new(), transient: true };
+        let event = Event {
+            source: EventSource::Host,
+            from: "Claktory".to_owned(),
+            id: String::new(),
+            summary: String::new(),
+            transient: true,
+            pipe_seqs: Vec::new(),
+        };
         let mut note = Queued::event(notes.join("\n"), event);
         match self.store.add_message(id, &note) {
             Ok(message) => note.id = message,
@@ -1534,6 +1540,7 @@ mod tests {
                  "project": "p", "folder": "app"},
             ]})
             .to_string(),
+            home.root(),
         )
         .expect("config");
 

@@ -1,7 +1,7 @@
 //! Idle compaction: an agent left idle with a long conversation compacts it
-//! just before its prompt cache expires (after 54 minutes for an hour's
-//! cache; after 4 for a 5-minute one, only when asked), once, quietly, and
-//! never over new work.
+//! just before its prompt cache expires (after 58 minutes for an hour's
+//! cache, the default; after 4 for a 5-minute one, only when asked), once,
+//! quietly, and never over new work.
 
 use std::time::Duration;
 
@@ -21,6 +21,10 @@ fn settings(settings: v1::UpdateSettings) -> client_message::Body {
 
 fn hour_cache() -> client_message::Body {
     settings(v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: "anthropic".into(), ttl: "1h".into() }), ..Default::default() })
+}
+
+fn five_minute_cache() -> client_message::Body {
+    settings(v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: "anthropic".into(), ttl: "5m".into() }), ..Default::default() })
 }
 
 fn compactions(view: &View) -> Vec<v1::Compaction> {
@@ -88,31 +92,50 @@ async fn until(client: &mut Client, view: &mut View, mut done: impl FnMut(&View)
 }
 
 #[tokio::test]
-async fn an_hour_s_cache_compacts_after_54_idle_minutes_once_and_quietly() {
+async fn an_hour_s_cache_compacts_after_58_idle_minutes_once_and_quietly() {
     let (factory, mut client, mut view, requests) = setup().await;
+    // An hour unless set otherwise: nothing in the settings says so.
+    let ttls = view.workspace.settings.as_ref().map(|settings| settings.cache_ttls.clone()).unwrap_or_default();
+    assert!(ttls.is_empty(), "{ttls:?}");
     apply_request(&mut client, &mut view, hour_cache()).await;
     let provider = view.workspace.providers.iter().find(|provider| provider.id == "scripted").map(|provider| provider.cache_ttl.clone());
     assert_eq!(provider.as_deref(), Some(""), "a provider whose cache lifetime Claktory can't choose");
     let ttls = view.workspace.settings.as_ref().map(|settings| settings.cache_ttls.clone()).unwrap_or_default();
     assert_eq!(ttls, [v1::CacheTtl { key: "anthropic".into(), ttl: "1h".into() }]);
-    for (key, ttl) in [("openai", "1h"), ("anthropic", "2h")] {
+    // Each provider's own lifetimes only; none for one whose requests can't choose.
+    for (key, ttl) in [("openai", "1h"), ("anthropic", "2h"), ("anthropic", "30m"), ("openai-codex", "30m")] {
         let wrong = v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: key.into(), ttl: ttl.into() }), ..Default::default() };
         let refused = apply_request(&mut client, &mut view, settings(wrong)).await;
         assert!(matches!(&refused, Body::Error(_)), "{key} {ttl}: {refused:?}");
     }
+    // OpenAI's own aren't written yet either: the backend a rollback goes
+    // back to refuses a config.json that has them (#281).
+    for (key, ttl) in [("openai", "12h"), ("openai", "30m"), ("openai/gpt-5.6-sol", "12h")] {
+        let openai = v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: key.into(), ttl: ttl.into() }), ..Default::default() };
+        let refused = apply_request(&mut client, &mut view, settings(openai)).await;
+        assert!(matches!(&refused, Body::Error(error) if error.message.contains("can't be chosen yet")), "{key} {ttl}: {refused:?}");
+    }
+    let unset = v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: "openai".into(), ttl: String::new() }), ..Default::default() };
+    apply_request(&mut client, &mut view, settings(unset)).await;
+    let ttls = view.workspace.settings.as_ref().map(|settings| settings.cache_ttls.clone()).unwrap_or_default();
+    assert_eq!(ttls, [v1::CacheTtl { key: "anthropic".into(), ttl: "1h".into() }], "nothing of OpenAI's written");
+    // Back to the default: still an hour.
+    let unset = v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: "anthropic".into(), ttl: String::new() }), ..Default::default() };
+    apply_request(&mut client, &mut view, settings(unset)).await;
+    assert!(view.workspace.settings.as_ref().is_some_and(|settings| settings.cache_ttls.is_empty()));
     talk(&factory, &mut client, &mut view, "hello").await;
     assert_eq!(requests.lock().expect("lock")[0].cache_ttl, "1h", "requests ask for an hour's cache");
 
-    // 53 minutes: not yet.
-    factory.set_idle_clock_ahead(53 * MINUTE);
+    // 57 minutes: not yet.
+    factory.set_idle_clock_ahead(57 * MINUTE);
     settle(&factory, &mut client, &mut view).await;
     assert!(compactions(&view).is_empty());
 
-    // 54: summarized while idle, and that's all it does: no news of a run
+    // 58: summarized while idle, and that's all it does: no news of a run
     // for the person while they look elsewhere.
     let select = |agent: &str| client_message::Body::SelectAgent(v1::SelectAgent { agent_id: agent.into() });
     apply_request(&mut client, &mut view, select("rivet")).await;
-    factory.set_idle_clock_ahead(54 * MINUTE);
+    factory.set_idle_clock_ahead(58 * MINUTE);
     factory.set_idle_check_every(Duration::from_millis(20));
     until(&mut client, &mut view, |view| requests.lock().expect("lock").len() == 2 && idle(view, "builder")).await;
     settle(&factory, &mut client, &mut view).await;
@@ -126,7 +149,7 @@ async fn an_hour_s_cache_compacts_after_54_idle_minutes_once_and_quietly() {
     assert!(matches!(last.kind, Some(Kind::Compaction(_))), "nothing after the divider: {last:?}");
 
     // Once: the summary isn't compacted again.
-    factory.set_idle_clock_ahead(108 * MINUTE);
+    factory.set_idle_clock_ahead(116 * MINUTE);
     settle(&factory, &mut client, &mut view).await;
     assert_eq!(compactions(&view).len(), 1);
 
@@ -142,8 +165,9 @@ async fn an_hour_s_cache_compacts_after_54_idle_minutes_once_and_quietly() {
 #[tokio::test]
 async fn a_five_minute_cache_compacts_only_when_asked_and_never_late_or_when_off() {
     let (factory, mut client, mut view, _) = setup().await;
+    apply_request(&mut client, &mut view, five_minute_cache()).await;
     talk(&factory, &mut client, &mut view, "hello").await;
-    // The provider's own 5 minutes: not unless asked.
+    // The provider's own 5 minutes, chosen: not unless asked.
     factory.set_idle_clock_ahead(4 * MINUTE);
     settle(&factory, &mut client, &mut view).await;
     assert!(compactions(&view).is_empty());
@@ -178,7 +202,7 @@ async fn new_work_or_stop_cancels_it_and_the_conversation_stays() {
     apply_request(&mut client, &mut view, hour_cache()).await;
     // Its summary never finishes, so it's still compacting when work comes.
     talk(&factory, &mut client, &mut view, "a slow summary, please").await;
-    factory.set_idle_clock_ahead(54 * MINUTE);
+    factory.set_idle_clock_ahead(58 * MINUTE);
     factory.set_idle_check_every(Duration::from_millis(20));
     until(&mut client, &mut view, |view| {
         requests.lock().expect("lock").len() == 2 && view.agent("builder").status() == AgentStatus::Working
@@ -190,7 +214,7 @@ async fn new_work_or_stop_cancels_it_and_the_conversation_stays() {
     assert!(answered, "the message got its answer");
 
     // Stopped while compacting: nothing changes, and it isn't tried again.
-    factory.set_idle_clock_ahead(54 * MINUTE);
+    factory.set_idle_clock_ahead(58 * MINUTE);
     until(&mut client, &mut view, |_| requests.lock().expect("lock").len() == 4).await;
     let reply = apply_request(&mut client, &mut view, client_message::Body::StopAgent(v1::StopAgent { agent_id: "builder".into() })).await;
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");

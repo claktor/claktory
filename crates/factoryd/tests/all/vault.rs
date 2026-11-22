@@ -60,6 +60,7 @@ async fn the_vault_is_there_from_the_start_and_the_person_adds_secrets() {
         name: "Cloudflare".into(),
         description: "The claktory.com zone.".into(),
         entries: vec![entry("CLOUDFLARE_API_TOKEN", TOKEN), entry("ZONE", "claktory")],
+        ..Default::default()
     };
     let events = client.ok(Request::CreateSecret(secret)).await;
     let state = vault(last_workspace(&events).expect("workspace"));
@@ -513,10 +514,13 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     })
     .await;
     assert!(
-        events(&view).iter().any(|line| line == "event from Claktory: The person dismissed your request for Stripe (comment: Not yet.)."),
+        events(&view).iter().any(|line| line == "event from Claktory: The person dismissed your request for Stripe."),
         "{:?}",
         events(&view)
     );
+    // The person's comment reaches it as theirs, on a line of its own (#253).
+    assert!(view.entries.iter().any(|entry| matches!(&entry.kind,
+        Some(Kind::Event(event)) if event.text.contains("dismissed your request for Stripe.\n\nThe person's note: Not yet.\n\n"))));
     let twice = client.request(Request::DecideSecretRequest(decide("builder", &id, true, Vec::new(), ""))).await;
     assert!(failure(&twice.body).1.contains("decided already"), "{:?}", twice.body);
     drop(client);
@@ -884,7 +888,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
         events(view).iter().any(|line| line.contains("The person approved Builder's request for Cloudflare token")) && idle(view, "rivet")
     })
     .await;
-    let give = format!(r#"{{"secret":"Cloudflare","request":"{}"}}"#, asked.id);
+    let give = format!(r#"{{"secret":"Cloudflare","request":"{}","note":"It's the DNS-only token."}}"#, asked.id);
     let given = call(&mut client, &mut view, "rivet", "secrets_grant", &give).await;
     assert!(given.starts_with("Gave Cloudflare to builder"), "{given}");
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
@@ -892,6 +896,12 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
         events(view).iter().any(|line| line.contains("approved your request and Rivet gave you Cloudflare")) && idle(view, "builder")
     })
     .await;
+    // Each note reaches it as its writer's: the person's approval comment,
+    // and Rivet's, never as the person's (#253).
+    assert!(
+        view.entries.iter().any(|entry| matches!(&entry.kind,
+        Some(Kind::Event(event)) if event.text.contains("\n\nThe person's note: Go ahead.\n\nRivet's note: It's the DNS-only token.\n\n")))
+    );
     let decided = shown_request(&view, &asked.id);
     assert_eq!((decided.state(), decided.given_secret_name.as_str()), (v1::SecretRequestState::Granted, "Cloudflare"));
     assert!(waiting_seqs(&view, "builder").is_empty(), "nothing waits any more");

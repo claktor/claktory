@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../controls.dart';
 import '../identity.dart';
 import 'platform_policy.dart';
+import 'push.dart' show PushRegistrar;
 
 /// The message box on a phone (research mobile.md §4, "Conversation, input
 /// and keyboard"), laid out as iOS's own Messages: + at its start for files
@@ -24,7 +26,11 @@ class PhoneComposerRow extends StatelessWidget {
     this.primary,
     this.maxFieldHeight,
     this.recording,
+    this.accent,
   });
+
+  /// Send's color, the target's ([SendButton.accent]).
+  final Color? accent;
 
   /// While a voice message records: what shows in place of + and the field
   /// (the primary slot stays, under the finger that holds it).
@@ -47,6 +53,13 @@ class PhoneComposerRow extends StatelessWidget {
   /// How tall the field's box may grow before its text scrolls, so a long
   /// draft never takes the whole screen above the keyboard.
   final double? maxFieldHeight;
+
+  /// Sends; the first time, the system then asks whether Claktory may
+  /// notify the person (an answer is what they'll want to hear of).
+  void _send() {
+    onSend();
+    unawaited(PushRegistrar.current?.askInContext());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +92,7 @@ class PhoneComposerRow extends StatelessWidget {
             child: SizedBox(height: target, child: recording),
           ),
           const SizedBox(width: Space.xs),
-          primary ?? SendButton(onSend: canSend ? onSend : null),
+          primary ?? SendButton(onSend: canSend ? _send : null, accent: accent),
         ],
       );
     }
@@ -130,7 +143,7 @@ class PhoneComposerRow extends StatelessWidget {
         ),
         const SizedBox(width: Space.xs),
         if (canSend || primary == null)
-          SendButton(onSend: canSend ? onSend : null)
+          SendButton(onSend: canSend ? _send : null, accent: accent)
         else
           primary!,
       ],
@@ -139,7 +152,8 @@ class PhoneComposerRow extends StatelessWidget {
 }
 
 /// Send, at the end of a phone's message box: an arrow up in a signal
-/// disc, 32pt in a 44pt target. Faint while there's nothing to send.
+/// disc, 32pt in a 44pt target, or in the target's [accent] with the
+/// arrow white. Faint while there's nothing to send.
 /// Brings up the keyboard for the field under [context], focusing it.
 void _requestKeyboard(BuildContext context) {
   EditableTextState? editable;
@@ -157,14 +171,19 @@ void _requestKeyboard(BuildContext context) {
 }
 
 class SendButton extends StatelessWidget {
-  const SendButton({super.key, required this.onSend});
+  const SendButton({super.key, required this.onSend, this.accent});
 
   final VoidCallback? onSend;
+
+  /// The disc's color in place of signal, such as a pipe's; the arrow on
+  /// it is white.
+  final Color? accent;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final enabled = onSend != null;
+    final fill = accent ?? palette.signal;
     return Semantics(
       container: true,
       button: true,
@@ -185,11 +204,8 @@ class SendButton extends StatelessWidget {
                 shape: BoxShape.circle,
                 color: enabled
                     ? (pressed
-                          ? Color.alphaBlend(
-                              const Color(0x33000000),
-                              palette.signal,
-                            )
-                          : palette.signal)
+                          ? Color.alphaBlend(const Color(0x33000000), fill)
+                          : fill)
                     : palette.selected,
               ),
               alignment: Alignment.center,
@@ -199,8 +215,13 @@ class SendButton extends StatelessWidget {
                 child: ExtensionGlyph(
                   icon: 'arrow-down',
                   name: 'Send',
-                  // Text on signal is black (docs/IDENTITY.md, Contrast).
-                  color: enabled ? const Color(0xFF000000) : palette.textFaint,
+                  // Text on signal is black (docs/IDENTITY.md, Contrast);
+                  // on an accent, white, as on agents' bubbles.
+                  color: !enabled
+                      ? palette.textFaint
+                      : accent != null
+                      ? const Color(0xFFFFFFFF)
+                      : const Color(0xFF000000),
                   size: 18,
                 ),
               ),

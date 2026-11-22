@@ -32,9 +32,26 @@ class UsageMeter {
   /// Who it is: the account's email or name, empty when unknown.
   String get who => account?.label ?? '';
 
+  /// One of a provider's several accounts, whose order says which
+  /// requests go to first.
+  bool get oneOfMany => account != null && provider.accounts.length > 1;
+
+  /// Requests go to it now, rather than to the provider's other accounts.
+  bool get inUseOfMany => oneOfMany && account!.inUse;
+
+  /// First in the order requests try the provider's accounts: used
+  /// whenever it has room.
+  bool get first =>
+      account != null &&
+      provider.accounts.isNotEmpty &&
+      provider.accounts.first.id == account!.id;
+
   /// What screen readers and tests call its circle.
-  String get name =>
-      who.isEmpty ? '${provider.name} usage' : '${provider.name} usage, $who';
+  String get name => [
+    '${provider.name} usage',
+    if (who.isNotEmpty) who,
+    if (inUseOfMany) 'in use',
+  ].join(', ');
 }
 
 /// One meter per account signed in, provider by provider, in the order
@@ -93,8 +110,10 @@ class UsageCircle extends StatelessWidget {
 }
 
 /// An account's ring alone: [size] across in a [cell] a little larger,
-/// with the reset cue at the cell's corner. The circle's, and a phone's
-/// Usage page's rows'.
+/// with the reset cue at the cell's corner and, when it's the one of its
+/// provider's accounts requests go to now, a dot under it, as the Dock
+/// marks an app that's running. The circle's, and a phone's Usage page's
+/// rows'.
 class UsageRing extends StatelessWidget {
   const UsageRing({
     super.key,
@@ -113,7 +132,7 @@ class UsageRing extends StatelessWidget {
     final provider = meter.provider;
     final usage = meter.usage;
     final (mark, used) = usageMark(usage);
-    return SizedBox.square(
+    final ring = SizedBox.square(
       dimension: cell,
       child: ResetCue(
         shown: resetCue(meter),
@@ -134,8 +153,36 @@ class UsageRing extends StatelessWidget {
         ),
       ),
     );
+    if (!meter.inUseOfMany) return ring;
+    // Just under the ring, in the cell's margin and a little past it.
+    final gap = (cell - size) / 2;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        ring,
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: gap - inUseDot - 1,
+          child: Center(
+            child: SizedBox.square(
+              dimension: inUseDot,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: providerColor(provider.id, palette),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
+
+/// The dot under the ring of the account requests go to now.
+const inUseDot = 4.0;
 
 /// How a circle for [usage] is drawn, and for a meter how full it is (0 to
 /// 1): the share of its weekly limit used. Null usage has no limits.
@@ -382,8 +429,8 @@ class UsageCard extends StatelessWidget {
 
 /// What [account] is doing now: requests go to it ("In use"), it reached a
 /// usage limit and is skipped until it resets ("Limit reached, back at
-/// 14:00"), an API key ran out of credit, or it waits its turn ("Signed
-/// in"). [problem] marks a state the
+/// 14:00"), an API key ran out of credit, its sign-in expired ("Sign-in
+/// expired"), or it waits its turn ("Signed in"). [problem] marks a state the
 /// person may need to act on.
 ({String text, bool problem}) accountState(
   Provider provider,
@@ -403,6 +450,8 @@ class UsageCard extends StatelessWidget {
       problem: true,
     );
   }
+  // The provider refused to refresh it: skipped until signed in to again.
+  if (account.signInAgain) return (text: 'Sign-in expired', problem: true);
   if (account.inUse) return (text: 'In use', problem: false);
   return (text: 'Signed in', problem: false);
 }

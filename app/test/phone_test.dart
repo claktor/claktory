@@ -6,6 +6,7 @@ import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart' show NoAgentView;
 import 'package:factory_app/sidebar.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -158,6 +159,9 @@ void main() {
 
   testWidgets('Scan code asks for the camera, then connects to the code it '
       'scans', (tester) async {
+    // The iPhone's words (tests run as Android unless told).
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace(), localBackend: false);
     harness.camera.state = CameraAccess.undetermined;
     await harness.show(tester, size: phone);
@@ -231,6 +235,9 @@ void main() {
   testWidgets('a restricted camera says to paste instead, with no Settings', (
     tester,
   ) async {
+    // The iPhone's words (tests run as Android unless told).
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace(), localBackend: false);
     harness.camera.state = CameraAccess.restricted;
     await harness.show(tester, size: phone);

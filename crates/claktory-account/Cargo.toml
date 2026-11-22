@@ -12,6 +12,7 @@ default = ["server"]
 # types and its cryptography, for clients such as factoryd.
 server = [
   "dep:bytes",
+  "dep:claktory-user-apps",
   "dep:form_urlencoded",
   "dep:http-body-util",
   "dep:hyper",
@@ -43,6 +44,7 @@ sha2 = "0.11"
 zeroize = "1.9"
 
 bytes = { version = "1.12.2", optional = true }
+claktory-user-apps = { path = "../claktory-user-apps", default-features = false, optional = true }
 form_urlencoded = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
@@ -56,5 +58,7 @@ tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
+claktory-user-apps = { path = "../claktory-user-apps" }
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"

@@ -8,7 +8,7 @@
 //! visually before, is read and kept but no longer used, so an older
 //! Claktory (a rollback) still shows what it did.
 
-use crate::config::{AgentConfig, Config};
+use crate::config::{AgentConfig, Config, FolderConfig};
 use crate::factory::RequestError;
 
 /// A drop the app wouldn't make from what it shows: the list changed under
@@ -165,6 +165,28 @@ pub(crate) fn check_folder(config: &Config, id: &str, folder: &str) -> Result<()
     }
 }
 
+/// A dragged folder that's gone (deleted on another device, say).
+const FOLDER_GONE: &str = "That folder no longer exists.";
+
+/// Moves a project's folder `id` before the folder `before`, or last with
+/// "" (#248): `folders` is the order the sidebar shows, config.json's.
+/// Before itself changes nothing.
+pub(crate) fn move_folder(folders: &mut Vec<FolderConfig>, id: &str, before: &str) -> Result<(), RequestError> {
+    let Some(from) = folders.iter().position(|folder| folder.id == id) else {
+        return Err(RequestError::Arrange(FOLDER_GONE.to_owned()));
+    };
+    if before == id {
+        return Ok(());
+    }
+    if !before.is_empty() && !folders.iter().any(|folder| folder.id == before) {
+        return Err(RequestError::Arrange(CHANGED.to_owned()));
+    }
+    let folder = folders.remove(from);
+    let to = if before.is_empty() { folders.len() } else { folders.iter().position(|other| other.id == before).unwrap_or(folders.len()) };
+    folders.insert(to, folder);
+    Ok(())
+}
+
 /// An agent is about to go: those that report to it report to its own lead
 /// instead, which led them through it already, so nothing more is granted.
 pub(crate) fn lift_children(config: &mut Config, going: &str) {
@@ -204,6 +226,7 @@ mod tests {
             extensions: Default::default(),
             avatar: Default::default(),
             fallback_model: String::new(),
+            other: Default::default(),
         }
     }
 
@@ -216,6 +239,7 @@ mod tests {
                 path: format!("/{id}").into(),
                 folders: Vec::new(),
                 archived: false,
+                other: Default::default(),
             });
         }
         config.agents = vec![
@@ -322,7 +346,7 @@ mod tests {
         let mut config = factory();
         for project in &mut config.projects {
             let path = project.path.join("ui");
-            project.folders.push(crate::config::FolderConfig { id: "ui".into(), name: "UI".into(), path });
+            project.folders.push(crate::config::FolderConfig { id: "ui".into(), name: "UI".into(), path, other: Default::default() });
         }
         arrange(&mut config, "frontend", None, None, None, Some("ui")).expect("arrange");
         let folder = |config: &Config, id: &str| config.agent(id).expect("agent").folder.clone();

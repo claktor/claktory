@@ -25,6 +25,10 @@ enum Link {
 
   /// Turned away: this device isn't allowed any more.
   refused,
+
+  /// It moved to another computer: what answers here is the copy it left,
+  /// which runs nothing.
+  moved,
 }
 
 /// A Claktory's connection as the app shows it: its state and the words
@@ -44,6 +48,7 @@ class Connection {
 
   static Link _linkOf(Backend backend) {
     if (backend.refused.value != null) return Link.refused;
+    if (backend.movedAway.value != null) return Link.moved;
     if (backend.connected.value) return Link.live;
     final tunnel = backend.tunnel.value;
     // Back from the background or a network change, it reconnects without
@@ -63,6 +68,7 @@ class Connection {
     backend.connectedSince,
     backend.reconnecting,
     backend.refused,
+    backend.movedAway,
     backend.tunnel,
   ]);
 
@@ -77,6 +83,10 @@ class Connection {
       machine == null ? 'Connecting…' : 'Connecting to $machine…',
     Link.failing => "Can't connect to $_name",
     Link.refused => "$_name doesn't allow this device",
+    Link.moved => switch (backend.movedAway.value?.to ?? '') {
+      '' => 'Moved to another computer',
+      final to => 'Moved to $to',
+    },
   };
 
   /// A word or two, beside a name that's already shown (a phone's rows).
@@ -86,6 +96,7 @@ class Connection {
       backend.reconnecting.value ? 'Reconnecting…' : 'Connecting…',
     Link.failing => "Can't connect",
     Link.refused => 'Not allowed',
+    Link.moved => 'Moved',
   };
 
   /// How it connects, and since when.
@@ -113,6 +124,11 @@ class Connection {
         };
       case Link.connecting:
         return 'Trying to reach $_name…';
+      case Link.moved:
+        final to = backend.movedAway.value?.to ?? '';
+        return 'This Claktory moved to '
+            '${to.isEmpty ? 'another computer' : to}. The copy it left here '
+            'doesn’t run.';
       case Link.failing || Link.refused:
         return tunnelAdvice(
           backend.tunnel.value ?? idleTunnel,
@@ -144,6 +160,7 @@ class ConnectionDot extends StatelessWidget {
         quiet ? Dot(color: palette.textFaint) : const SizedBox.shrink(),
       Link.connecting => const LiveDot(),
       Link.failing || Link.refused => Dot(color: palette.danger),
+      Link.moved => Dot(color: palette.textFaint),
     };
   }
 }

@@ -12,6 +12,7 @@ import 'connections.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/input.dart' show InputKind;
@@ -1004,7 +1005,8 @@ class _FactoryRow extends StatelessWidget {
 /// What this device is, for what it's told: "iPhone", "Mac", or on
 /// Android "phone" or "tablet" (from the display, not the window).
 String get thisDeviceKind => switch (defaultTargetPlatform) {
-  TargetPlatform.iOS => 'iPhone',
+  TargetPlatform.iOS =>
+    deviceCapabilities.idiom == Idiom.pad ? 'iPad' : 'iPhone',
   TargetPlatform.android => AndroidDeviceIdentity.forDisplayShortestSide(
     androidDisplayShortestSide(),
   ).noun,

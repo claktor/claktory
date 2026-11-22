@@ -52,6 +52,7 @@ use crate::config::{Config, RemoteConfig};
 use crate::encoding::{hex, unhex};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::home::Home;
+use crate::locking::lock;
 use crate::transcript::now_ms;
 
 /// The backend's protocol on iroh, the same in the app (app/rust).
@@ -213,6 +214,15 @@ pub struct Device {
     /// Claktory's account.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending_signed_in: bool,
+    /// What its app last said it is, from a Hello that named its system
+    /// (Hello.device_kind, platform and client_version): counted, never
+    /// named, in the account's check-ins (#119).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub app_kind: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_platform: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_version: String,
 }
 
 /// What a device made without a name is called until one uses its code.
@@ -289,7 +299,7 @@ fn remote_config(home: &Home) -> Result<Option<RemoteConfig>, RemoteError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let config = Config::parse(&text).map_err(|error| RemoteError::Config(path.clone(), error.to_string()))?;
+    let config = Config::parse(&text, home.root()).map_err(|error| RemoteError::Config(path.clone(), error.to_string()))?;
     Ok(config.remote)
 }
 
@@ -375,7 +385,8 @@ pub struct Identity {
 /// This Claktory's identity from config.json, away from the running Factory
 /// (defaults when the file is missing or broken).
 fn identity(home: &Home) -> Identity {
-    let config = std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text).ok()).unwrap_or_default();
+    let config =
+        std::fs::read_to_string(home.config_path()).ok().and_then(|text| Config::parse(&text, home.root()).ok()).unwrap_or_default();
     Identity { name: config.claktory_name(), color: config.claktory_color(key_color(home)).to_owned() }
 }
 
@@ -876,6 +887,10 @@ pub(crate) struct Knock<'a> {
     pub kind: v1::DeviceKind,
     /// Its own name (Hello.device_name), for a device that names itself.
     pub name: &'a str,
+    /// Its system and app version (Hello.platform, client_version); the
+    /// platform is empty from apps before it, and from tools.
+    pub platform: &'a str,
+    pub app_version: &'a str,
 }
 
 /// How long a device has to confirm it's the owner's, from its first Hello
@@ -1109,6 +1124,13 @@ fn admit(
         device.endpoint_id.clone_from(&peer.endpoint_id);
     }
     device.last_seen = Some(now);
+    // Only an app says its system: a tool on the loopback port (factoryd's
+    // own commands, QA) leaves this computer's app's as they were.
+    if !knock.platform.is_empty() {
+        device.app_kind = knock.kind as i32;
+        device.app_platform = knock.platform.chars().take(40).collect();
+        device.app_version = knock.app_version.chars().take(40).collect();
+    }
     device.last_address = peer.address.map(|address| address.ip().to_canonical().to_string()).unwrap_or_default();
     Admission::Connected { index, confirm_by }
 }
@@ -1147,10 +1169,6 @@ struct Shown {
     relay_connected: bool,
     /// How each connected device's connection travels, by its id.
     paths: HashMap<String, v1::DevicePath>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// n0's relays, which the tunnel uses unless config.json names others.
@@ -1554,6 +1572,7 @@ impl Factory {
                         // A device that never bound a key and has no code
                         // (paired before the tunnel) shows as expired.
                         code_expires_ms: if device.endpoint_id.is_empty() { device.code_expires.unwrap_or(device.created) } else { 0 },
+                        notifications: crate::notify::push::registered(self, &device.id),
                         id: device.id,
                         name: device.name,
                         paired_ms: device.created,
@@ -1703,6 +1722,8 @@ impl Factory {
         };
         self.close_device(&removed.id, &removed.endpoint_id);
         self.cancel_device_flows(&removed.id);
+        // And its notification key.
+        crate::notify::push::forget(self, &removed.id);
         self.refresh_remote();
         // Its zoom goes with it.
         if self.lock().config.display.zoom.contains_key(&removed.id)
@@ -2143,7 +2164,7 @@ mod tests {
     }
 
     fn knock<'a>(token: &'a str, assertion: &'a str, can_confirm: bool) -> Knock<'a> {
-        Knock { token, assertion, can_confirm, kind: v1::DeviceKind::Phone, name: "Matt's  iPhone" }
+        Knock { token, assertion, can_confirm, kind: v1::DeviceKind::Phone, name: "Matt's  iPhone", platform: "", app_version: "" }
     }
 
     fn tunnel(key: &str) -> Peer {

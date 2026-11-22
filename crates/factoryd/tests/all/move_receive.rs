@@ -556,8 +556,14 @@ async fn receive_lets_in_one_source_by_its_digits_and_never_writes_outside_what_
     let (mut wire, welcome) = Wire::again(&key, &code).await;
     assert!(matches!(welcome, Frame::Welcome { resumed: true, .. }), "{welcome:?}");
     wire.send(Frame::Cancel { why: "the person changed their mind".to_owned() }).await;
-    let text = tokio::time::timeout(WAIT, task).await.expect("in time").expect("joined").expect("over");
+    // Not moved: never a success (the installer would start an empty Claktory).
+    let ended = tokio::time::timeout(WAIT, task).await.expect("in time").expect("joined").expect_err("called off");
+    assert!(matches!(ended, factoryd::move_import::ImportError::CalledOff(_)), "{ended:?}");
+    assert_eq!(ended.exit_code(), 3);
+    let text = ended.to_string();
     assert!(text.contains("Old Mac called the move off. The person changed their mind. Nothing changed here."), "{text}");
+    let (line, code) = factoryd::cli::receive_json::end(&Err(ended));
+    assert_eq!((line["ok"].clone(), line["error"].clone(), code), (serde_json::json!(false), serde_json::json!("called_off"), 3));
     assert!(!here.root().join("import").exists() && factoryd::move_import::unfinished(&here).is_none());
 }
 

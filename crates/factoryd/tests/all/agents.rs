@@ -97,9 +97,9 @@ async fn compaction_shows_a_divider_continues_from_the_summary_and_reloads_ident
     }
     // The scripted model reports 1200 tokens of context per reply.
     let config_path = dir.join("home/config.json");
-    let mut config = Config::parse(&std::fs::read_to_string(&config_path).expect("read")).expect("parse");
+    let mut config = Config::parse(&std::fs::read_to_string(&config_path).expect("read"), &dir.join("home")).expect("parse");
     config.compact_at_tokens = 1_000;
-    std::fs::write(&config_path, config.to_json().expect("json")).expect("write");
+    std::fs::write(&config_path, config.to_json(&dir.join("home")).expect("json")).expect("write");
     view.follow(&mut client, |view| view.agent("builder").compact_at_tokens == 1_000).await;
 
     for event in client.ok(send_message("builder", "first")).await {
@@ -575,7 +575,7 @@ async fn a_rivet_prompt_nobody_edited_follows_the_default() {
     config.agents[0].model = MODEL.into();
     config.agents[0].effort = "off".into();
     std::fs::create_dir_all(dir.join("home")).expect("home");
-    std::fs::write(dir.join("home/config.json"), config.to_json().expect("json")).expect("config");
+    std::fs::write(dir.join("home/config.json"), config.to_json(&dir.join("home")).expect("json")).expect("config");
 
     let models = Scripted::signed_in();
     let system_prompt = models.system_prompt.clone();
@@ -584,7 +584,7 @@ async fn a_rivet_prompt_nobody_edited_follows_the_default() {
     let rivet = &workspace.agents[0];
     assert_eq!(rivet.prompt, current, "an old default became this version's");
     assert_eq!(rivet.default_prompt, current);
-    let written = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    let written = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
     assert_eq!(written.agents[0].prompt, current, "saved with its placeholders");
 
     // The placeholders are filled in for the person.
@@ -614,11 +614,12 @@ async fn a_rivet_prompt_nobody_edited_follows_the_default() {
     assert_eq!(view.agent("rivet").prompt, current);
 
     // Pasting an old default into the file follows too.
-    let mut config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    let mut config =
+        Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
     config.agents[0].prompt = old;
-    std::fs::write(dir.join("home/config.json"), config.to_json().expect("json")).expect("config");
+    std::fs::write(dir.join("home/config.json"), config.to_json(&dir.join("home")).expect("json")).expect("config");
     let saved = || {
-        Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"))
+        Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home"))
             .ok()
             .map(|config| config.agents[0].prompt.clone())
     };

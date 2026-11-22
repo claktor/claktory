@@ -6,6 +6,8 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Vault backups (`vault/backup.rs`): age, to an X25519 or SSH key.
+age = { version = "0.12", features = ["ssh"] }
 # The tunnel's compressed streams (`claktory/2`, remote.rs): zstd, as the app's.
 async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 # AWS connections' receipts (connectors/aws_stack.rs): RSA-OAEP and AES-GCM;
@@ -46,6 +48,8 @@ rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
 rustls = { version = "0.23", features = ["ring"] }
 scraper = "0.29"
 serde = { version = "1.0.229", features = ["derive"] }
+# Keys the vault generates (`vault/generate.rs`, #252): OpenSSH's formats, ed25519.
+ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["std", "ed25519", "getrandom"] }
 serde_json = "1.0.154"
 sha2 = "0.11"
 similar = { version = "3.2.1", default-features = false, features = ["std"] }
@@ -53,6 +57,8 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync", "process", "signal"] }
 tokio-tungstenite = "0.30.0"
+# Vault backups hold a tar (`vault/backup.rs`).
+tar = "0.4"
 # The person's initials (person.rs), by grapheme; already linked through iroh.
 unicode-segmentation = "1"
 tokio-util = "0.7.20"

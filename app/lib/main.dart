@@ -12,6 +12,8 @@ import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'links.dart' show appLinks;
 import 'mobile/device.dart' show loadDeviceCapabilities;
 import 'mobile/platform_policy.dart';
+import 'mobile/push.dart' show HttpPushRelay, IosPushDevice, PushRegistrar;
+import 'notifications.dart';
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
@@ -141,11 +143,34 @@ class _FactoryAppState extends State<FactoryApp> {
     }
   }
 
+  /// A Mac (and an iPhone, through the same channel) shows each
+  /// Claktory's notifications while the person isn't using it
+  /// (notifications.dart).
+  ClaktoryNotifications? _notifications;
+
   @override
   void initState() {
     super.initState();
     _startSetup();
+    if (defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      _notifications = ClaktoryNotifications(
+        claktories: _claktories,
+        system: MacNotifications(),
+      );
+    }
+    // An iPhone registers with each Claktory for pushes, once the person
+    // allows notifications (mobile/push.dart).
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      _pushes = PushRegistrar.current = PushRegistrar(
+        claktories: _claktories,
+        device: IosPushDevice(),
+        relay: HttpPushRelay(),
+      );
+    }
   }
+
+  PushRegistrar? _pushes;
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -174,6 +199,8 @@ class _FactoryAppState extends State<FactoryApp> {
     _window.remove();
     _window.dispose();
     _setup?.dispose();
+    _notifications?.dispose();
+    _pushes?.dispose();
     _claktories.dispose();
     for (final focus in _focuses.values) {
       focus.dispose();

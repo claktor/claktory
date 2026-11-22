@@ -55,7 +55,7 @@ async fn an_archived_projects_agents_stop_and_wait_and_come_back_as_they_were() 
     assert!(view.workspace.agents.iter().any(|agent| agent.id == "scout"), "its agents are still listed");
     assert!(!on_map(&view, "agent:builder") && !on_map(&view, "agent:scout") && !on_map(&view, "project:site"));
     assert_eq!(view.workspace.focused_project_id, "");
-    let saved = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("valid");
+    let saved = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
     assert!(saved.project("site").expect("site").archived, "kept in config.json");
 
     // What's sent to it waits, without waking it.

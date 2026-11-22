@@ -227,34 +227,31 @@ void main() {
     expect(find.byType(Sidebar), findsOneWidget);
   });
 
-  testWidgets('what needs the person leads the drawer', (tester) async {
+  testWidgets('Needs you leads the drawer as on a Mac: one row with the '
+      'count, which pushes the Needs you page', (tester) async {
     final snapshot = workspace();
     snapshot.agents[1].waitingSeqs.add(Int64(7));
     final harness = await _show(tester, snapshot);
     await tester.tap(menuButton());
     await pumpFrames(tester);
     expect(_inDrawer('Needs you'), findsOneWidget);
-    // Mike twice: under Needs you, and in his project.
-    expect(_inDrawer('Mike'), findsNWidgets(2));
-    final needsYou = tester.getTopLeft(_inDrawer('Needs you')).dy;
-    final rows = _inDrawer('Mike').evaluate().toList();
-    expect(
-      tester.getTopLeft(find.byWidget(rows.first.widget)).dy,
-      greaterThan(needsYou),
+    // Mike once, in his project: the row counts what waits, it doesn't
+    // list who.
+    expect(_inDrawer('Mike'), findsOneWidget);
+    final row = find.ancestor(
+      of: _inDrawer('Needs you'),
+      matching: find.byKey(const ValueKey('needs-you')),
     );
-    await tester.tap(find.byWidget(rows.first.widget));
-    await pumpFrames(tester);
-    expect(harness.last.selectAgent.agentId, 'mike');
-    expect(find.byType(Sidebar), findsNothing);
-
-    // See all: every card waiting, on the Needs you page, with Back.
-    await tester.tap(menuButton());
-    await pumpFrames(tester);
-    final seeAll = find.bySemanticsLabel(RegExp('See everything that needs you'));
-    // As tall as the drawer's rows of one line, a finger wide.
-    expect(tester.getSize(seeAll).height, greaterThanOrEqualTo(36));
-    expect(tester.getSize(seeAll).width, greaterThanOrEqualTo(44));
-    await tester.tap(seeAll);
+    expect(tester.getSize(row).height, greaterThanOrEqualTo(44));
+    expect(
+      tester.getTopLeft(_inDrawer('Needs you')).dy,
+      lessThan(tester.getTopLeft(_inDrawer('Mike')).dy),
+    );
+    expect(
+      find.bySemanticsLabel(RegExp('Something is waiting for your answer')),
+      findsOneWidget,
+    );
+    await tester.tap(_inDrawer('Needs you'));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
     expect(find.byType(InboxView), findsOneWidget);
@@ -263,6 +260,13 @@ void main() {
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.agent);
     expect(find.byType(AgentView), findsOneWidget);
+  });
+
+  testWidgets('nothing waiting: no Needs you in the drawer', (tester) async {
+    await _show(tester, workspace());
+    await tester.tap(menuButton());
+    await pumpFrames(tester);
+    expect(_inDrawer('Needs you'), findsNothing);
   });
 
   testWidgets("a pipe opens in the conversation's place, with the Menu", (

@@ -193,10 +193,13 @@ pub async fn resolve_account_auth(
     if cancel.is_cancelled() {
         return Err(Error::Aborted);
     }
-    let accounts = store
-        .accounts(provider.id)
-        .await
-        .map_err(|error| models_error("auth", format!("Credential store read failed for {}", provider.id), Some(&error)))?;
+    let accounts = store.accounts(provider.id).await.map_err(|error| {
+        if error.is_locked() {
+            error
+        } else {
+            models_error("auth", format!("Credential store read failed for {}", provider.id), Some(&error))
+        }
+    })?;
     let stored = match account {
         Some(id) => match accounts.into_iter().find(|stored| stored.id == id) {
             Some(stored) => Some(stored),

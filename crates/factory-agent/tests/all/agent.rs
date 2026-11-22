@@ -390,7 +390,14 @@ async fn what_arrives_while_the_agent_works_is_read_between_steps() {
             Ok(stream)
         })
     };
-    let event = Event { source: EventSource::Task, from: "task-1".into(), id: "task-1".into(), summary: String::new(), transient: false };
+    let event = Event {
+        source: EventSource::Task,
+        from: "task-1".into(),
+        id: "task-1".into(),
+        summary: String::new(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+    };
     let mut arrivals = vec![Vec::new(), vec![UserMessage::text("and also this", 2)], vec![UserMessage::event("task-1 finished", event, 1)]];
     let arrivals = Arc::new(Mutex::new(std::mem::take(&mut arrivals)));
     let mut options = options(dir.path(), stream);

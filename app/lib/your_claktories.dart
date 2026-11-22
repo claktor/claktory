@@ -3,7 +3,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
-import 'account.dart' show CodeBoxes, codeLength, looksLikeEmail;
+import 'account.dart'
+    show
+        CodeBoxes,
+        PrivacyLink,
+        accountSiteName,
+        codeLength,
+        looksLikeEmail,
+        openDeleteAccountPage;
 import 'backend.dart' show Backend, RequestFailure;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
@@ -254,6 +261,8 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
               StepButtons(children: [send])
             else
               Align(alignment: Alignment.centerRight, child: send),
+            SizedBox(height: isPhoneLayout(context) ? Space.s : Space.l),
+            const PrivacyLink(),
           ],
         );
       },
@@ -350,12 +359,22 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
 /// connect to after one confirmation; signed out, the sign-in. [onConnect]
 /// connects to the one picked (by default it shows in the window).
 class YourClaktories extends StatefulWidget {
-  const YourClaktories({super.key, this.onConnect, this.hideConnected = false});
+  const YourClaktories({
+    super.key,
+    this.onConnect,
+    this.hideConnected = false,
+    this.offerDelete = false,
+  });
 
   final void Function(RemoteFactory target)? onConnect;
 
   /// Leaves out the ones this app shows already (listed beside it).
   final bool hideConnected;
+
+  /// Offers Delete account… under Sign out: where this is the only place
+  /// the account shows (a phone with no Claktory yet), so an account made
+  /// here can be deleted here too (App Store 5.1.1(v)).
+  final bool offerDelete;
 
   @override
   State<YourClaktories> createState() => _YourClaktoriesState();
@@ -574,6 +593,43 @@ class _YourClaktoriesState extends State<YourClaktories> {
               signOut,
             ],
           ),
+        if (widget.offerDelete) ...[
+          const SizedBox(height: Space.xl),
+          _deleteAccount(context, account),
+        ],
+      ],
+    );
+  }
+
+  /// Last and apart, since it can't be undone: the account site asks once
+  /// more before it deletes anything.
+  Widget _deleteAccount(BuildContext context, DeviceAccount account) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final button = Button(
+      label: 'Delete account…',
+      onPressed: () => openDeleteAccountPage(account.service),
+    );
+    final words = Text(
+      'Deletes your email and everything linked to it at '
+      '${accountSiteName(account.service)}, after asking.',
+      style: type.caption.copyWith(color: palette.textFaint),
+    );
+    if (isPhoneLayout(context)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          button,
+          const SizedBox(height: Space.s),
+          words,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        button,
+        const SizedBox(width: Space.m),
+        Expanded(child: words),
       ],
     );
   }

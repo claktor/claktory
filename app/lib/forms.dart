@@ -16,7 +16,15 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
 import 'pipes.dart'
-    show ConnectPipeForm, PortalGlyph, openPipe, pipeStatus, pipesIn;
+    show
+        ConnectPipeForm,
+        PortalGlyph,
+        openPipe,
+        pipeColor,
+        pipeLimitText,
+        pipeStatus,
+        pipesIn,
+        pipesLimiting;
 import 'settings_view.dart';
 import 'state.dart';
 
@@ -251,8 +259,62 @@ class FormFrame extends StatelessWidget {
       onTap: onSubmit,
       primary: true,
     );
-    // At the largest text sizes the title goes under Cancel and the action.
-    final stacked = largeText(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // At the largest text sizes, or when Cancel or the action wouldn't
+        // fit in its quarter of the bar ("I've saved it" on a small
+        // iPhone), the title goes under them and each has half the bar,
+        // so no word is cut short.
+        final stacked =
+            largeText(context) ||
+            !_fitsBar(context, cancelLabel, constraints.maxWidth / 4) ||
+            !_fitsBar(context, submitLabel, constraints.maxWidth / 4);
+        return _phoneFormBody(
+          context,
+          palette,
+          type,
+          body: body,
+          error: error,
+          secondary: secondary,
+          heading: heading,
+          cancel: cancel,
+          action: action,
+          stacked: stacked,
+        );
+      },
+    );
+  }
+
+  /// Whether [label] fits a bar button [width] wide, at the bar's text
+  /// size (clamped at ×1.5, as the bar is).
+  static bool _fitsBar(BuildContext context, String label, double width) {
+    final scaler = MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.5);
+    final painter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: PhoneType.label.copyWith(fontWeight: FontWeight.w600),
+      ),
+      textScaler: scaler,
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final fits = painter.width + 2 * Space.s <= width;
+    painter.dispose();
+    return fits;
+  }
+
+  Widget _phoneFormBody(
+    BuildContext context,
+    Palette palette,
+    TypeScale type, {
+    required String? body,
+    required String? error,
+    required Widget? secondary,
+    required Widget heading,
+    required Widget cancel,
+    required Widget action,
+    required bool stacked,
+  }) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -260,10 +322,12 @@ class FormFrame extends StatelessWidget {
         // Like iOS's bar, its buttons grow with the text only so far.
         MediaQuery.withClampedTextScaling(
           maxScaleFactor: 1.5,
+          // Stacked, each has half the bar.
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Flexible(child: cancel),
-              stacked ? const Spacer() : Expanded(flex: 2, child: heading),
+              if (!stacked) Expanded(flex: 2, child: heading),
               Flexible(child: action),
             ],
           ),
@@ -1885,8 +1949,12 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                     'Message ${_name.text.trim().isEmpty ? agent.name : _name.text.trim()}',
               ),
             ),
+            // Limited to a pipe, its secrets and extensions are off: why,
+            // above them.
+            if (_current.quarantined)
+              _PipeLimitNote(agent: _current, workspace: workspace),
             // Above the extensions, so it's in sight: which secrets it has.
-            AgentSecretsField(agent: agent),
+            AgentSecretsField(agent: _current),
             if (workspace.extensions.isNotEmpty)
               Field(
                 label: 'Extensions',
@@ -1900,6 +1968,9 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                           workspace: workspace,
                           agentId: agent.id,
                           projectId: _project,
+                          // Ask is all a pipe's limit leaves it.
+                          limited:
+                              _current.quarantined && extension.id != 'ask',
                           enabled: _enabled[extension.id] ?? saved.enabled,
                           value: (option) =>
                               _options[extension.id]?[option] ??
@@ -1961,6 +2032,7 @@ List<Agent> leadCandidates(
 bool _sameValue(OptionValue a, OptionValue? b) {
   b ??= OptionValue();
   return a.on == b.on &&
+      a.choice == b.choice &&
       a.agentIds.toSet().containsAll(b.agentIds) &&
       b.agentIds.toSet().containsAll(a.agentIds);
 }
@@ -1977,6 +2049,7 @@ class _ExtensionSettings extends StatelessWidget {
     required this.value,
     required this.onEnabled,
     required this.onOption,
+    this.limited = false,
   });
 
   final Extension extension;
@@ -1986,6 +2059,10 @@ class _ExtensionSettings extends StatelessWidget {
   /// The agent's project as the form has it.
   final String projectId;
   final bool enabled;
+
+  /// Off while the agent is limited to a pipe: greyed, its options hidden,
+  /// nothing to change.
+  final bool limited;
   final OptionValue Function(String optionId) value;
   final ValueChanged<bool> onEnabled;
   final void Function(String optionId, OptionValue value) onOption;
@@ -2007,13 +2084,13 @@ class _ExtensionSettings extends StatelessWidget {
             leading: ExtensionGlyph(
               icon: extension.icon,
               name: extension.name,
-              color: enabled ? palette.text : palette.textMuted,
+              color: enabled && !limited ? palette.text : palette.textMuted,
             ),
             label: extension.name,
             description: extension.description,
             strong: true,
             value: enabled,
-            onChanged: onEnabled,
+            onChanged: limited ? null : onEnabled,
           ),
           // Given secrets work whether or not it's on: say which it has.
           if (extension.id == 'secrets')
@@ -2024,7 +2101,7 @@ class _ExtensionSettings extends StatelessWidget {
               ),
               child: AgentSecretsSummary(agentId: agentId),
             ),
-          if (enabled)
+          if (enabled && !limited)
             for (final option in extension.options)
               Padding(
                 padding: const EdgeInsets.only(
@@ -2050,6 +2127,13 @@ class _ExtensionSettings extends StatelessWidget {
                       onChanged: (on) =>
                           onOption(option.id, OptionValue(on: on)),
                     ),
+                  ExtensionOptionKind.EXTENSION_OPTION_KIND_CHOICE =>
+                    _ChoiceRow(
+                      option: option,
+                      value: value(option.id).choice,
+                      onChanged: (choice) =>
+                          onOption(option.id, OptionValue(choice: choice)),
+                    ),
                   // A kind from a newer backend: say so rather than guess.
                   _ => Text(
                     '${option.label}: needs a newer Claktory',
@@ -2060,6 +2144,114 @@ class _ExtensionSettings extends StatelessWidget {
               ),
         ],
       ),
+    );
+  }
+}
+
+/// Above an agent's secrets while it's limited to a pipe (Agent.quarantined):
+/// what it can still do, and that its secrets and extensions are off until
+/// the person lets it run commands in the pipe's settings.
+class _PipeLimitNote extends StatelessWidget {
+  const _PipeLimitNote({required this.agent, required this.workspace});
+
+  final Agent agent;
+  final Workspace workspace;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: Space.l),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 2),
+          child: ExcludeSemantics(
+            child: PortalGlyph(color: pipeColor, size: 12),
+          ),
+        ),
+        const SizedBox(width: Space.xs + 2),
+        Expanded(
+          child: Text(
+            pipeLimitNote(pipesLimiting(workspace, agent.id)),
+            style: TypeScale.of(context).caption
+                .copyWith(color: Palette.of(context).textMuted),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Why an agent limited to [pipes] has its secrets and extensions off.
+String pipeLimitNote(List<Pipe> pipes) => pipes.length < 2
+    ? '${pipes.isEmpty ? 'Limited to a pipe' : pipeLimitText(pipes)}: it can '
+          'only read and answer it, and ask you. Its secrets and extensions '
+          "are off until you let it run commands in the pipe's settings."
+    : '${pipeLimitText(pipes)}: it can only read and answer them, and ask '
+          'you. Its secrets and extensions are off until you let it run '
+          'commands in their settings.';
+
+/// An option that's one of a few (ExtensionOption.choices): its label and
+/// description beside a select of them, the default while none is set;
+/// on a phone the select goes under the words.
+class _ChoiceRow extends StatelessWidget {
+  const _ChoiceRow({
+    required this.option,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final ExtensionOption option;
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final chosen = value.isEmpty ? option.defaultChoice : value;
+    final select = Select<String>(
+      value: chosen,
+      options: [
+        // One the catalog doesn't list (a newer Claktory's), as it is.
+        if (!option.choices.any((choice) => choice.value == chosen))
+          SelectOption(chosen, chosen),
+        for (final choice in option.choices)
+          SelectOption(choice.value, choice.label),
+      ],
+      onChanged: onChanged,
+    );
+    final words = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          option.label,
+          style: TypeScale.of(context).body.copyWith(color: palette.text),
+        ),
+        if (option.description.isNotEmpty)
+          Text(
+            option.description,
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+      ],
+    );
+    if (isPhoneLayout(context)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          words,
+          const SizedBox(height: Space.xs),
+          select,
+        ],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: words),
+        const SizedBox(width: Space.m),
+        SizedBox(width: 180, child: select),
+      ],
     );
   }
 }
@@ -2078,7 +2270,9 @@ class _SwitchRow extends StatelessWidget {
   final String label;
   final String description;
   final bool value;
-  final ValueChanged<bool> onChanged;
+
+  /// Null greys it: it can't be changed now.
+  final ValueChanged<bool>? onChanged;
   final Widget? leading;
 
   /// The extension itself rather than one of its options.
@@ -2104,13 +2298,20 @@ class _SwitchRow extends StatelessWidget {
                     (strong
                             ? TypeScale.of(context).label
                             : TypeScale.of(context).body)
-                        .copyWith(color: palette.text),
+                        .copyWith(
+                          color: onChanged == null
+                              ? palette.textMuted
+                              : palette.text,
+                        ),
               ),
               if (description.isNotEmpty)
                 Text(
                   description,
-                  style: TypeScale.of(context).caption
-                      .copyWith(color: palette.textMuted),
+                  style: TypeScale.of(context).caption.copyWith(
+                    color: onChanged == null
+                        ? palette.textFaint
+                        : palette.textMuted,
+                  ),
                 ),
             ],
           ),

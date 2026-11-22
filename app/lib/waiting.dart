@@ -118,4 +118,23 @@ class EntryReveal extends ValueNotifier<EntryTarget?> {
   void used(EntryTarget target) {
     if (value == target) value = null;
   }
+
+  /// An item of a conversation's timeline that isn't one of its entries
+  /// (TranscriptView.extras: a pipe's message among its liaison's
+  /// conversation), by its key, to open [agentId]'s conversation at,
+  /// however far back.
+  ({String agentId, Object key})? get extra => _extra;
+  ({String agentId, Object key})? _extra;
+
+  /// Opens [agentId]'s conversation at its timeline item [key].
+  void reachExtra(String agentId, Object key) {
+    _extra = (agentId: agentId, key: key);
+    notifyListeners();
+  }
+
+  /// Done with the item [extra] named: the conversation is there, or it
+  /// can't be.
+  void usedExtra(({String agentId, Object key}) target) {
+    if (_extra == target) _extra = null;
+  }
 }

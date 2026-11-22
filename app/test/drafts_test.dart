@@ -163,6 +163,16 @@ void main() {
     expect(drafts.of('chat:c1'), 'Ask');
   });
 
+  test("a pipe's draft stays while the pipe does", () async {
+    final storage = MemoryDraftStorage()
+      ..saved = {'pipe:p1': 'To Ana', 'pipe:gone': 'Lost'};
+    final drafts = await Drafts.load(storage);
+    final store = WorkspaceStore();
+    drafts.watch(store);
+    store.apply(Workspace(pipes: [Pipe(id: 'p1')]));
+    expect(storage.saved, {'pipe:p1': 'To Ana'});
+  });
+
   testWidgets('on the device, drafts go to the native side', (tester) async {
     const channel = MethodChannel('factory/device');
     Map<Object?, Object?> kept = {'a1': 'Saved'};

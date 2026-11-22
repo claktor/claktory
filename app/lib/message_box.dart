@@ -54,6 +54,11 @@ abstract class MessageTarget {
   /// Why nothing can be sent now, and what can be done; null when it can.
   MessageBlocked? blocked(BuildContext context) => null;
 
+  /// The color Send is filled with while the box writes to this target,
+  /// in place of signal, with white on it: a pipe's, so what goes out to
+  /// another Claktory looks it. Null for signal.
+  Color? get accent => null;
+
   /// Sends [text] with [files] (from the box, taken out of it), or a
   /// voice message ([voice], its length; [text] empty, the recording in
   /// [files]). It should show at once and say if it fails, as an agent's
@@ -222,9 +227,20 @@ class _MessageBoxState extends State<MessageBox> {
   /// Settings.
   var _micDenied = false;
 
+  /// What the mic says on a phone that can't record voice messages.
+  static const noVoiceHere =
+      "You can't record voice messages on this phone yet.";
+
   /// Starts recording from a phone's mic, as [_record] does, saying how to
   /// give the microphone back when it's off.
   Future<bool> _startPhoneVoice() async {
+    // A phone with no recorder yet (Android, for now) says so at once,
+    // before anything asks to download the speech model.
+    if (await deviceRecorder.access() == MicAccess.unavailable) {
+      if (mounted) setState(() => _error = noVoiceHere);
+      return false;
+    }
+    if (!mounted) return false;
     final model = AppScope.of(context).workspace.workspace.speechModel;
     if (voiceUnavailable(model) case final why?) {
       setState(() => _error = why);
@@ -303,12 +319,12 @@ class _MessageBoxState extends State<MessageBox> {
       voice: recording.duration,
     );
     // A phone's keyboard stays down: it wasn't up for a voice message.
-    if (!_phoneVoice.active && !isPhoneLayout(context)) _focus.requestFocus();
+    if (!_phoneVoice.active && !touchFirst(context)) _focus.requestFocus();
   }
 
   Future<void> _cancelVoice() async {
     await _voice.cancel();
-    if (mounted && !isPhoneLayout(context)) _focus.requestFocus();
+    if (mounted && !touchFirst(context)) _focus.requestFocus();
   }
 
   /// The recording stopped by itself: at its time limit (or a call, on an
@@ -507,7 +523,9 @@ class _MessageBoxState extends State<MessageBox> {
       unawaited(_voice.cancel());
       _text.value = _draftValue(widget.target.key);
       _error = null;
-      _focus.requestFocus();
+      // A touch screen's keyboard stays down: it would cover the
+      // conversation just chosen.
+      if (!touchFirst(context)) _focus.requestFocus();
     }
   }
 
@@ -721,6 +739,7 @@ class _MessageBoxState extends State<MessageBox> {
       row = ListenableBuilder(
         listenable: Listenable.merge([_text, backend.attachments, _phoneVoice]),
         builder: (context, _) => PhoneComposerRow(
+          accent: target.accent,
           onAttach: target.takesFiles ? _pick : null,
           canSend:
               !_phoneVoice.active &&
@@ -733,8 +752,8 @@ class _MessageBoxState extends State<MessageBox> {
           primary: !voice
               ? null
               : switch (_phoneVoice.mode) {
-                  PhoneVoiceMode.locked ||
-                  PhoneVoiceMode.paused => PhoneVoiceSend(voice: _phoneVoice),
+                  PhoneVoiceMode.locked || PhoneVoiceMode.paused =>
+                    PhoneVoiceSend(voice: _phoneVoice, accent: target.accent),
                   _ => PhoneMicButton(
                     key: const ValueKey('mic'),
                     voice: _phoneVoice,
@@ -832,7 +851,9 @@ class _MessageBoxState extends State<MessageBox> {
             phone ? Space.s : Space.xl,
             Space.s,
             phone ? Space.s : Space.xl,
-            phone ? Space.s : Space.l,
+            // On an iPad the conversation runs under the home indicator
+            // (ipad/workbench.dart): the box stays above it. 0 on a Mac.
+            (phone ? Space.s : Space.l) + MediaQuery.paddingOf(context).bottom,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -912,9 +933,10 @@ class _MessageBoxState extends State<MessageBox> {
                                             focusNode: _focus,
                                             placeholder: target.placeholder,
                                             semanticsLabel: target.label,
-                                            // On a phone the keyboard would
-                                            // cover the conversation at once.
-                                            autofocus: !phone,
+                                            // On a touch screen (a phone, an
+                                            // iPad) the keyboard would cover
+                                            // the conversation at once.
+                                            autofocus: !touchFirst(context),
                                             minLines: 1,
                                             maxLines: 12,
                                             bordered: false,

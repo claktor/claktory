@@ -65,6 +65,26 @@ Future<DeviceKind> deviceKindOf(
   }
 }
 
+/// The system this app runs on, told to the backend in every Hello, for
+/// the counts of how people reach Claktory in its check-ins: "ios",
+/// "ipados", "android", "macos", "linux" or "windows". Worked out once.
+Future<String> thisPlatformForHello() async =>
+    platformOf(defaultTargetPlatform, await thisDeviceKindForHello());
+
+/// [platform]'s name for the backend; an iPad's ([kind] a tablet) is
+/// iPadOS. Empty for a system Claktory doesn't run on.
+@visibleForTesting
+String platformOf(TargetPlatform platform, DeviceKind kind) =>
+    switch (platform) {
+      TargetPlatform.iOS =>
+        kind == DeviceKind.DEVICE_KIND_TABLET ? 'ipados' : 'ios',
+      TargetPlatform.android => 'android',
+      TargetPlatform.macOS => 'macos',
+      TargetPlatform.linux => 'linux',
+      TargetPlatform.windows => 'windows',
+      TargetPlatform.fuchsia => '',
+    };
+
 double _shortestSide() {
   final views = PlatformDispatcher.instance.views;
   if (views.isEmpty) return 0;

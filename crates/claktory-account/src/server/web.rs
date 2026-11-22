@@ -1,13 +1,14 @@
 //! claktory.com/account: sign in with an emailed code, see your Claktories
-//! and their recent unlocks, remove one, download your data or delete the
-//! account. Plain HTML forms, no scripts.
+//! and their recent unlocks, remove one, see and remove what agents may use
+//! in the account's apps, download your data or delete the account. Plain
+//! HTML forms, no scripts.
 
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Method, StatusCode};
 
 use super::api::{check_code, new_code, sign_in_limits, start};
 use super::mail::{escape, format_time};
-use super::{ApiError, Call, Reply, Service, db};
+use super::{ApiError, Call, Reply, Service, apps, db};
 use crate::protocol::{b64, normalize_email, random_32};
 
 const COOKIE: &str = "claktory_account";
@@ -17,12 +18,13 @@ const SESSION: i64 = 3600;
 pub(super) async fn page(service: &Service, call: &Call) -> Reply {
     let form = Form::parse(call);
     let result = match (&call.method, call.path.as_str()) {
-        (&Method::GET, "/account") => Ok(home(service, call, None)),
+        (&Method::GET, "/account") => Ok(account_home(service, call).await),
         (&Method::POST, "/account/sign-in") => sign_in(service, call, &form).await,
         (&Method::POST, "/account/verify") => verify(service, call, &form),
         (&Method::POST, "/account/remove") => remove(service, call, &form),
         (&Method::POST, "/account/remove-device") => remove_device(service, call, &form),
-        (&Method::POST, "/account/delete") => delete(service, call, &form),
+        (&Method::POST, "/account/remove-grant") => remove_grant(service, call, &form).await,
+        (&Method::POST, "/account/delete") => delete(service, call, &form).await,
         (&Method::GET, "/account/delete") => Ok(delete_page(service, call)),
         (&Method::POST, "/account/sign-out") => Ok(sign_out(service, call)),
         (&Method::GET, "/account/data") => data(service, call),
@@ -84,7 +86,18 @@ fn checked_session(service: &Service, call: &Call, form: &Form) -> Option<String
     (!csrf.is_empty() && form.get("csrf") == csrf).then_some(email)
 }
 
-fn home(service: &Service, call: &Call, notice: Option<&str>) -> Reply {
+/// The account page, with what agents may use in the account's apps (which
+/// the user-apps worker keeps).
+async fn account_home(service: &Service, call: &Call) -> Reply {
+    let account = session(service, call).and_then(|(_, email, _)| db::account_by_email(&service.db(), &email).ok().flatten());
+    let grants = match &account {
+        Some(account) => Some(apps::account_grants(service, &account.id).await),
+        None => None,
+    };
+    home(service, call, None, grants.as_ref())
+}
+
+fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&apps::Shown>) -> Reply {
     let notice = notice.map(|text| format!("<p class=\"notice\">{}</p>", escape(text))).unwrap_or_default();
     let Some((_, email, csrf)) = session(service, call) else {
         return sign_in_page(&notice, "", Next::Account);
@@ -142,6 +155,9 @@ fn home(service: &Service, call: &Call, notice: Option<&str>) -> Reply {
             })
             .collect();
         body.push_str(&format!("<section><h2>Devices signed in</h2><ul class=\"devices\">{items}</ul></section>"));
+    }
+    if let Some(grants) = grants {
+        body.push_str(&grants_section(grants, &claktories, &csrf, service.now()));
     }
     if service.config.admins.contains(&email) {
         body.push_str("<p><a href=\"/account/admin\">Usage counts</a></p>");
@@ -226,7 +242,7 @@ fn plural(count: i64, noun: &str) -> String {
 /// The usage counts, for whoever runs the service.
 fn admin(service: &Service, call: &Call) -> Reply {
     let Some((_, email, _)) = session(service, call).filter(|(_, email, _)| service.config.admins.contains(email)) else {
-        return home(service, call, None);
+        return home(service, call, None, None);
     };
     let report = match super::stats::report(&service.db(), service.now()) {
         Ok(report) => report,
@@ -415,14 +431,14 @@ fn verify(service: &Service, _call: &Call, form: &Form) -> Result<Reply, ApiErro
 }
 
 fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
-    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None)) };
+    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
     let conn = service.db();
     let account = db::account_by_email(&conn, &email)?;
     let claktory = db::claktory(&conn, form.get("claktory"))?
         .filter(|claktory| claktory.revoked_at.is_none() && account.as_ref().is_some_and(|account| account.id == claktory.account_id));
     let (Some(account), Some(claktory)) = (account, claktory) else {
         drop(conn);
-        return Ok(home(service, call, None));
+        return Ok(home(service, call, None, None));
     };
     if form.get("confirm") != "yes" {
         return Ok(html(
@@ -444,14 +460,14 @@ fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
 }
 
 fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
-    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None)) };
+    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
     let mut conn = service.db();
     let account = db::account_by_email(&conn, &email)?;
     let device =
         db::device(&conn, form.get("device"))?.filter(|device| account.as_ref().is_some_and(|account| account.id == device.account_id));
     let (Some(account), Some(device)) = (account, device) else {
         drop(conn);
-        return Ok(home(service, call, None));
+        return Ok(home(service, call, None, None));
     };
     if form.get("confirm") != "yes" {
         return Ok(html(
@@ -474,14 +490,111 @@ fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
     Ok(redirect(None))
 }
 
-fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
-    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None)) };
-    let Some(account) = db::account_by_email(&service.db(), &email)? else { return Ok(home(service, call, None)) };
+/// An app's name, as the account page says it.
+fn app_name(app: &str) -> &str {
+    match app {
+        "dms" => "Direct messages",
+        other => other,
+    }
+}
+
+/// Scopes in the order the account page lists them.
+const SCOPES: &[&str] = &["dm.read", "dm.draft", "dm.send", "dm.subscribe"];
+
+/// What a scope lets an agent do, as the account page says it.
+fn scope_words(scope: &str) -> &str {
+    match scope {
+        "dm.read" => "read",
+        "dm.draft" => "write drafts",
+        "dm.send" => "send",
+        "dm.subscribe" => "hear of new messages",
+        other => other,
+    }
+}
+
+/// What agents on the account's Claktories may use in its apps, each with
+/// Remove; nothing when there's none, or no apps run here.
+fn grants_section(grants: &apps::Shown, claktories: &[db::Claktory], csrf: &str, now: i64) -> String {
+    let listed = match grants {
+        apps::Shown::NoApps => return String::new(),
+        apps::Shown::Unavailable => {
+            return "<section><h2>Agents' access</h2><p class=\"muted\">Can't show agents' access right now. Try again later.</p></section>"
+                .to_owned();
+        }
+        apps::Shown::Listed(listed) if listed.is_empty() => return String::new(),
+        apps::Shown::Listed(listed) => listed,
+    };
+    let items: String = listed
+        .iter()
+        .map(|grant| {
+            let claktory = claktories
+                .iter()
+                .find(|claktory| claktory.id == grant.claktory_id)
+                .map_or("a Claktory", |claktory| claktory.display_name.as_deref().unwrap_or(&claktory.name));
+            // In the order the app lists its scopes, not by name.
+            let mut scopes: Vec<&String> = grant.scopes.iter().collect();
+            scopes.sort_by_key(|scope| SCOPES.iter().position(|known| known == scope).unwrap_or(SCOPES.len()));
+            let can: Vec<&str> = scopes.into_iter().map(|scope| scope_words(scope)).collect();
+            let reaches = match grant.resources.len() {
+                1 => " · 1 conversation".to_owned(),
+                count => format!(" · {count} conversations"),
+            };
+            let until = if grant.expires_ms > 0 && grant.expires_ms / 1000 > now {
+                format!(" · until {}", format_time(grant.expires_ms / 1000))
+            } else {
+                String::new()
+            };
+            format!(
+                "<li><form method=\"post\" action=\"/account/remove-grant\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"grant\" value=\"{id}\">{agent} on {claktory} <span class=\"muted\">· {app}: {can}{reaches} \
+                 · since {since}{until}</span> <button class=\"plain\">Remove</button></form></li>",
+                csrf = escape(csrf),
+                id = escape(&grant.id),
+                agent = escape(&grant.agent.id),
+                claktory = escape(claktory),
+                app = escape(app_name(&grant.app)),
+                can = escape(&can.join(", ")),
+                reaches = escape(&reaches),
+                since = escape(&format_time(grant.granted_ms / 1000)),
+                until = escape(&until),
+            )
+        })
+        .collect();
+    format!(
+        "<section><h2>Agents' access</h2><p class=\"muted\">What your agents can use in your account, such as your direct \
+         messages. You approved each one; remove it to take it back.</p><ul class=\"devices\">{items}</ul></section>"
+    )
+}
+
+/// Takes back what an agent could use in one of the account's apps.
+async fn remove_grant(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
+    let Some(account) = db::account_by_email(&service.db(), &email)? else { return Ok(home(service, call, None, None)) };
+    match apps::revoke_for_account(service, &account.id, form.get("grant")).await {
+        Some(removed) => {
+            if removed {
+                tracing::info!("removed: a grant of account {}", account.id);
+            }
+            Ok(redirect(None))
+        }
+        None => Ok(html(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Couldn't remove it",
+            "<p>Try again in a few minutes.</p><p><a href=\"/account\">Go to your account</a></p>",
+        )),
+    }
+}
+
+async fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
+    let Some(account) = db::account_by_email(&service.db(), &email)? else { return Ok(home(service, call, None, None)) };
     if form.get("confirm") != "yes" {
         return Ok(delete_confirm(form.get("csrf")));
     }
     db::delete_account(&mut service.db(), &account)?;
     tracing::info!("deleted: account {}", account.id);
+    // Its calls no longer authenticate; now its user-level apps forget it.
+    super::apps::purge_account(service, &account.id).await;
     let mut reply = sign_in_page("<p class=\"notice\">Your account was deleted.</p>", "", Next::Account);
     reply.headers.push(clear_cookie());
     Ok(reply)

@@ -152,7 +152,9 @@ void main() {
 
   group('messages', () {
     const toNative = {
+      'attach',
       'setTool',
+      'setDrawingPolicy',
       'showToolPicker',
       'undo',
       'redo',
@@ -160,6 +162,7 @@ void main() {
       'setActive',
       'goToPage',
       'exportComposite',
+      'layerSaved',
     };
     const toDart = {
       'ready',
@@ -168,6 +171,7 @@ void main() {
       'drawingChanged',
       'undoState',
       'toolChanged',
+      'strokeActive',
       'strokeInterrupted',
       'error',
     };

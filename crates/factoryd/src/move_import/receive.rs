@@ -431,8 +431,17 @@ impl Ctx {
         let outcome = self.talk(&source, &out, &mut frames).await;
         drop(out);
         let _ = written.await;
-        let linger = if matches!(outcome, Outcome::Done(_)) { DONE_LINGER } else { LINGER };
-        let _ = tokio::time::timeout(linger, connection.closed()).await;
+        if matches!(outcome, Outcome::Done(_)) {
+            let _ = tokio::time::timeout(DONE_LINGER, connection.closed()).await;
+        } else {
+            // Its last frame has the time to be read, without holding up the
+            // next session: a source starting over at once (a move called
+            // off at the digits, then started again) is that session, not
+            // turned away as another computer.
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(LINGER, connection.closed()).await;
+            });
+        }
         outcome
     }
 
@@ -640,9 +649,14 @@ impl Ctx {
             Frame::Cancel { why } => {
                 let home = self.home.clone();
                 let undone = tokio::task::spawn_blocking(move || undo(&home)).await;
-                let text = format!("{} called the move off.{} Nothing changed here.", self.machine, reason(&why));
+                let text = format!(
+                    "{} called the move off.{} Nothing changed here.",
+                    self.machine,
+                    reason(&why, &[&self.code.machine, &self.machine])
+                );
+                // Not moved: an end of its own, never a success.
                 return Some(Outcome::Over(match undone {
-                    Ok(Ok(_)) => Ok(text),
+                    Ok(Ok(_)) => Err(ImportError::CalledOff(text)),
                     Ok(Err(error)) => Err(error),
                     Err(error) => Err(failed("Can't undo the move", error)),
                 }));
@@ -757,14 +771,19 @@ impl Ctx {
 
 /// The source's reason, as a sentence after "… called the move off.", or
 /// nothing when it only says that again.
-fn reason(why: &str) -> String {
+fn reason(why: &str, names: &[&str]) -> String {
     let why = why.trim();
     if why.is_empty() || why.to_lowercase().contains("called off") {
         return String::new();
     }
+    let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
+    // A computer's name keeps its own case ("matts-mac can't take this
+    // Claktory"); anything else starts as a sentence does.
+    if names.iter().any(|name| !name.is_empty() && why.starts_with(name)) {
+        return format!(" {why}{end}");
+    }
     let mut chars = why.chars();
     let first = chars.next().map(|first| first.to_uppercase().collect::<String>()).unwrap_or_default();
-    let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
     format!(" {first}{}{end}", chars.as_str())
 }
 
@@ -1166,9 +1185,14 @@ mod tests {
 
     #[test]
     fn a_reason_reads_as_one_sentence_and_isnt_said_twice() {
-        assert_eq!(reason("The move was called off."), "");
-        assert_eq!(reason(""), "");
-        assert_eq!(reason("the person changed their mind"), " The person changed their mind.");
-        assert_eq!(reason("Not enough room!"), " Not enough room!");
+        assert_eq!(reason("The move was called off.", &[]), "");
+        assert_eq!(reason("", &[]), "");
+        assert_eq!(reason("the person changed their mind", &[]), " The person changed their mind.");
+        assert_eq!(reason("Not enough room!", &[]), " Not enough room!");
+        assert_eq!(
+            reason("matts-mac can't take this Claktory: it's full", &["matts-mac"]),
+            " matts-mac can't take this Claktory: it's full.",
+            "a computer's name keeps its case"
+        );
     }
 }

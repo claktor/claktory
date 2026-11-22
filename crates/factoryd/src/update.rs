@@ -430,6 +430,7 @@ impl Factory {
                 factory.pass_trial();
             } else {
                 trial_failed(&factory.home, &"It couldn't serve the app.");
+                crate::account::analytics::backend_stopped(&factory.home);
                 std::process::exit(1);
             }
         });
@@ -509,6 +510,8 @@ impl Factory {
         let replaced = async {
             if supervised {
                 let running = tokio::fs::read(std::env::current_exe()?).await?;
+                // The next backend needn't keep a copy of the sign-ins for this one.
+                crate::vault::signins::note_backend(&self.home, &running);
                 write_durably(self.home.previous_backend(), running).await?;
                 let trial = Trial { from: VERSION.to_owned(), to: latest.backend.clone(), started: false, reason: None };
                 write_json(&self.home.trial_path(), &trial)?;
@@ -530,6 +533,7 @@ impl Factory {
                 // The supervisor starts the new backend and watches it,
                 // handing it the open vault's key.
                 factory.vault.hand_over(false);
+                crate::account::analytics::backend_stopped(&factory.home);
                 std::process::exit(0);
             }
             // Nobody to watch over it: become the new backend in place, the
@@ -540,8 +544,10 @@ impl Factory {
             if let Some(fd) = &handed {
                 command.env(crate::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(fd).to_string());
             }
+            crate::account::analytics::backend_stopped(&factory.home);
             let error = command.exec();
             drop(handed);
+            crate::account::analytics::backend_started(&factory);
             tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
         });
         Ok(())

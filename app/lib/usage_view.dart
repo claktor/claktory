@@ -385,7 +385,20 @@ class _UsageViewState extends State<UsageView> {
                     border: Border.all(color: palette.hairline),
                     borderRadius: BorderRadius.circular(Radii.panel),
                   ),
-                  child: UsageCard(meter: meter, now: DateTime.now()),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      UsageCard(meter: meter, now: DateTime.now()),
+                      if (meter.oneOfMany) ...[
+                        const SizedBox(height: Space.m),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 240),
+                          child: _UseFirst(meter: meter),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
             ],
           ),
@@ -1256,6 +1269,11 @@ class _LimitDetail extends StatelessWidget {
           if (about.isNotEmpty) Text(about, style: muted),
           if (state != null && state.problem)
             Text(state.text, style: muted.copyWith(color: palette.danger)),
+          if (meter.oneOfMany)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.m),
+              child: _UseFirst(meter: meter),
+            ),
           for (final window in windows)
             Padding(
               padding: const EdgeInsets.only(top: Space.m),
@@ -1340,6 +1358,88 @@ class _LimitDetail extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Which of a provider's several accounts requests try first: the first
+/// one says so; the others have Use this one, which puts that one first
+/// (as Settings → Providers' does), for now and after every reset.
+class _UseFirst extends StatefulWidget {
+  const _UseFirst({required this.meter});
+
+  final UsageMeter meter;
+
+  @override
+  State<_UseFirst> createState() => _UseFirstState();
+}
+
+class _UseFirstState extends State<_UseFirst> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _use() async {
+    final account = widget.meter.account;
+    if (_busy || account == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context)
+          .moveAccount(widget.meter.provider.id, account.id, 0);
+      unawaited(Haptics.selection());
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final phone = isPhoneLayout(context);
+    final style = (phone ? type.secondary : type.caption).copyWith(
+      color: palette.textMuted,
+    );
+    final error = _error;
+    final Widget line;
+    if (widget.meter.first) {
+      line = Text(
+        'Used first whenever it has room, including after a reset.',
+        style: style,
+      );
+    } else {
+      final words = Text(
+        'Claktory then uses it first whenever it has room, including after a reset.',
+        style: style,
+      );
+      final button = Button(
+        label: 'Use this one',
+        onPressed: _busy ? null : () => unawaited(_use()),
+      );
+      line = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          words,
+          const SizedBox(height: Space.s),
+          button,
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        line,
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.xs),
+            child: Text(error, style: style.copyWith(color: palette.danger)),
+          ),
+      ],
     );
   }
 }

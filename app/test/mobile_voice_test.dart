@@ -217,6 +217,40 @@ void main() {
     expect(sent(harness).single.voice, isTrue);
   });
 
+  testWidgets('a phone with no recorder says so, asking nothing', (
+    tester,
+  ) async {
+    recorder.granted = MicAccess.unavailable;
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(
+      _workspace()
+        ..speechModel = SpeechModel(
+          state: SpeechModelState.SPEECH_MODEL_STATE_ABSENT,
+        ),
+    );
+    harness.backend.transcript.load(Transcript(agentId: 'mike'));
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    if (find.byType(AgentView).evaluate().isEmpty) {
+      await tester.tap(find.text('Mike').first);
+      await pumpFrames(tester);
+    }
+    await tester.tap(mic);
+    await io(tester);
+    expect(recorder.recordingInto, isNull);
+    expect(
+      find.text("You can't record voice messages on this phone yet."),
+      findsOneWidget,
+    );
+    expect(find.text('Open Settings'), findsNothing);
+    expect(
+      find.byType(SpeechModelConsent),
+      findsNothing,
+      reason: 'no speech model to download for it',
+    );
+  });
+
   testWidgets('the microphone turned off offers Settings', (tester) async {
     recorder.granted = MicAccess.denied;
     await conversation(tester);

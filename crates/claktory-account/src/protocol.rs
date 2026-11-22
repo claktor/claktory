@@ -431,14 +431,69 @@ pub struct CheckIn {
     /// recorded once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub periods: Vec<Period>,
+    /// How far its setup got, each reached once and never undone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
+    /// Its paired devices now (this computer's own app among them), counted
+    /// by what they are: never named. None from Claktories before they
+    /// counted them, which leaves the last list as it was; an empty list
+    /// says there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<DeviceCount>>,
 }
 
-/// A Claktory's agents, projects and paired devices, at a check-in.
+/// A Claktory's agents, projects and paired devices, at a check-in; newer
+/// ones also its pipes, secrets and monitors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counts {
     pub agents: u32,
     pub projects: u32,
     pub devices: u32,
+    #[serde(default)]
+    pub pipes: u32,
+    #[serde(default)]
+    pub secrets: u32,
+    /// Monitors active now.
+    #[serde(default)]
+    pub monitors: u32,
+}
+
+/// Steps of a Claktory's setup it has reached: true once, for good.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setup {
+    /// A model provider was signed in.
+    #[serde(default)]
+    pub model_connected: bool,
+    /// An agent ran for the first time.
+    #[serde(default)]
+    pub first_run: bool,
+}
+
+/// How many of a Claktory's devices are one kind of device on one system
+/// with one app version.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCount {
+    /// "ios", "ipados", "android", "macos", "linux", "windows"; "unknown"
+    /// for apps from before they said.
+    pub platform: String,
+    /// "desktop", "laptop", "phone", "tablet" or "unknown".
+    pub kind: String,
+    /// The app's version ("v0.1.16", "dev"); "unknown" from older apps.
+    pub app_version: String,
+    pub count: u32,
+}
+
+/// A backend version's health in a period: how often an update to it
+/// didn't start and was rolled back by the supervisor, and how often it
+/// stopped without stopping cleanly (a crash, or the computer losing power).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Health {
+    /// "v0.1.16"; "unknown" when the supervisor couldn't tell.
+    pub version: String,
+    #[serde(default)]
+    pub rolled_back: u32,
+    #[serde(default)]
+    pub crashes: u32,
 }
 
 /// A stretch of time a check-in reports on.
@@ -456,6 +511,13 @@ pub struct Period {
     /// Agents' work in the period, per UTC hour.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<Activity>,
+    /// How many paired devices (this computer's own app among them)
+    /// connected in the period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices_connected: Option<u32>,
+    /// Backend versions that were rolled back or crashed in the period.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health: Vec<Health>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

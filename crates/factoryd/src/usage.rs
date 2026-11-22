@@ -208,12 +208,16 @@ impl Factory {
                     }
                     Err(error) => {
                         entry.failed = true;
+                        // A sign-in the provider won't refresh is marked so now:
+                        // the account shows it, to sign in to again.
+                        named |= error.is_refused();
                         self.usage_failed(&key, &error);
                     }
                 }
             }
         }
-        // Who an account is, unknown until now, was read with its plan.
+        // Who an account is, unknown until now, was read with its plan; or
+        // a sign-in was refused.
         if named {
             self.refresh_models().await;
         }

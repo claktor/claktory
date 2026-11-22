@@ -270,6 +270,7 @@ async fn notes_only_for_this_context_are_summarized_as_sent_but_not_kept() {
         id: String::new(),
         summary: String::new(),
         transient: true,
+        pipe_seqs: Vec::new(),
     };
     agent
         .prompt_messages(vec![

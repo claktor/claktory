@@ -281,6 +281,11 @@ class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_SIGN_IN_REQUIRED =
       ErrorCode._(15, _omitEnumNames ? '' : 'ERROR_CODE_SIGN_IN_REQUIRED');
 
+  /// This Claktory moved to another computer (Error.moved says where); the
+  /// copy left here runs nothing.
+  static const ErrorCode ERROR_CODE_MOVED =
+      ErrorCode._(16, _omitEnumNames ? '' : 'ERROR_CODE_MOVED');
+
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
     ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
@@ -298,10 +303,11 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_RATE_LIMITED,
     ERROR_CODE_UNREACHABLE,
     ERROR_CODE_SIGN_IN_REQUIRED,
+    ERROR_CODE_MOVED,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 15);
+      $pb.ProtobufEnum.$_initByValueList(values, 16);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -376,14 +382,20 @@ class ExtensionOptionKind extends $pb.ProtobufEnum {
       ExtensionOptionKind._(
           2, _omitEnumNames ? '' : 'EXTENSION_OPTION_KIND_AGENTS');
 
+  /// One of `ExtensionOption.choices`: `OptionValue.choice`.
+  static const ExtensionOptionKind EXTENSION_OPTION_KIND_CHOICE =
+      ExtensionOptionKind._(
+          3, _omitEnumNames ? '' : 'EXTENSION_OPTION_KIND_CHOICE');
+
   static const $core.List<ExtensionOptionKind> values = <ExtensionOptionKind>[
     EXTENSION_OPTION_KIND_UNSPECIFIED,
     EXTENSION_OPTION_KIND_SWITCH,
     EXTENSION_OPTION_KIND_AGENTS,
+    EXTENSION_OPTION_KIND_CHOICE,
   ];
 
   static final $core.List<ExtensionOptionKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 2);
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
   static ExtensionOptionKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -642,6 +654,61 @@ class AgentStatus extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const AgentStatus._(super.value, super.name);
+}
+
+class PipeStartKind extends $pb.ProtobufEnum {
+  static const PipeStartKind PIPE_START_KIND_UNSPECIFIED =
+      PipeStartKind._(0, _omitEnumNames ? '' : 'PIPE_START_KIND_UNSPECIFIED');
+
+  /// Make an invite for someone else to accept.
+  static const PipeStartKind PIPE_START_KIND_INVITE =
+      PipeStartKind._(1, _omitEnumNames ? '' : 'PIPE_START_KIND_INVITE');
+
+  /// Accept an invite the person was given.
+  static const PipeStartKind PIPE_START_KIND_ACCEPT =
+      PipeStartKind._(2, _omitEnumNames ? '' : 'PIPE_START_KIND_ACCEPT');
+
+  static const $core.List<PipeStartKind> values = <PipeStartKind>[
+    PIPE_START_KIND_UNSPECIFIED,
+    PIPE_START_KIND_INVITE,
+    PIPE_START_KIND_ACCEPT,
+  ];
+
+  static final $core.List<PipeStartKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static PipeStartKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeStartKind._(super.value, super.name);
+}
+
+class PipeStartState extends $pb.ProtobufEnum {
+  static const PipeStartState PIPE_START_STATE_UNSPECIFIED =
+      PipeStartState._(0, _omitEnumNames ? '' : 'PIPE_START_STATE_UNSPECIFIED');
+  static const PipeStartState PIPE_START_STATE_WAITING =
+      PipeStartState._(1, _omitEnumNames ? '' : 'PIPE_START_STATE_WAITING');
+
+  /// The person made the invite or connected with the code: pipe_id.
+  static const PipeStartState PIPE_START_STATE_DONE =
+      PipeStartState._(2, _omitEnumNames ? '' : 'PIPE_START_STATE_DONE');
+
+  /// The person closed it, or it waited 24 hours.
+  static const PipeStartState PIPE_START_STATE_DISMISSED =
+      PipeStartState._(3, _omitEnumNames ? '' : 'PIPE_START_STATE_DISMISSED');
+
+  static const $core.List<PipeStartState> values = <PipeStartState>[
+    PIPE_START_STATE_UNSPECIFIED,
+    PIPE_START_STATE_WAITING,
+    PIPE_START_STATE_DONE,
+    PIPE_START_STATE_DISMISSED,
+  ];
+
+  static final $core.List<PipeStartState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static PipeStartState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeStartState._(super.value, super.name);
 }
 
 class DevicePairingState extends $pb.ProtobufEnum {
@@ -939,6 +1006,13 @@ class SecretRequestState extends $pb.ProtobufEnum {
       SecretRequestState._(
           6, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_APPROVED');
 
+  /// A generate request (SecretRequest.generate) decided: the vault made the
+  /// key and gave it to no one, as the agent asked. given_secret_id and
+  /// given_secret_name name it, public_key is its public half.
+  static const SecretRequestState SECRET_REQUEST_STATE_GENERATED =
+      SecretRequestState._(
+          7, _omitEnumNames ? '' : 'SECRET_REQUEST_STATE_GENERATED');
+
   static const $core.List<SecretRequestState> values = <SecretRequestState>[
     SECRET_REQUEST_STATE_UNSPECIFIED,
     SECRET_REQUEST_STATE_PENDING,
@@ -947,10 +1021,11 @@ class SecretRequestState extends $pb.ProtobufEnum {
     SECRET_REQUEST_STATE_EXPIRED,
     SECRET_REQUEST_STATE_WITHDRAWN,
     SECRET_REQUEST_STATE_APPROVED,
+    SECRET_REQUEST_STATE_GENERATED,
   ];
 
   static final $core.List<SecretRequestState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 6);
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
   static SecretRequestState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1250,6 +1325,81 @@ class ConnectionStatus extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const ConnectionStatus._(super.value, super.name);
+}
+
+class AppDataKind extends $pb.ProtobufEnum {
+  static const AppDataKind APP_DATA_KIND_UNSPECIFIED =
+      AppDataKind._(0, _omitEnumNames ? '' : 'APP_DATA_KIND_UNSPECIFIED');
+
+  /// Claktory's records (factory.db): agents, runs, usage, messages, tasks…
+  static const AppDataKind APP_DATA_KIND_FACTORY_RECORDS =
+      AppDataKind._(1, _omitEnumNames ? '' : 'APP_DATA_KIND_FACTORY_RECORDS');
+
+  /// An agent's own database (its Database extension's).
+  static const AppDataKind APP_DATA_KIND_AGENT_DATABASE =
+      AppDataKind._(2, _omitEnumNames ? '' : 'APP_DATA_KIND_AGENT_DATABASE');
+
+  static const $core.List<AppDataKind> values = <AppDataKind>[
+    APP_DATA_KIND_UNSPECIFIED,
+    APP_DATA_KIND_FACTORY_RECORDS,
+    APP_DATA_KIND_AGENT_DATABASE,
+  ];
+
+  static final $core.List<AppDataKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static AppDataKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppDataKind._(super.value, super.name);
+}
+
+class AppSurfaceState extends $pb.ProtobufEnum {
+  static const AppSurfaceState APP_SURFACE_STATE_UNSPECIFIED =
+      AppSurfaceState._(
+          0, _omitEnumNames ? '' : 'APP_SURFACE_STATE_UNSPECIFIED');
+
+  /// The app is making it.
+  static const AppSurfaceState APP_SURFACE_STATE_OPENING =
+      AppSurfaceState._(1, _omitEnumNames ? '' : 'APP_SURFACE_STATE_OPENING');
+  static const AppSurfaceState APP_SURFACE_STATE_OPEN =
+      AppSurfaceState._(2, _omitEnumNames ? '' : 'APP_SURFACE_STATE_OPEN');
+
+  /// The app isn't running (turned off, crashed, updating): it opens again
+  /// by itself when the app runs again.
+  static const AppSurfaceState APP_SURFACE_STATE_STOPPED =
+      AppSurfaceState._(3, _omitEnumNames ? '' : 'APP_SURFACE_STATE_STOPPED');
+
+  /// The app sent something invalid, or couldn't open it (`error` says
+  /// what). It stays so: OpenAppView again opens a new surface.
+  static const AppSurfaceState APP_SURFACE_STATE_FAILED =
+      AppSurfaceState._(4, _omitEnumNames ? '' : 'APP_SURFACE_STATE_FAILED');
+
+  /// The app closed it, or was uninstalled. OpenAppView again for a new one.
+  static const AppSurfaceState APP_SURFACE_STATE_CLOSED =
+      AppSurfaceState._(5, _omitEnumNames ? '' : 'APP_SURFACE_STATE_CLOSED');
+
+  /// This app doesn't render the surface's catalog: only in the answer to
+  /// OpenAppView, which opened nothing.
+  static const AppSurfaceState APP_SURFACE_STATE_UNSUPPORTED =
+      AppSurfaceState._(
+          6, _omitEnumNames ? '' : 'APP_SURFACE_STATE_UNSUPPORTED');
+
+  static const $core.List<AppSurfaceState> values = <AppSurfaceState>[
+    APP_SURFACE_STATE_UNSPECIFIED,
+    APP_SURFACE_STATE_OPENING,
+    APP_SURFACE_STATE_OPEN,
+    APP_SURFACE_STATE_STOPPED,
+    APP_SURFACE_STATE_FAILED,
+    APP_SURFACE_STATE_CLOSED,
+    APP_SURFACE_STATE_UNSUPPORTED,
+  ];
+
+  static final $core.List<AppSurfaceState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static AppSurfaceState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AppSurfaceState._(super.value, super.name);
 }
 
 class AppTier extends $pb.ProtobufEnum {
@@ -1685,6 +1835,132 @@ class MovePhase extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MovePhase._(super.value, super.name);
+}
+
+class NotifyKind extends $pb.ProtobufEnum {
+  static const NotifyKind NOTIFY_KIND_UNSPECIFIED =
+      NotifyKind._(0, _omitEnumNames ? '' : 'NOTIFY_KIND_UNSPECIFIED');
+
+  /// Something waits for the person: a question, a request for a secret, a
+  /// proposal, a held pipe message.
+  static const NotifyKind NOTIFY_KIND_NEEDS_YOU =
+      NotifyKind._(1, _omitEnumNames ? '' : 'NOTIFY_KIND_NEEDS_YOU');
+
+  /// An agent's notify_person.
+  static const NotifyKind NOTIFY_KIND_ALERT =
+      NotifyKind._(2, _omitEnumNames ? '' : 'NOTIFY_KIND_ALERT');
+
+  /// An agent answered the person's message.
+  static const NotifyKind NOTIFY_KIND_REPLY =
+      NotifyKind._(3, _omitEnumNames ? '' : 'NOTIFY_KIND_REPLY');
+
+  /// SendTestNotification's.
+  static const NotifyKind NOTIFY_KIND_TEST =
+      NotifyKind._(4, _omitEnumNames ? '' : 'NOTIFY_KIND_TEST');
+
+  static const $core.List<NotifyKind> values = <NotifyKind>[
+    NOTIFY_KIND_UNSPECIFIED,
+    NOTIFY_KIND_NEEDS_YOU,
+    NOTIFY_KIND_ALERT,
+    NOTIFY_KIND_REPLY,
+    NOTIFY_KIND_TEST,
+  ];
+
+  static final $core.List<NotifyKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static NotifyKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NotifyKind._(super.value, super.name);
+}
+
+/// What notifications say.
+class NotifyPreview extends $pb.ProtobufEnum {
+  /// As FULL.
+  static const NotifyPreview NOTIFY_PREVIEW_UNSPECIFIED =
+      NotifyPreview._(0, _omitEnumNames ? '' : 'NOTIFY_PREVIEW_UNSPECIFIED');
+
+  /// Who, and what it says.
+  static const NotifyPreview NOTIFY_PREVIEW_FULL =
+      NotifyPreview._(1, _omitEnumNames ? '' : 'NOTIFY_PREVIEW_FULL');
+
+  /// Only who: "Pericolo needs you".
+  static const NotifyPreview NOTIFY_PREVIEW_WHO =
+      NotifyPreview._(2, _omitEnumNames ? '' : 'NOTIFY_PREVIEW_WHO');
+
+  /// Just "Claktory has something for you".
+  static const NotifyPreview NOTIFY_PREVIEW_NONE =
+      NotifyPreview._(3, _omitEnumNames ? '' : 'NOTIFY_PREVIEW_NONE');
+
+  static const $core.List<NotifyPreview> values = <NotifyPreview>[
+    NOTIFY_PREVIEW_UNSPECIFIED,
+    NOTIFY_PREVIEW_FULL,
+    NOTIFY_PREVIEW_WHO,
+    NOTIFY_PREVIEW_NONE,
+  ];
+
+  static final $core.List<NotifyPreview?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static NotifyPreview? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NotifyPreview._(super.value, super.name);
+}
+
+/// Whether an agent notifies the person.
+class NotifyMode extends $pb.ProtobufEnum {
+  /// As NotificationSettings says for each kind.
+  static const NotifyMode NOTIFY_MODE_DEFAULT =
+      NotifyMode._(0, _omitEnumNames ? '' : 'NOTIFY_MODE_DEFAULT');
+
+  /// Every kind, even those turned off (still within quiet hours and the
+  /// hourly cap).
+  static const NotifyMode NOTIFY_MODE_ALWAYS =
+      NotifyMode._(1, _omitEnumNames ? '' : 'NOTIFY_MODE_ALWAYS');
+
+  /// Never.
+  static const NotifyMode NOTIFY_MODE_NEVER =
+      NotifyMode._(2, _omitEnumNames ? '' : 'NOTIFY_MODE_NEVER');
+
+  static const $core.List<NotifyMode> values = <NotifyMode>[
+    NOTIFY_MODE_DEFAULT,
+    NOTIFY_MODE_ALWAYS,
+    NOTIFY_MODE_NEVER,
+  ];
+
+  static final $core.List<NotifyMode?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static NotifyMode? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NotifyMode._(super.value, super.name);
+}
+
+class PushPlatform extends $pb.ProtobufEnum {
+  static const PushPlatform PUSH_PLATFORM_UNSPECIFIED =
+      PushPlatform._(0, _omitEnumNames ? '' : 'PUSH_PLATFORM_UNSPECIFIED');
+  static const PushPlatform PUSH_PLATFORM_APNS =
+      PushPlatform._(1, _omitEnumNames ? '' : 'PUSH_PLATFORM_APNS');
+
+  /// An app built for development, on APNs's sandbox.
+  static const PushPlatform PUSH_PLATFORM_APNS_SANDBOX =
+      PushPlatform._(2, _omitEnumNames ? '' : 'PUSH_PLATFORM_APNS_SANDBOX');
+  static const PushPlatform PUSH_PLATFORM_FCM =
+      PushPlatform._(3, _omitEnumNames ? '' : 'PUSH_PLATFORM_FCM');
+
+  static const $core.List<PushPlatform> values = <PushPlatform>[
+    PUSH_PLATFORM_UNSPECIFIED,
+    PUSH_PLATFORM_APNS,
+    PUSH_PLATFORM_APNS_SANDBOX,
+    PUSH_PLATFORM_FCM,
+  ];
+
+  static final $core.List<PushPlatform?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static PushPlatform? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PushPlatform._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

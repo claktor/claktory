@@ -136,7 +136,9 @@ fn kept_folders(root: &Path) -> Vec<PathBuf> {
         let paths =
             std::iter::once(&project["path"]).chain(project["folders"].as_array().into_iter().flatten().map(|folder| &folder["path"]));
         for path in paths.filter_map(serde_json::Value::as_str) {
+            // Written relative, a path is Claktory's own territory (config.rs).
             let path = PathBuf::from(path);
+            let path = if path.is_relative() { root.join(path) } else { path };
             if path.starts_with(root) {
                 folders.push(path);
             }

@@ -7,6 +7,7 @@ import '../controls.dart' show Pressable;
 import '../extensions.dart' show extensionBarWidth;
 import '../identity.dart';
 import '../layout.dart';
+import '../mobile/device.dart' show WindowControls, windowControls;
 import '../mobile/metrics.dart';
 import '../mobile/popover.dart' show presentPopover;
 import '../panes.dart' show PaneProjection, paneTitle, paneGlyph;
@@ -191,10 +192,14 @@ class WorkbenchScope extends InheritedNotifier<WorkbenchFocus> {
       context.dependOnInheritedWidgetOfExactType<WorkbenchScope>()?.notifier;
 }
 
-/// The tier of the window [context] is in: its size less the safe area,
-/// never less the keyboard, and the person's text size.
-WorkbenchTier windowTier(BuildContext context, Size window) {
-  final padding = MediaQuery.paddingOf(context);
+/// The tier of the window [context] is in ([window], else the window's
+/// size): its size less the safe area, never less the keyboard, and the
+/// person's text size. The same safe size Shell chooses the workbench by
+/// (isPhoneLayout), so the two never disagree: not the workbench's own
+/// constraints, which banners and the keyboard's arrival change.
+WorkbenchTier windowTier(BuildContext context, [Size? window]) {
+  window ??= MediaQuery.sizeOf(context);
+  final padding = MediaQuery.viewPaddingOf(context);
   return tierFor(
     idiom: Idiom.pad,
     window: Size(
@@ -202,6 +207,58 @@ WorkbenchTier windowTier(BuildContext context, Size window) {
       window.height - padding.vertical,
     ),
     textFactor: textFactorOf(MediaQuery.textScalerOf(context).scale),
+  );
+}
+
+/// The window's room for the workbench: clear of the status bar along
+/// the top. The window reaches the bottom edge, so the conversation's own
+/// color runs under the home indicator: what's inside keeps clear of the
+/// indicator itself by the bottom padding it's left with (the message box
+/// does). The window's controls aren't kept
+/// clear here: the native side adds them to the view's top padding
+/// ([controls].top, for screens with no toolbar), and the workbench takes
+/// that back, starting at the status bar as Apple's apps do, while its
+/// toolbar's leading items move past them ([_Toolbar]) and the rail's
+/// column starts below them ([_RailColumn]). The on-screen keyboard
+/// covers the rail and the sidebar, as it does a UIKit sidebar; the
+/// content and the panel rise above it ([_aboveKeyboard]). What's inside
+/// sees no keyboard left to avoid, and only the home indicator's padding.
+class _SafeWindow extends StatelessWidget {
+  const _SafeWindow({required this.controls, required this.child});
+
+  final WindowControls controls;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final padding = MediaQuery.paddingOf(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        padding.left,
+        math.max(0.0, padding.top - controls.top),
+        padding.right,
+        0,
+      ),
+      child: MediaQuery(
+        data: MediaQuery.of(context)
+            .removePadding(removeLeft: true, removeTop: true, removeRight: true)
+            .removeViewInsets(removeBottom: true),
+        child: child,
+      ),
+    );
+  }
+}
+
+/// What the on-screen keyboard leaves of the content's and the panel's
+/// room: they end above it, so the message box being written in stays in
+/// sight, while the rail and the sidebar beside them stay put under it (a
+/// short window's columns would overflow if they rose too). [context] is
+/// outside [_SafeWindow], where the keyboard is still known.
+Widget _aboveKeyboard(BuildContext context, Widget child) {
+  final lift = MediaQuery.viewInsetsOf(context).bottom;
+  return Padding(
+    padding: EdgeInsets.only(bottom: lift),
+    child: child,
   );
 }
 
@@ -224,7 +281,6 @@ class Workbench extends StatefulWidget {
     this.panel,
     this.panelWidth = 0,
     this.agent,
-    this.windowControls = 0,
   });
 
   /// The Claktories rail (ClaktoryRail).
@@ -250,11 +306,6 @@ class Workbench extends StatefulWidget {
   /// The selected agent, whose panes the switch and Panes go through.
   final Agent? agent;
 
-  /// Room at the window's top left kept clear for the system's window
-  /// controls when the app is in a window of its own (Stage Manager);
-  /// 0 in full screen. From the native side.
-  final double windowControls;
-
   @override
   State<Workbench> createState() => _WorkbenchState();
 }
@@ -262,6 +313,24 @@ class Workbench extends StatefulWidget {
 class _WorkbenchState extends State<Workbench> {
   /// The Panes button shown now, if any: what Panes points at.
   final _panesAnchor = GlobalKey(debugLabel: 'Panes');
+
+  /// The window's controls, as the native side says (mobile/device.dart):
+  /// the toolbar's leading items clear them, and so does the rail's column.
+  WindowControls get _controls => windowControls.value;
+
+  @override
+  void initState() {
+    super.initState();
+    windowControls.addListener(_controlsChanged);
+  }
+
+  @override
+  void dispose() {
+    windowControls.removeListener(_controlsChanged);
+    super.dispose();
+  }
+
+  void _controlsChanged() => setState(() {});
 
   /// Panes, pointing at its button, or in the window's middle when none
   /// shows (⌥⌘P with every pane laid out).
@@ -281,11 +350,12 @@ class _WorkbenchState extends State<Workbench> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final focus = WorkbenchScope.of(context);
-      final tier = windowTier(context, constraints.biggest);
-      assert(
-        tier != WorkbenchTier.compact,
-        'A compact window takes the phone routes, not the workbench',
-      );
+      // A compact window takes the phone's routes (Shell); one that
+      // reaches here anyway (a test's host) lays out as one pane.
+      final tier = switch (windowTier(context)) {
+        WorkbenchTier.compact => WorkbenchTier.focused,
+        final tier => tier,
+      };
       final pinned = tier == WorkbenchTier.full && !focus.sidebarHidden;
       final agent = widget.agent;
       void showPanes() {
@@ -329,17 +399,20 @@ class _WorkbenchState extends State<Workbench> {
         commands: commands,
         native: focus.menu.native,
         escape: focus.overlayOpen && !pinned ? focus.closeOverlay : null,
-        child: Stack(
-          children: [
-            Positioned.fill(child: body),
-            if (focus.overlayOpen && !pinned)
-              ..._sidebarOverlay(
-                context,
-                focus,
-                constraints,
-                withRail: tier == WorkbenchTier.focused,
-              ),
-          ],
+        child: _SafeWindow(
+          controls: _controls,
+          child: Stack(
+            children: [
+              Positioned.fill(child: body),
+              if (focus.overlayOpen && !pinned)
+                ..._sidebarOverlay(
+                  context,
+                  focus,
+                  constraints,
+                  withRail: tier == WorkbenchTier.focused,
+                ),
+            ],
+          ),
         ),
       );
     },
@@ -355,7 +428,10 @@ class _WorkbenchState extends State<Workbench> {
     required bool pinned,
   }) {
     final palette = Palette.of(context);
-    final tier = windowTier(context, constraints.biggest);
+    final tier = switch (windowTier(context)) {
+      WorkbenchTier.compact => WorkbenchTier.focused,
+      final tier => tier,
+    };
     final sidebar = pinned ? _sidebarWidth(constraints.maxWidth) : 0.0;
     final room =
         constraints.maxWidth - workbenchRailWidth - sidebar - _bar(context);
@@ -370,7 +446,7 @@ class _WorkbenchState extends State<Workbench> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _RailColumn(
-                windowControls: widget.windowControls,
+                windowControls: _controls,
                 sidebarShown: pinned || focus.overlayOpen,
                 onSidebar: () => focus.toggleSidebar(tier),
                 hidden: hidden,
@@ -386,13 +462,20 @@ class _WorkbenchState extends State<Workbench> {
                 Container(width: 1, color: palette.hairline),
               ],
               ?widget.extensionBar,
-              Expanded(child: content),
-              if (panelFits) SizedBox(width: widget.panelWidth, child: panel),
+              Expanded(child: _aboveKeyboard(context, content)),
+              if (panelFits)
+                SizedBox(
+                  width: widget.panelWidth,
+                  child: _aboveKeyboard(context, panel),
+                ),
             ],
           ),
         ),
         if (panel != null && !panelFits)
-          _PanelOver(width: widget.panelWidth, child: panel),
+          _PanelOver(
+            width: widget.panelWidth,
+            child: _aboveKeyboard(context, panel),
+          ),
       ],
     );
   }
@@ -409,7 +492,7 @@ class _WorkbenchState extends State<Workbench> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _Toolbar(
-                windowControls: widget.windowControls,
+                windowControls: _controls,
                 agent: agent,
                 focus: focus,
                 hidden: _hiddenCount(focus),
@@ -422,14 +505,18 @@ class _WorkbenchState extends State<Workbench> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     ?widget.extensionBar,
-                    Expanded(child: content),
+                    Expanded(child: _aboveKeyboard(context, content)),
                   ],
                 ),
               ),
             ],
           ),
         ),
-        if (panel != null) _PanelOver(width: widget.panelWidth, child: panel),
+        if (panel != null)
+          _PanelOver(
+            width: widget.panelWidth,
+            child: _aboveKeyboard(context, panel),
+          ),
       ],
     );
   }
@@ -501,7 +588,7 @@ class _WorkbenchState extends State<Workbench> {
                       SizedBox(
                         width: workbenchRailWidth,
                         child: Padding(
-                          padding: EdgeInsets.only(top: widget.windowControls),
+                          padding: EdgeInsets.only(top: _controls.top),
                           child: Center(child: widget.rail),
                         ),
                       ),
@@ -726,7 +813,7 @@ class _RailColumn extends StatelessWidget {
     required this.rail,
   });
 
-  final double windowControls;
+  final WindowControls windowControls;
   final bool sidebarShown;
   final VoidCallback onSidebar;
   final int hidden;
@@ -739,7 +826,7 @@ class _RailColumn extends StatelessWidget {
     width: workbenchRailWidth,
     child: Column(
       children: [
-        SizedBox(height: windowControls),
+        SizedBox(height: windowControls.top),
         _ToolButton(
           key: const ValueKey('workbench-sidebar'),
           label: sidebarShown ? 'Hide sidebar' : 'Show sidebar',
@@ -777,7 +864,7 @@ class _Toolbar extends StatelessWidget {
     required this.panesAnchor,
   });
 
-  final double windowControls;
+  final WindowControls windowControls;
   final Agent? agent;
   final WorkbenchFocus focus;
   final int hidden;
@@ -793,7 +880,7 @@ class _Toolbar extends StatelessWidget {
       constraints: const BoxConstraints(minHeight: Touch.target + Space.s),
       child: Padding(
         padding: EdgeInsets.only(
-          left: Space.xs + windowControls,
+          left: Space.xs + windowControls.leading,
           right: Space.xs,
         ),
         child: Row(

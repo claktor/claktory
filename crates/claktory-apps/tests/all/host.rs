@@ -224,7 +224,7 @@ async fn the_host_binary_speaks_frames_on_stdio_and_ends_with_its_input() {
     frames::write(&mut input, &hello).await.expect("write");
     let ready = frames::read(&mut output).await.expect("read").expect("a frame");
     assert_eq!(ready.reply_to, 1);
-    assert!(matches!(ready.body, Some(Body::Ready(ref ready)) if ready.worlds == ["claktory:app@1"]), "{ready:?}");
+    assert!(matches!(ready.body, Some(Body::Ready(ref ready)) if ready.worlds == ["claktory:app@1", "claktory:app@1.1"]), "{ready:?}");
     drop(input);
     let status = tokio::time::timeout(Duration::from_secs(10), host.wait()).await.expect("it ends").expect("status");
     assert!(status.success(), "{status}");

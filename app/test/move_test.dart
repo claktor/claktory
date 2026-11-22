@@ -32,6 +32,14 @@ class _FakeMove implements MoveSource {
   @override
   Future<void> freeze() => _ask('freeze');
 
+  @override
+  final ValueNotifier<pb.MovedAway?> movedAway = ValueNotifier(null);
+  @override
+  bool canDeleteMovedCopy = true;
+  @override
+  Future<void> deleteMovedCopy(String typedWord) =>
+      _ask('delete copy $typedWord');
+
   void set(MoveStatus move) => status.value = move;
 }
 
@@ -387,5 +395,287 @@ void main() {
       expect(title.flagsCollection.namesRoute, phone, reason: '$size');
     }
     semantics.dispose();
+  });
+
+  group('moved away', () {
+    // A year gone, so it reads as a date whatever day the tests run.
+    final at = DateTime(2020, 11, 21, 14, 20);
+    pb.MovedAway away({int deleted = 0, String to = 'hetzner-box'}) =>
+        pb.MovedAway(
+          to: to,
+          toOs: to.isEmpty ? '' : 'linux',
+          atMs: Int64(at.millisecondsSinceEpoch),
+          machine: 'mac-mini',
+          deletedMs: Int64(deleted),
+        );
+
+    Future<_FakeMove> showGate(WidgetTester tester, {Size? size}) async {
+      final move = _FakeMove();
+      final harness = Harness(pb.Workspace());
+      await harness.show(
+        tester,
+        size: size ?? const Size(1200, 900),
+        home: MoveGate(
+          source: move,
+          rail: const SizedBox(width: 60, child: Text('rail')),
+          child: const Text('the window'),
+        ),
+      );
+      return move;
+    }
+
+    test('when it moved, in a sentence', () {
+      final now = DateTime(2020, 11, 21, 18);
+      expect(movedWhen(at, now: now), 'today at 14:20');
+      expect(movedWhen(at, now: DateTime(2020, 11, 22)), 'on 21 Nov at 14:20');
+      expect(
+        movedWhen(at, now: DateTime(2021, 1, 2)),
+        'on 21 Nov 2020 at 14:20',
+      );
+    });
+
+    testWidgets('the window gives way to where it went, the rail beside it; '
+        'Delete this copy… asks for "delete" typed, then deletes', (
+      tester,
+    ) async {
+      final move = await showGate(tester);
+      expect(find.text('the window'), findsOneWidget);
+
+      move.movedAway.value = away();
+      await tester.pump();
+      expect(find.text('the window'), findsNothing);
+      expect(find.text('rail'), findsOneWidget, reason: 'the rail stays');
+      expect(find.text('This Claktory moved to hetzner-box'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'nothing in it runs, and everything since '
+          'happens on hetzner-box',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Delete this copy…'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete this copy?'), findsOneWidget);
+      expect(
+        find.textContaining('Your workspace and project folders stay'),
+        findsOneWidget,
+      );
+      // Not until the word is typed.
+      await tester.tap(find.text('Delete copy'));
+      await tester.pump();
+      expect(move.asked, isEmpty);
+      await tester.enterText(find.byType(EditableText), 'delet');
+      await tester.pump();
+      await tester.tap(find.text('Delete copy'));
+      await tester.pump();
+      expect(move.asked, isEmpty);
+      await tester.enterText(find.byType(EditableText), 'delete');
+      await tester.pump();
+      await tester.tap(find.text('Delete copy'));
+      await tester.pumpAndSettle();
+      expect(move.asked, ['delete copy delete']);
+      expect(find.text('Delete this copy?'), findsNothing);
+
+      // Asked again, it says when the copy went; nothing more to delete.
+      move.movedAway.value = away(
+        deleted: at.add(const Duration(days: 1)).millisecondsSinceEpoch,
+      );
+      await tester.pump();
+      expect(find.textContaining('was deleted on 22 Nov 2020'), findsOneWidget);
+      expect(find.text('Delete this copy…'), findsNothing);
+
+      // Another Claktory picked: the window comes back.
+      move.movedAway.value = null;
+      await tester.pump();
+      expect(find.text('the window'), findsOneWidget);
+    });
+
+    testWidgets('a refusal says why, in the dialog', (tester) async {
+      final move = await showGate(tester);
+      move.movedAway.value = away();
+      move.refuse = 'Type delete to delete the copy.';
+      await tester.pump();
+      await tester.tap(find.text('Delete this copy…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(EditableText), 'delete');
+      await tester.pump();
+      await tester.tap(find.text('Delete copy'));
+      await tester.pumpAndSettle();
+      expect(find.text('Type delete to delete the copy.'), findsOneWidget);
+      expect(find.text('Delete this copy?'), findsOneWidget);
+    });
+
+    testWidgets('moved by file, or seen from another device: no computer to '
+        'name, and no Delete', (tester) async {
+      final move = await showGate(tester);
+      move.canDeleteMovedCopy = false;
+      move.movedAway.value = away(to: '');
+      await tester.pump();
+      expect(
+        find.text('This Claktory moved to another computer'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('happens on the other computer'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('left on mac-mini is a copy'), findsOneWidget);
+      expect(find.text('You can delete it only on mac-mini.'), findsOneWidget);
+      expect(find.text('Delete this copy…'), findsNothing);
+    });
+
+    testWidgets('on a phone at the largest text, it fits', (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final move = await showGate(tester, size: const Size(390, 844));
+      move.movedAway.value = away();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.ensureVisible(find.text('Delete this copy…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete this copy…'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Delete this copy?'), findsOneWidget);
+    });
+  });
+
+  group('a move an agent started', () {
+    MoveStatus confirm({
+      String agent = 'rivet',
+      bool here = false,
+      bool there = false,
+    }) => MoveStatus(
+      phase: MovePhase.confirm,
+      targetMachine: 'cloud-box',
+      targetOs: 'linux',
+      targetArch: 'x86_64',
+      digits: '123 456',
+      canCancel: true,
+      startedByAgentId: agent,
+      confirmedHere: here,
+      targetConfirmed: there,
+      targetAddress: '203.0.113.7:4433',
+    );
+
+    Future<_FakeMove> gate(WidgetTester tester, {Size? size}) async {
+      final move = _FakeMove();
+      final harness = Harness(
+        pb.Workspace(
+          agents: [pb.Agent(id: 'rivet', name: 'Rivet')],
+        ),
+      );
+      await harness.show(
+        tester,
+        size: size ?? const Size(1200, 900),
+        home: MoveGate(source: move, child: const Text('the window')),
+      );
+      return move;
+    }
+
+    testWidgets("Claktory's own confirm floats over the window, in its own "
+        'words: the machine, its system and the digits; Confirm and Cancel', (
+      tester,
+    ) async {
+      final move = await gate(tester);
+      move.set(confirm());
+      await tester.pump();
+      expect(find.text('the window'), findsOneWidget, reason: 'kept under it');
+      expect(
+        find.text('Move this Claktory to the computer named cloud-box?'),
+        findsOneWidget,
+      );
+      expect(find.text('Rivet started this move.'), findsOneWidget);
+      expect(
+        find.text(
+          'It moves this whole Claktory (agents, secrets, sign-ins and your '
+          'devices’ connection) to the computer named cloud-box (Linux '
+          'x86_64), and it stops running here.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Confirm only if you asked for this move and that computer shows '
+          'these digits:',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('123 456'), findsOneWidget);
+      expect(
+        find.text('This computer reached it at 203.0.113.7.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Confirm'));
+      await tester.pump();
+      expect(move.asked, ['confirm']);
+
+      // Confirmed here: every device says it waits for the other side.
+      move.set(confirm(here: true));
+      await tester.pump();
+      expect(find.text('Confirmed here'), findsOneWidget);
+      expect(
+        find.text('Waiting for cloud-box to confirm too.'),
+        findsOneWidget,
+      );
+      expect(find.text('Confirm'), findsNothing);
+      expect(find.text('123 456'), findsNothing);
+      await tester.tap(find.text('Cancel move'));
+      await tester.pump();
+      expect(move.asked, ['confirm', 'cancel']);
+
+      // Past the digits, it goes.
+      move.set(_at(MovePhase.checking));
+      await tester.pump();
+      expect(find.text('Confirmed here'), findsNothing);
+    });
+
+    testWidgets('a move the person started has no such card: its form asks', (
+      tester,
+    ) async {
+      final move = await gate(tester);
+      move.set(confirm(agent: ''));
+      await tester.pump();
+      expect(
+        find.text('Move this Claktory to the computer named cloud-box?'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('on a phone at the largest text, it fits', (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final move = await gate(tester, size: const Size(390, 844));
+      move.set(confirm());
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Confirm'), findsOneWidget);
+    });
+
+    testWidgets('on a phone it sits at the foot: the header and banners '
+        'above stay in reach', (tester) async {
+      final move = await gate(tester, size: const Size(390, 844));
+      move.set(confirm());
+      await tester.pump();
+      final card = tester.getRect(find.byType(MoveConfirmCard));
+      expect(card.bottom, greaterThan(844 - 40));
+      // Nothing of it over the top of the screen, where the header's
+      // menu and the banners are.
+      expect(card.top, greaterThan(100));
+    });
+
+    test('an address without its port', () {
+      expect(addressHost('203.0.113.7:4433'), '203.0.113.7');
+      expect(addressHost('[2001:db8::1]:4433'), '2001:db8::1');
+      expect(addressHost('2001:db8::1'), '2001:db8::1');
+      expect(addressHost('203.0.113.7'), '203.0.113.7');
+    });
+
+    test('it waits for the person until they confirm here', () {
+      expect(confirm().awaitsPerson, isTrue);
+      expect(confirm(here: true).awaitsPerson, isFalse);
+      expect(confirm(agent: '').awaitsPerson, isFalse);
+    });
   });
 }

@@ -56,6 +56,13 @@ if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
   else
     echo "signed ad hoc: no notarization key (~/.appstoreconnect/claktory.env, see scripts/sign-release.sh)"
   fi
+  # The helpers went into the app after Flutter signed it: seal them in
+  # again, inside out, so the app verifies (the online installer checks).
+  for helper in "$APP/Contents/Helpers/"*; do
+    [[ -e "$helper" ]] && codesign --force --sign - "$helper"
+  done
+  codesign --force --sign - --preserve-metadata=entitlements,requirements,flags "$APP"
+  codesign --verify --deep --strict "$APP"
   exit 0
 fi
 [[ -n "$IDENTITY" ]] || { echo "no Developer ID identity in the keychain to sign with" >&2; exit 1; }

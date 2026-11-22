@@ -61,7 +61,25 @@ pub async fn start() -> Instance {
     start_with(Config { trust_proxy: true, ..Config::default() }).await
 }
 
+/// Lets the tests open as many files as the system allows: each runs a
+/// service, its database and clients at once, past the 256 a shell may
+/// start with.
+fn more_files() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit and setrlimit only read and write `limit`.
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < 4096 {
+                limit.rlim_cur = limit.rlim_max.min(4096);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+            }
+        }
+    });
+}
+
 pub async fn start_with(config: Config) -> Instance {
+    more_files();
     let dir = tempfile::tempdir().expect("a folder");
     let secrets = Secrets::generate();
     let k_share = *secrets.k_share;

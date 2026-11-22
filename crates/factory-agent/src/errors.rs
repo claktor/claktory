@@ -182,10 +182,19 @@ impl Error {
 /// doesn't accept, or a sign-in whose token it won't refresh.
 pub const REFUSED: &str = "refused";
 
+/// `Error::Models`' code when the sign-ins are locked away with the
+/// person's secrets until they open (`credentials::locked_error`).
+pub const LOCKED: &str = "locked";
+
 impl Error {
     /// Whether the provider refused the credentials (`REFUSED`).
     pub fn is_refused(&self) -> bool {
         matches!(self, Error::Models { code: REFUSED, .. })
+    }
+
+    /// Whether the sign-ins are locked away (`LOCKED`).
+    pub fn is_locked(&self) -> bool {
+        matches!(self, Error::Models { code: LOCKED, .. })
     }
 }
 

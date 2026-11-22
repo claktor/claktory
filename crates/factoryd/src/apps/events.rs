@@ -140,6 +140,7 @@ fn deliver(factory: &Arc<Factory>, app: &str, name: &str, agent: &str, text: &st
         id: app.to_owned(),
         summary,
         transient: false,
+        pipe_seqs: Vec::new(),
     };
     factory.deliver_event(agent, text.to_owned(), event);
 }

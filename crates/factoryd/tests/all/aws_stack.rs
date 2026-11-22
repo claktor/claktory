@@ -220,7 +220,7 @@ async fn aws_connects_with_the_proposals_exact_statements_and_gives_narrowed_ses
         let model = v1::UpdateAgent { agent_id: agent.into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
         apply_request(&mut client, &mut view, Request::UpdateAgent(model)).await;
     }
-    let value = v1::OptionValue { on: true, agent_ids: Vec::new() };
+    let value = v1::OptionValue { on: true, agent_ids: Vec::new(), ..Default::default() };
     let change = v1::ExtensionChange { id: "secrets".into(), option_id: "connect".into(), value: Some(value), ..Default::default() };
     apply_request(
         &mut client,

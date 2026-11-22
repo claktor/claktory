@@ -23,3 +23,19 @@ anyhow = "1"
 # claktory/2: the tunnel's streams compressed (zstd), as the backend's (crates/factoryd).
 async-compression = { version = "0.4.52", features = ["tokio", "zstd"] }
 hex = "0.4"
+
+# Android: the raw JNI calls of the bootstrap (src/android.rs), the version
+# iroh's own DNS resolver already brings.
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = "0.4"
+# The resolver iroh uses, to count the DNS servers it reads (src/android.rs).
+n0-dns-resolver = { version = "0.1", default-features = false }
+
+# The tunnel's and iroh's logs into logcat (src/android.rs).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry"] }
+
+# The same, for android.rs's tests on this computer.
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry"] }

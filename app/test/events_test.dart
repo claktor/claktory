@@ -174,7 +174,8 @@ void main() {
             seq: Int64(3),
             event: Event(
               source: EventSource.EVENT_SOURCE_AGENT,
-              from: 'Writer',
+              // Signed as the agent read it (#251).
+              from: 'Writer (Docs)',
               fromId: 'a2',
               text: 'The notes are ready.\n\nAlso sent to: Lena (Backend).',
             ),
@@ -208,7 +209,7 @@ void main() {
     harness.drafts.set('a1', '');
     await reply(find.textContaining('The notes are ready.'));
     final quoted = harness.drafts.of('a1');
-    expect(quoted, contains('Writer'));
+    expect(quoted, contains('> Writer wrote:'));
     expect(quoted, contains('> The notes are ready.'));
     expect(quoted, isNot(contains('Also sent to')));
 

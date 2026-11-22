@@ -1,4 +1,5 @@
-//! A claktory:app@1 app for the host's tests. Each tool (`call`) does one
+//! A claktory:app@1.1 app for the host's tests (with feature `v1_0`, the
+//! same app built for 1.0, without views). Each tool (`call`) does one
 //! thing, with `args` as plain text:
 //! - echo: answers "<args> from <caller>", with `args` as its data.
 //! - count: counts its calls in memory, so a restart shows.
@@ -10,8 +11,20 @@
 //! - fetch <url>: GET, answering "<status> <body>" or the error.
 //! - spin: never returns. trap: panics. grow <mb>: allocates that much.
 //!
+//! - push <surface> <message>: push-view, answering "pushed" or the error.
+//! - sources: data-sources, "<id> <label> <granted>" a line.
+//! - query <source> <sql>: data-query with params [1], answering its JSON or
+//!   the error ("not-granted", "unknown-source", "invalid: …", "failed: …").
+//!
 //! start() sets its status to "started"; upgrade(from) keeps
 //! "upgraded-from" in its store.
+//!
+//! Views (1.1): view-open("main") pushes a createSurface whose Text shows
+//! the params; "refuse" refuses; "invalid" pushes `{"invalid":true}` and
+//! refuses with the push's error. view-action pushes an updateDataModel of
+//! /last with the message, and keeps it as "last-action". view-closed
+//! keeps the surface as "closed" and what pushing to it then answered as
+//! "push-after-close".
 
 use std::cell::Cell;
 
@@ -19,9 +32,16 @@ use wasi::http::outgoing_handler;
 use wasi::http::types::{Fields, Method, OutgoingRequest, Scheme};
 use wasi::io::streams::StreamError;
 
+#[cfg(not(feature = "v1_0"))]
+wit_bindgen::generate!({
+    world: "app-with-views",
+    path: "../../wit",
+});
+
+#[cfg(feature = "v1_0")]
 wit_bindgen::generate!({
     world: "app",
-    path: "../../wit",
+    path: "wit-1.0",
 });
 
 use claktory::app::host;
@@ -103,6 +123,28 @@ impl Guest for TestApp {
                 }
             }
             "trap" => panic!("asked to trap"),
+            #[cfg(not(feature = "v1_0"))]
+            "push" => match host::push_view(key, rest) {
+                Ok(()) => ok("pushed"),
+                Err(error) => fail(error),
+            },
+            #[cfg(not(feature = "v1_0"))]
+            "sources" => ok(host::data_sources()
+                .iter()
+                .map(|source| format!("{} {} {}", source.id, source.label, source.granted))
+                .collect::<Vec<_>>()
+                .join("\n")),
+            #[cfg(not(feature = "v1_0"))]
+            "query" => {
+                use claktory::app::types::DataError;
+                match host::data_query(key, rest, "[1]") {
+                    Ok(json) => ok(json),
+                    Err(DataError::NotGranted) => fail("not-granted"),
+                    Err(DataError::UnknownSource) => fail("unknown-source"),
+                    Err(DataError::Invalid(why)) => fail(format!("invalid: {why}")),
+                    Err(DataError::Failed(why)) => fail(format!("failed: {why}")),
+                }
+            }
             "grow" => {
                 let mb: usize = args.parse().unwrap_or(1);
                 let block = std::hint::black_box(vec![1u8; mb << 20]);
@@ -114,6 +156,34 @@ impl Guest for TestApp {
 
     fn on_timer(name: String) {
         host::emit(&Event { kind: "tick".into(), text: name, data: None, dedupe_key: None, scope: "chat".into() });
+    }
+}
+
+#[cfg(not(feature = "v1_0"))]
+impl exports::claktory::app::views::Guest for TestApp {
+    fn view_open(view: String, params: String, surface: String) -> Result<(), String> {
+        match view.as_str() {
+            "main" => {
+                let create = format!(
+                    r#"{{"version":"1.0","createSurface":{{"surfaceId":"{surface}","catalogId":"https://claktory.com/a2ui/catalog/v1","components":[{{"id":"root","component":"Text","text":{params:?}}}],"dataModel":{{}}}}}}"#
+                );
+                host::push_view(&surface, &create)
+            }
+            "invalid" => Err(host::push_view(&surface, r#"{"invalid":true}"#).err().unwrap_or_else(|| "it was taken".into())),
+            _ => Err(format!("no view {view}")),
+        }
+    }
+
+    fn view_action(surface: String, message: String) {
+        host::kv_set("last-action", message.as_bytes()).expect("room for it");
+        let update = format!(r#"{{"version":"1.0","updateDataModel":{{"surfaceId":"{surface}","path":"/last","value":{message:?}}}}}"#);
+        let _ = host::push_view(&surface, &update);
+    }
+
+    fn view_closed(surface: String) {
+        host::kv_set("closed", surface.as_bytes()).expect("room for it");
+        let pushed = host::push_view(&surface, "{}").err().unwrap_or_else(|| "pushed".into());
+        host::kv_set("push-after-close", pushed.as_bytes()).expect("room for it");
     }
 }
 
